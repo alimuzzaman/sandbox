@@ -900,16 +900,152 @@ class TestHostingManifest(unittest.TestCase):
             "compose_override": "services: {}\n",
             "environment": "EXAMPLE=value\n",
         }
+        remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertIn("--force-recreate", commands[0])
-        self.assertIn("--renew-anon-volumes", commands[0])
+        up_commands = [command for command in commands if " up -d" in command]
+        self.assertIn("--force-recreate", up_commands[0])
+        self.assertIn("--renew-anon-volumes", up_commands[0])
+        self.assertTrue(up_commands[-1].endswith("up -d --no-deps web"))
         build_index = next(i for i, command in enumerate(commands) if command.endswith("build setup"))
         run_index = next(
             i for i, command in enumerate(commands)
             if command.endswith("run --rm --pull never setup")
         )
         self.assertLess(build_index, run_index)
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_dependency_completed_initializer_is_not_replayed(self, remote_checked, _write):
+        with self._write(_manifest().replace(
+                "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        remote_checked.return_value = '{"schema_version":1,"status":"succeeded"}'
+
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertFalse(any(" run --rm " in command for command in commands))
+        self.assertEqual(sum(" up -d" in command for command in commands), 2)
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_nonterminal_initializer_evidence_refuses_replay(self, remote_checked, _write):
+        with self._write(_manifest().replace(
+                "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+
+        for status in ("failed", "running", "foreign", "ambiguous"):
+            with self.subTest(status=status):
+                remote_checked.reset_mock()
+                remote_checked.return_value = (
+                    '{"schema_version":1,"status":"' + status + '"}'
+                )
+                with self.assertRaisesRegex(RuntimeError, f"initializer setup has {status}"):
+                    hosting_cmd._run_compose(
+                        {}, validated, "/srv/example", "/srv/runtime", runtime,
+                    )
+                commands = [call.args[1] for call in remote_checked.call_args_list]
+                self.assertFalse(any(" run --rm " in command for command in commands))
+                self.assertEqual(sum(" up -d" in command for command in commands), 1)
+
+    def test_initializer_status_command_has_bounded_identity_checks(self):
+        command = hosting_cmd._initializer_status_command(
+            "docker compose -p example -f compose.yml", "setup",
+        )
+        argv = shlex.split(command)
+        self.assertEqual(argv[:2], ["python3", "-c"])
+        self.assertIn("config-hash", argv[2])
+        self.assertIn("com.docker.compose.project", argv[2])
+        self.assertIn("com.docker.compose.service", argv[2])
+        self.assertIn("com.docker.compose.config-hash", argv[2])
+        self.assertIn("created_at", argv[2])
+        self.assertIn("not_before", argv[2])
+        self.assertIn("raw_prefix", argv[2])
+        self.assertIn("time.monotonic()+900", argv[2])
+        compile(argv[2], "<initializer-status>", "exec")
+
+    def test_initializer_status_command_accepts_env_prefix_and_rejects_stale_container(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            docker = root / "docker"
+            created = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+            docker.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json,os,sys\n"
+                "args=sys.argv[1:]\n"
+                "if args and args[0]=='compose':\n"
+                " if 'config' in args: print('hash-1')\n"
+                " elif 'images' in args: print('img-1')\n"
+                " elif 'ps' in args: print('' if os.environ.get('NO_CONTAINER') else 'container-1')\n"
+                " else: raise SystemExit(2)\n"
+                "elif args and args[0]=='inspect':\n"
+                f" print(json.dumps({{'Created': {created!r}, 'Image': 'img-1', "
+                "'Config': {'Labels': {'com.docker.compose.project': 'example', "
+                "'com.docker.compose.service': 'setup', "
+                "'com.docker.compose.config-hash': 'hash-1'}}, "
+                "'State': {'Status': 'exited', 'ExitCode': 0}}))\n"
+                "else: raise SystemExit(2)\n"
+            )
+            docker.chmod(0o755)
+            prefix = (
+                "SANDBOX_HOST_ENV_FILE=/tmp/example.env "
+                "docker compose -p example -f compose.yml"
+            )
+            marker = root / "initializer-started-at"
+            marker.write_text(str(time.time() - 120))
+            command = hosting_cmd._initializer_status_command(
+                prefix, "setup", marker_path=str(marker),
+            )
+            argv = shlex.split(command)
+            argv[0] = sys.executable
+            from tests.subprocess_support import synthetic_environment
+            environment = synthetic_environment({
+                "PATH": str(root) + os.pathsep + os.defpath,
+            })
+            result = subprocess.run(
+                argv, capture_output=True, text=True, check=False, env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {
+                "schema_version": 1, "status": "succeeded",
+            })
+
+            stale = hosting_cmd._initializer_status_command(
+                prefix, "setup", not_before=time.time() + 5,
+            )
+            stale_argv = shlex.split(stale)
+            stale_argv[0] = sys.executable
+            stale_result = subprocess.run(
+                stale_argv, capture_output=True, text=True, check=False, env=environment,
+            )
+            self.assertEqual(stale_result.returncode, 0, stale_result.stderr)
+            self.assertEqual(json.loads(stale_result.stdout), {
+                "schema_version": 1, "status": "foreign",
+            })
+
+            absent = hosting_cmd._initializer_status_command(
+                "NO_CONTAINER=1 " + prefix, "setup", not_before=time.time() - 120,
+            )
+            absent_argv = shlex.split(absent)
+            absent_argv[0] = sys.executable
+            absent_result = subprocess.run(
+                absent_argv, capture_output=True, text=True, check=False, env=environment,
+            )
+            self.assertEqual(absent_result.returncode, 0, absent_result.stderr)
+            self.assertEqual(json.loads(absent_result.stdout), {
+                "schema_version": 1, "status": "absent",
+            })
+
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_initializer_dependency_status_refuses_malformed_receipt(self, remote_checked):
+        remote_checked.return_value = '{"schema_version":1,"status":"unknown"}'
+        with self.assertRaisesRegex(RuntimeError, "initializer setup proof was malformed"):
+            hosting_cmd._initializer_dependency_status({}, "docker compose", "setup")
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
@@ -924,7 +1060,7 @@ class TestHostingManifest(unittest.TestCase):
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertIn("--force-recreate --renew-anon-volumes --remove-orphans web worker", commands[0])
-        self.assertTrue(commands[-1].endswith("up -d web worker"))
+        self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._preflight_no_build_images")
@@ -941,6 +1077,7 @@ class TestHostingManifest(unittest.TestCase):
             ))
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         preflight.assert_called_once()
@@ -950,15 +1087,18 @@ class TestHostingManifest(unittest.TestCase):
         self.assertTrue(all(
             "--no-build" in command
             for command in commands
-            if " run --rm " not in command
+            if " up -d" in command or " run --rm " in command
         ))
         self.assertIn(
             "up -d --no-build --force-recreate --renew-anon-volumes "
             "--remove-orphans web worker",
-            commands[0],
+            next(command for command in commands if " up -d" in command),
         )
         self.assertFalse(any(command.endswith(" build setup") for command in commands))
-        self.assertTrue(any(command.endswith("run --rm --pull never setup") for command in commands))
+        self.assertTrue(any(
+            command.endswith("run --rm --pull never --no-build setup")
+            for command in commands
+        ))
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._preflight_no_build_images")
@@ -1205,6 +1345,7 @@ class TestHostingManifest(unittest.TestCase):
         with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         build_calls = [call for call in remote_checked.call_args_list
                        if "--force-recreate" in call.args[1]

@@ -90,3 +90,15 @@ acceptance is green (`./sb selftest`: 5,489 tests, 21 skipped); hosted CI,
 disposable topology, provider, installed-controller, edge, deployment, and
 production gates remain separate and unobserved. Do not treat this plan or its
 local tests as release or activation approval.
+
+Hosted deployment follow-up (2026-09-07): the active maintenance branch also
+normalizes Compose secret targets before candidate materialization and hardens
+ordinary `host apply` initializer handling. Initializer images are built before
+the first runtime `up`; a bounded proof of the current project, service, config
+hash, image, container creation time, and terminal exit decides whether the
+explicit one-shot run is skipped. Absent evidence runs once; failed, running,
+foreign, stale, malformed, or ambiguous evidence refuses replay. This is a
+hosted-apply guard, not immutable activation completion. File-backed secret
+ownership for non-root application users remains a separate Linux-canary blocker;
+no permission widening or readiness-timeout relaxation is authorized by this
+maintenance pass.

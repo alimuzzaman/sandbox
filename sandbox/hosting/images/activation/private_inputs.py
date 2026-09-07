@@ -303,9 +303,17 @@ def materialize_secrets(compose: dict, environment: dict[str, str], candidate: s
                         or type(mount.get("source")) is not str or mount["source"] not in sources):
                     raise ValueError()
                 target = mount.get("target", mount["source"])
-                if type(target) is not str or _NAME.fullmatch(target) is None or target in targets:
+                # Compose's normalized JSON expands the shorthand target
+                # ``name`` to ``/run/secrets/name``. Accept both forms, while
+                # keeping secret mounts inside the runtime secret directory.
+                if type(target) is not str:
                     raise ValueError()
-                targets.add(target)
+                target_key = (target if re.fullmatch(
+                    r"/run/secrets/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", target)
+                    else "/run/secrets/" + target if _NAME.fullmatch(target) else None)
+                if target_key is None or target_key in targets:
+                    raise ValueError()
+                targets.add(target_key)
                 used.add(mount["source"])
         if used != set(sources):
             raise ValueError()

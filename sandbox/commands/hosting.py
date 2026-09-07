@@ -886,6 +886,99 @@ def _preflight_no_build_images(entry: dict, prefix: str, services: list[str],
         progress("No-build image preflight passed")
 
 
+def _initializer_status_command(prefix: str, service: str, *, not_before: float = 0.0,
+                                marker_path: str = "") -> str:
+    """Build a bounded read-only proof for a Compose-owned initializer.
+
+    The first ``compose up`` may already execute an initializer through its
+    dependency graph. A second ``compose run`` would execute it twice, so the
+    caller must prove the current project/service, config hash, image identity,
+    and successful terminal exit before deciding to skip the explicit run.
+    """
+    program = "\n".join((
+        "import datetime,json,os,shlex,subprocess,sys,time",
+        "raw_prefix=shlex.split(sys.argv[1]);env=dict(os.environ)",
+        "while raw_prefix and '=' in raw_prefix[0] and raw_prefix[0].split('=',1)[0].isidentifier():",
+        " key,value=raw_prefix.pop(0).split('=',1);env[key]=value",
+        "prefix=raw_prefix;service=sys.argv[2];not_before=float(sys.argv[3]);marker_path=sys.argv[4];deadline=time.monotonic()+900",
+        "project=None",
+        "for i,value in enumerate(prefix[:-1]):",
+        " if value in ('-p','--project-name'):project=prefix[i+1]",
+        " if value.startswith('--project-name='):project=value.split('=',1)[1]",
+        "def emit(status):",
+        " print(json.dumps({'schema_version':1,'status':status},separators=(',',':')))",
+        " raise SystemExit(0)",
+        "if marker_path:",
+        " try:",
+        "  with open(marker_path,encoding='ascii') as marker:not_before=float(marker.read().strip())",
+        " except (OSError,TypeError,ValueError):emit('foreign')",
+        "def call(argv,timeout=30):",
+        " try:return subprocess.run(argv,env=env,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=timeout,check=False)",
+        " except (OSError,subprocess.SubprocessError):emit('foreign')",
+        "def compose(*args):",
+        " result=call([*prefix,*args])",
+        " if result.returncode or len(result.stdout)>65536:emit('foreign')",
+        " return result.stdout.strip()",
+        "config_hash=compose('config','--hash',service)",
+        "if not config_hash or '\\n' in config_hash or len(config_hash)>256:emit('foreign')",
+        "ids=[row for row in compose('ps','-aq',service).splitlines() if row]",
+        "if not ids:emit('absent')",
+        "if len(ids)!=1:emit('ambiguous')",
+        "image_ids=[row for row in compose('images','-q',service).splitlines() if row]",
+        "if len(image_ids)!=1:emit('foreign')",
+        "container=ids[0]",
+        "def inspect():",
+        " raw=call(['docker','inspect','--format','{{json .}}',container])",
+        " if raw.returncode or len(raw.stdout)>65536:emit('foreign')",
+        " try:value=json.loads(raw.stdout)",
+        " except (TypeError,ValueError,json.JSONDecodeError):emit('foreign')",
+        " return value if isinstance(value,dict) else emit('foreign')",
+        "while True:",
+        " value=inspect();labels=((value.get('Config') or {}).get('Labels') or {})",
+        " if (not project or labels.get('com.docker.compose.project')!=project or",
+        "     labels.get('com.docker.compose.service')!=service or",
+        "     labels.get('com.docker.compose.config-hash')!=config_hash or",
+        "     value.get('Image')!=image_ids[0]):emit('foreign')",
+        " state=value.get('State') or {};status=state.get('Status')",
+        " if status in ('running','created','restarting'):",
+        "  if time.monotonic()>=deadline:emit('running')",
+        "  time.sleep(min(2,deadline-time.monotonic()));continue",
+        " created=value.get('Created')",
+        " if not isinstance(created,str):emit('foreign')",
+        " try:created_at=datetime.datetime.fromisoformat(created.replace('Z','+00:00')).timestamp()",
+        " except (TypeError,ValueError,OverflowError):emit('foreign')",
+        " if created_at < not_before:emit('foreign')",
+        " if status=='exited' and state.get('ExitCode')==0:emit('succeeded')",
+        " if status=='exited':emit('failed')",
+        " emit('foreign')",
+    ))
+    return shlex.join([
+        "python3", "-c", program, prefix, service, repr(float(not_before)), marker_path,
+    ])
+
+
+def _initializer_dependency_status(entry: dict, prefix: str, service: str,
+                                   *, not_before: float = 0.0, marker_path: str = "") -> str:
+    """Return the private, exact status of one Compose-owned initializer."""
+    raw = _remote_checked(
+        entry,
+        _initializer_status_command(
+            prefix, service, not_before=not_before, marker_path=marker_path,
+        ),
+        timeout=930,
+    )
+    try:
+        receipt = json.loads((raw or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise RuntimeError(f"initializer {service} proof was unavailable") from None
+    if (type(receipt) is not dict or receipt.get("schema_version") != 1
+            or receipt.get("status") not in {
+                "absent", "succeeded", "failed", "running", "foreign", "ambiguous",
+            }):
+        raise RuntimeError(f"initializer {service} proof was malformed")
+    return receipt["status"]
+
+
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
                  *, force_recreate: bool = True,
@@ -936,6 +1029,26 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         _preflight_no_build_images(
             entry, prefix, declared_services, progress=progress,
         )
+    init_services = tuple(validated["compose"].get("init_services", ()))
+    initializer_marker = f"{runtime_dir}/.initializer-started-at"
+    if force_recreate and init_services:
+        _remote_checked(
+            entry,
+            "umask 077; "
+            f"printf '%s\\n' \"$(date +%s)\" > {shlex.quote(initializer_marker)}; "
+            f"chmod 0600 {shlex.quote(initializer_marker)}",
+            timeout=30,
+        )
+    if force_recreate and build and init_services:
+        init_args = " ".join(shlex.quote(service) for service in init_services)
+        if progress is not None:
+            progress("Initializer image build started")
+        _build_checked(
+            entry, prefix, f"{prefix} build {init_args}", init_args,
+            timeout=build_timeout, progress=progress, log_path=apply_log,
+        )
+        if progress is not None:
+            progress("Initializer image build completed")
     build_flag = " --build" if force_recreate and build else " --no-build"
     if progress is not None:
         progress(
@@ -963,29 +1076,29 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         )
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
-    for init_service in (
-            validated["compose"].get("init_services", []) if force_recreate else []):
-        # `compose up --build <web>` does not build a distinct image tagged for
-        # a one-shot job service. Build it explicitly so an updated initializer
-        # is never run from a previous deployment's image.
-        if build:
+    for init_service in init_services if force_recreate else ():
+        status = _initializer_dependency_status(
+            entry, f"{prefix} --profile jobs", init_service,
+            marker_path=initializer_marker,
+        )
+        if status == "succeeded":
             if progress is not None:
-                progress(f"Init service {init_service} build started")
-            _build_checked(
-                entry, prefix, f"{prefix} build {shlex.quote(init_service)}",
-                shlex.quote(init_service), timeout=build_timeout,
-                progress=progress, log_path=apply_log,
+                progress(f"Init service {init_service} completed as a Compose dependency")
+            continue
+        if status != "absent":
+            raise RuntimeError(
+                f"initializer {init_service} has {status} evidence; refusing replay"
             )
-            if progress is not None:
-                progress(f"Init service {init_service} build completed")
+        no_build = " --no-build" if not build else ""
         _remote_checked(
             entry,
-            f"{prefix} --profile jobs run --rm --pull never"
+            f"{prefix} --profile jobs run --rm --pull never{no_build}"
             f" {shlex.quote(init_service)}",
             timeout=900, progress=progress, log_path=apply_log,
         )
     _remote_checked(
-        entry, f"{prefix} up -d{' --no-build' if not build else ''} {service_args}",
+        entry,
+        f"{prefix} up -d{' --no-build' if not build else ''} --no-deps {service_args}",
         timeout=300,
         progress=progress, log_path=apply_log,
     )

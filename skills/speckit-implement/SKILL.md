@@ -10,13 +10,14 @@ user-invocable: true
 disable-model-invocation: false
 ---
 
-## Preferred model
+## Model routing
 
-Use `gpt-5.6-terra` at High effort by default. Use `gpt-5.6-sol` at Medium
-effort when implementation involves architectural coupling, sensitive boundaries,
-conflicting evidence, material ambiguity, or difficult cross-system decisions.
-This skill cannot switch the active root model; report the actual configuration or
-fallback and never claim a preferred configuration ran when it did not.
+Follow the active repository and user model/delegation policy for implementation.
+Use the configured implementation route for routine work and escalate to the
+review/implementation capacity required by architectural coupling, sensitive
+boundaries, conflicting evidence, material ambiguity, or difficult cross-system
+decisions. This skill cannot switch the active root model; report the actual
+configuration and never imply that an unavailable or unrequested model ran.
 
 ## User Input
 

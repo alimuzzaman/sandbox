@@ -1,12 +1,12 @@
-# Thin alias over the `./sandbox` CLI for muscle-memory users.
-# The real interface is the CLI. Run `./sandbox` for help.
+# Thin alias over the `./sb` CLI for muscle-memory users.
+# The real interface is the CLI. Run `./sb` for help.
 
 .DEFAULT_GOAL := help
 
 %:
-	@./sandbox $(MAKECMDGOALS)
+	@./sb $(MAKECMDGOALS)
 
 help:
-	@./sandbox
+	@./sb
 
 .PHONY: help

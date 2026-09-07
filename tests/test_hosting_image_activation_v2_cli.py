@@ -17,12 +17,12 @@ def recovery_state(*, genesis=False):
     )
     from sandbox.hosting.images.activation.v2_service import ActivationServiceV2
 
-    plan, proof, snapshot = artifacts()
+    plan, proof, snapshot = artifacts(graph=True)
     host = FakeHostStatePort()
     repository = ActivationRepository(
         host_state_port=host, stage_repository=FakeStageRepositoryPort(),
         target_mutation_port=FakeTargetMutationPort())
-    first_grant = grant_for(plan, proof)
+    first_grant = grant_for(plan, proof, snapshot=snapshot)
     first = request_for(plan, proof, snapshot, first_grant)
     common = {"compose_files": ("compose.yml",), "compose_project": "lenzora",
         "edge_route_digest": DIGEST_A,
@@ -35,7 +35,7 @@ def recovery_state(*, genesis=False):
             clock=lambda: 100).execute(first, rollback_grant=first_grant, **common)["ok"]
     prior = deepcopy(host.state["current"])
     generation = 0 if genesis else 1
-    second_grant = grant_for(plan, proof, generation=generation,
+    second_grant = grant_for(plan, proof, snapshot=snapshot, generation=generation,
                              prior_digest=None if prior is None else prior["generation_digest"])
     second = request_for(plan, proof, snapshot, second_grant, generation=generation,
                          request_id="fresh-process-recovery-v2")

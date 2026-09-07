@@ -12,16 +12,25 @@ The rule: **never fix what you haven't reproduced.** Reading code is not
 reproduction. Simulating in your head is not reproduction. A failing call
 against the running stack is.
 
+First classify the surface. A runtime bug changes or depends on a live
+WordPress/Sandbox instance and needs live evidence. A source/tooling bug is in
+the CLI, Makefile, parser, workflow, or other repository-owned code and should
+start with the smallest local command or focused test. Source/tooling work does
+not require booting WordPress or taking a runtime snapshot unless it also
+touches runtime state.
+
 ---
 
 ## Standard loop
 
-1. **Snapshot a clean baseline** if you don't have one yet:
-   `./sb snapshot pre-repro` — gives you a one-command rollback if
-   the repro mutates state in surprising ways.
+1. **Snapshot a clean runtime baseline** if this is a runtime bug and you don't
+   have one yet: `./sb snapshot pre-repro` — gives you a one-command rollback
+   if the repro mutates state in surprising ways. For a source/tooling bug,
+   capture the initial command and output instead; no WordPress snapshot is
+   needed.
 
-2. **Capture the broken state.** Pick the shortest tool that triggers the
-   reported behavior:
+2. **Capture the broken state.** For a runtime bug, pick the shortest tool
+   that triggers the reported behavior:
 
    | Bug surface | First-choice tool |
    |---|---|
@@ -34,16 +43,24 @@ against the running stack is.
    | Email never sent | `wp_cli eval 'wp_mail(...)'` then `mail_list` |
    | DB-shaped wrong | `db_query` with `mutate:false` against the suspect table |
 
+   For a source/tooling bug, run the smallest reproducer from the repository
+   (for example `make help`, `./sb guide`, or one focused unittest) and save
+   its exit code and output. Do not substitute a live-stack claim for local
+   source evidence.
+
 3. **Save the broken output** verbatim. JSON response, HTML snippet, log
    line — paste into the response or into `memory/repros/<card>-<slug>.md`.
    This is the "before" half of the evidence pair the user wants in reports.
 
-4. **Fix in the plugin source.** Plugin code lives under `${plugins_home}/` and
-   is bind-mounted live — edits take effect on the next request, no rebuild.
+4. **Fix in the owning source.** For plugin runtime work, plugin code lives
+   under `${plugins_home}/` and is bind-mounted live — edits take effect on the
+   next request, no rebuild. For Sandbox tooling or other source-only work,
+   edit only the named repository-owned files and use its local test path.
 
-5. **Re-run the exact same trigger.** Same `wp_rest` call, same shortcode,
-   same cron hook. Compare to step 3. If you ran any DB writes you weren't
-   sure about, `./sb restore pre-repro` first.
+5. **Re-run the exact same trigger.** For runtime work, use the same `wp_rest`
+   call, shortcode, or cron hook and compare to step 3. For source/tooling work,
+   rerun the same local command or focused test. If you ran any DB writes you
+   weren't sure about, `./sb restore pre-repro` first.
 
 6. **Report broken-then-fixed.** Both halves, side-by-side, in the response.
    Without the "before" half the user can't verify the fix actually changed
@@ -51,7 +68,7 @@ against the running stack is.
 
 ---
 
-## Matching the reported stack — minimally
+## Matching a reported runtime stack — minimally
 
 A bug report lists everything (WP, PHP, theme, 30 plugins). Copy only what the
 bug plausibly depends on. Every extra pin is a variable you now own forever.

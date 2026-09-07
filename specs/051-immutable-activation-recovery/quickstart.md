@@ -42,18 +42,15 @@ proof remain separate gates with explicit approval and exact identities.
 Suggested local gate after implementation:
 
 ```text
-python3 -m unittest \
-  tests.test_hosting_image_activation_models \
-  tests.test_hosting_image_activation_policy \
-  tests.test_hosting_image_activation_repository \
-  tests.test_hosting_image_activation_init \
-  tests.test_hosting_image_activation_runtime \
-  tests.test_hosting_image_activation_service \
-  tests.test_hosting_image_activation_recovery \
-  tests.test_hosting_image_activation_races \
-  tests.test_hosting_image_activation_cli \
-  tests.test_architecture_boundaries
+./sb selftest
+.cli-venv/bin/python -m unittest discover -s tests -p 'test_hosting_image_activation*.py' -v
+.cli-venv/bin/python -m unittest tests.test_architecture_boundaries tests.test_owned_storage_architecture -v
 ```
+
+The activation selector discovers the complete `test_hosting_image_activation*.py`
+family, so newly added activation coverage is included without maintaining a
+second hand-written module list. The architecture and owned-storage checks stay
+explicit as a focused boundary run.
 
 This gate is local acceptance only. Live registered-host, edge, deployment, rollback,
 and production proof remain open until separately authorized and observed.

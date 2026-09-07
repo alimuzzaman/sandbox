@@ -34,8 +34,8 @@ Body: the actual playbook. Steps, gotchas, commands.
                  --scope project --file body.md       # or --file - for stdin
 ```
 
-- **scope**: `project` (the focused plugin's `.Codex/skills/` — default when in a
-  project), `personal` (`~/.Codex/skills/`), or `sandbox` (the shared `skills/`).
+- **scope**: `project` (the focused plugin's `.claude/skills/` — default when in a
+  project), `personal` (`~/.claude/skills/`), or `sandbox` (the shared `skills/`).
 - **slug** is derived from the title (lowercased, hyphenated).
 - **conflicts**: `--on-conflict fail` (default; suggests a free slug), `replace`
   (same-scope only), or `rename` (auto-suffix). A built-in sandbox slug can't be

@@ -3,7 +3,8 @@
 Registry-wide (not instance-scoped): the cache is one shared dir under the
 sandbox root, mounted into every instance. See sandbox/core/_docker.py
 (dl_cache_info / dl_cache_clear) and the dl-cache mu-plugin."""
-from sandbox.core import *  # noqa: F401,F403
+from sandbox.core._docker import _human_bytes, dl_cache_clear, dl_cache_info
+from sandbox.core._ui import info, ok
 from sandbox.registry import register
 
 

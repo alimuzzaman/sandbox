@@ -128,7 +128,8 @@ class ExecutionProgressTests(unittest.TestCase):
         self.assertEqual(admitted[0]["recovery_context"]["compose_snapshot"], snapshot.as_mapping())
         self.assertEqual(admitted[0]["recovery_context"]["compatibility_grant"], grant.as_mapping())
         self.assertEqual(admitted[0]["execution_progress"]["events"], [])
-        self.assertEqual(result["code"], "init_mismatch")  # Executor guard remains until wired.
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["code"], "committed")
         altered = {**transaction, "recovery_context": {**context, "compose_snapshot": legacy.as_mapping()}}
         with self.assertRaises(ValueError):
             validate_transaction_v2(altered)

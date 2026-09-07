@@ -1512,3 +1512,28 @@ anything else stays unpromoted. Rollback also compares the retained prior Compos
 first runtime effect.
 
 Image staging samples the authenticated machine projection at both observation boundaries. A projection change fails closed even when the private raw machine epoch and Docker daemon remain stable; raw machine identity is never emitted.
+
+### Opt-in stopped-container file secrets
+
+`host image provision --provision-phase activation-bundle
+--candidate-input-contract candidate-v2` selects the new private input contract.
+The default remains `candidate-v1`; retained v1 candidates and recovery are unchanged.
+Candidate-v2 requires the explicit execution graph. It cannot use legacy replacement.
+
+The candidate still keeps captured source files owner-only. Its private Compose
+render uses generated environment source references, while Sandbox prepares the
+exact file bytes and declared UID/GID/mode in stopped containers through the
+bounded Docker archive channel. It verifies those files before start and during
+readiness. Files default to root/root and mode 0444, matching Compose. No source
+secret becomes a container environment variable. Read-only root filesystems,
+mounted `/run` or `/run/secrets` paths, symlinks, and conflicting private files
+refuse; Sandbox never weakens those settings or writes through such mounts.
+
+Initializer copying occurs only after the exact created container identity has
+been saved. A partial copy or lost acknowledgement remains fenced by the graph;
+replay does not recopy or restart it. A new contract has a different preparation
+identity and configuration HMAC. Explicit v1-to-v2 provisioning may replace only
+expired old admission authority, with no active owner; the old document remains
+archived. Selecting v2 does not settle an uncertain activation or authorize data
+reset, rollback, or deployment. Release and production use require review of this
+security-control change plus Linux and installed-controller acceptance.

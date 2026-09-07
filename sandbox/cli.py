@@ -919,6 +919,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--rollback-authority-revision", default=None)
     host_p.add_argument("--compose-provider-revision", default=None)
     host_p.add_argument("--snapshot-expires-at", type=int, default=None)
+    host_p.add_argument("--candidate-input-contract", choices=["candidate-v1", "candidate-v2"],
+        default="candidate-v1",
+        help="explicit activation-bundle private input contract; candidate-v2 prepares stopped-container secret files")
     host_p.add_argument("--grant-ttl-seconds", type=int, default=900)
     host_p.add_argument("--signed-receipt-directory", default=None, metavar="PATH",
         help="closed receipt, payload, and offline Sigstore bundle directory")

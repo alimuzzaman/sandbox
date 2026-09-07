@@ -306,7 +306,69 @@ These are source checks, not installed-controller or production acceptance.
 Disposable Linux job `368aaf34e04768cf83abc5b13e447ba8` reproduced the private
 file blocker using the already-present signed worker image: host owner UID 1001,
 application UID/GID 1000, candidate mode 0600, application read denied. No real
-secret was used. Environment-backed Compose delivery still requires a passing
-ownership/isolation canary and a reviewed binding/mount-proof implementation.
+secret was used. The candidate-v2 work below addresses that ownership boundary.
 Production remains generation 0 with no verified activation; do not retry it on
 the strength of the local suite.
+
+### Candidate-v2 implementation boundary
+
+The environment-source canary passed on Linux Compose 5.4.0 in job
+`8e056610cc1153bab736830d6ff540e4`. However, Compose injects these files during
+start, not create, and refuses them for read-only root filesystems. Merely
+changing `file` to `environment` cannot satisfy the existing initializer path,
+which verifies a stopped container then starts it directly.
+
+Implement a distinct `candidate-v2` input contract under FR-052–FR-054. Preserve
+candidate-v1 decoding and retained recovery. New snapshot/preparation identity
+and configuration HMAC must include the new contract, so an old candidate is
+never silently reused with different runtime semantics. Keep source secret
+files owner-only; retain exact captured bytes and deterministic source mappings.
+
+For candidate-v2, represent sources as private generated environment references
+in the effective Compose document. Supply their captured values only to the
+private Compose process. Create exact containers without starting them. Through
+the private Docker archive channel, prepare `/run/secrets` with exact declared
+UID/GID/mode and bytes, then independently read back and verify the bounded
+archive before application start. Refuse symlinks, extra secret files, unsafe
+parent ownership/modes, changed container state, undeclared sources, and
+read-only services. Do not overwrite an existing mismatched secret directory.
+Default ownership/mode follows Compose (root/root, 0444); explicit mappings must
+remain exact. Values and unkeyed hashes must never enter public evidence.
+
+Initializers use their existing create/inspect/start receipt sequence. Persistent
+graph phases replace `up` with create, verify each exact selected container,
+prepare/read back private files, then start only those container IDs. Keep the
+existing durable effect boundary and uncertainty fencing; no replay restarts an
+uncertain operation. Verify the private files again during readiness/observation.
+
+Ownership: private-input agent owns the private archive helper, candidate source
+materialization and helper tests; activation agent owns graph integration and
+graph tests; current agent owns models, provisioning, transport wiring and final
+integration. The branch agent independently reviews the completed boundary.
+Acceptance requires malicious archive/unit cases, candidate-v1 regression parity,
+an actual stopped-container Linux prepare/readback/start canary, the focused
+activation suite and full selftest. Security-control review is required before
+this contract is released or used on production.
+
+Stopped-container Linux acceptance passed in durable job
+`292832616a0eae8299bfb9dd059e70fd`, using the already-present signed worker image
+and synthetic data: prepare, exact archive readback, app UID/GID 1000 read,
+wrong-UID denial, and exact-container cleanup. Plain tar-stdin `docker cp`
+preserved numeric ownership; `--archive` remapped it to the container user and
+was rejected by readback. The helper uses the observed passing form.
+
+The candidate-v1/v2 focused image suite passed 365 tests. Independent review
+identified a blocking stdin write outside the graph deadline. The corrected
+nonblocking command port passed 21 graph/runtime/topology tests, including
+unread large-input and short-read failures. Final Linux archive job
+`0f36678534c230a625949ca9a146a780` passed against that corrected source.
+Lenzora's wrapper suite passed 261 tests, with 27 skipped, for source/control
+checkout separation, rotated-policy refusal, and opt-in v2 capability routing.
+These checks do not establish installed-controller parity or production recovery.
+
+Final full job `0c65582ace1b105159e2080a7d20422b` ran 5,527 tests with 13 skips
+and one stale modularity-count failure (247 expected, 248 observed from the new
+legacy-replacement refusal). Corrected that inventory expectation and reran
+the modularity/architecture modules; no production code changed afterward.
+The original full job remains recorded as failed. Lenzora's final wrapper run
+again passed 261 tests with 27 skips after the v2-value capability check.

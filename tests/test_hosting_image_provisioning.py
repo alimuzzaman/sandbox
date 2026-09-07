@@ -635,6 +635,16 @@ class ProvisioningTests(unittest.TestCase):
                 reuse_activation_bundle(path, **{**selectors, "stage_ledger_revision": 8})
             with self.assertRaisesRegex(ProvisioningError, "expired"):
                 reuse_activation_bundle(path, **{**selectors, "now": 1001})
+            retained = path.read_bytes()
+            migration = {**selectors, "input_contract": "candidate-v2",
+                         "snapshot_id": "compose-snapshot/candidate-v2-distinct"}
+            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+                reuse_activation_bundle(path, **migration)
+            self.assertIsNone(reuse_activation_bundle(path, **{**migration, "now": 1001}))
+            self.assertEqual(path.read_bytes(), retained)
+            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+                reuse_activation_bundle(path, **{**migration, "now": 1001,
+                                                "authority_revision": "different-authority"})
         self.assertEqual(bundle["stage_ledger"],
             {"authority": "feature-050-stage-ledger-v2", "revision": 7})
         self.assertEqual(bundle["compose_snapshot"]["input_contract"], "candidate-v1")

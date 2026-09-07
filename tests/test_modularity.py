@@ -180,7 +180,8 @@ class TestModularityInventory(unittest.TestCase):
                 "cli_commands": 91,
                 "mcp_tools": 44,
                 "wildcard_imports": 19,
-                "kind_referencing_conditionals": 247,
+                # candidate-v2 refuses the legacy compose_replace_v2 path.
+                "kind_referencing_conditionals": 248,
             },
         )
 

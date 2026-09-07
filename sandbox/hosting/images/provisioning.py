@@ -169,7 +169,8 @@ def _validate_activation_bundle(raw):
 def reuse_activation_bundle(path: Path, *, plan: VerifiedImagePlanSet, proof: StagedImageProofSet,
         current_generation: int, current_generation_digest: str, stage_ledger_revision: int,
         snapshot_id: str, provider_revision: str, authority_id: str,
-        authority_revision: str, public_key: str, now: int | None = None) -> dict | None:
+        authority_revision: str, public_key: str, now: int | None = None,
+        input_contract: str = "candidate-v1") -> dict | None:
     """Return exact retained admission authority without signing or secret reads.
 
     Expired authority requires a distinct, explicitly admitted preparation. A
@@ -177,15 +178,32 @@ def reuse_activation_bundle(path: Path, *, plan: VerifiedImagePlanSet, proof: St
     """
     from sandbox.hosting.images.plan_set import read_stable_file
     try:
+        if input_contract not in {"candidate-v1", "candidate-v2"}:
+            raise ProvisioningError("conflict")
         try:
             path.lstat()
         except FileNotFoundError:
             return None
         raw = _load_json_bytes(read_stable_file(path, MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True))
         snapshot, grant = _validate_activation_bundle(raw)
+        instant = int(time.time()) if now is None else now
         prior = activation_digest("sandbox.hosting.images.activation-genesis.v2",
             {"target": proof.target.as_mapping(), "generation": 0}) if current_generation == 0 else current_generation_digest
-        if (snapshot.input_contract != "candidate-v1" or snapshot.snapshot_id != snapshot_id
+        if (input_contract == "candidate-v2" and snapshot.input_contract == "candidate-v1"
+                and snapshot.snapshot_id != snapshot_id
+                and snapshot.expires_at <= instant and grant.expires_at <= instant
+                and snapshot.target == proof.target.as_mapping()
+                and grant.authority_id == authority_id
+                and grant.authority_revision == authority_revision
+                and grant.expected_generation <= current_generation
+                and (grant.expected_generation != current_generation or grant.prior_generation_digest == prior)
+                and raw["rollback_grant_public_key"] == public_key):
+            # Explicit one-way contract migration creates a different candidate.
+            # install_activation_bundle retains the old expired authority and
+            # rechecks target/generation before atomic replacement. The caller
+            # still must prove there is no active activation owner.
+            return None
+        if (snapshot.input_contract != input_contract or snapshot.snapshot_id != snapshot_id
                 or snapshot.provider_revision != provider_revision
                 or snapshot.plan_set_digest != plan.plan_set_digest
                 or snapshot.selected_services != plan.policy.persistent_services
@@ -198,7 +216,6 @@ def reuse_activation_bundle(path: Path, *, plan: VerifiedImagePlanSet, proof: St
                 or raw["rollback_grant_public_key"] != public_key
                 or raw["stage_ledger"] != {"authority": "feature-050-stage-ledger-v2", "revision": stage_ledger_revision}):
             raise ProvisioningError("conflict")
-        instant = int(time.time()) if now is None else now
         if grant.issued_at > instant or min(snapshot.expires_at, grant.expires_at) <= instant:
             raise ProvisioningError("preparation_expired")
         return raw

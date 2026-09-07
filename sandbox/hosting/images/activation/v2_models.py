@@ -314,14 +314,19 @@ class PrivateComposeInputSnapshotV2:
     def __post_init__(self) -> None:
         if self.schema_version != 2:
             raise ActivationContractError("policy_mismatch")
-        if self.input_contract not in (None, "candidate-v1"):
+        if self.input_contract not in (None, "candidate-v1", "candidate-v2"):
             raise ActivationContractError("policy_mismatch")
         if self.init_contract is not None:
-            if self.input_contract != "candidate-v1" or type(self.init_contract) is not InitExecutionContractV2:
+            if self.input_contract not in {"candidate-v1", "candidate-v2"} or type(self.init_contract) is not InitExecutionContractV2:
                 raise ActivationContractError("init_mismatch")
             if any(row.target != self.target or row.snapshot_id != self.snapshot_id
                    for row in self.init_contract.declarations):
                 raise ActivationContractError("init_mismatch")
+        if self.input_contract == "candidate-v2" and (
+                self.init_contract is None or self.init_contract.graph is None):
+            # Copied private files are prepared by the graph's stopped-container
+            # boundary. Legacy replace actions cannot supply this proof.
+            raise ActivationContractError("init_mismatch")
         _text(self.snapshot_id, identity=True)
         if not self.snapshot_id.startswith("compose-snapshot/"):
             raise ActivationContractError("policy_mismatch")
@@ -373,7 +378,7 @@ class PrivateComposeInputSnapshotV2:
     def from_mapping(cls, value: object) -> "PrivateComposeInputSnapshotV2":
         fields = cls.FIELDS
         if type(value) is dict and "input_contract" in value:
-            if value["input_contract"] != "candidate-v1":
+            if value["input_contract"] not in ("candidate-v1", "candidate-v2"):
                 raise ActivationContractError("policy_mismatch")
             fields = fields | {"input_contract"}
         if type(value) is dict and "init_contract" in value:

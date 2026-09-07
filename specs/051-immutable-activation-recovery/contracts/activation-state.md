@@ -23,6 +23,23 @@ The record retains exactly current and nullable previous verified generations. A
 moves current to previous and discards the older previous. No secret value, credential,
 credential reference, arbitrary output, environment body, or temporary path is serializable.
 
+## Candidate-v2 private input compatibility
+
+`PrivateComposeInputSnapshotV2.input_contract` additionally admits `candidate-v2`
+only with a complete execution graph. Its snapshot digest includes this literal;
+the preparation identity and private configuration HMAC use distinct v2 input
+domains. Retained candidate-v1 and legacy snapshots retain their original hashes
+and decoding. A substituted contract fails the original snapshot digest.
+
+The graph's existing `created` event persists the initializer container ID before
+private archive preparation in `inspect`. The source mappings and exact metadata
+are bound through the snapshot configuration digest and step subject. Only an
+exact readback permits `inspected`, followed by durable `effect_entered` and
+start. Persistent graph replacement already saves `effect_entered` before any
+create or archive write. Any retained progress blocks automatic execution replay,
+including partial copies and lost acknowledgements. No new public secret bytes,
+paths, archive manifests, or unkeyed hashes enter state.
+
 Before proof validation, Feature 050 durably prepares a holder/deadline-bound proof lease;
 it immediately pins the full proof. The stage lock/pin stays held across forward acceptance.
 Forward acceptance atomically stores the activation-authority digest, accepted-proof-pin

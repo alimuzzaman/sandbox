@@ -258,7 +258,7 @@ def capture_source(root: Path, revision: str, compose_files: tuple[str, ...],
 
 
 def materialize_secrets(compose: dict, environment: dict[str, str], candidate: str,
-                        key: bytes) -> tuple[dict, dict[str, bytes], str]:
+                        key: bytes, input_contract: str = "candidate-v1") -> tuple[dict, dict[str, bytes], str]:
     """Transform only captured environment-backed secrets into private files.
 
     The caller atomically publishes the returned files with this effective render.
@@ -268,6 +268,7 @@ def materialize_secrets(compose: dict, environment: dict[str, str], candidate: s
     try:
         if (type(compose) is not dict or type(environment) is not dict
                 or type(key) is not bytes or len(key) != 32
+                or input_contract not in {"candidate-v1", "candidate-v2"}
                 or type(candidate) is not str or not candidate.startswith("/")
                 or ".." in Path(candidate).parts or "\0" in candidate):
             raise ValueError()
@@ -296,6 +297,8 @@ def materialize_secrets(compose: dict, environment: dict[str, str], candidate: s
                 raise ValueError()
             secrets = service.get("secrets", [])
             if type(secrets) is not list:
+                raise ValueError()
+            if input_contract == "candidate-v2" and secrets and service.get("read_only") is True:
                 raise ValueError()
             targets = set()
             for mount in secrets:
@@ -336,23 +339,50 @@ def materialize_secrets(compose: dict, environment: dict[str, str], candidate: s
                 raise ValueError()
             filename = f"secret-{index}"
             files[filename] = raw
-            rendered["secrets"][name] = {"file": candidate + "/" + filename,
-                **({"name": source["name"]} if "name" in source else {})}
+            if input_contract == "candidate-v2":
+                rendered["secrets"][name] = {
+                    "environment": f"SANDBOX_ACTIVATION_SECRET_{index}",
+                    **({"name": source["name"]} if "name" in source else {})}
+            else:
+                rendered["secrets"][name] = {"file": candidate + "/" + filename,
+                    **({"name": source["name"]} if "name" in source else {})}
             bound[name] = base64.b64encode(raw).decode("ascii")
         if sum(map(len, files.values())) > MAX_TOTAL:
             raise ValueError()
         subject = json.dumps({"render": rendered, "material": bound},
                              sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-        binding = "sha256:" + hmac.new(key, b"sandbox-hosting-candidate-secrets.v1\0" + subject,
+        domain = (b"sandbox-hosting-candidate-secrets.v2\0"
+                  if input_contract == "candidate-v2"
+                  else b"sandbox-hosting-candidate-secrets.v1\0")
+        binding = "sha256:" + hmac.new(key, domain + subject,
                                        hashlib.sha256).hexdigest()
         return rendered, files, binding
     except (ValueError, TypeError, KeyError, UnicodeError):
         raise ValueError("secret_source_refused") from None
 
 
+def _generated_secret_values(compose: dict, captured_environment: dict[str, str]) -> dict[str, str]:
+    """Build only generated private environment keys for Compose config."""
+    sources = compose.get("secrets", {})
+    if type(sources) is not dict:
+        raise ValueError("secret_source_refused")
+    values = {}
+    for index, name in enumerate(sorted(sources)):
+        source = sources[name]
+        if type(source) is not dict or type(source.get("environment")) is not str:
+            raise ValueError("secret_source_refused")
+        variable = f"SANDBOX_ACTIVATION_SECRET_{index}"
+        value = captured_environment.get(source["environment"])
+        if type(value) is not str or "\0" in value:
+            raise ValueError("secret_source_refused")
+        values[variable] = value
+    return values
+
+
 def render_candidate(content: dict[str, bytes], *, project_name: str,
                      image_environment: dict[str, str], captured_environment: dict[str, str],
-                     key: bytes, candidate: str, expected_services: tuple[str, ...]) -> dict[str, bytes]:
+                     key: bytes, candidate: str, expected_services: tuple[str, ...],
+                     input_contract: str = "candidate-v1") -> dict[str, bytes]:
     """Render privately without running containers, then freeze mounted secrets."""
     try:
         if (type(project_name) is not str or _NAME.fullmatch(project_name) is None
@@ -361,6 +391,7 @@ def render_candidate(content: dict[str, bytes], *, project_name: str,
                        or type(value) is not str or re.fullmatch(
                            r"[a-z0-9.]+/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", value) is None
                        for name, value in image_environment.items())
+                or input_contract not in {"candidate-v1", "candidate-v2"}
                 or type(expected_services) is not tuple or not 1 <= len(expected_services) <= 80
                 or len(set(expected_services)) != len(expected_services)
                 or any(type(name) is not str or _NAME.fullmatch(name) is None for name in expected_services)):
@@ -382,6 +413,10 @@ def render_candidate(content: dict[str, bytes], *, project_name: str,
                 base.extend(("--file", str(root / name)))
             base.extend(("--project-directory", str(root), "--project-name", project_name))
             environment = {**_ENV, **image_environment}
+            if input_contract == "candidate-v2":
+                # Source resolution is private and bounded; v1 deliberately
+                # keeps the captured values out of the Compose subprocess.
+                environment.update(captured_environment)
             def run(args):
                 result = subprocess.run(args, env=environment, capture_output=True, timeout=60)
                 if result.returncode != 0 or result.stderr or len(result.stdout) > MAX_FILE:
@@ -404,7 +439,8 @@ def render_candidate(content: dict[str, bytes], *, project_name: str,
                 if len(matches) != 1:
                     raise ValueError()
                 document = matches[0]
-            effective, files, _binding = materialize_secrets(document, captured_environment, candidate, key)
+            effective, files, _binding = materialize_secrets(
+                document, captured_environment, candidate, key, input_contract=input_contract)
             # The selected complete topology is already explicit. Runtime
             # operations select exact graph members and never discover profiles.
             for service in effective["services"].values():
@@ -415,27 +451,39 @@ def render_candidate(content: dict[str, bytes], *, project_name: str,
         raise ValueError("candidate_render_refused") from None
 
 
-def retained_secret_material(compose: dict, directory: str) -> dict[str, str]:
-    """Read only immutable candidate-owned secret files for keyed render binding."""
+def _retained_secret_bytes(compose: dict, directory: str) -> tuple[dict[str, bytes], dict[str, str]]:
+    """Read candidate-owned files and validate generated environment references."""
     descriptor = None
     try:
         sources = compose.get("secrets", {})
         if type(sources) is not dict or len(sources) > 64:
             raise ValueError()
         if not sources:
-            return {}
+            return {}, {}
         descriptor = _directory_fd(Path(directory))
         _owned_directory(descriptor)
         material = {}
+        generated = {}
         filenames = set()
         total = 0
-        for name, source in sources.items():
-            if (type(name) is not str or _NAME.fullmatch(name) is None
-                    or type(source) is not dict or set(source) - {"file", "name"}
-                    or type(source.get("file")) is not str):
+        for index, name in enumerate(sorted(sources)):
+            source = sources[name]
+            if type(name) is not str or _NAME.fullmatch(name) is None or type(source) is not dict:
                 raise ValueError()
-            path = Path(source["file"])
-            if str(path.parent) != directory or re.fullmatch(r"secret-[0-9]+", path.name) is None or path.name in filenames:
+            if set(source) - {"file", "environment", "name"} or ("file" in source) == ("environment" in source):
+                raise ValueError()
+            if "file" in source:
+                if type(source["file"]) is not str:
+                    raise ValueError()
+                path = Path(source["file"])
+            else:
+                variable = source.get("environment")
+                if variable != f"SANDBOX_ACTIVATION_SECRET_{index}":
+                    raise ValueError()
+                path = Path(directory) / f"secret-{index}"
+                generated[variable] = name
+            if (str(path.parent) != directory or re.fullmatch(r"secret-[0-9]+", path.name) is None
+                    or path.name in filenames):
                 raise ValueError()
             filenames.add(path.name)
             secret_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
@@ -460,10 +508,10 @@ def retained_secret_material(compose: dict, directory: str) -> dict[str, str]:
                 total += len(raw)
                 if total > MAX_TOTAL:
                     raise ValueError()
-                material[name] = base64.b64encode(raw).decode("ascii")
+                material[name] = bytes(raw)
             finally:
                 os.close(secret_fd)
-        return material
+        return material, generated
     except (OSError, ValueError, TypeError, KeyError):
         raise ValueError("candidate_secret_refused") from None
     finally:
@@ -471,12 +519,56 @@ def retained_secret_material(compose: dict, directory: str) -> dict[str, str]:
             os.close(descriptor)
 
 
+def retained_secret_material(compose: dict, directory: str) -> dict[str, str]:
+    """Read only immutable candidate-owned secret files for keyed render binding."""
+    material, _generated = _retained_secret_bytes(compose, directory)
+    return {name: base64.b64encode(raw).decode("ascii") for name, raw in material.items()}
+
+
+def candidate_secret_environment(compose: dict, directory: str) -> dict[str, str]:
+    """Return generated environment names and their retained UTF-8 values."""
+    try:
+        material, generated = _retained_secret_bytes(compose, directory)
+        return {variable: material[name].decode("utf-8") for variable, name in generated.items()}
+    except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError):
+        raise ValueError("candidate_secret_refused") from None
+
+
+def retained_candidate_secret_environment(directory: str) -> dict[str, str]:
+    """Hydrate generated secret variables from an owner-only effective render."""
+    try:
+        root = Path(directory)
+        descriptor = _directory_fd(root)
+        try:
+            _owned_directory(descriptor)
+        finally:
+            os.close(descriptor)
+        raw = _read_exact_file(root, "effective.json")
+        if len(raw) > MAX_FILE:
+            raise ValueError()
+        def unique(pairs):
+            result = {}
+            for name, value in pairs:
+                if name in result:
+                    raise ValueError()
+                result[name] = value
+            return result
+        document = json.loads(raw, object_pairs_hook=unique)
+        if type(document) is not dict or type(document.get("secrets", {})) is not dict:
+            raise ValueError()
+        return candidate_secret_environment(document, str(root))
+    except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("candidate_secret_refused") from None
+
+
 def retained_secret_program() -> str:
     """Fixed helper definitions shared by preparation and runtime composition."""
-    return (f"MAX_TOTAL={MAX_TOTAL}\n"
+    return (f"MAX_FILE={MAX_FILE}\nMAX_TOTAL={MAX_TOTAL}\n"
             "from pathlib import Path\n_NAME=re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\\Z')\n"
             + "\n".join(inspect.getsource(function) for function in (
-                _directory_fd, _owned_directory, retained_secret_material)))
+                _directory_fd, _owned_directory, _retained_secret_bytes,
+                _read_exact_file, retained_secret_material,
+                candidate_secret_environment, retained_candidate_secret_environment)))
 
 
 def _candidate_main() -> None:
@@ -527,16 +619,23 @@ def _candidate_main() -> None:
                             "source_revision": frame["source_revision"], "compose_files": names,
                             "manifest": manifest}, sort_keys=True, separators=(",", ":")).encode()})
         contract = frame["render_contract"]
-        if type(contract) is not dict or set(contract) != {"project_name", "image_environment",
-                "captured_environment", "configuration_key", "expected_services"}:
+        if (type(contract) is not dict or not {
+                "project_name", "image_environment", "captured_environment",
+                "configuration_key", "expected_services"}.issubset(contract)
+                or set(contract) - {"project_name", "image_environment", "captured_environment",
+                    "configuration_key", "expected_services", "input_contract"}):
             raise ValueError()
         if type(contract["expected_services"]) is not list or type(contract["configuration_key"]) is not str:
             raise ValueError()
         key = base64.b64decode(contract["configuration_key"], validate=True)
+        input_contract = contract.get("input_contract", "candidate-v1")
+        if input_contract not in {"candidate-v1", "candidate-v2"}:
+            raise ValueError()
         candidate = str(Path(frame["runtime_directory"]) / "activation-inputs" / frame["candidate_id"])
         content = render_candidate(content, project_name=contract["project_name"],
             image_environment=contract["image_environment"], captured_environment=contract["captured_environment"],
-            key=key, candidate=candidate, expected_services=tuple(contract["expected_services"]))
+            key=key, candidate=candidate, expected_services=tuple(contract["expected_services"]),
+            input_contract=input_contract)
         result = publish_candidate(Path(frame["runtime_directory"]), frame["candidate_id"], content)
     except Exception:
         sys.stdout.write('{"ok":false,"result":"refused"}\n')

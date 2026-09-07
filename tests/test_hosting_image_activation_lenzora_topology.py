@@ -264,7 +264,10 @@ class LenzoraTopologyTests(unittest.TestCase):
                 }]).encode(), b"")
             self.fail(argv)
 
-        with patch("subprocess.run", side_effect=run), patch("time.sleep"):
+        def graph_port(_environment, _timeout):
+            return (lambda argv, **_kwargs: run(argv).stdout), float("inf")
+
+        with patch("sandbox.hosting.images.activation.private_graph.graph_command_port", side_effect=graph_port), patch("time.sleep"):
             source["action"] = "replace"
             execute_private_graph(
                 source=source, document=fixture["compose"], environment={"PATH": "/synthetic/bin"},

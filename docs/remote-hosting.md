@@ -1434,6 +1434,10 @@ Compose files and project while remaining read-only. Local, running, recovery, a
 fresh registered-target and Docker-daemon observations. Init platform architecture comes from an
 independent image inspection, not an optional container-inspect default.
 
+V2 replacement and observation both resolve a unique Compose profile when the default
+render differs from the retained private render digest. Missing or ambiguous matches refuse before
+replacement; the exact matching render feeds the no-build, no-pull Compose operation.
+
 An exact activation terminal is looked up before current policy, grant, deadline, or custody
 admission. It returns the immutable result and never recreates a released lease. Image recovery
 atomically terminalizes the interrupted original activation as well as its separate recovery result;

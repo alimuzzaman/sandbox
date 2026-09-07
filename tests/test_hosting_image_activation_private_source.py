@@ -530,6 +530,74 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                     else:
                         self.assertNotEqual(result["returncode"], 0)
 
+    def test_real_private_replacement_requires_unique_digest_matching_profile(self):
+        from sandbox.commands.hosting import _host_image_argv_runner
+
+        image = "ghcr.io/acme/widget@sha256:" + "a" * 64
+        rendered = {"services": {"web": {"image": image}}}
+        raw = (json.dumps(rendered) + "\n").encode()
+        digest = "sha256:" + hmac.new(CONFIGURATION_KEY,
+            b"sandbox-hosting-private-compose-render.v2\0" + raw, hashlib.sha256).hexdigest()
+        target = {"machine_identity": "machine-a", "target_identity": "target-a",
+                  "daemon_identity": "daemon-a"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env_file = root / "environment.env"
+            env_file.write_text("# synthetic\n")
+            env_file.chmod(0o600)
+            provider = {"snapshot_id": "compose-snapshot/test-replace-profile",
+                "snapshot_digest": digest, "provider_revision": "provider-v2",
+                "target": target, "compose_files": (str(root / "compose.yml"),),
+                "project_name": "widget", "project_directory": str(root),
+                "environment_file": str(env_file), "render_digest": digest}
+            source = {key: provider[key] for key in (
+                "snapshot_id", "snapshot_digest", "provider_revision", "target", "render_digest")}
+            source.update(kind="compose_replace_v2", services=("web",), topology_digest=digest)
+            docker = root / "docker"
+            effect = root / "effect.json"
+
+            def ssh_run(entry, command, **kwargs):
+                return run_test_process(shlex.split(command),
+                    env=synthetic_environment({"PATH": f"{root}:/usr/bin:/bin"}),
+                    input=kwargs.get("input_data"), text=True, capture_output=True)
+
+            for mode in ("unique", "ambiguous", "mismatch"):
+                effect.unlink(missing_ok=True)
+                docker.write_text("\n".join((
+                    "#!/usr/bin/env python3", "import sys,os,json", "from pathlib import Path",
+                    "a=sys.argv[1:]",
+                    "if a[0]=='info': print('daemon-a'); sys.exit(0)",
+                    "if a[0]=='inspect': print('hash-a'); sys.exit(0)",
+                    "if '--hash' in a: print('web hash-a'); sys.exit(0)",
+                    "if 'ps' in a: print('container-a'); sys.exit(0)",
+                    "if 'up' in a:",
+                    " p=Path(" + repr(str(effect)) + "); assert not p.exists()",
+                    " p.write_text(json.dumps({'argv':a,'stdin':sys.stdin.read()})); sys.exit(0)",
+                    "if '--profiles' in a: print('job-orchestration\\nother'); sys.exit(0)",
+                    "profile=a[a.index('--profile')+1] if '--profile' in a else None",
+                    "match=" + repr(mode) + "!='mismatch' and (profile=='job-orchestration' or (" + repr(mode) + "=='ambiguous' and profile=='other'))",
+                    "if match and os.environ.get('COMPOSE_PROFILES')==profile: print(" + repr(json.dumps(rendered)) + "); sys.exit(0)",
+                    "print('{\"services\":{}}')")))
+                docker.chmod(0o700)
+                argv = ("docker", "compose", "--file", "-", "--project-directory", str(root),
+                        "--project-name", "widget", "up", "--detach", "--no-build",
+                        "--pull", "never", "--no-deps", "web")
+                with self.subTest(mode=mode), patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh_run):
+                    result = _host_image_argv_runner({"name": "synthetic"}, compose_snapshot_provider=provider)(
+                        argv=argv,
+                        environment={"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                        private_environment={CONFIGURATION_KEY_ENV: base64.b64encode(CONFIGURATION_KEY).decode()},
+                        private_environment_source=source, redact_environment_keys=None,
+                        timeout_seconds=30, max_output_bytes=4096)
+                    if mode == "unique":
+                        self.assertEqual(result["returncode"], 0)
+                        recorded = json.loads(effect.read_text())
+                        self.assertEqual(recorded["argv"], list(argv[1:]))
+                        self.assertEqual(recorded["stdin"].encode(), raw)
+                    else:
+                        self.assertNotEqual(result["returncode"], 0)
+                        self.assertFalse(effect.exists())
+
     def test_private_observer_admits_only_verified_manifest_local_identity(self):
         from sandbox.commands.hosting import _host_image_argv_runner
         from types import SimpleNamespace

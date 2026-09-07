@@ -36,6 +36,13 @@ Edge is a transaction sub-request. Proven-not-entered may exact-resume. Acceptan
 first queries existing replay authority. Exact terminal receipt may promote only after
 fresh unchanged runtime observation. Possible delivery without receipt remains fenced.
 
+V2 writes the runtime observation, generation subject, and prepared edge sub-request in
+one atomic `edge_pending` transition. A crash before that write leaves `runtime_pending`;
+a crash after it cannot omit the edge requirement. Historical v2 `runtime_proven` records
+without a terminal edge receipt and retained candidate remain `recovery_conflict` after
+two observations, with no promotion or owner release. V1 optional-edge behavior remains
+unchanged.
+
 Activation recovery is a separate request type dispatched by `sb host image recover`.
 Under the same owner/CAS, 051 validates the first read-only Feature 048 observer value and
 durably writes only its bounded `authorizing: false` recovery provisional with the exact

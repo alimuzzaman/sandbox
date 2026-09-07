@@ -542,6 +542,65 @@ class StageRepository:
                 return result
             return dict(record)
 
+    def lookup_successful_replay(self, request: StageRequestSet):
+        """Select one retained v2 request binding before a generation retry.
+
+        A caller that re-provisions a stage policy can observe the ledger's
+        resulting generation and accidentally rebuild the same request ID with
+        a different request digest.  The normal request APIs must keep refusing
+        that mismatch.  This narrow, read-only selector lets a caller recover
+        the original request binding only when the retained proof authenticates
+        the same plan, policy, and target.  An exact digest returns its exact
+        terminal result (or an in-progress ``None`` result) unchanged.  A
+        generation-drifted request can select only a retained success proof.
+        It never selects an active, uncertain, failed, or expired request for
+        a new effect.
+        """
+        if type(request) is not StageRequestSet:
+            raise StageRepositoryError("request_conflict")
+        target = request.target.target_identity
+        with self.target_lock(target):
+            state = self._load_unlocked(target)
+            tombstone = state["tombstones"].get(request.request_id)
+            if tombstone is not None:
+                if tombstone.get("request_digest") == request.request_digest:
+                    raise StageRepositoryError("proof_expired")
+                raise StageRepositoryError("request_conflict")
+            record = state["records"].get(request.request_id)
+            if record is None:
+                return None
+            result = self.lookup_result_unlocked(state, request.request_id)
+            if record.get("request_digest") == request.request_digest:
+                return request, result
+            proof = result.proof if type(result) is StageResultSet and result.ok else None
+            if (type(result) is not StageResultSet or not result.ok
+                    or proof is None or record.get("phase") != "succeeded"
+                    or record.get("effect_entered") is not True):
+                raise StageRepositoryError("request_conflict")
+            if (proof.request_id != request.request_id
+                    or proof.target != request.target
+                    or proof.plan_set_digest != request.plan_set.plan_set_digest
+                    or proof.verified_plan_set != request.plan_set.as_mapping()
+                    or proof.staging_policy_digest != request.staging_policy_digest
+                    or record.get("request_digest") != proof.request_digest
+                    or record.get("generation") != proof.staging_generation):
+                raise StageRepositoryError("request_conflict")
+            if proof.staging_generation < 1:
+                raise StageRepositoryError("ledger_invalid")
+            try:
+                original = StageRequestSet.create(
+                    request_id=proof.request_id,
+                    expected_generation=proof.staging_generation - 1,
+                    plan_set=request.plan_set,
+                    staging_policy_digest=request.staging_policy_digest,
+                    target=request.target,
+                    confirmed=True)
+            except (TypeError, ValueError, StagingContractError):
+                raise StageRepositoryError("ledger_invalid") from None
+            if original.request_digest != proof.request_digest:
+                raise StageRepositoryError("request_conflict")
+            return original, result
+
     def accept(self, request):
         target = request.target.target_identity
         with self.target_lock(target):

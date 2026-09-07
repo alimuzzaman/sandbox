@@ -208,12 +208,6 @@ class ActivationServiceV2:
                 "sandbox.hosting.images.activation-generation-subject.v2",
                 {key: (list(value) if isinstance(value, tuple) else value)
                  for key, value in base.items()})
-            self.repository.transition_v2(
-                target_key, request, "runtime_proven",
-                running_observation=observation, generation_subject={
-                    **{key: (list(value) if isinstance(value, tuple) else value)
-                       for key, value in base.items()},
-                    "generation_subject_digest": subject_digest})
             edge_prepared = {"schema_version": 2, "phase": "prepared",
                 "request_digest": request.request_digest,
                 "generation": request.expected_generation + 1,
@@ -221,8 +215,17 @@ class ActivationServiceV2:
                 "route_digest": edge_route_digest,
                 "observation_digest": observation["observation_digest"],
                 "terminal": False, "receipt_digest": None}
+            # Keep the runtime proof and the edge sub-request in one durable
+            # transition. A process death between separate runtime_proven and
+            # edge_pending writes would leave a v2 record that recovery could
+            # mistake for a promotable generation without an edge receipt.
             self.repository.transition_v2(
-                target_key, request, "edge_pending", edge_result=edge_prepared)
+                target_key, request, "edge_pending",
+                running_observation=observation, generation_subject={
+                    **{key: (list(value) if isinstance(value, tuple) else value)
+                       for key, value in base.items()},
+                    "generation_subject_digest": subject_digest},
+                edge_result=edge_prepared)
             # The provider adapter may perform several effects.  Give the
             # target owner a narrow callback so each zone transition is
             # durable before/after its POST.  Adapters without this optional

@@ -3405,9 +3405,9 @@ def _cmd_host_stage(args) -> None:
         from sandbox.hosting.images import validate_verified_image_plan
         from sandbox.hosting.images.plan_set import VerifiedImagePlanSet
         from sandbox.hosting.images.staging_models import StageRequest, StagingPolicy
-        from sandbox.hosting.images.staging_v2 import StageRequestSet, StagingPolicySet
+        from sandbox.hosting.images.staging_v2 import StageRequestSet, StageResultSet, StagingPolicySet
         from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
-        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_repository import StageRepository, StageRepositoryError
         from sandbox.hosting.images.staging_service import ImageStagingService
         from sandbox.hosting.images.staging_worker import StageWorker, StageWorkerV2
         from sandbox.isolation.credential_binding import CredentialBinding
@@ -3466,30 +3466,50 @@ def _cmd_host_stage(args) -> None:
                 from sandbox.hosting.images.staging_worker import unit_name
                 unit = unit_name(supplied_request.request_id, supplied_request.request_digest)
                 return transport.observe_posteffect_cleanup(args.remote, unit)
-            result = service.reconcile_uncertain_failure(
-                request, policy, observe_absence, observe_cleanup)
-        else:
-            binding = CredentialBinding.from_dict(private["binding"])
-            registry = SourceRegistry(
-                project_root, private["secret_sources"],
-                personal_path=personal_secrets.secret_file(),
-                project_scope=str(project_root),
-            )
-            resolver = SecretReferenceResolver(registry, owner=binding.owner)
-            revision_key = load_revision_key(RUNTIME_DIR / "secrets" / "revision.key")
-            broker = GHCRStagingCredentialAdapter(
-                resolver, binding, recipient=policy.broker_recipient,
-                credential_reference_revision=policy.credential_reference_revision,
-                revision_key=revision_key,
-            )
-            service_type = ImagePlanSetStagingService if is_v2 else ImageStagingService
-            worker = StageWorkerV2(RegisteredRemoteImageTransport()) if is_v2 \
-                else StageWorker(RegisteredRemoteImageTransport())
-            service = service_type(repository=repository, broker=broker, worker=worker)
             recovery_repository = RecoveryRepository()
             with recovery_repository.target_mutation_port(
                     "image-stage").target_mutation_transaction(request.target.target_identity):
-                result = service.stage(request, policy)
+                result = service.reconcile_uncertain_failure(
+                    request, policy, observe_absence, observe_cleanup)
+        else:
+            recovery_repository = RecoveryRepository()
+            with recovery_repository.target_mutation_port(
+                    "image-stage").target_mutation_transaction(request.target.target_identity):
+                retained = None
+                if is_v2:
+                    try:
+                        retained = repository.lookup_successful_replay(request)
+                    except StageRepositoryError as exc:
+                        code = exc.code if exc.code in {"request_conflict", "proof_expired"} \
+                            else "proof_invalid"
+                        generation = (repository.target_revision(request.target.target_identity)[0]
+                                      if code != "proof_invalid" else request.expected_generation)
+                        retained = (request, StageResultSet(2, False, "refused", code,
+                                                          request.request_id, generation))
+                if retained is not None:
+                    original, result = retained
+                    if result is None:
+                        result = ImagePlanSetStagingService(
+                            repository=repository, broker=None, worker=None).status(original)
+                else:
+                    binding = CredentialBinding.from_dict(private["binding"])
+                    registry = SourceRegistry(
+                        project_root, private["secret_sources"],
+                        personal_path=personal_secrets.secret_file(),
+                        project_scope=str(project_root),
+                    )
+                    resolver = SecretReferenceResolver(registry, owner=binding.owner)
+                    revision_key = load_revision_key(RUNTIME_DIR / "secrets" / "revision.key")
+                    broker = GHCRStagingCredentialAdapter(
+                        resolver, binding, recipient=policy.broker_recipient,
+                        credential_reference_revision=policy.credential_reference_revision,
+                        revision_key=revision_key,
+                    )
+                    service_type = ImagePlanSetStagingService if is_v2 else ImageStagingService
+                    worker = StageWorkerV2(RegisteredRemoteImageTransport()) if is_v2 \
+                        else StageWorker(RegisteredRemoteImageTransport())
+                    service = service_type(repository=repository, broker=broker, worker=worker)
+                    result = service.stage(request, policy)
     except (OSError, json.JSONDecodeError, TypeError, ValueError, RuntimeError):
         # Private paths, remote diagnostics, helper output, and broker details
         # never cross the public stage envelope.

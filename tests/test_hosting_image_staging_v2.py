@@ -814,6 +814,155 @@ class TestV2BatchStaging(unittest.TestCase):
                 first.proof.as_mapping()).as_mapping(), first.proof.as_mapping())
             self.assertNotIn("credential", repr(first.as_mapping()).lower())
 
+    def test_successful_replay_selector_restores_original_generation_binding(self):
+        from sandbox.hosting.images.staging_repository import StageRepository
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+
+        plan = plan_set(); policy = policy_set(plan)
+        first = request_set(plan, policy, request_id="deterministic-stage", generation=0)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            broker = FakeBroker(); worker = FakeBatchWorker()
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=broker, worker=worker)
+            result = service.stage(first, policy)
+            exact = repository.lookup_successful_replay(first)
+            self.assertIsNotNone(exact)
+            self.assertEqual(exact[0], first)
+            self.assertEqual(exact[1].as_mapping(), result.as_mapping())
+            retry = request_set(plan, policy, request_id=first.request_id, generation=1)
+            selected = repository.lookup_successful_replay(retry)
+            self.assertIsNotNone(selected)
+            original, replay = selected
+            self.assertEqual(original, first)
+            self.assertEqual(replay.as_mapping(), result.as_mapping())
+            self.assertEqual((len(broker.calls), worker.prepares), (1, 1))
+            self.assertEqual(
+                service.stage(retry, policy).as_mapping(),
+                {"schema_version": 2, "ok": False, "result_class": "refused",
+                 "code": "request_conflict", "request_id": first.request_id,
+                 "generation": 1})
+            self.assertEqual((len(broker.calls), worker.prepares), (1, 1))
+
+    def test_successful_replay_selector_refuses_changed_authority_and_plan(self):
+        from sandbox.hosting.images.staging_repository import (
+            StageRepository, StageRepositoryError,
+        )
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+        from tests.test_hosting_image_activation_v2 import artifacts
+
+        plan = plan_set(); policy = policy_set(plan)
+        first = request_set(plan, policy, request_id="deterministic-stage", generation=0)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=FakeBroker(), worker=FakeBatchWorker())
+            self.assertTrue(service.stage(first, policy).ok)
+
+            drifted_policy = policy_set(plan)
+            object.__setattr__(drifted_policy, "policy_digest", "sha256:" + "e" * 64)
+            wrong_policy = request_set(plan, drifted_policy,
+                                       request_id=first.request_id, generation=1)
+            with self.assertRaisesRegex(StageRepositoryError, "request_conflict"):
+                repository.lookup_successful_replay(wrong_policy)
+
+            other_plan, _proof, _snapshot = artifacts(release_offset=4)
+            wrong_plan = StageRequestSet.create(
+                request_id=first.request_id, expected_generation=1,
+                plan_set=other_plan, staging_policy_digest=policy.policy_digest,
+                target=policy.target, confirmed=True)
+            with self.assertRaisesRegex(StageRepositoryError, "request_conflict"):
+                repository.lookup_successful_replay(wrong_plan)
+
+            wrong_target = StageRequestSet.create(
+                request_id=first.request_id, expected_generation=1,
+                plan_set=plan, staging_policy_digest=policy.policy_digest,
+                target=StagingTarget("machine-a", "target-b", "daemon-a"),
+                confirmed=True)
+            self.assertIsNone(repository.lookup_successful_replay(wrong_target))
+
+            wrong_id = request_set(plan, policy, request_id="other-stage", generation=1)
+            self.assertIsNone(repository.lookup_successful_replay(wrong_id))
+
+    def test_replay_selector_rejects_tampered_proof_and_uncertain_owner(self):
+        from sandbox.hosting.images.staging_repository import (
+            StageRepository, StageRepositoryError,
+        )
+        from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService
+
+        plan = plan_set(); policy = policy_set(plan)
+        first = request_set(plan, policy, request_id="deterministic-stage", generation=0)
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=FakeBroker(), worker=FakeBatchWorker())
+            service.stage(first, policy)
+            retry = request_set(plan, policy, request_id=first.request_id, generation=1)
+            with repository.target_lock(policy.target.target_identity):
+                state = repository._load_unlocked(policy.target.target_identity)
+                state["proofs"][first.request_id]["request"]["request_digest"] = \
+                    "sha256:" + "f" * 64
+                repository._write_unlocked(policy.target.target_identity, state)
+            with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                repository.lookup_successful_replay(retry)
+
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            self.assertEqual(repository.accept(first)[0], "accepted")
+            self.assertEqual(repository.lookup_successful_replay(first), (first, None))
+            retry = request_set(plan, policy, request_id=first.request_id, generation=1)
+            with self.assertRaisesRegex(StageRepositoryError, "request_conflict"):
+                repository.lookup_successful_replay(retry)
+
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=FakeBroker(), worker=FakeBatchWorker())
+            result = service.stage(first, policy)
+            from sandbox.hosting.images.staging_models import StageProofTombstone
+            with repository.target_lock(policy.target.target_identity):
+                state = repository._load_unlocked(policy.target.target_identity)
+                state["tombstones"][first.request_id] = StageProofTombstone(
+                    first.request_id, first.request_digest,
+                    result.proof.proof_digest).as_mapping()
+                del state["records"][first.request_id]
+                del state["proofs"][first.request_id]
+                repository._write_unlocked(policy.target.target_identity, state)
+            with self.assertRaisesRegex(StageRepositoryError, "proof_expired"):
+                repository.lookup_successful_replay(first)
+            retry = request_set(plan, policy, request_id=first.request_id, generation=1)
+            with self.assertRaisesRegex(StageRepositoryError, "request_conflict"):
+                repository.lookup_successful_replay(retry)
+
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=FakeBroker(), worker=FakeBatchWorker())
+            service.stage(first, policy)
+            retry = request_set(plan, policy, request_id=first.request_id, generation=1)
+            with repository.target_lock(policy.target.target_identity):
+                state = repository._load_unlocked(policy.target.target_identity)
+                state["records"][first.request_id]["generation"] = 2
+                repository._write_unlocked(policy.target.target_identity, state)
+            with self.assertRaisesRegex(StageRepositoryError, "ledger_invalid"):
+                repository.lookup_successful_replay(retry)
+
+        with tempfile.TemporaryDirectory() as temp:
+            repository = StageRepository(Path(temp))
+            broker = FakeBroker(); worker = FakeBatchWorker(unsafe_cleanup=True)
+            service = ImagePlanSetStagingService(
+                repository=repository, broker=broker, worker=worker)
+            uncertain = service.stage(first, policy)
+            self.assertEqual(uncertain.result_class, "uncertain")
+            exact = repository.lookup_successful_replay(first)
+            self.assertEqual((exact[0], exact[1].as_mapping()),
+                             (first, uncertain.as_mapping()))
+            retry = request_set(plan, policy, request_id=first.request_id, generation=1)
+            with self.assertRaisesRegex(StageRepositoryError, "request_conflict"):
+                repository.lookup_successful_replay(retry)
+            self.assertEqual((len(broker.calls), worker.prepares), (1, 1))
+            self.assertEqual(uncertain.request_id, retry.request_id)
+
     def test_policy_drift_refuses_before_broker_or_helper(self):
         from sandbox.hosting.images.staging_repository import StageRepository
         from sandbox.hosting.images.staging_v2_service import ImagePlanSetStagingService

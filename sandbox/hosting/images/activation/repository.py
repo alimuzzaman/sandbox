@@ -380,6 +380,17 @@ def recovery_decision(transaction: dict[str, Any], classification: str, *,
     if (phase == "init_pending" and entered) or phase == "runtime_pending":
         return "effect_unknown", False, False
     if phase == "runtime_proven":
+        if transaction.get("schema_version") == 2:
+            # v2 edge proof is part of the same transaction. Historical
+            # runtime_proven records may predate the combined edge_pending
+            # write, but they cannot authorize generation promotion without
+            # both a terminal edge receipt and a retained candidate.
+            edge = transaction.get("edge_result")
+            candidate = transaction.get("candidate_generation")
+            if (not isinstance(edge, dict) or edge.get("terminal") is not True
+                    or not isinstance(edge.get("receipt_digest"), str)
+                    or not isinstance(candidate, dict)):
+                return "recovery_conflict", False, False
         complete_init = all(item.get("termination_complete") is True and item.get("cleanup_complete") is True
                             for item in transaction.get("init_receipts", []))
         edge = transaction.get("edge_result")

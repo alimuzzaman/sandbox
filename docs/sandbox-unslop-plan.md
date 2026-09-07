@@ -1,6 +1,6 @@
 # Sandbox unslop maintenance plan
 
-Planning baseline: `latest` at `ac65c83a50cf799725b7380a510c01953e93c6eb`, audited 2026-09-07. This is a repository-wide maintenance plan, not implementation or release approval. Runtime mutation, remote updates, deployment, merge, credentials and production work remain outside scope. Recheck source identity and concurrent changes before implementation.
+Original maintenance baseline: `latest` at `ac65c83a50cf799725b7380a510c01953e93c6eb`, audited 2026-09-07. The original packages and their evidence remain below. The deployment completion amendment at the end records the current task, owners, scope, and acceptance gates; it supersedes the original task's execution assignments. Recheck source identity and concurrent changes before implementation.
 
 The confirmed defects are the activation contract/test mismatch, incomplete activation acceptance, missing automatic Python workflow, broken Makefile alias, contradictory guidance and stale activation selector. Wildcard imports, mirror differences and large modules are candidates, not defects established by their size. The baseline activation run failed 15 of 157 tests; 26 architecture/storage boundary tests passed. No full-suite, installed-controller or production pass is established.
 
@@ -102,3 +102,211 @@ hosted-apply guard, not immutable activation completion. File-backed secret
 ownership for non-root application users remains a separate Linux-canary blocker;
 no permission widening or readiness-timeout relaxation is authorized by this
 maintenance pass.
+
+## Deployment completion amendment — 2026-09-07
+
+The user requests a detailed plan by the current agent, four Luna implementation
+agents starting at lower effort, deployment repairs with Lenzora production first,
+and review/port of the remaining branch into `latest`. The current agent owns
+planning, integration, and final acceptance. Four Luna High agents own the bounded
+packages below. Escalate a package to XHigh or Max only for demonstrated reasoning
+or review needs. Do not start an Astra agent or task. These task-level choices
+supersede the older role assignments above.
+
+### Outcome and current evidence
+
+Finish the existing deployment contract without another broad rewrite. A successful
+production outcome means one exact signed application revision activated through
+the supported Lenzora package command, with complete initializer, image, service,
+edge, and public-route proof. A green source suite alone does not meet that outcome.
+
+Inspected baselines: Sandbox `latest`/`origin/latest` at `ccd4119`, clean; Lenzora
+`latest`/`origin/latest` at `fa945494a20852a46697fc1f105efe4233895c44`, clean.
+The remaining Sandbox branch is `codex/activation-preparation-fix` at `c380e3e`.
+Its `private_inputs.py` production change is already identical to `latest`.
+Its remaining test changes switch graph cases to legacy zero-init and remove newer
+coverage. Preserve the graph cases; do not cherry-pick these superseded migrations.
+The three affected current test modules passed 38 tests during this audit.
+Keep the branch and worktree; this review is not deletion authority.
+
+The referenced task, **Merge sapan-dev into latest**, reports repeated failures:
+private artifact rejection, incomplete initializer execution, `effect_unknown`,
+controller revision skew, and finally staging `request_conflict`. Its latest
+retained report says production was generation 0 with no activated revision.
+Current `host status` independently confirms generation 0, null revision fields,
+and unavailable/partial runtime observation; it does not prove absence of old
+containers or effects. A previous recovery plan retained an uncertain transaction
+and worker effects, so generation 0 cannot establish a clean first deployment.
+Development's last retained report has healthy runtime but `provider_auth` on
+required edge purge; that is historical, not a fresh development acceptance.
+
+Current remote service status is authenticated and active but mismatched:
+local runtime `56fa80e0495ec7539a04ad07`, installed
+`fab9fdea93229996b1587a61`. Do not rely on new protocol behavior until a reviewed
+source revision is installed through the supported lifecycle and checked again.
+
+### Package A — replay the exact staging operation
+
+Owner: Luna High branch/replay agent. Own
+`sandbox/hosting/images/{provisioning,staging_repository,staging_v2_service}.py`
+and their existing provisioning/staging tests. The current agent owns required
+dispatch edits in `sandbox/commands/hosting.py` and matching public docs.
+
+Trace the wrapper's stable stage request ID through stage-bundle provisioning,
+returned generation, `StageRequestSet`, repository acceptance, and terminal replay.
+Reproduce any generation/policy drift with real codecs and a temporary repository.
+The expected behavior is that an exact retry returns retained evidence without
+another broker use, image pull, or generation advance. A different plan, target,
+policy, or ambiguous effect remains refused. An expired credential does not justify
+changing an existing request. A new request identity must never be an automatic
+escape from conflict. Inspect retained requests through their repository owner;
+never edit or directly parse machine ledgers.
+
+Before implementation, identify which immutable request fields survive and where
+the caller currently loses them. Keep any fix in the existing custody/replay
+mechanism. If a public selector or wire contract must change, update its manifest,
+docs, tests, and revision evidence together. Tests must disprove accidental replay
+across changed authority, and prove that unknown/in-progress results cannot start
+a second operation.
+
+### Package B — make private secret inputs usable without leaking them
+
+Owner: Luna High private-input agent. Initially own
+`sandbox/hosting/images/activation/private_inputs.py` and
+`tests/test_hosting_image_activation_private_source.py`; reassign additional
+transport files explicitly if the actual mechanism lives there.
+
+Reproduce Linux file access for a non-root container consuming candidate-owned
+Compose secrets. Preserve the registered source, `_FILE` application contract,
+exact candidate HMAC binding, atomic publication, and owner-only source custody.
+Do not make private source files world-readable, silently inject secrets into
+public environment/state, or assume Compose honors file-backed uid/gid options.
+Choose the smallest supported runtime projection only after proving its ownership
+and cleanup behavior. Missing ownership proof must refuse before application
+effects. Replay verifies the same bytes and ownership; partial publication leaves
+the active/prior candidates intact. Source tests use synthetic values only.
+
+Acceptance requires a real disposable Linux container reading the intended secret
+as the intended non-root user, a different user denied access where the contract
+requires it, and no secret bytes in public output. Local mocked filesystem checks
+are useful regressions, not the Linux acceptance result.
+
+### Package C — finish the bounded activation execution gaps
+
+Owner: Luna High activation agent. Initially own
+`sandbox/hosting/images/activation/{v2_service,v2_runtime,init_runner}.py` and
+`tests/test_hosting_image_activation_init.py`; assign graph/recovery files only
+after the agent maps actual gaps in T156–T164. Preserve the existing graph codecs
+and progress mechanism instead of adding a competing executor.
+
+Before changes, map current source against required behavior: exact queue
+prerequisite readiness; migrate, storage-init, topology-gate order; inspect before
+start; durable effect entry; terminal exit persisted before cleanup; dependent
+services fenced on failure; bounded final readiness; complete evidence before edge
+and generation commit. Name a reproducible missing behavior and its causal path.
+Implement established-contract defects only. Do not disable graph rollback guards
+or make an incomplete initializer chain recoverable merely to permit a deploy.
+
+Regression cases must cover delayed healthy readiness, nonzero init exit, lost
+start acknowledgement, crash after exit before cleanup, changed container/config
+identity, and replay after possible effect. Assert which later phases never run.
+Retained uncertain state must stay uncertain. Graph rollback/recovery and operator
+settlement remain separate gates unless their full existing contracts are proven.
+
+### Package D — repair the Lenzora caller
+
+Owner: Luna High Lenzora agent. Own Lenzora `scripts/deploy-sandbox.sh`, its
+existing deployment tests, and `docs/runbooks/hosted-production-images.md`.
+Do not edit snapshot/comparison core code or start image builds.
+
+Trace exact application revision A, control/wrapper revision D, and Sandbox
+revision S. Preserve the retained signed images for A. Identify whether the current
+wrapper can use a reviewed D/S without requiring an application rebuild; implement
+only the established A/D/S contract in Feature 051. Reject source drift, a bundle
+for another A, an unreviewed S, malformed/uncertain results, and changed target
+generation. Coordinate staging changes with package A. Change the runtime pin only
+after the current agent provides an accepted commit and installed-runtime evidence.
+
+Keep the supported `pnpm run deploy production` path, whole-second deadlines,
+private bounded failure capture, complete terminal activation proof, and the seven
+public route checks. Tests must exercise actual wrapper branches with synthetic
+CLI responses, including same-request retry, conflict, partial status, and an exact
+successful result. No full application test/build sweep by this agent.
+
+### Integration and release sequence
+
+1. Review each agent's causal finding before authorizing its patch. Keep one writer
+   per path. Record remaining Feature 051 gaps without declaring old unchecked
+   tasks done based on a source skim. Update this amendment when findings change
+   the contracts or file ownership.
+2. Accept bounded patches only with a meaningful failing-before/passing-after
+   check, diff review, and matching docs. Reuse the four agents for independent
+   correctness and operator-output review after their own patches stabilize;
+   reviewers do not approve their own implementation. The current agent resolves
+   findings and checks cross-package invariants.
+3. Run the combined activation/staging/hosting, architecture, storage, subprocess
+   environment, and affected Lenzora wrapper gates. Run required full Sandbox
+   discovery once the integrated source is stable. Long checks use finite durable
+   jobs with one retained request ID/job ID. Report optional skips and failures.
+   Commit/push accepted work on `latest`; preserve concurrent work and `main`.
+4. Prove a disposable Linux topology before production: cold start, three ordered
+   initializers, queue prerequisite, non-root secret readers, delayed health,
+   failure/no-replay, and supported recovery boundaries. Use supported Sandbox
+   controls and explicit synthetic inputs. Retain exact source and terminal job
+   evidence. A unavailable canary is an open gate, never a simulated pass.
+5. Refresh the exact production transaction/staging owner and preservation evidence
+   through supported observation. Do not equate an empty/partial status with
+   permission to replace possibly effected containers. If legal two-observation
+   recovery cannot close an old transaction, prepare the existing Feature 051
+   settlement work and its concrete data/preservation decision for human review.
+   Do not bypass it by deleting state, renaming requests, or adopting a partial run.
+6. Review the concrete A/D/S tuple and consequential security/production changes
+   before release. Use the supported runtime update, then independently verify
+   installed revision/capability. Preserve required edge purge; diagnose provider
+   refusal through registered controls. Credential changes, destruction, or data
+   settlement need their own exact authority and are not inferred from this plan.
+7. Revalidate the retained signed bundle and reuse exact staging custody where
+   legal. Submit one supported production activation. Require all three initializer
+   exits, exact image identities for 17 healthy services, edge/purge receipt,
+   unchanged post-edge proof, committed generation, and fresh `/api/health`,
+   `/product`, `/features`, `/demo`, `/pricing`, `/docs`, `/integrations` evidence.
+   Observe bounded stability and report any remaining provider/runtime failure.
+8. Address development separately after production's critical path: refresh its
+   current SHA/owner/edge receipt, then use admitted recovery or an exact approved
+   deployment. Do not let production authority modify unrelated hosted apps.
+
+### Anti-slop and completion rule
+
+No module splitting, broad import cleanup, timeout increases, permission widening,
+new dependencies, or redundant test frameworks without a demonstrated need.
+Keep fixed refusal reasons useful and secret-free. Preserve failure history rather
+than counting repeated partial tests as progress. Stop repeating a failed approach
+after two attempts; change the diagnosis and continue independent work.
+
+This amendment is a plan, not a completed implementation or production receipt.
+Completion requires the source, disposable-runtime, installed-controller,
+incident-authority, and production/public gates above. Report exact outstanding
+gates if one requires an external decision; finish all independent authorized work
+before requesting that decision.
+
+### Execution evidence — 2026-09-07
+
+The staging CLI now selects a retained successful v2 proof before opening the
+credential source, preserving the original request binding when the caller repeats
+the request with the resulting generation. Changed plans/policies and uncertain
+operations remain fenced. Reconciliation holds the hosting target owner.
+Activation now persists runtime proof and the prepared edge request together;
+historical v2 runtime-only records cannot promote without terminal edge evidence.
+Independent review found no actionable defects in these changes.
+
+Local durable job `74a9cd246d52a573ed31a222dd5bc3fc` completed `./sb selftest`:
+5,509 tests, 13 skipped, exit 0. The focused image suite passed 347 tests.
+These are source checks, not installed-controller or production acceptance.
+
+Disposable Linux job `368aaf34e04768cf83abc5b13e447ba8` reproduced the private
+file blocker using the already-present signed worker image: host owner UID 1001,
+application UID/GID 1000, candidate mode 0600, application read denied. No real
+secret was used. Environment-backed Compose delivery still requires a passing
+ownership/isolation canary and a reviewed binding/mount-proof implementation.
+Production remains generation 0 with no verified activation; do not retry it on
+the strength of the local suite.

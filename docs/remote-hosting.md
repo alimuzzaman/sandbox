@@ -1305,6 +1305,14 @@ envelope inside the 16-MiB ledger before effects, so a terminal commit cannot di
 capacity only after pulling.
 An exact replay of that owner returns `in_progress/accepted`, not `target_busy`. Read-only
 `--stage-status` reports the same authority without opening a credential source or helper.
+For a confirmed v2 stage retry, the CLI also recognizes an already successful request
+when policy provisioning has returned the ledger's advanced generation. It reconstructs
+the original accepted generation from the retained proof and requires exact plan, policy,
+target, request ID, and digest equality before returning that original result. It opens
+no broker or worker on this path. Changed authority, uncertain work, and expired proofs
+cannot use this generation correction. Do not generate a new request ID to evade a
+retained conflict. Both normal submission and close-only reconciliation hold the shared
+target mutation owner; refusal envelopes report the current ledger generation when known.
 Private reconciliation may resume only a proven pre-effect owner after exact unit, cgroup,
 workspace, and no-effect evidence. Effect-entered reconciliation is close-only: it can
 release the fence only after read-only proof that the exact unit is inactive or absent,

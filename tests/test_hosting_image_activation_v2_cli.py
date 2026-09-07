@@ -17,7 +17,7 @@ def recovery_state(*, genesis=False):
     )
     from sandbox.hosting.images.activation.v2_service import ActivationServiceV2
 
-    plan, proof, snapshot = artifacts()
+    plan, proof, snapshot = artifacts(legacy=True)
     host = FakeHostStatePort()
     repository = ActivationRepository(
         host_state_port=host, stage_repository=FakeStageRepositoryPort(),

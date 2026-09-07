@@ -80,4 +80,13 @@ Local audit evidence at the planning baseline:
 - Architecture/storage durable job `d9d3c7baa082113f527701a10637e488`: 26 tests passed, exit 0. Modules: `tests.test_architecture_boundaries`, `tests.test_owned_storage_architecture`.
 - `make help`: exit 2 because `./sandbox` is a directory.
 
-Implementation status: all six packages pending. The independent Makefile and guidance repairs can start immediately once implementation is requested. Do not rerun the activation baseline merely to validate this documentation-only change.
+Implementation status (2026-09-07): packages 1–5 are complete at the integrated
+revision. The activation fixtures now exercise the authenticated graph path and
+retain pre-effect refusal coverage for legacy-init and graph rollback; the
+production activation service was not changed in this maintenance pass. Package
+6 was intentionally rejected: a fixed 20-repetition CLI/import benchmark did
+not meet the 10% improvement threshold, so no performance edit was made. Local
+acceptance is green (`./sb selftest`: 5,489 tests, 21 skipped); hosted CI,
+disposable topology, provider, installed-controller, edge, deployment, and
+production gates remain separate and unobserved. Do not treat this plan or its
+local tests as release or activation approval.

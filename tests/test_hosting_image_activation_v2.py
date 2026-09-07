@@ -30,7 +30,7 @@ TARGET = {"machine_identity": "machine-a", "target_identity": "target-a",
           "daemon_identity": "daemon-a"}
 
 
-def artifacts(release_offset=0, *, docker29=False):
+def artifacts(release_offset=0, *, docker29=False, legacy=False):
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp); receipt_digest = make_bundle(root)
         if release_offset:
@@ -52,7 +52,21 @@ def artifacts(release_offset=0, *, docker29=False):
             (root / "receipt.sha256").write_text(
                 f"{hashlib.sha256(raw).hexdigest()}  receipt.json\n")
             receipt_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-        plan = verify_release_bundle(policy_mapping(receipt_digest), root, FakeVerifier())
+        policy = policy_mapping(receipt_digest)
+        if legacy:
+            # These tests exercise the pre-graph v2 transaction. Keep the
+            # production guard meaningful by making the fixture explicitly
+            # zero-init instead of silently bypassing a declared initializer.
+            policy["one_shot_services"] = []
+            policy["service_image_bindings"] = [
+                row for row in policy["service_image_bindings"]
+                if row["service"] in policy["persistent_services"]
+            ]
+            from sandbox.hosting.images.models import canonical_digest
+            policy.pop("policy_digest", None)
+            policy["policy_digest"] = canonical_digest(
+                "sandbox.hosting.images.machine-plan-set-policy.v2", policy)
+        plan = verify_release_bundle(policy, root, FakeVerifier())
     target = StagingTarget(**TARGET)
     helper = HelperIdentity(DIGEST_A, "sandbox-image-stage-helper-v2",
                             "runtime-v2", "systemd-cgroup-v2-batch-stage-v2")
@@ -446,7 +460,7 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(result["result_class"], "refused")
 
     def test_all_images_are_proven_then_one_exact_atomic_compose_effect_commits(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2(); edge = FakeEdgeV2()
         result = execute(repo, runtime, edge, request, grant)
@@ -466,7 +480,7 @@ class ActivationV2Tests(unittest.TestCase):
                          len(plan.policy.persistent_services))
 
     def test_docker29_manifest_local_id_keeps_receipt_config_through_activation(self):
-        plan, proof, snapshot = artifacts(docker29=True)
+        plan, proof, snapshot = artifacts(docker29=True, legacy=True)
         grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2(proof)
@@ -477,7 +491,7 @@ class ActivationV2Tests(unittest.TestCase):
             self.assertNotEqual(image["local_image_id"], image["config_digest"])
 
     def test_any_running_service_identity_mismatch_fences_without_commit(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2()
         runtime.running_mutation = lambda rows: rows[0].update(
@@ -487,7 +501,7 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(repo.commits, 0); self.assertEqual(len(runtime.replacements), 1)
 
     def test_generation_bound_edge_receipt_is_required_after_effect(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2()
         result = execute(repo, runtime, FakeEdgeV2(invalid=True), request, grant)
@@ -495,7 +509,7 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(result["code"], "edge_incomplete"); self.assertEqual(repo.commits, 0)
 
     def test_stale_independent_edge_observation_fences_after_effect(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); result = execute(
             repo, FakeRuntimeV2(), FakeEdgeV2(stale=True), request, grant)
@@ -517,7 +531,7 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(runtime.replacements, []); self.assertEqual(repo.commits, 0)
 
     def test_rollback_reads_retained_v2_generation_and_uses_one_effect(self):
-        plan, proof, snapshot = artifacts(); repo = FakeRepositoryV2()
+        plan, proof, snapshot = artifacts(legacy=True); repo = FakeRepositoryV2()
         first_grant = grant_for(plan, proof)
         first = request_for(plan, proof, snapshot, first_grant)
         self.assertTrue(execute(repo, FakeRuntimeV2(), FakeEdgeV2(), first, first_grant)["ok"])
@@ -541,8 +555,8 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(repo.state["current"]["rollback_from_generation_digest"], rollback_target)
 
     def test_rollback_custody_uses_selected_previous_release_not_current_proof(self):
-        plan_a, proof_a, snapshot_a = artifacts()
-        plan_b, proof_b, snapshot_b = artifacts(release_offset=4)
+        plan_a, proof_a, snapshot_a = artifacts(legacy=True)
+        plan_b, proof_b, snapshot_b = artifacts(release_offset=4, legacy=True)
         self.assertNotEqual(plan_a.plan_set_digest, plan_b.plan_set_digest)
         self.assertNotEqual(proof_a.proof_digest, proof_b.proof_digest)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
@@ -651,7 +665,7 @@ class ActivationV2Tests(unittest.TestCase):
             PrivateComposeInputSnapshotV2.from_mapping(raw)
 
     def test_request_and_generation_dispatch_refuse_unknown_or_caller_chosen_kind(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         self.assertEqual(ActivationRequestV2.from_mapping(request.as_mapping()), request)
         raw = request.as_mapping(); raw["generation_kind"] = "v1"
@@ -665,7 +679,7 @@ class ActivationV2Tests(unittest.TestCase):
         from sandbox.hosting.images.activation.repository import (
             decode_activation_state, empty_activation_state,
         )
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2()
         self.assertTrue(execute(repo, FakeRuntimeV2(), FakeEdgeV2(), request, grant)["ok"])
@@ -682,7 +696,7 @@ class ActivationV2Tests(unittest.TestCase):
             ActivationRepositoryError, decode_activation_state, empty_activation_state,
         )
         from sandbox.hosting.images.activation.v2_repository import accept_candidate_v2
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         pin = {"lease_id": "activation-lease/" + "a" * 48,
             "holder": "activation-owner/activate-v2-a", "phase": "accepted",
@@ -717,7 +731,7 @@ class ActivationV2Tests(unittest.TestCase):
                            ("starting_generation", True)):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_result_v2({**base_result, key: value})
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         pin = {"lease_id": "activation-lease/" + "a" * 48,
             "holder": "activation-owner/activate-v2-a", "phase": "accepted",
@@ -745,7 +759,7 @@ class ActivationV2Tests(unittest.TestCase):
         from sandbox.hosting.images.activation.repository import (
             ActivationRepository, decode_activation_state,
         )
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(
@@ -771,7 +785,7 @@ class ActivationV2Tests(unittest.TestCase):
             ActivationRepository, decode_activation_state,
         )
         from sandbox.hosting.recovery.models import ActivationRecoveryObservation
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,
@@ -827,7 +841,7 @@ class ActivationV2Tests(unittest.TestCase):
         from sandbox.hosting.images.activation.repository import (
             ActivationRepositoryError, decode_activation_state,
         )
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,
@@ -868,7 +882,7 @@ class ActivationV2Tests(unittest.TestCase):
             activation_recovery_intent_v2, activation_recovery_projection,
         )
         from sandbox.hosting.recovery.policy import classify_activation_transition
-        plan, proof, snapshot = artifacts(); host = FakeHostStatePort()
+        plan, proof, snapshot = artifacts(legacy=True); host = FakeHostStatePort()
         stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,
             stage_repository=stage, target_mutation_port=FakeTargetMutationPort())
@@ -974,7 +988,7 @@ class ActivationV2Tests(unittest.TestCase):
         )
         from sandbox.hosting.images.activation.v2_repository import activation_recovery_projection
         from sandbox.hosting.recovery.policy import classify_activation_transition
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(legacy=True); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,

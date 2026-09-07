@@ -53,3 +53,8 @@ rollback, pull, build, decide trust, invoke broker/helper, receive credentials, 
 provisional activation owner. The provisional is exclusively 051-owned. Existing Feature
 048 requests/results, old schema-v2 image
 planes, and legacy receipts remain compatible and non-authorizing.
+
+The new execution-phase matrix, retained-selector and pre-forward rollback
+requirements are specified in [execution-v2.md](execution-v2.md). Operator settlement
+is a separate confirmed capability and never expands Feature 048's observation-only
+authority or permits replay of an uncertain effect.

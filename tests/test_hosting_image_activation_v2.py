@@ -30,7 +30,7 @@ TARGET = {"machine_identity": "machine-a", "target_identity": "target-a",
           "daemon_identity": "daemon-a"}
 
 
-def artifacts(release_offset=0, *, docker29=False):
+def artifacts(release_offset=0, *, docker29=False, graph=False):
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp); receipt_digest = make_bundle(root)
         if release_offset:
@@ -85,10 +85,33 @@ def artifacts(release_offset=0, *, docker29=False):
         target=TARGET, plan_set_digest=plan.plan_set_digest,
         selected_services=plan.policy.persistent_services,
         configuration_digest=DIGEST_B, expires_at=4_000_000_000)
+    if graph:
+        # Build the authenticated graph through the same codec used by the
+        # command path.  A graphless snapshot remains available for the
+        # explicit legacy-init refusal tests below.
+        from sandbox.hosting.images.activation.execution_graph import (
+            prepare_execution_contract,
+        )
+        from tests.fixtures.hosting_image_activation import lenzora_compose_fixture
+        fixture = lenzora_compose_fixture(plan)
+        services = {name: {**row,
+                           "x-sandbox-environment-keys": sorted(row.get("environment", {})),
+                           "depends_on": row.get("depends_on", {})}
+                    for name, row in fixture["compose"]["services"].items()}
+        contract = prepare_execution_contract(
+            plan=plan, services=services, target=TARGET,
+            snapshot_id=snapshot.snapshot_id,
+            configuration_digest=snapshot.configuration_digest,
+            initializer_order=fixture["initializer_order"])
+        body = snapshot.body_mapping()
+        body.pop("schema_version")
+        body["selected_services"] = tuple(body["selected_services"])
+        snapshot = PrivateComposeInputSnapshotV2.create(
+            **body, input_contract="candidate-v1", init_contract=contract)
     return plan, proof, snapshot
 
 
-def grant_for(plan, proof, *, generation=0, prior_digest=None,
+def grant_for(plan, proof, *, snapshot=None, generation=0, prior_digest=None,
               candidate_plan_digest=None, candidate_proof_digest=None,
               candidate_policy_digest=None):
     prior = prior_digest or activation_digest(
@@ -101,6 +124,8 @@ def grant_for(plan, proof, *, generation=0, prior_digest=None,
         "candidate_proof_set_digest": candidate_proof_digest or proof.proof_digest,
         "policy_digest": candidate_policy_digest or plan.policy.policy_digest, "issued_at": 1,
         "expires_at": 4_000_000_000, "authority_proof": "fixture-proof"}
+    if snapshot is not None:
+        body["compose_snapshot_digest"] = snapshot.snapshot_digest
     return RollbackCompatibilityGrantV2(**body, grant_digest=activation_digest(
         "sandbox.hosting.images.rollback-grant.v2", body))
 
@@ -141,7 +166,14 @@ class FakeRepositoryV2:
         self.events.append("accept")
         self.active = {"request_digest": request.request_digest,
                        "proof_set_digest": kwargs["proof_set_digest"]}
-        return "accepted", {"transaction_digest": DIGEST_A}
+        transaction = {"transaction_digest": DIGEST_A}
+        contract = request.compose_snapshot.init_contract
+        if contract is not None and contract.graph is not None:
+            from sandbox.hosting.images.activation.execution_state import ExecutionProgressV2
+            transaction["execution_progress"] = ExecutionProgressV2.create(
+                graph=contract.graph, request_digest=request.request_digest,
+                snapshot_digest=request.compose_snapshot.snapshot_digest).as_mapping()
+        return "accepted", transaction
 
     def transition_v2(self, target, request, phase, **values):
         self.events.append(phase)
@@ -224,6 +256,7 @@ class FakeRuntimeV2:
     class Crash(BaseException): pass
     def __init__(self, proof=None):
         self.replacements = []; self.rendered = None; self.running_mutation = None
+        self.graph_effects = []
         self.crash_during_replace = False
         self.proof = proof
 
@@ -253,6 +286,26 @@ class FakeRuntimeV2:
         self.replacements.append(kwargs)
         if self.crash_during_replace:
             raise self.Crash()
+
+    def bind_execution_v2(self, request):
+        self.execution_request = request
+
+    def execute_graph_step_v2(self, *, action, subject, container_identity,
+                              timeout_seconds):
+        self.graph_effects.append((action, subject))
+        if action == "replace":
+            if self.crash_during_replace:
+                raise self.Crash()
+        initializer = subject["kind"] == "initializer"
+        identity = container_identity
+        if initializer and action == "create":
+            identity = "container-" + subject["services"][0]
+        if initializer and identity is None:
+            identity = "container-" + subject["services"][0]
+        return {"subject_digest": subject["subject_digest"],
+                "container_identity": identity if initializer else None,
+                "exit_code": 0 if initializer and action == "wait" else None,
+                "terminated": True}
 
     def observe_running(self, *, target, services, compose_project):
         images = self.rendered["services"]
@@ -308,19 +361,159 @@ def execute(repo, runtime, edge, request, grant):
 
 
 class ActivationV2Tests(unittest.TestCase):
-    def test_all_images_are_proven_then_one_exact_atomic_compose_effect_commits(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+    def test_execution_graph_binds_prerequisites_order_and_dependency_conditions(self):
+        from sandbox.hosting.images.activation.v2_models import RuntimeExecutionGraphV2
+        dependencies = (
+            {"service": "topology", "dependency": "queue", "condition": "service_healthy"},
+            {"service": "web", "dependency": "migrate", "condition": "service_completed_successfully"},
+            {"service": "web", "dependency": "topology", "condition": "service_completed_successfully"},
+        )
+        graph = RuntimeExecutionGraphV2.create(prerequisite_groups=(("queue",),),
+            initializer_order=("migrate", "storage", "topology"), consumer_groups=(("web",),),
+            dependencies=dependencies, readiness_timeout_seconds=300)
+        self.assertEqual(RuntimeExecutionGraphV2.from_mapping(graph.as_mapping()), graph)
+        for changes in (
+            {"prerequisite_groups": (), "consumer_groups": (("web",), ("queue",))},
+            {"consumer_groups": (("web", "queue"),)},
+            {"initializer_order": ("topology", "migrate", "topology")},
+            {"dependencies": (*dependencies, {"service": "queue", "dependency": "web", "condition": "service_started"})},
+            {"dependencies": ({"service": "topology", "dependency": "queue", "condition": "service_completed_successfully"}, *dependencies[1:])},
+            {"readiness_timeout_seconds": 3601},
+        ):
+            values = {"prerequisite_groups": graph.prerequisite_groups,
+                "initializer_order": graph.initializer_order, "consumer_groups": graph.consumer_groups,
+                "dependencies": graph.dependencies, "readiness_timeout_seconds": graph.readiness_timeout_seconds}
+            with self.assertRaises(ValueError):
+                RuntimeExecutionGraphV2.create(**{**values, **changes})
+
+    def test_init_contract_is_bound_to_snapshot_request_and_exact_service_images(self):
+        from sandbox.hosting.images.activation.v2_models import InitDeclarationV2, InitExecutionContractV2
+
+        plan, proof, legacy = artifacts()
+        images = {row.name: row for row in plan.receipt.images}
+        bindings = {row["service"]: row for row in plan.as_mapping()["service_image_bindings"]}
+        declarations = []
+        for index, service in enumerate(reversed(plan.policy.one_shot_services)):
+            binding = bindings[service]; image = images[binding["image"]]
+            declarations.append(InitDeclarationV2.create(index=index, service=service,
+                image=image.name, image_ref=image.image_ref, config_digest=image.config_digest,
+                platform={"os": "linux", "architecture": "amd64"}, timeout_seconds=300,
+                environment_keys=(), dependency_services=(), target=TARGET,
+                snapshot_id=legacy.snapshot_id, configuration_digest=DIGEST_A))
+        contract = InitExecutionContractV2.create(declarations=tuple(declarations))
+        body = legacy.body_mapping(); body.pop("schema_version")
+        body["selected_services"] = tuple(body["selected_services"])
+        snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=contract)
+        self.assertEqual(PrivateComposeInputSnapshotV2.from_mapping(snapshot.as_mapping()), snapshot)
+        grant = grant_for(plan, proof)
+        request = request_for(plan, proof, snapshot, grant)
+        self.assertEqual(ActivationRequestV2.from_mapping(request.as_mapping()), request)
+        incomplete = InitExecutionContractV2.create(declarations=tuple(declarations[:-1]))
+        partial_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=incomplete)
+        with self.assertRaises(ValueError):
+            request_for(plan, proof, partial_snapshot, grant)
+        changed = InitDeclarationV2.create(**{**declarations[0].body_mapping(),
+                                            "image_ref": "ghcr.io/foreign/image@" + DIGEST_A})
+        wrong = InitExecutionContractV2.create(declarations=(changed, *declarations[1:]))
+        wrong_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=wrong)
+        with self.assertRaises(ValueError):
+            request_for(plan, proof, wrong_snapshot, grant)
+        with self.assertRaises(ValueError):
+            PrivateComposeInputSnapshotV2.create(**body, init_contract=contract)
+        from sandbox.hosting.images.activation.v2_models import RuntimeExecutionGraphV2
+        graph = RuntimeExecutionGraphV2.create(prerequisite_groups=(),
+            initializer_order=tuple(row.service for row in declarations),
+            consumer_groups=(plan.policy.persistent_services,), dependencies=(), readiness_timeout_seconds=300)
+        complete = InitExecutionContractV2.create(declarations=tuple(declarations), graph=graph)
+        complete_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=complete)
+        complete_request = request_for(plan, proof, complete_snapshot, grant)
+        self.assertNotEqual(complete_request.request_digest, request.request_digest)
+        self.assertEqual(ActivationRequestV2.from_mapping(complete_request.as_mapping()), complete_request)
+        partial = RuntimeExecutionGraphV2.create(prerequisite_groups=(), initializer_order=graph.initializer_order,
+            consumer_groups=(plan.policy.persistent_services[:-1],), dependencies=(), readiness_timeout_seconds=300)
+        partial_contract = InitExecutionContractV2.create(declarations=tuple(declarations), graph=partial)
+        partial_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=partial_contract)
+        with self.assertRaises(ValueError):
+            request_for(plan, proof, partial_snapshot, grant)
+
+    def test_ordered_init_contract_is_closed_bounded_and_preserves_order(self):
+        from sandbox.hosting.images.activation.v2_models import InitDeclarationV2, InitExecutionContractV2
+
+        def declaration(index, service):
+            return InitDeclarationV2.create(index=index, service=service, image="worker",
+                image_ref="ghcr.io/acme/worker@" + DIGEST_A, config_digest=DIGEST_B,
+                platform={"os": "linux", "architecture": "amd64"}, timeout_seconds=300,
+                environment_keys=("DATABASE_URL",), dependency_services=(), target=TARGET,
+                snapshot_id="compose-snapshot/candidate-a", configuration_digest=DIGEST_A)
+
+        first, second = declaration(0, "z-migrate"), declaration(1, "a-storage")
+        contract = InitExecutionContractV2.create(declarations=(first, second))
+        self.assertEqual([row.service for row in contract.declarations], ["z-migrate", "a-storage"])
+        self.assertEqual(InitExecutionContractV2.from_mapping(contract.as_mapping()), contract)
+        self.assertEqual(contract.execution_revision, "ordered-init-v1")
+        for rows in ((second, first), (first, first), (first, declaration(2, "other"))):
+            with self.assertRaises(ValueError):
+                InitExecutionContractV2.create(declarations=rows)
+        for extra in ({"environment": {"TOKEN": "synthetic-canary"}},
+                      {"command": ["sh", "-c", "private"]}, {"mounts": ["/private"]}):
+            with self.assertRaises(ValueError):
+                InitDeclarationV2.from_mapping({**first.as_mapping(), **extra})
+        with self.assertRaises(ValueError):
+            InitDeclarationV2.create(**{**first.body_mapping(), "timeout_seconds": 0})
+        with self.assertRaises(ValueError):
+            InitExecutionContractV2.from_mapping({**contract.as_mapping(), "execution_revision": "unknown"})
+
+    def test_candidate_input_contract_is_explicit_and_legacy_digest_stays_stable(self):
+        _plan, _proof, legacy = artifacts()
+        body = legacy.body_mapping()
+        body.pop("schema_version")
+        body["selected_services"] = tuple(body["selected_services"])
+        candidate = PrivateComposeInputSnapshotV2.create(**body, input_contract="candidate-v1")
+        self.assertEqual(candidate.input_contract, "candidate-v1")
+        self.assertNotEqual(candidate.snapshot_digest, legacy.snapshot_digest)
+        self.assertEqual(PrivateComposeInputSnapshotV2.from_mapping(
+            candidate.as_mapping()), candidate)
+        self.assertNotIn("input_contract", legacy.as_mapping())
+        self.assertEqual(PrivateComposeInputSnapshotV2.from_mapping(
+            legacy.as_mapping()).snapshot_digest, legacy.snapshot_digest)
+        with self.assertRaises(ValueError):
+            PrivateComposeInputSnapshotV2.create(**body, input_contract="unknown")
+
+    def test_required_initializers_without_execution_contract_refuse_before_replacement(self):
+        plan, proof, snapshot = artifacts()
+        self.assertTrue(plan.policy.one_shot_services)
+        grant = grant_for(plan, proof)
+        request = request_for(plan, proof, snapshot, grant)
+        repo = FakeRepositoryV2(); runtime = FakeRuntimeV2()
+
+        result = execute(repo, runtime, FakeEdgeV2(), request, grant)
+
+        self.assertEqual(runtime.replacements, [])
+        self.assertEqual(repo.commits, 0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["result_class"], "refused")
+
+    def test_all_images_are_proven_then_ordered_graph_effect_commits(self):
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2(); edge = FakeEdgeV2()
         result = execute(repo, runtime, edge, request, grant)
         self.assertTrue(result["ok"], result)
-        self.assertEqual(len(runtime.replacements), 1)
-        replacement = runtime.replacements[0]
-        self.assertEqual(set(replacement["service_image_bindings"]),
-                         set(plan.policy.persistent_services))
-        self.assertEqual(set(replacement["environment_bindings"]), {
-            "LENZORA_PRODUCTION_QUEUE_IMAGE", "LENZORA_PRODUCTION_WEB_IMAGE",
-            "LENZORA_PRODUCTION_WORKER_IMAGE"})
+        self.assertEqual(runtime.replacements, [])
+        self.assertIs(runtime.execution_request, request)
+        replace_effects = [(action, subject) for action, subject in runtime.graph_effects
+                           if action == "replace"]
+        self.assertEqual(len(replace_effects), 2)
+        self.assertEqual(replace_effects[0][1]["kind"], "prerequisite")
+        self.assertEqual(replace_effects[0][1]["services"], ["lenzora-job-queue"])
+        self.assertEqual(replace_effects[1][1]["kind"], "consumer")
+        self.assertEqual(set(replace_effects[1][1]["services"]),
+                         set(plan.policy.persistent_services) - {"lenzora-job-queue"})
         self.assertEqual(repo.commits, 1); self.assertEqual(edge.calls, 1)
         generation = repo.state["current"]
         self.assertEqual(generation["schema_version"], 2)
@@ -329,8 +522,8 @@ class ActivationV2Tests(unittest.TestCase):
                          len(plan.policy.persistent_services))
 
     def test_docker29_manifest_local_id_keeps_receipt_config_through_activation(self):
-        plan, proof, snapshot = artifacts(docker29=True)
-        grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(docker29=True, graph=True)
+        grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2(proof)
         result = execute(repo, runtime, FakeEdgeV2(), request, grant)
@@ -340,17 +533,17 @@ class ActivationV2Tests(unittest.TestCase):
             self.assertNotEqual(image["local_image_id"], image["config_digest"])
 
     def test_any_running_service_identity_mismatch_fences_without_commit(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2()
         runtime.running_mutation = lambda rows: rows[0].update(
             declared_image="ghcr.io/lenzora/lenzora/web@sha256:" + "f" * 64)
         result = execute(repo, runtime, FakeEdgeV2(), request, grant)
         self.assertFalse(result["ok"]); self.assertEqual(result["result_class"], "uncertain")
-        self.assertEqual(repo.commits, 0); self.assertEqual(len(runtime.replacements), 1)
+        self.assertEqual(repo.commits, 0); self.assertEqual(runtime.replacements, [])
 
     def test_generation_bound_edge_receipt_is_required_after_effect(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); runtime = FakeRuntimeV2()
         result = execute(repo, runtime, FakeEdgeV2(invalid=True), request, grant)
@@ -358,7 +551,7 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(result["code"], "edge_incomplete"); self.assertEqual(repo.commits, 0)
 
     def test_stale_independent_edge_observation_fences_after_effect(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2(); result = execute(
             repo, FakeRuntimeV2(), FakeEdgeV2(stale=True), request, grant)
@@ -379,20 +572,20 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(result["result_class"], "refused")
         self.assertEqual(runtime.replacements, []); self.assertEqual(repo.commits, 0)
 
-    def test_rollback_reads_retained_v2_generation_and_uses_one_effect(self):
-        plan, proof, snapshot = artifacts(); repo = FakeRepositoryV2()
-        first_grant = grant_for(plan, proof)
+    def test_graph_rollback_refuses_before_replacement(self):
+        plan, proof, snapshot = artifacts(graph=True); repo = FakeRepositoryV2()
+        first_grant = grant_for(plan, proof, snapshot=snapshot)
         first = request_for(plan, proof, snapshot, first_grant)
         self.assertTrue(execute(repo, FakeRuntimeV2(), FakeEdgeV2(), first, first_grant)["ok"])
         current_digest = repo.state["current"]["generation_digest"]
-        second_grant = grant_for(plan, proof, generation=1, prior_digest=current_digest)
+        second_grant = grant_for(plan, proof, snapshot=snapshot, generation=1, prior_digest=current_digest)
         second = request_for(plan, proof, snapshot, second_grant, generation=1,
                              request_id="activate-v2-b")
         self.assertTrue(execute(repo, FakeRuntimeV2(), FakeEdgeV2(), second, second_grant)["ok"])
         rollback_target = repo.state["previous"]["generation_digest"]
         retained = repo.state["previous"]
         rollback_grant = grant_for(
-            plan, proof, generation=2, prior_digest=rollback_target,
+            plan, proof, snapshot=snapshot, generation=2, prior_digest=rollback_target,
             candidate_plan_digest=retained["plan_set_digest"],
             candidate_proof_digest=retained["proof_set_digest"],
             candidate_policy_digest=retained["policy_digest"])
@@ -400,19 +593,23 @@ class ActivationV2Tests(unittest.TestCase):
                                operation="rollback", request_id="rollback-v2-a")
         runtime = FakeRuntimeV2()
         result = execute(repo, runtime, FakeEdgeV2(), rollback, rollback_grant)
-        self.assertTrue(result["ok"], result); self.assertEqual(len(runtime.replacements), 1)
-        self.assertEqual(repo.state["current"]["rollback_from_generation_digest"], rollback_target)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["result_class"], "refused")
+        self.assertEqual(result["code"], "init_mismatch")
+        self.assertEqual(runtime.replacements, [])
+        self.assertEqual(repo.commits, 2)
+        self.assertNotEqual(repo.state["current"]["generation_digest"], rollback_target)
 
-    def test_rollback_custody_uses_selected_previous_release_not_current_proof(self):
-        plan_a, proof_a, snapshot_a = artifacts()
-        plan_b, proof_b, snapshot_b = artifacts(release_offset=4)
+    def test_graph_rollback_custody_checks_precede_containment_refusal(self):
+        plan_a, proof_a, snapshot_a = artifacts(graph=True)
+        plan_b, proof_b, snapshot_b = artifacts(release_offset=4, graph=True)
         self.assertNotEqual(plan_a.plan_set_digest, plan_b.plan_set_digest)
         self.assertNotEqual(proof_a.proof_digest, proof_b.proof_digest)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         from sandbox.hosting.images.activation.repository import ActivationRepository
         repository = ActivationRepository(host_state_port=host,
             stage_repository=stage, target_mutation_port=FakeTargetMutationPort())
-        first_grant = grant_for(plan_a, proof_a)
+        first_grant = grant_for(plan_a, proof_a, snapshot=snapshot_a)
         first = request_for(plan_a, proof_a, snapshot_a, first_grant)
         first_result = ActivationServiceV2(repository=repository,
             runtime_adapter=FakeRuntimeV2(proof_a), edge_adapter=FakeEdgeV2(),
@@ -424,7 +621,7 @@ class ActivationV2Tests(unittest.TestCase):
                 stage_ledger_revision=1)
         self.assertTrue(first_result["ok"], first_result)
         second_grant = grant_for(
-            plan_b, proof_b, generation=1,
+            plan_b, proof_b, snapshot=snapshot_b, generation=1,
             prior_digest=host.state["current"]["generation_digest"])
         second = request_for(plan_b, proof_b, snapshot_b, second_grant,
                              generation=1, request_id="activate-release-b")
@@ -441,7 +638,7 @@ class ActivationV2Tests(unittest.TestCase):
         self.assertEqual(previous["proof_set_digest"], proof_a.proof_digest)
 
         rollback_grant = grant_for(
-            plan_a, proof_a, generation=2,
+            plan_a, proof_a, snapshot=snapshot_a, generation=2,
             prior_digest=previous["generation_digest"],
             candidate_plan_digest=previous["plan_set_digest"],
             candidate_proof_digest=previous["proof_set_digest"],
@@ -490,8 +687,11 @@ class ActivationV2Tests(unittest.TestCase):
                 admission_deadline="2999-01-01T00:00:00Z",
                 stage_ledger_authority="feature-050-stage-ledger-v2",
                 stage_ledger_revision=1)
-        self.assertTrue(accepted["ok"], accepted)
-        self.assertEqual(host.state["current"]["proof_set_digest"], proof_a.proof_digest)
+        self.assertFalse(accepted["ok"], accepted)
+        self.assertEqual(accepted["result_class"], "refused")
+        self.assertEqual(accepted["code"], "init_mismatch")
+        self.assertEqual(host.state["generation"], 2)
+        self.assertEqual(host.state["current"]["proof_set_digest"], proof_b.proof_digest)
 
     def test_v2_rollback_refuses_retained_v1_kind_before_effect(self):
         from tests.test_hosting_image_activation_service import prepared_rollback
@@ -514,7 +714,7 @@ class ActivationV2Tests(unittest.TestCase):
             PrivateComposeInputSnapshotV2.from_mapping(raw)
 
     def test_request_and_generation_dispatch_refuse_unknown_or_caller_chosen_kind(self):
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         self.assertEqual(ActivationRequestV2.from_mapping(request.as_mapping()), request)
         raw = request.as_mapping(); raw["generation_kind"] = "v1"
@@ -528,7 +728,7 @@ class ActivationV2Tests(unittest.TestCase):
         from sandbox.hosting.images.activation.repository import (
             decode_activation_state, empty_activation_state,
         )
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         repo = FakeRepositoryV2()
         self.assertTrue(execute(repo, FakeRuntimeV2(), FakeEdgeV2(), request, grant)["ok"])
@@ -545,7 +745,7 @@ class ActivationV2Tests(unittest.TestCase):
             ActivationRepositoryError, decode_activation_state, empty_activation_state,
         )
         from sandbox.hosting.images.activation.v2_repository import accept_candidate_v2
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         pin = {"lease_id": "activation-lease/" + "a" * 48,
             "holder": "activation-owner/activate-v2-a", "phase": "accepted",
@@ -554,7 +754,9 @@ class ActivationV2Tests(unittest.TestCase):
         status, state, _ = accept_candidate_v2(
             empty_activation_state(), request, holder=pin["holder"], proof_pin=pin,
             recovery_context={"target": TARGET, "compose_project": "lenzora",
-                              "selected_services": list(plan.policy.persistent_services)},
+                              "selected_services": list(plan.policy.persistent_services),
+                              "compose_snapshot": snapshot.as_mapping(),
+                              "compatibility_grant": grant.as_mapping()},
             prior_generation_digest=grant.prior_generation_digest)
         self.assertEqual(status, "accepted")
         self.assertEqual(decode_activation_state(state)["active"]["schema_version"], 2)
@@ -580,7 +782,7 @@ class ActivationV2Tests(unittest.TestCase):
                            ("starting_generation", True)):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_result_v2({**base_result, key: value})
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         pin = {"lease_id": "activation-lease/" + "a" * 48,
             "holder": "activation-owner/activate-v2-a", "phase": "accepted",
@@ -589,7 +791,9 @@ class ActivationV2Tests(unittest.TestCase):
         _, state, _ = accept_candidate_v2(
             empty_activation_state(), request, holder=pin["holder"], proof_pin=pin,
             recovery_context={"target": TARGET, "compose_project": "lenzora",
-                "selected_services": list(plan.policy.persistent_services)},
+                "selected_services": list(plan.policy.persistent_services),
+                "compose_snapshot": snapshot.as_mapping(),
+                "compatibility_grant": grant.as_mapping()},
             prior_generation_digest=grant.prior_generation_digest)
         mutations = (
             lambda raw: raw["active"].update(holder="activation-owner/other"),
@@ -608,7 +812,7 @@ class ActivationV2Tests(unittest.TestCase):
         from sandbox.hosting.images.activation.repository import (
             ActivationRepository, decode_activation_state,
         )
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(
@@ -634,7 +838,7 @@ class ActivationV2Tests(unittest.TestCase):
             ActivationRepository, decode_activation_state,
         )
         from sandbox.hosting.recovery.models import ActivationRecoveryObservation
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,
@@ -642,7 +846,9 @@ class ActivationV2Tests(unittest.TestCase):
         status, _ = repository.accept_v2(
             request, proof_set_digest=proof.proof_digest,
             recovery_context={"target": TARGET, "compose_project": "lenzora",
-                "selected_services": list(plan.policy.persistent_services)},
+                "selected_services": list(plan.policy.persistent_services),
+                "compose_snapshot": snapshot.as_mapping(),
+                "compatibility_grant": grant.as_mapping()},
             prior_generation_digest=grant.prior_generation_digest,
             admission_deadline="2999-01-01T00:00:00Z",
             stage_ledger_authority="feature-050-stage-ledger-v2", stage_ledger_revision=1)
@@ -690,7 +896,8 @@ class ActivationV2Tests(unittest.TestCase):
         from sandbox.hosting.images.activation.repository import (
             ActivationRepositoryError, decode_activation_state,
         )
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(
+            plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,
@@ -731,11 +938,11 @@ class ActivationV2Tests(unittest.TestCase):
             activation_recovery_intent_v2, activation_recovery_projection,
         )
         from sandbox.hosting.recovery.policy import classify_activation_transition
-        plan, proof, snapshot = artifacts(); host = FakeHostStatePort()
+        plan, proof, snapshot = artifacts(graph=True); host = FakeHostStatePort()
         stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,
             stage_repository=stage, target_mutation_port=FakeTargetMutationPort())
-        first_grant = grant_for(plan, proof)
+        first_grant = grant_for(plan, proof, snapshot=snapshot)
         first = request_for(plan, proof, snapshot, first_grant)
         self.assertTrue(ActivationServiceV2(repository=repository,
             runtime_adapter=FakeRuntimeV2(), edge_adapter=FakeEdgeV2(),
@@ -746,7 +953,7 @@ class ActivationV2Tests(unittest.TestCase):
                 stage_ledger_authority="feature-050-stage-ledger-v2",
                 stage_ledger_revision=1)["ok"])
         prior = deepcopy(host.state["current"])
-        second_grant = grant_for(plan, proof, generation=1,
+        second_grant = grant_for(plan, proof, snapshot=snapshot, generation=1,
                                  prior_digest=prior["generation_digest"])
         second = request_for(plan, proof, snapshot, second_grant, generation=1,
                              request_id="replace-crash-v2")
@@ -837,7 +1044,7 @@ class ActivationV2Tests(unittest.TestCase):
         )
         from sandbox.hosting.images.activation.v2_repository import activation_recovery_projection
         from sandbox.hosting.recovery.policy import classify_activation_transition
-        plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True); grant = grant_for(plan, proof, snapshot=snapshot)
         request = request_for(plan, proof, snapshot, grant)
         host = FakeHostStatePort(); stage = FakeStageRepositoryPort()
         repository = ActivationRepository(host_state_port=host,
@@ -922,7 +1129,7 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
                 stdout = json.dumps({"services": services,
                     "x-sandbox-configuration-digest": DIGEST_B,
                     "x-sandbox-compose-config-hashes": {name: DIGEST_A for name in services},
-                    "x-sandbox-has-configs": False, "x-sandbox-has-secrets": True,
+                    "x-sandbox-has-configs": False, "x-sandbox-has-secrets": False,
                     "x-sandbox-has-external-networks": False})
             elif argv[:1] == ("sandbox-activation-observe-running-v2",):
                 config_by_ref = {item.image_ref: item.config_digest

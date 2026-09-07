@@ -3,6 +3,17 @@
 This is a post-implementation verification guide. Use only synthetic artifacts and fake
 runtime/edge adapters until separate remote/deployment authorization exists.
 
+For the complete v2 execution amendment, first exercise one Lenzora-shaped synthetic
+fixture through real codecs/private helpers and CLI composition. Cover candidate
+secret files, exact A/D/S, queue prerequisites, three ordered initializers, delayed
+readiness, graph-phase crash/replay, retained rollback authority, settlement refusal
+and opt-in dev initialization/source isolation. Follow `contracts/execution-v2.md`.
+Then run the existing local compatibility gates below and the required full suite.
+A separately authorized disposable Docker/Compose cold-start test must prove actual
+secret mounts, users, image identities and receipts; local fakes do not replace it.
+Installed-tool, provider, incident preservation/settlement and public production
+proof remain separate gates with explicit approval and exact identities.
+
 1. Run the focused 051 model/policy/repository/init/runtime/service/CLI suites.
 2. Prove caller plan/proof alone refuses; exact machine activation binding plus a Feature
    050 prepared proof lease/pin acquired before validation and held through durable host
@@ -31,18 +42,15 @@ runtime/edge adapters until separate remote/deployment authorization exists.
 Suggested local gate after implementation:
 
 ```text
-python3 -m unittest \
-  tests.test_hosting_image_activation_models \
-  tests.test_hosting_image_activation_policy \
-  tests.test_hosting_image_activation_repository \
-  tests.test_hosting_image_activation_init \
-  tests.test_hosting_image_activation_runtime \
-  tests.test_hosting_image_activation_service \
-  tests.test_hosting_image_activation_recovery \
-  tests.test_hosting_image_activation_races \
-  tests.test_hosting_image_activation_cli \
-  tests.test_architecture_boundaries
+./sb selftest
+.cli-venv/bin/python -m unittest discover -s tests -p 'test_hosting_image_activation*.py' -v
+.cli-venv/bin/python -m unittest tests.test_architecture_boundaries tests.test_owned_storage_architecture -v
 ```
+
+The activation selector discovers the complete `test_hosting_image_activation*.py`
+family, so newly added activation coverage is included without maintaining a
+second hand-written module list. The architecture and owned-storage checks stay
+explicit as a focused boundary run.
 
 This gate is local acceptance only. Live registered-host, edge, deployment, rollback,
 and production proof remain open until separately authorized and observed.

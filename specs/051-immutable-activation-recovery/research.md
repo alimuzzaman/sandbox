@@ -1,5 +1,34 @@
 # Research: Immutable Activation and Recovery
 
+## Deployment audit decisions — 2026-09-07
+
+- **Complete dependency graph**: A queue-backed topology initializer requires a
+  healthy persistent prerequisite. A simple initializer loop before all runtime
+  replacement cannot cold-start Lenzora. Use one admitted graph and receipt owner.
+- **Captured application inputs**: Production does not stage its shared remote
+  source, while development mounts it live. Capture exact signed local application
+  bytes into a self-contained candidate instead of resetting that shared checkout.
+- **Private secret files**: A rendered environment-backed Compose secret names a
+  source but does not snapshot its value. Materialize supported candidate-owned
+  files, preserve `_FILE` consumers and protect bytes with target HMAC.
+- **Terminal before cleanup**: Persist exit/termination before removing an init
+  container; otherwise a cleanup/crash boundary can discard its only completion proof.
+- **Readiness convergence**: Detached startup is admission, not readiness. Poll
+  identity/health read-only within a deadline without repeating the runtime effect.
+- **Honest incident closure**: Empty runtime cannot undo prior worker/data effects.
+  Keep ordinary observation recovery strict and introduce only an explicitly
+  approved abandoned-with-effects settlement with preservation/data prerequisites.
+- **Retained rollback history**: A post-forward grant cannot create pre-forward
+  compatibility authority. Retain that authority before effects and refuse old
+  generations that lack it; rollback never reruns forward initialization.
+- **Control/application split**: Updating a wrapper's Sandbox pin changes wrapper
+  HEAD but need not change signed application bytes. Bind exact A/D/S separately;
+  never relabel changed application input or use a new identity to evade uncertainty.
+
+These decisions follow the requested Astra XHigh whole-deployment review. They are
+proposed source contract amendments, not evidence of runtime recovery or release
+approval. The canonical contract is `contracts/execution-v2.md`.
+
 ## Decision 1 — One target-wide owner
 
 - **Decision**: All registered target mutations share the existing per-target lock and

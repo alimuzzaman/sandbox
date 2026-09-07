@@ -811,12 +811,15 @@ and pass `--instance NAME`. Most instance-scoped commands accept
 `unit` or `integration`; `integration` provisions and runs the external
 WordPress/PHPUnit harness, while `unit` runs plugin unit PHPUnit with the runner tools. Declared Compose modes and
 `matrix` are separate execution paths; none run Sandbox's own Python tests. To test
-this checkout, use the stdlib `unittest` commands in
+this checkout, use `./sb selftest` for the full Python gate or the focused stdlib
+`unittest` commands in
 [`tests/README.md`](tests/README.md), for example:
 
 ```bash
+./sb selftest
 .cli-venv/bin/python -m unittest tests.test_cli.TestResolutionGate -v
-.cli-venv/bin/python -m unittest discover -s tests -p 'test_feedback.py' -v
+.cli-venv/bin/python -m unittest discover -s tests -p 'test_hosting_image_activation*.py' -v
+.cli-venv/bin/python -m unittest tests.test_architecture_boundaries tests.test_owned_storage_architecture -v
 ```
 
 ---
@@ -845,6 +848,10 @@ defaults:
 plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a remote
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
 — see [`docs/remote-hosting.md`](docs/remote-hosting.md).
+
+Immutable multi-image activation prepares private candidate configuration without
+overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)
+for source binding, replay limits and required initializer execution proof.
 
 There is **no central project catalog** — each plugin self-describes.
 

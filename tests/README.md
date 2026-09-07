@@ -11,12 +11,18 @@ only — no extra deps (the `.cli-venv` already has PyYAML).
 .cli-venv/bin/python -m unittest discover -s tests -v # the full Python suite
 ```
 
+The same full suite runs automatically in GitHub Actions for every pull request
+and every push to `latest` (`.github/workflows/python.yml`). The workflow prints
+the exact checked-out revision before running `./sb selftest`.
+
 For a focused Python run, target a module, class, method, or filename pattern:
 
 ```sh
 .cli-venv/bin/python -m unittest tests.test_cli.TestResolutionGate -v
 .cli-venv/bin/python -m unittest tests.test_cli.TestResolutionGate.test_test_command_lists_explicit_modes -v
 .cli-venv/bin/python -m unittest discover -s tests -p 'test_feedback.py' -v
+.cli-venv/bin/python -m unittest discover -s tests -p 'test_hosting_image_activation*.py' -v
+.cli-venv/bin/python -m unittest tests.test_architecture_boundaries tests.test_owned_storage_architecture -v
 ```
 
 The module and class forms are useful while iterating on one area; `discover -p`

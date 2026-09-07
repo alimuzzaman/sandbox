@@ -94,7 +94,7 @@ class ActivationRecoveryTests(unittest.TestCase):
         self.assertEqual(classify_activation_transition(
             projection, prior_shaped).classification, "neither")
 
-    def test_empty_genesis_after_effect_is_exact_prior_only_with_coherent_epoch(self):
+    def test_empty_genesis_after_effect_remains_fenced_despite_coherent_epoch(self):
         from dataclasses import replace
         from sandbox.hosting.recovery.policy import classify_activation_transition
         from sandbox.hosting.images.activation.repository import recovery_decision
@@ -106,11 +106,11 @@ class ActivationRecoveryTests(unittest.TestCase):
         transaction = {"schema_version": 2, "starting_generation": 0,
                        "operation": "activate", "phase": "runtime_pending", "effect_entered": True}
         self.assertEqual(recovery_decision(transaction, result.classification, empty_genesis=True),
-            ("recovery_no_effect", False, True))
+            ("effect_unknown", False, False))
         self.assertEqual(recovery_decision(transaction, result.classification),
                          ("effect_unknown", False, False))
         self.assertEqual(recovery_decision({**transaction, "phase": "uncertain"},
-            result.classification, empty_genesis=True), ("recovery_no_effect", False, True))
+            result.classification, empty_genesis=True), ("effect_unknown", False, False))
         for changed in ({"schema_version": 1}, {"starting_generation": 1},
                         {"operation": "rollback"}, {"phase": "init_pending"}):
             self.assertFalse(recovery_decision({**transaction, **changed},

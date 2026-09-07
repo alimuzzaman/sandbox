@@ -42,6 +42,249 @@ def _target(value: object) -> dict[str, str]:
 
 
 @dataclass(frozen=True, slots=True)
+class InitDeclarationV2:
+    """Public identity of a complete, privately retained initializer configuration.
+
+    The private provider supplies ``configuration_digest`` as a target-keyed
+    HMAC. Commands, entrypoints, mounts and environment values never enter this
+    value. The declaration digest binds only this closed public projection.
+    """
+
+    index: int
+    service: str
+    image: str
+    image_ref: str
+    config_digest: str
+    platform: dict[str, str]
+    timeout_seconds: int
+    environment_keys: tuple[str, ...]
+    dependency_services: tuple[str, ...]
+    target: dict[str, str]
+    snapshot_id: str
+    configuration_digest: str
+    declaration_digest: str
+
+    FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "index", "service", "image", "image_ref", "config_digest", "platform",
+        "timeout_seconds", "environment_keys", "dependency_services", "target",
+        "snapshot_id", "configuration_digest", "declaration_digest"})
+
+    def __post_init__(self) -> None:
+        _integer(self.index)
+        _integer(self.timeout_seconds, minimum=1)
+        if self.index >= 16 or self.timeout_seconds > 3600:
+            raise ActivationContractError("init_mismatch")
+        for name in (self.service, self.image, self.snapshot_id):
+            _text(name, identity=True)
+        if not self.snapshot_id.startswith("compose-snapshot/"):
+            raise ActivationContractError("init_mismatch")
+        if type(self.image_ref) is not str or _REPOSITORY_DIGEST.fullmatch(self.image_ref) is None:
+            raise ActivationContractError("init_mismatch")
+        if self.platform != {"os": "linux", "architecture": "amd64"}:
+            raise ActivationContractError("init_mismatch")
+        object.__setattr__(self, "platform", dict(self.platform))
+        object.__setattr__(self, "target", _target(self.target))
+        for value in (self.config_digest, self.configuration_digest, self.declaration_digest):
+            _digest(value)
+        for names, maximum in ((self.environment_keys, 256), (self.dependency_services, 64)):
+            if (type(names) is not tuple or len(names) > maximum
+                    or any(type(name) is not str for name in names)
+                    or names != tuple(sorted(set(names)))):
+                raise ActivationContractError("init_mismatch")
+            for name in names:
+                _text(name, identity=True)
+        if any(_ENVIRONMENT_VARIABLE.fullmatch(name) is None for name in self.environment_keys):
+            raise ActivationContractError("init_mismatch")
+        if self.service in self.dependency_services or self.declaration_digest != activation_digest(
+                "sandbox.hosting.images.init-declaration.v2", self.body_mapping()):
+            raise ActivationContractError("init_mismatch")
+
+    def body_mapping(self) -> dict[str, Any]:
+        return {"index": self.index, "service": self.service, "image": self.image,
+                "image_ref": self.image_ref, "config_digest": self.config_digest,
+                "platform": dict(self.platform), "timeout_seconds": self.timeout_seconds,
+                "environment_keys": list(self.environment_keys),
+                "dependency_services": list(self.dependency_services),
+                "target": dict(self.target), "snapshot_id": self.snapshot_id,
+                "configuration_digest": self.configuration_digest}
+
+    def as_mapping(self) -> dict[str, Any]:
+        return {**self.body_mapping(), "declaration_digest": self.declaration_digest}
+
+    @classmethod
+    def create(cls, **values: object) -> "InitDeclarationV2":
+        body = {**values, "environment_keys": list(values["environment_keys"]),
+                "dependency_services": list(values["dependency_services"])}
+        return cls.from_mapping({**body, "declaration_digest": activation_digest(
+            "sandbox.hosting.images.init-declaration.v2", body)})
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "InitDeclarationV2":
+        raw = _closed(value, cls.FIELDS)
+        if type(raw["environment_keys"]) is not list or type(raw["dependency_services"]) is not list:
+            raise ActivationContractError("init_mismatch")
+        return cls(**{**raw, "environment_keys": tuple(raw["environment_keys"]),
+                     "dependency_services": tuple(raw["dependency_services"])})
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeExecutionGraphV2:
+    """Complete bounded phase order. No dependency is delegated to Compose."""
+
+    prerequisite_groups: tuple[tuple[str, ...], ...]
+    initializer_order: tuple[str, ...]
+    consumer_groups: tuple[tuple[str, ...], ...]
+    dependencies: tuple[dict[str, str], ...]
+    readiness_timeout_seconds: int
+    graph_digest: str
+
+    def __post_init__(self) -> None:
+        _integer(self.readiness_timeout_seconds, minimum=1)
+        if self.readiness_timeout_seconds > 3600:
+            raise ActivationContractError("init_mismatch")
+        for groups in (self.prerequisite_groups, self.consumer_groups):
+            if type(groups) is not tuple or len(groups) > 64:
+                raise ActivationContractError("init_mismatch")
+            for group in groups:
+                if (type(group) is not tuple or not group or len(group) > 64
+                        or any(type(name) is not str for name in group)
+                        or group != tuple(sorted(set(group)))):
+                    raise ActivationContractError("init_mismatch")
+        if (type(self.initializer_order) is not tuple or len(self.initializer_order) > 16
+                or any(type(name) is not str for name in self.initializer_order)):
+            raise ActivationContractError("init_mismatch")
+        phases = (*self.prerequisite_groups, *((name,) for name in self.initializer_order), *self.consumer_groups)
+        names = [name for group in phases for name in group]
+        if (not names or len(names) != len(set(names))
+                or len(names) - len(self.initializer_order) > 64):
+            raise ActivationContractError("init_mismatch")
+        for name in names:
+            _text(name, identity=True)
+        positions = {name: index for index, group in enumerate(phases) for name in group}
+        if type(self.dependencies) is not tuple or len(self.dependencies) > 512:
+            raise ActivationContractError("init_mismatch")
+        edges = []
+        for value in self.dependencies:
+            row = _closed(value, frozenset({"service", "dependency", "condition"}))
+            if (type(row["service"]) is not str or type(row["dependency"]) is not str
+                    or row["service"] not in positions or row["dependency"] not in positions
+                    or positions[row["dependency"]] >= positions[row["service"]]
+                    or row["condition"] not in {"service_started", "service_healthy", "service_completed_successfully"}
+                    or (row["dependency"] in self.initializer_order) != (row["condition"] == "service_completed_successfully")):
+                raise ActivationContractError("init_mismatch")
+            edges.append(dict(row))
+        keys = [(row["service"], row["dependency"]) for row in edges]
+        if keys != sorted(set(keys)):
+            raise ActivationContractError("init_mismatch")
+        object.__setattr__(self, "dependencies", tuple(edges))
+        if self.graph_digest != activation_digest("sandbox.hosting.images.runtime-execution-graph.v2", self.body_mapping()):
+            raise ActivationContractError("init_mismatch")
+
+    @property
+    def persistent_services(self) -> tuple[str, ...]:
+        return tuple(sorted(name for group in (*self.prerequisite_groups, *self.consumer_groups) for name in group))
+
+    def body_mapping(self) -> dict[str, Any]:
+        return {"prerequisite_groups": [list(group) for group in self.prerequisite_groups],
+                "initializer_order": list(self.initializer_order),
+                "consumer_groups": [list(group) for group in self.consumer_groups],
+                "dependencies": [dict(row) for row in self.dependencies],
+                "readiness_timeout_seconds": self.readiness_timeout_seconds}
+
+    def as_mapping(self) -> dict[str, Any]:
+        return {**self.body_mapping(), "graph_digest": self.graph_digest}
+
+    @classmethod
+    def create(cls, *, prerequisite_groups: tuple[tuple[str, ...], ...],
+               initializer_order: tuple[str, ...], consumer_groups: tuple[tuple[str, ...], ...],
+               dependencies: tuple[dict[str, str], ...], readiness_timeout_seconds: int) -> "RuntimeExecutionGraphV2":
+        body = {"prerequisite_groups": [list(group) for group in prerequisite_groups],
+                "initializer_order": list(initializer_order),
+                "consumer_groups": [list(group) for group in consumer_groups],
+                "dependencies": list(dependencies), "readiness_timeout_seconds": readiness_timeout_seconds}
+        return cls.from_mapping({**body, "graph_digest": activation_digest(
+            "sandbox.hosting.images.runtime-execution-graph.v2", body)})
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "RuntimeExecutionGraphV2":
+        raw = _closed(value, frozenset({"prerequisite_groups", "initializer_order", "consumer_groups",
+                                       "dependencies", "readiness_timeout_seconds", "graph_digest"}))
+        if (any(type(raw[name]) is not list for name in ("prerequisite_groups", "initializer_order", "consumer_groups", "dependencies"))
+                or any(type(group) is not list for group in (*raw["prerequisite_groups"], *raw["consumer_groups"]))):
+            raise ActivationContractError("init_mismatch")
+        return cls(tuple(tuple(group) for group in raw["prerequisite_groups"]), tuple(raw["initializer_order"]),
+                   tuple(tuple(group) for group in raw["consumer_groups"]), tuple(raw["dependencies"]),
+                   raw["readiness_timeout_seconds"], raw["graph_digest"])
+
+
+@dataclass(frozen=True, slots=True)
+class InitExecutionContractV2:
+    execution_revision: str
+    declarations: tuple[InitDeclarationV2, ...]
+    contract_digest: str
+    graph: RuntimeExecutionGraphV2 | None = None
+
+    def __post_init__(self) -> None:
+        if (self.execution_revision != "ordered-init-v1" or type(self.declarations) is not tuple
+                or len(self.declarations) > 16
+                or any(type(row) is not InitDeclarationV2 for row in self.declarations)):
+            raise ActivationContractError("init_mismatch")
+        if [row.index for row in self.declarations] != list(range(len(self.declarations))):
+            raise ActivationContractError("init_mismatch")
+        if len({row.service for row in self.declarations}) != len(self.declarations):
+            raise ActivationContractError("init_mismatch")
+        if self.graph is not None:
+            if (type(self.graph) is not RuntimeExecutionGraphV2
+                    or self.graph.initializer_order != tuple(row.service for row in self.declarations)):
+                raise ActivationContractError("init_mismatch")
+            for row in self.declarations:
+                if row.dependency_services != tuple(sorted(edge["dependency"] for edge in self.graph.dependencies
+                                                           if edge["service"] == row.service)):
+                    raise ActivationContractError("init_mismatch")
+        if self.declarations:
+            first = self.declarations[0]
+            if any(row.target != first.target or row.snapshot_id != first.snapshot_id
+                   for row in self.declarations):
+                raise ActivationContractError("init_mismatch")
+            positions = {row.service: row.index for row in self.declarations}
+            for row in self.declarations:
+                if any(positions[name] >= row.index for name in row.dependency_services if name in positions):
+                    raise ActivationContractError("init_mismatch")
+        if self.contract_digest != activation_digest(
+                "sandbox.hosting.images.init-execution-contract.v2", self.body_mapping()):
+            raise ActivationContractError("init_mismatch")
+
+    def body_mapping(self) -> dict[str, Any]:
+        return {"execution_revision": self.execution_revision,
+                "declarations": [row.as_mapping() for row in self.declarations],
+                **({"graph": self.graph.as_mapping()} if self.graph is not None else {})}
+
+    def as_mapping(self) -> dict[str, Any]:
+        return {**self.body_mapping(), "contract_digest": self.contract_digest}
+
+    @classmethod
+    def create(cls, *, declarations: tuple[InitDeclarationV2, ...],
+               graph: RuntimeExecutionGraphV2 | None = None) -> "InitExecutionContractV2":
+        body = {"execution_revision": "ordered-init-v1",
+                "declarations": [row.as_mapping() for row in declarations],
+                **({"graph": graph.as_mapping()} if graph is not None else {})}
+        return cls("ordered-init-v1", declarations, activation_digest(
+            "sandbox.hosting.images.init-execution-contract.v2", body), graph)
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "InitExecutionContractV2":
+        fields = frozenset({"execution_revision", "declarations", "contract_digest"})
+        if type(value) is dict and "graph" in value:
+            fields = fields | {"graph"}
+        raw = _closed(value, fields)
+        if type(raw["declarations"]) is not list or len(raw["declarations"]) > 16:
+            raise ActivationContractError("init_mismatch")
+        return cls(raw["execution_revision"], tuple(InitDeclarationV2.from_mapping(row)
+                   for row in raw["declarations"]), raw["contract_digest"],
+                   RuntimeExecutionGraphV2.from_mapping(raw["graph"]) if "graph" in raw else None)
+
+
+@dataclass(frozen=True, slots=True)
 class PrivateComposeInputSnapshotV2:
     """Secret-free authority for one private Compose render.
 
@@ -59,6 +302,8 @@ class PrivateComposeInputSnapshotV2:
     configuration_digest: str
     expires_at: int
     snapshot_digest: str
+    input_contract: str | None = None
+    init_contract: InitExecutionContractV2 | None = None
 
     FIELDS: ClassVar[frozenset[str]] = frozenset({
         "schema_version", "snapshot_id", "provider_revision", "target",
@@ -69,6 +314,14 @@ class PrivateComposeInputSnapshotV2:
     def __post_init__(self) -> None:
         if self.schema_version != 2:
             raise ActivationContractError("policy_mismatch")
+        if self.input_contract not in (None, "candidate-v1"):
+            raise ActivationContractError("policy_mismatch")
+        if self.init_contract is not None:
+            if self.input_contract != "candidate-v1" or type(self.init_contract) is not InitExecutionContractV2:
+                raise ActivationContractError("init_mismatch")
+            if any(row.target != self.target or row.snapshot_id != self.snapshot_id
+                   for row in self.init_contract.declarations):
+                raise ActivationContractError("init_mismatch")
         _text(self.snapshot_id, identity=True)
         if not self.snapshot_id.startswith("compose-snapshot/"):
             raise ActivationContractError("policy_mismatch")
@@ -88,12 +341,17 @@ class PrivateComposeInputSnapshotV2:
             raise ActivationContractError("policy_mismatch")
 
     def body_mapping(self) -> dict[str, Any]:
-        return {"schema_version": 2, "snapshot_id": self.snapshot_id,
+        body = {"schema_version": 2, "snapshot_id": self.snapshot_id,
                 "provider_revision": self.provider_revision, "target": self.target,
                 "plan_set_digest": self.plan_set_digest,
                 "selected_services": list(self.selected_services),
                 "configuration_digest": self.configuration_digest,
                 "expires_at": self.expires_at}
+        if self.input_contract is not None:
+            body["input_contract"] = self.input_contract
+        if self.init_contract is not None:
+            body["init_contract"] = self.init_contract.as_mapping()
+        return body
 
     def as_mapping(self) -> dict[str, Any]:
         return {**self.body_mapping(), "snapshot_digest": self.snapshot_digest}
@@ -101,13 +359,28 @@ class PrivateComposeInputSnapshotV2:
     @classmethod
     def create(cls, **values: object) -> "PrivateComposeInputSnapshotV2":
         body = {"schema_version": 2, **values}
-        return cls(**body, snapshot_digest=activation_digest(
-            "sandbox.hosting.images.private-compose-input-snapshot.v2", {
-                **body, "selected_services": list(body["selected_services"])}))
+        if body.get("input_contract") is None:
+            body.pop("input_contract", None)
+        contract = body.pop("init_contract", None)
+        if contract is not None:
+            body["init_contract"] = (contract.as_mapping()
+                                     if type(contract) is InitExecutionContractV2 else contract)
+        encoded = {**body, "selected_services": list(body["selected_services"])}
+        return cls.from_mapping({**encoded, "snapshot_digest": activation_digest(
+            "sandbox.hosting.images.private-compose-input-snapshot.v2", encoded)})
 
     @classmethod
     def from_mapping(cls, value: object) -> "PrivateComposeInputSnapshotV2":
-        raw = _closed(value, cls.FIELDS)
+        fields = cls.FIELDS
+        if type(value) is dict and "input_contract" in value:
+            if value["input_contract"] != "candidate-v1":
+                raise ActivationContractError("policy_mismatch")
+            fields = fields | {"input_contract"}
+        if type(value) is dict and "init_contract" in value:
+            fields = fields | {"init_contract"}
+        raw = _closed(value, fields)
+        if "init_contract" in raw:
+            raw = {**raw, "init_contract": InitExecutionContractV2.from_mapping(raw["init_contract"])}
         return cls(**{**raw, "selected_services": tuple(raw["selected_services"])})
 
 
@@ -282,6 +555,20 @@ class ActivationRequestV2:
                 or self.compose_snapshot.target != proof_target
                 or self.compose_snapshot.selected_services != persistent):
             raise ActivationContractError("artifact_mismatch")
+        contract = self.compose_snapshot.init_contract
+        if contract is not None:
+            if contract.graph is not None and contract.graph.persistent_services != persistent:
+                raise ActivationContractError("init_mismatch")
+            bindings = dict(self.plan_set.policy.service_image_bindings)
+            images = {image.name: image for image in self.plan_set.receipt.images}
+            if {row.service for row in contract.declarations} != set(self.plan_set.policy.one_shot_services):
+                raise ActivationContractError("init_mismatch")
+            for row in contract.declarations:
+                image = images.get(bindings.get(row.service))
+                if (image is None or row.image != image.name or row.image_ref != image.image_ref
+                        or row.config_digest != image.config_digest
+                        or not set(row.dependency_services) <= set(bindings)):
+                    raise ActivationContractError("init_mismatch")
         if self.request_digest != activation_digest(
                 "sandbox.hosting.images.activation-request.v2", self.body_mapping()):
             raise ActivationContractError("request_conflict")
@@ -348,6 +635,7 @@ class RollbackCompatibilityGrantV2:
     expires_at: int
     authority_proof: str
     grant_digest: str
+    compose_snapshot_digest: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 2:
@@ -361,13 +649,16 @@ class RollbackCompatibilityGrantV2:
                       self.candidate_proof_set_digest, self.policy_digest, self.grant_digest):
             _digest(value)
         _text(self.authority_proof)
+        if self.compose_snapshot_digest is not None:
+            _digest(self.compose_snapshot_digest)
         if self.grant_digest != activation_digest(
                 "sandbox.hosting.images.rollback-grant.v2", self.body_mapping()):
             raise ActivationContractError("rollback_grant_mismatch")
 
     def unsigned_mapping(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self.__dataclass_fields__
-                if name not in {"authority_proof", "grant_digest"}}
+                if name not in {"authority_proof", "grant_digest"}
+                and not (name == "compose_snapshot_digest" and self.compose_snapshot_digest is None)}
 
     def body_mapping(self) -> dict[str, Any]:
         return {**self.unsigned_mapping(), "authority_proof": self.authority_proof}
@@ -377,7 +668,11 @@ class RollbackCompatibilityGrantV2:
 
     @classmethod
     def from_mapping(cls, value: object) -> "RollbackCompatibilityGrantV2":
-        return cls(**_closed(value, frozenset(cls.__dataclass_fields__)))
+        fields = frozenset(cls.__dataclass_fields__) - {"compose_snapshot_digest"}
+        if type(value) is dict and "compose_snapshot_digest" in value:
+            _digest(value["compose_snapshot_digest"])
+            fields = fields | {"compose_snapshot_digest"}
+        return cls(**_closed(value, fields))
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,6 +769,7 @@ class VerifiedActivationGenerationV2:
     edge_receipt: dict[str, Any]
     rollback_from_generation_digest: str
     generation_digest: str
+    execution_evidence: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 2:
@@ -548,6 +844,10 @@ class VerifiedActivationGenerationV2:
             services[service] = row
         if set(services) != set(bindings):
             raise ActivationContractError("runtime_mismatch")
+        if self.execution_evidence is not None:
+            from .execution_evidence import validate_execution_evidence
+            object.__setattr__(self, "execution_evidence", validate_execution_evidence(
+                self.execution_evidence, subject=self.subject_mapping()))
         receipt = GenerationBoundEdgeReceiptV2.from_mapping(self.edge_receipt)
         subject = self.subject_mapping()
         if (receipt.request_digest != self.request_digest or receipt.target != self.target
@@ -561,7 +861,7 @@ class VerifiedActivationGenerationV2:
             raise ActivationContractError()
 
     def subject_mapping(self) -> dict[str, Any]:
-        return {name: (list(value) if isinstance(value, tuple) else value)
+        result = {name: (list(value) if isinstance(value, tuple) else value)
                 for name, value in ((key, getattr(self, key)) for key in (
                     "schema_version", "generation", "plan_set_digest", "proof_set_digest",
                     "policy_digest", "request_digest", "target", "topology_digest",
@@ -569,6 +869,9 @@ class VerifiedActivationGenerationV2:
                     "images", "service_image_bindings", "compose_projection",
                     "service_projection", "running_observation_digest",
                     "rollback_from_generation_digest"))}
+        if self.execution_evidence is not None:
+            result["execution_evidence"] = self.execution_evidence
+        return result
 
     def body_mapping(self) -> dict[str, Any]:
         return {**self.subject_mapping(), "edge_receipt": self.edge_receipt}
@@ -578,7 +881,12 @@ class VerifiedActivationGenerationV2:
 
     @classmethod
     def from_mapping(cls, value: object) -> "VerifiedActivationGenerationV2":
-        raw = _closed(value, frozenset(cls.__dataclass_fields__))
+        fields = set(cls.__dataclass_fields__) - {"execution_evidence"}
+        if type(value) is dict and "execution_evidence" in value:
+            if value["execution_evidence"] is None:
+                raise ActivationContractError("init_mismatch")
+            fields.add("execution_evidence")
+        raw = _closed(value, frozenset(fields))
         return cls(**{**raw, "images": tuple(raw["images"]),
                       "service_image_bindings": tuple(raw["service_image_bindings"]),
                       "compose_projection": tuple(raw["compose_projection"]),

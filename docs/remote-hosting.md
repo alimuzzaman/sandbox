@@ -644,6 +644,24 @@ instead of mutating runtime. A changed source always uses the full recreate path
 when a saved configuration digest happens to match. Unknown Compose health is reported as
 `unverified`, never `ready`.
 
+On a full recreate with `compose.build: true`, Sandbox builds every declared
+`init_services` image before the first runtime `up`. After that `up`, it performs a
+bounded, read-only initializer proof against the same Compose project: the service,
+config hash, image ID, container labels, creation time, and terminal exit code must all
+match the current apply. A successful dependency-owned initializer is not replayed; an
+absent initializer is run once with `--pull never`. Failed, running, foreign, stale, or
+ambiguous evidence refuses the apply instead of guessing or executing the job twice.
+This proof is an ordinary hosting guard and does not replace the immutable activation
+workflow.
+
+File-backed Compose secrets are written on the host with owner-only permissions. Compose
+does not remap the host file's UID, GID, or mode to a container `uid`/`gid`/`mode`
+request. If the application declares a non-root `USER`, a real Linux disposable-host
+canary must prove that the process can read each required secret before hosted rollout;
+Sandbox does not silently widen permissions or run the application as root to hide a
+UID mismatch. A failed canary remains a deployment blocker until the delivery contract
+is made explicit.
+
 For a deliberate cold or large build, set `compose.build_timeout_seconds` to a bounded
 value from 60 through 7200 (default `900`). The value applies to the Compose `up` and
 explicit `init_services` build operations; the final no-build restart and health probes

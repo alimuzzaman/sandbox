@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
 import subprocess
@@ -24,6 +24,79 @@ from tests.test_hosting_image_staging_v2 import observation, plan_set, policy_se
 
 
 class ProvisioningTests(unittest.TestCase):
+    def test_candidate_selector_uses_its_own_project_directory(self):
+        from sandbox.commands.hosting import _host_image_v2_runtime_selector
+        validated = {"project": "widget", "environment": "production",
+                     "compose": {"files": ["compose.yml"]}}
+        snapshot = SimpleNamespace(snapshot_id="compose-snapshot/candidate-a",
+            snapshot_digest="sha256:" + "a" * 64, provider_revision="candidate-test",
+            configuration_digest="sha256:" + "b" * 64, input_contract="candidate-v1",
+            target={"machine_identity": "machine-a", "target_identity": "target-a", "daemon_identity": "daemon-a"})
+        with patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox"), \
+                patch("sandbox.commands.hosting.hosting.compose_project_name", return_value="widget-production"):
+            selector = _host_image_v2_runtime_selector(validated, {}, snapshot)
+        self.assertEqual(selector["project_directory"], str(Path(selector["environment_file"]).parent))
+        self.assertNotIn("deploy-src", json.dumps(selector))
+
+    def test_candidate_preparation_uses_signed_revision_and_refuses_active_before_secrets(self):
+        from sandbox.commands.hosting import _host_image_prepare_candidate_inputs
+
+        validated = {"project": "widget", "environment": "production",
+            "source_root": "/synthetic/source", "manifest_path": "/synthetic/source/sandbox.hosting.yml",
+            "compose": {"files": ["compose.yml"], "service": "web", "container_port": 3000},
+            "secrets": {"values": {"JOBS_ENABLED": "true"},
+                        "required": {"TOKEN": "WIDGET_TOKEN"}, "generated": {}},
+            "deploy": {"derived_environment": {"APP_SHA": "pushed_commit_sha"}}}
+        revision = "a" * 40
+        plan = SimpleNamespace(policy=SimpleNamespace(source_revision=revision,
+            activation_environment_bindings=(("web", "WEB_IMAGE"),),
+            persistent_services=("web",), one_shot_services=()),
+            receipt=SimpleNamespace(images=(SimpleNamespace(name="web", image_ref="ghcr.io/acme/web@sha256:" + "a" * 64),)))
+        host_state = {"hosts": {"target-a": {"loopback_port": 18300}}}
+        calls = []
+
+        def ssh(_entry, command, **kwargs):
+            calls.append((command, kwargs["input_data"]))
+            return SimpleNamespace(returncode=0, stdout='{"ok":true,"result":"prepared"}', stderr="")
+
+        with patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox"), \
+                patch("sandbox.commands.hosting.hosting.state_key", return_value="target-a"), \
+                patch("sandbox.commands.hosting._secret_status", return_value=(
+                    {"WIDGET_TOKEN": "synthetic-private-input-canary"}, [])) as secrets, \
+                patch("sandbox.hosting.images.activation.private_inputs.capture_source",
+                      return_value={"compose.yml": "c3ludGhldGlj", "sandbox.hosting.yml": "c3ludGhldGlj"}) as capture, \
+                patch("sandbox.commands.hosting.hosting.validate_manifest", return_value=validated) as validate, \
+                patch("sandbox.commands.hosting.personal_secrets.hosting_binding_broker_lock", side_effect=nullcontext), \
+                patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh):
+            with self.assertRaises(ValueError):
+                _host_image_prepare_candidate_inputs(validated, {}, plan,
+                    snapshot_id="compose-snapshot/candidate-a", activation_state={"active": {}},
+                    host_state=host_state, remote_name="registered", configuration_key=b"k" * 32)
+            secrets.assert_not_called(); self.assertEqual(calls, [])
+            capture.assert_not_called()
+            _host_image_prepare_candidate_inputs(validated, {}, plan,
+                snapshot_id="compose-snapshot/candidate-a", activation_state={"active": None},
+                host_state=host_state, remote_name="registered", configuration_key=b"k" * 32)
+            secrets.reset_mock()
+            validate.return_value = {**validated, "secrets": {**validated["secrets"], "values": {"JOBS_ENABLED": "false"}}}
+            with self.assertRaisesRegex(ValueError, "manifest changed"):
+                _host_image_prepare_candidate_inputs(validated, {}, plan,
+                    snapshot_id="compose-snapshot/candidate-b", activation_state={"active": None},
+                    host_state=host_state, remote_name="registered", configuration_key=b"k" * 32)
+            secrets.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        command, private = calls[0]; frame = json.loads(private)
+        self.assertEqual(frame["source_revision"], revision)
+        self.assertEqual(frame["source_files"]["compose.yml"], "c3ludGhldGlj")
+        self.assertNotIn("source_directory", frame)
+        self.assertEqual(frame["render_contract"]["captured_environment"]["TOKEN"],
+                         "synthetic-private-input-canary")
+        self.assertIn("JOBS_ENABLED=true", frame["environment"])
+        self.assertIn("APP_SHA=" + revision, frame["environment"])
+        self.assertIn("synthetic-private-input-canary", frame["environment"])
+        self.assertNotIn("synthetic-private-input-canary", command)
+        self.assertIn("127.0.0.1:18300:3000", frame["compose_override"])
+
     def test_activation_rotation_expiry_authority_and_atomic_publication(self):
         from sandbox.hosting.images.activation.models import activation_digest
         from sandbox.hosting.images.activation.v2_models import PrivateComposeInputSnapshotV2
@@ -547,9 +620,26 @@ class ProvisioningTests(unittest.TestCase):
                 target=proof.target.as_mapping(), configuration_digest="sha256:" + "b" * 64,
                 snapshot_id="compose-snapshot/test-a", provider_revision="provider-v2",
                 snapshot_expires_at=1000, authority_revision="rollback-v2",
-                signer=signer, now=100)
+                signer=signer, now=100, input_contract="candidate-v1")
+            from sandbox.hosting.images.provisioning import reuse_activation_bundle
+            path = root / "activation.json"
+            install_owner_only_json(path, bundle)
+            selectors = dict(plan=plan, proof=proof, current_generation=0,
+                current_generation_digest="sha256:" + "0" * 64, stage_ledger_revision=7,
+                snapshot_id="compose-snapshot/test-a", provider_revision="provider-v2",
+                authority_id=signer.authority_id, authority_revision="rollback-v2",
+                public_key=signer.public_key, now=200)
+            with patch.object(signer, "sign", side_effect=AssertionError("replay cannot sign")):
+                self.assertEqual(reuse_activation_bundle(path, **selectors), bundle)
+            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+                reuse_activation_bundle(path, **{**selectors, "stage_ledger_revision": 8})
+            with self.assertRaisesRegex(ProvisioningError, "expired"):
+                reuse_activation_bundle(path, **{**selectors, "now": 1001})
         self.assertEqual(bundle["stage_ledger"],
             {"authority": "feature-050-stage-ledger-v2", "revision": 7})
+        self.assertEqual(bundle["compose_snapshot"]["input_contract"], "candidate-v1")
+        self.assertEqual(bundle["rollback_grant"]["compose_snapshot_digest"],
+                         bundle["compose_snapshot"]["snapshot_digest"])
         self.assertNotIn(str(private), json.dumps(bundle))
         record["ledger_revision"] = 8
         with self.assertRaisesRegex(ProvisioningError, "ledger_mismatch"):

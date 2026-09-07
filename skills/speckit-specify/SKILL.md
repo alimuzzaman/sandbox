@@ -10,11 +10,11 @@ user-invocable: true
 disable-model-invocation: false
 ---
 
-## Preferred model
+## Model routing
 
-Run this specification phase with `gpt-5.6-sol` at Medium effort when available.
-This skill cannot switch the active root model; report the actual configuration or
-fallback and never imply that the preferred configuration ran when it did not.
+Follow the active repository and user model/delegation policy for specification.
+This skill cannot switch the active root model; report the actual configuration
+and never imply that an unavailable or unrequested model ran.
 
 ## User Input
 

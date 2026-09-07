@@ -29,3 +29,8 @@ replay is read-only. A possible POST with no exact acknowledgement is
 `acceptance_unknown`, remains fenced, and is never automatically replayed by
 observation recovery. A changed policy, route, zone, generation, or request digest
 conflicts with the retained operation.
+
+The complete deployment amendment in [execution-v2.md](execution-v2.md) additionally
+requires capability preflight before runtime/data effects, first-target setup through
+shared registered mechanisms, and aggregate reconstruction from exact durable zone
+acknowledgements without repeating their POSTs.

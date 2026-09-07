@@ -8,9 +8,9 @@
 
 **Input**: "$ARGUMENTS"
 
-**Drafting Model**: `gpt-5.6-terra` Medium (or actual fallback)
+**Drafting Configuration**: [Active model/delegation policy and actual configuration]
 
-**Final Validation**: `PENDING` — `gpt-5.6-sol` High
+**Final Validation**: `PENDING` — independent readiness review
 
 **Validated On**: [DATE or N/A]
 
@@ -83,7 +83,7 @@
 - [ ] Acceptance outcomes are measurable and implementation-independent.
 - [ ] No blocking open questions remain.
 - [ ] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent Sol High validation verdict is `PASS`.
+- [ ] The latest independent readiness review verdict is `PASS`.
 
 **Readiness**: `NOT READY`
 

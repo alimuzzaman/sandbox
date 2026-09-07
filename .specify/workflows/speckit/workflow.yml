@@ -1,10 +1,10 @@
 schema_version: "1.0"
 workflow:
   id: "speckit"
-  name: "Full SDD Cycle"
-  version: "1.2.0"
+  name: "Material SDD Cycle"
+  version: "1.3.0"
   author: "Sandbox"
-  description: "Runs Terra refinement, Sol PRD validation, then specify → clarify → plan → tasks → analyze → implement"
+  description: "For material or ambiguous changes, runs PRD refinement, independent readiness review, then specify → clarify → plan → tasks → analyze → implement. Routine maintenance uses a bounded issue or work package instead."
 
 requires:
   # 0.8.5 is the first release with engine-side resolution of the
@@ -31,6 +31,11 @@ inputs:
     type: string
     required: true
     prompt: "Describe the product idea to refine and build"
+  change_class:
+    type: string
+    required: true
+    enum: ["material", "ambiguous"]
+    prompt: "Classify this as material or ambiguous; routine maintenance uses the bounded short path"
   integration:
     type: string
     default: "auto"
@@ -49,7 +54,7 @@ steps:
 
   - id: review-prd
     type: gate
-    message: "Confirm the PRD has a PASS verdict from independent Sol High validation before formal specification."
+    message: "Confirm the PRD has a PASS verdict from an independent readiness review before formal specification."
     options: [approve, reject]
     on_reject: abort
 

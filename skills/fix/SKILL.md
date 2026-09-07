@@ -5,10 +5,9 @@ description: Diagnose, fix, and verify a Sandbox or WordPress bug in one evidenc
 
 # fix — one-pass bug-fix loop
 
-**Load this skill whenever the user asks you to fix a bug, debug an
-issue, or "make X work" inside a plugin running in the Sandbox.** Skip it
-for net-new features (use the slicing rule), trivial one-liners, or
-pure refactors.
+**Load this skill whenever the user asks you to fix a bug, debug an issue, or
+"make X work" in Sandbox or WordPress code.** Skip it for net-new features
+(use the slicing rule), trivial one-liners, or pure refactors.
 
 The skill exists for one reason: to kill the slow
 fix → test → fix → test → fix → test cycle that wastes 20+ minutes per
@@ -39,17 +38,19 @@ EVIDENCE:
 (Diff is already in the working tree — the user reads it directly.)
 
 **You may not emit STATUS: FIXED unless BOTH of these are true:**
-1. `EVIDENCE.before` was produced by a real MCP call against the
-   running stack **before your first Edit**.
-2. `EVIDENCE.after` was produced by re-running that same MCP call
-   **after your last Edit**, and shows the bug is gone.
+1. `EVIDENCE.before` was produced before your first Edit by a real MCP call
+   against the running stack for a runtime bug, or by the exact local command
+   or focused test for a source/tooling bug.
+2. `EVIDENCE.after` was produced by re-running that same surface **after your
+   last Edit**, and shows the bug is gone.
 
 A FIXED block missing either is auto-invalidated. If you find
 yourself about to emit FIXED without both captures, stop and go back
 to step 1 — you skipped the contract. "I read the code and the fix
 looks right" is not evidence. A passing PHP lint is not evidence.
-A grep that doesn't match the old pattern anymore is not evidence.
-Only a live MCP call counts.
+A grep that doesn't match the old pattern anymore is not evidence. Use the
+same live MCP call for runtime work or the same local command/test for
+source/tooling work.
 
 **BLOCKED** — you could not finish. Report:
 
@@ -61,15 +62,17 @@ NEXT: <decision the user needs to make>
 ```
 
 No third option. No "I think this should work." No "you may want to
-test." Either you verified it live, or you are BLOCKED.
+test." Either you verified the required runtime or source/tooling surface, or
+you are BLOCKED.
 
 ---
 
 ## The one-pass loop (in order, no interleaving)
 
-1. **Reproduce live.** Use sandbox MCP tools (`wp_cli`, `wp_rest`,
-   `db_query`, `tail_log`, `wp_exec`, `visit`) to trigger the broken
-   behavior against the running stack at `http://localhost:8188`.
+1. **Reproduce the right surface.** For a runtime bug, use sandbox MCP tools
+   (`wp_cli`, `wp_rest`, `db_query`, `tail_log`, `wp_exec`, `visit`) to trigger
+   the broken behavior against the running stack at `http://localhost:8188`.
+   For a source/tooling bug, run the smallest local command or focused test.
    Capture the exact output as `EVIDENCE.before`.
 
    **If repro requires a data condition the sandbox doesn't have by
@@ -87,10 +90,11 @@ test." Either you verified it live, or you are BLOCKED.
    don't have, or a customer's specific data shape that can't be
    inferred). In that case, name the missing condition precisely in
    `NEXT:` so the user knows exactly what to supply — don't bail with
-   "couldn't reproduce." A diagnosis without a live repro is never a
-   `STATUS: FIXED`, no matter how confident the code reading feels.
+   "couldn't reproduce." A diagnosis without the required runtime or
+   source/tooling repro is never a `STATUS: FIXED`, no matter how confident the
+   code reading feels.
 
-2. **Map every call site in one read pass.** Grep the focused plugin
+2. **Map every call site in one read pass.** Grep the owning component
    for every function, hook, block name, REST route, CSS class, JS
    handle, template partial involved. **If the focused plugin has a
    `-pro` sibling repo** (`embedpress` ↔ `embedpress-pro`, `betterdocs`
@@ -112,12 +116,13 @@ test." Either you verified it live, or you are BLOCKED.
 4. **Apply all edits in one pass.** Edit/Write every planned file. No
    verification between edits.
 
-5. **Verify live, end-to-end.** Re-run the exact reproduction from
-   step 1 — confirm the broken output is now the expected output. Then
-   verify adjacent surfaces you might have broken: other blocks
-   sharing the changed code, the admin page that loads the changed
-   asset, the REST route that calls the changed function. `tail_log`
-   to catch PHP warnings/notices triggered by your change.
+5. **Verify the same surface, end-to-end.** Re-run the exact runtime
+   reproduction from step 1 for runtime work, or the same local command/test
+   for source/tooling work. Then verify adjacent surfaces you might have
+   broken: other blocks sharing the changed code, the admin page that loads
+   the changed asset, the REST route that calls the changed function, or the
+   neighboring CLI/workflow path. Use `tail_log` for runtime work to catch PHP
+   warnings/notices triggered by your change.
 
 6. **Report FIXED or BLOCKED.** Stop.
 
@@ -161,8 +166,9 @@ evidence the *actual* bug fired against the *actual* code path.
   not `docker compose exec wp wp …`. `wp_rest` not `curl
   localhost:8188`. `db_query` not `mysql -h`. `tail_log` not `docker
   logs`. Raw bash is fine for `git diff`/`git status`/`grep`/`find`.
-- Snapshot before destructive DB work: `./sb snapshot fix-<short-name>`
-  before mass UPDATE/DELETE, migrations, or license-flow changes.
+- Snapshot before destructive runtime DB work: `./sb snapshot fix-<short-name>`
+  before mass UPDATE/DELETE, migrations, or license-flow changes. Source-only
+  fixes do not need a WordPress snapshot.
 - Never edit `runtime/wp/` core files or `vendor/`. Both get clobbered.
 - Use `wp-pilot` only for browser-driven admin testing or UI verification; do
   not hand-author browser state when a focused plugin API is available.
@@ -176,13 +182,13 @@ evidence the *actual* bug fired against the *actual* code path.
 
 ## Anti-patterns that invalidate a FIXED claim
 
-- Reporting FIXED without running the live reproduction a second time
-  after the edits.
-- Reporting FIXED based on "code reading + simulation" instead of a
-  real MCP call against the running stack.
+- Reporting FIXED without rerunning the required runtime or source/tooling
+  reproduction a second time after the edits.
+- Reporting FIXED based on "code reading + simulation" instead of the
+  required live or local evidence against the actual code path.
 - Editing one file → running one test → editing the next file. That is
   exactly the loop this skill exists to replace.
-- Touching files outside the focused plugin without calling it out in
+- Touching files outside the owning component without calling it out in
   SUMMARY with a one-line justification.
 - Asking a clarifying question mid-loop when the answer is obviously
   inferable. Pick the most likely interpretation, do the work, note it

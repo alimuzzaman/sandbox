@@ -135,7 +135,7 @@ Every registered command appears once below. “Candidate” means the concept c
 
 `tests.test_modularity.TestModularityInventory` now names the broad static
 regression proxy `kind_referencing_conditionals`. The current source baseline is
-88 CLI commands, 44 decorated MCP tools, 20 wildcard imports, and **141**
+91 CLI commands, 44 decorated MCP tools, 19 wildcard imports, and **247**
 kind-referencing conditional expressions. The broad metric intentionally includes
 job, CI, resource, and other discriminators; it is not a claim that every such
 branch is runtime selection.

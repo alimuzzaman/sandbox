@@ -34,8 +34,9 @@ synthetic secrets and forbidden-capability witnesses
 
 **Project Type**: Modular CLI/hosting orchestration service
 
-**Performance Goals**: Finite per-phase deadlines; bounded output <= 1 MiB; selected
-services <= 16, init steps <= 16, retained generations exactly 2
+**Performance Goals**: Finite per-phase deadlines; bounded output <= 1 MiB; legacy
+selected services <= 16, v2 selected services <= 64, init steps <= 16, retained
+generations exactly 2
 
 **Constraints**: No trust reinterpretation, broker/credential/helper/pull/build/tag/prune;
 closed subprocess environments; no init replay after possible effect; edge uncertainty fences
@@ -201,3 +202,60 @@ newly required purge. See [contracts/edge-cache.md](contracts/edge-cache.md).
 ## Complexity Tracking
 
 No violations.
+
+## Deployment repair amendment — 2026-09-07
+
+The user-requested Astra XHigh deployment audit extends this plan for FR-052–065.
+The current agent implements and verifies it; no further delegates. Historical PRD
+and review metadata remain unchanged. Local implementation does not authorize use
+of settlement, credentials, migrations, remote updates or production deployment.
+
+The canonical new execution and incident boundaries are in
+`contracts/execution-v2.md`. Existing v1/v2 documents retain their original decoding
+and digest bytes. Explicit new fields opt into the complete execution revision;
+missing fields are historical unknowns, never synthetic completion receipts.
+
+Implement sequentially, with integrated failing tests before each source slice:
+
+1. Complete spec/data/contract/task alignment and read-only consistency analysis.
+2. Build a synthetic Lenzora-shaped fixture through actual codecs, private helpers
+   and CLI composition: 17 services, three ordered jobs, a prerequisite queue,
+   environment-backed secret mounts, profiles and delayed health.
+3. Rework private preparation to capture exact local signed-application bytes under
+   source/broker guards. Atomically publish environment, supported secret files,
+   Compose/manifest, selected profile and provenance into a complete private candidate.
+   Use the candidate directory as production project directory; reject source mounts.
+   Add replay-safe preparation identity, retention and source/environment isolation.
+4. Bind dependency conditions, prerequisite groups, ordered jobs, private selectors,
+   receipt chains and pre-forward compatibility authority through every v2 layer.
+5. Execute prerequisites, ordered initializers and consumers through one owner.
+   Persist each possible effect before entry, initializer terminal exit before cleanup,
+   and cleanup before dependent execution. Never auto-start dependencies or replay
+   possible effects. Prove exact existing prerequisites without unnecessary restart.
+6. Add bounded read-only readiness convergence and shared first-target port/edge
+   setup. Preflight known provider capability failures before runtime/data effects.
+   Retain prepared purge identity and exact acknowledgements without duplicate POSTs.
+7. Extend two-observation recovery to every graph phase using retained selectors.
+   Remove effect-entered empty-genesis no-effect authority. Validate rollback using
+   retained pre-forward compatibility, without forward initializer execution.
+8. Implement the separate approved incident-settlement plan/apply boundary. Keep
+   uncertainty and generation unchanged; require predecessor/data assessment for
+   any new forward attempt. Do not invoke settlement from deployment automatically.
+9. Repair opt-in development's duplicate init/source path and Lenzora's exact
+   application/control/Sandbox revision tuple. Preserve development mode and generic
+   hosting compatibility. The wrapper remains the only application deploy entrypoint.
+10. Run final focused/full local gates, real disposable topology/crash gates, then
+    separately authorized installed-tool, incident, provider and production gates.
+
+Keep `RecoveryRepository` as the only outer state writer, with target → host →
+stage ordering. Preparation resolves secrets only before activation admission.
+Where a long transfer needs retained proof custody, use the existing same-holder
+pin; do not hold or bypass unrelated state locks during network operations.
+
+Source ownership: Sandbox implementation remains in the current dedicated worktree.
+Lenzora wrapper edits use its dedicated implementation worktree; the clean signed
+application checkout remains preserved for exact-image recovery. Main is read-only.
+
+Acceptance is tiered: local code/contracts, real disposable Compose execution,
+installed tool identity, incident preservation/settlement, then exact approved
+production/runtime/edge/public proof. No earlier tier substitutes for a later one.

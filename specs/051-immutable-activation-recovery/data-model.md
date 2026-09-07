@@ -1,5 +1,29 @@
 # Data Model: Immutable Activation and Recovery
 
+## Complete v2 execution amendment
+
+The canonical boundaries are in `contracts/execution-v2.md`. New values retain
+explicit execution/private-input revisions; old missing fields remain unknown.
+
+| Value | New retained identity/evidence |
+|---|---|
+| Preparation | Replay-safe identity, exact application revision, input HMAC, broker/source revision identity and opaque private selector |
+| Private candidate | Captured manifest/Compose/environment, supported secret files and full protected render; private bytes/paths stay outside public state |
+| Execution graph | Exact prerequisite, ordered init and consumer membership; image identity, dependency conditions, bounded deadlines and graph digest |
+| Phase step | Deterministic preparation/container ownership, inspected configuration identity, monotonic possible-effect marker, terminal and cleanup receipt identities |
+| Init terminal receipt | Exact request/graph/declaration/container/image/target binding and zero exit/termination persisted before cleanup |
+| Init cleanup receipt | Matching durable terminal receipt and proved owned cleanup; required before dependent phases |
+| Forward compatibility | Pre-forward current-generation/candidate/data subject and signed grant retained by acceptance and committed generation |
+| Readiness receipt | Complete exact service/container/configuration/target identities and bounded coherent ready observation |
+| Settlement plan/approval | Exact uncertain transaction, quiescent processes, preservation/backup/data-assessment identities and machine-installed operator approval |
+| Settlement result | Immutable abandoned-with-effects reference, unchanged current/generation and preserved original uncertainty; distinct terminal owner for custody release |
+| New forward predecessor | Exact settlement and separate reviewed data/schema decision; never implicit replay/rollback/adoption authority |
+| Deployment tuple | Exact application A, control D, Sandbox S and installed runtime/capability identity |
+
+Public documents never retain arbitrary source paths, private command/configuration,
+secret payloads, raw verifiers or free-text approval authority. The same closed
+bindings propagate through request, acceptance, intent, generation, edge and recovery.
+
 ## ActivationPolicy
 
 - authority identity/digest/revision

@@ -66,3 +66,8 @@ plan and retained proof, expected activation generation, and future snapshot exp
 config, and output never accept private-key bytes or paths. The verified bundle installs
 at `runtime/hosting/image-activation/policies/<selector>.json` mode `0600`; authority,
 key, ledger, generation, signature, or existing-byte conflicts refuse.
+
+The reviewed complete v2 execution amendment is defined in [execution-v2.md](execution-v2.md).
+Its private candidate, graph, prerequisite/init receipts, retained authority and
+release-control identities must propagate through every activation consumer before
+that execution revision is enabled.

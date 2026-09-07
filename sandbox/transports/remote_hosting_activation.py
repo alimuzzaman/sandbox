@@ -22,6 +22,164 @@ CLOSED_ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 MAX_REMOTE_OUTPUT = 1024 * 1024
 _CONFIGURATION_HMAC_KEY = "SANDBOX_ACTIVATION_CONFIGURATION_HMAC_KEY"
 
+# This fixed helper receives values only on stdin. It publishes a complete
+# candidate directory without replacing any existing candidate or legacy input.
+PRIVATE_CANDIDATE_INPUT_PROGRAM = r'''
+import ctypes, errno, json, os, re, stat, subprocess, sys, tempfile
+from pathlib import Path
+
+LIMIT = 1024 * 1024
+ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+
+def directory(path, owned=False):
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError()
+    for part in reversed((path, *path.parents)):
+        info = part.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError()
+    info = path.lstat()
+    if owned and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077):
+        raise ValueError()
+
+def read(path, maximum, private=False):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size > maximum or (private and
+                (before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) & 0o077))):
+            raise ValueError()
+        data = bytearray()
+        while len(data) <= maximum:
+            block = os.read(fd, min(65536, maximum + 1 - len(data)))
+            if not block:
+                break
+            data.extend(block)
+        after = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns",
+                  "st_mode", "st_uid", "st_nlink")
+        if len(data) > maximum or any(getattr(before, k) != getattr(after, k) for k in fields):
+            raise ValueError()
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+def git(source, *args):
+    result = subprocess.run(["git", "-C", str(source), *args], env=ENV,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=True)
+    if len(result.stdout) > 4 * LIMIT:
+        raise ValueError()
+    return result.stdout
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def publish(source, destination):
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        call = libc.renameat2
+        call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = call(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    elif sys.platform == "darwin":
+        call = libc.renamex_np
+        call.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = call(os.fsencode(source), os.fsencode(destination), 4)
+    else:
+        raise ValueError()
+    if result != 0:
+        raise OSError(ctypes.get_errno(), "candidate publication refused")
+
+def main():
+    raw = sys.stdin.buffer.read(LIMIT + 1)
+    if len(raw) > LIMIT:
+        raise ValueError()
+    frame = json.loads(raw)
+    if type(frame) is not dict or set(frame) != {
+            "source_directory", "source_revision", "runtime_directory", "candidate_id",
+            "compose_files", "environment", "compose_override"}:
+        raise ValueError()
+    for key in ("source_directory", "runtime_directory", "source_revision", "candidate_id",
+                "environment", "compose_override"):
+        if type(frame[key]) is not str or "\0" in frame[key]:
+            raise ValueError()
+    if not re.fullmatch("[0-9a-f]{40}", frame["source_revision"]) or not re.fullmatch(
+            "[0-9a-f]{64}", frame["candidate_id"]):
+        raise ValueError()
+    source = Path(frame["source_directory"]); runtime = Path(frame["runtime_directory"])
+    directory(source); directory(runtime, owned=True)
+    files = frame["compose_files"]
+    if type(files) is not list or not 1 <= len(files) <= 32 or len(set(files)) != len(files):
+        raise ValueError()
+    revision = frame["source_revision"]
+    if git(source, "rev-parse", "HEAD").strip() != revision.encode():
+        raise ValueError()
+    content = {"environment.env": frame["environment"].encode(),
+               "compose.override.yml": frame["compose_override"].encode()}
+    for index, name in enumerate(files):
+        if (type(name) is not str or not name or any(c in name for c in "\0\n\r")
+                or Path(name).is_absolute() or ".." in Path(name).parts):
+            raise ValueError()
+        directory((source / name).parent)
+        identity = revision + ":" + name
+        size = int(git(source, "cat-file", "-s", identity))
+        if not 0 <= size <= 4 * LIMIT:
+            raise ValueError()
+        expected = git(source, "show", identity)
+        if read(source / name, 4 * LIMIT) != expected:
+            raise ValueError()
+        content["compose-" + str(index) + ".yml"] = expected
+    if sum(map(len, content.values())) > 8 * LIMIT:
+        raise ValueError()
+    content["source.json"] = json.dumps({"source_revision": revision,
+        "compose_files": files}, sort_keys=True, separators=(",", ":")).encode()
+    parent = runtime / "activation-inputs"
+    try:
+        parent.mkdir(mode=0o700)
+        sync_directory(runtime)
+    except FileExistsError:
+        pass
+    directory(parent, owned=True)
+    destination = parent / frame["candidate_id"]
+    if os.path.lexists(destination):
+        directory(destination, owned=True)
+        if set(os.listdir(destination)) != set(content) or any(
+                read(destination / name, 4 * LIMIT, private=True) != value
+                for name, value in content.items()):
+            raise ValueError()
+        return "replayed"
+    temporary = Path(tempfile.mkdtemp(prefix=".candidate-", dir=parent))
+    try:
+        for name, value in content.items():
+            fd = os.open(temporary / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(value); stream.flush(); os.fsync(stream.fileno())
+        sync_directory(temporary)
+        publish(temporary, destination)
+        temporary = None
+        sync_directory(parent)
+        return "prepared"
+    finally:
+        if temporary is not None:
+            for name in content:
+                try:
+                    (temporary / name).unlink()
+                except FileNotFoundError:
+                    pass
+            temporary.rmdir()
+
+try:
+    result = main()
+except Exception:
+    sys.stdout.write('{"ok":false,"result":"refused"}\n')
+    sys.exit(1)
+sys.stdout.write(json.dumps({"ok": True, "result": result}, separators=(",", ":")) + "\n")
+'''
+
 
 class RemoteActivationError(RuntimeError):
     pass
@@ -53,6 +211,7 @@ class RegisteredRemoteActivationTransport:
         self._init_environment_sources: dict[str, dict] = {}
         self._compose_selector: dict[str, object] = {}
         self._compose_selector_v2: dict[str, object] = {}
+        self._prepared_execution_v2: dict | None = None
 
     @staticmethod
     def _service(value: str) -> str:
@@ -112,13 +271,13 @@ class RegisteredRemoteActivationTransport:
         runner resolves it privately and returns only bounded HMAC identities.
         """
         self._compose_selector_v2 = {}
-        if (type(private_compose_snapshot) is not dict
-                or set(private_compose_snapshot) != {
-                    "schema_version", "snapshot_id", "provider_revision", "target",
-                    "plan_set_digest", "selected_services", "configuration_digest",
-                    "expires_at", "snapshot_digest"}
-                or private_compose_snapshot.get("schema_version") != 2
-                or tuple(private_compose_snapshot.get("selected_services", ())) != selected_services
+        self._execution_request_v2 = None
+        from sandbox.hosting.images.activation.v2_models import PrivateComposeInputSnapshotV2
+        try:
+            snapshot = PrivateComposeInputSnapshotV2.from_mapping(private_compose_snapshot)
+        except (ValueError, TypeError, KeyError):
+            raise RemoteActivationError("topology_mismatch") from None
+        if (snapshot.selected_services != selected_services
                 or set(service_image_bindings) != set(selected_services)
                 or set(environment_bindings.values()) != set(service_image_bindings.values())
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", topology_digest or "") is None):
@@ -137,6 +296,8 @@ class RegisteredRemoteActivationTransport:
                   "snapshot_digest": private_compose_snapshot["snapshot_digest"],
                   "provider_revision": private_compose_snapshot["provider_revision"],
                   "target": private_compose_snapshot["target"]}
+        if snapshot.input_contract is not None:
+            source["input_contract"] = snapshot.input_contract
         expected_services = set(selected_services if allowed_services is None
                                 else allowed_services)
 
@@ -173,6 +334,10 @@ class RegisteredRemoteActivationTransport:
             raise RemoteActivationError("topology_mismatch")
         if set(services) != expected_services or \
                 render_digest != private_compose_snapshot["configuration_digest"]:
+            if snapshot.input_contract == "candidate-v1":
+                # Candidate preparation froze the complete profile selection.
+                # A changed digest cannot be repaired by discovering new input.
+                raise RemoteActivationError("topology_mismatch")
             profile_argv = ["docker", "compose"]
             for path in compose_files:
                 profile_argv.extend(("--file", path))
@@ -216,12 +381,17 @@ class RegisteredRemoteActivationTransport:
         markers = tuple(rendered.pop(name, None) for name in (
             "x-sandbox-has-configs", "x-sandbox-has-secrets",
             "x-sandbox-has-external-networks"))
+        private_secrets = rendered.pop("x-sandbox-private-secrets", None)
         if (render_digest != private_compose_snapshot["configuration_digest"]
                 or type(hashes) is not dict or set(hashes) != set(services)
                 or any(re.fullmatch(r"sha256:[0-9a-f]{64}", value or "") is None
                        for value in hashes.values())
                 or markers[0] is not False or markers[2] is not False
-                or type(markers[1]) is not bool or set(rendered) != {"services"}
+                or (markers[1] is not False and not (markers[1] is True
+                    and snapshot.input_contract == "candidate-v1" and private_secrets is True))
+                or (private_secrets is not None and (snapshot.input_contract != "candidate-v1"
+                    or type(private_secrets) is not bool))
+                or set(rendered) != {"services"}
                 or set(services) != expected_services
                 or not set(selected_services) <= expected_services):
             raise RemoteActivationError("topology_mismatch")
@@ -253,7 +423,8 @@ class RegisteredRemoteActivationTransport:
             "render_digest": render_digest, "runtime_epoch": epoch["runtime_epoch"],
             "compose_config_hashes": {name: hashes[name] for name in selected_services},
             "topology_digest": topology_digest, "private_source": source,
-            "snapshot_digest": private_compose_snapshot["snapshot_digest"]}
+            "snapshot_digest": private_compose_snapshot["snapshot_digest"],
+            "snapshot": snapshot.as_mapping()}
         return {"services": normalized, "orphans": [],
                 "runtime_epoch": epoch["runtime_epoch"],
                 "configuration_digest": render_digest}
@@ -263,8 +434,9 @@ class RegisteredRemoteActivationTransport:
             allowed_services: tuple[str, ...] | None = None,
             service_image_bindings: dict[str, str],
             environment_bindings: dict[str, str], target: dict[str, str],
-            snapshot_id: str, provider_revision: str) -> str:
+            snapshot_id: str, provider_revision: str, input_contract: str | None = None) -> str:
         """Identify one registered private render through the target HMAC path."""
+        self._prepared_execution_v2 = None
         if (type(target) is not dict or set(target) != {
                 "machine_identity", "target_identity", "daemon_identity"}
                 or type(snapshot_id) is not str or not snapshot_id.startswith("compose-snapshot/")
@@ -282,6 +454,10 @@ class RegisteredRemoteActivationTransport:
             environment[variable] = image
         source = {"kind": "compose_prepare_v2", "snapshot_id": snapshot_id,
                   "provider_revision": provider_revision, "target": target}
+        if input_contract is not None:
+            if input_contract != "candidate-v1":
+                raise RemoteActivationError("topology_mismatch")
+            source["input_contract"] = input_contract
         expected_services = set(selected_services if allowed_services is None
                                 else allowed_services)
 
@@ -359,6 +535,7 @@ class RegisteredRemoteActivationTransport:
             digest = rendered["x-sandbox-configuration-digest"]
         if not set(selected_services) <= expected_services:
             raise RemoteActivationError("topology_mismatch")
+        complete_services = services
         # The private Compose render includes one-shot initializers; activation
         # binds and starts only the persistent service projection.
         services = {name: services[name] for name in selected_services}
@@ -369,7 +546,20 @@ class RegisteredRemoteActivationTransport:
                     or row.get("pull_policy") not in {None, "never"} \
                     or row.get("platform") not in {None, "linux/amd64"}:
                 raise RemoteActivationError("topology_mismatch")
+        if input_contract == "candidate-v1":
+            self._prepared_execution_v2 = {"services": complete_services, "target": dict(target),
+                "snapshot_id": snapshot_id, "configuration_digest": digest}
         return digest
+
+    def prepared_init_contract_v2(self, *, plan, initializer_order: tuple[str, ...]):
+        from sandbox.hosting.images.activation.execution_graph import prepare_execution_contract
+        if self._prepared_execution_v2 is None:
+            raise RemoteActivationError("init_mismatch")
+        try:
+            return prepare_execution_contract(plan=plan, initializer_order=initializer_order,
+                                              **self._prepared_execution_v2)
+        except (ValueError, TypeError, KeyError):
+            raise RemoteActivationError("init_mismatch") from None
 
     def _observed_target(self, runtime_epoch: str) -> dict:
         if not callable(self._target_identity):
@@ -755,6 +945,88 @@ class RegisteredRemoteActivationTransport:
                              image_overrides={name: exact_image for name in services})
         if self._compose_selector.get("render_digest") != expected_digest:
             raise RemoteActivationError("effect_unknown")
+
+    def bind_execution_v2(self, request):
+        from sandbox.hosting.images.activation.v2_models import ActivationRequestV2
+        self._execution_request_v2 = None
+        selector = self._compose_selector_v2
+        if (type(request) is not ActivationRequestV2 or not selector
+                or request.compose_snapshot.as_mapping() != selector.get("snapshot")
+                or request.compose_snapshot.input_contract != "candidate-v1"
+                or request.compose_snapshot.init_contract is None
+                or request.compose_snapshot.init_contract.graph is None
+                or request.operation != "activate"):
+            raise RemoteActivationError("init_mismatch")
+        self._execution_request_v2 = request
+
+    def execute_graph_step_v2(self, *, action, subject, container_identity, timeout_seconds):
+        from sandbox.hosting.images.activation.execution_state import ExecutionProgressV2
+        from sandbox.hosting.images.activation.execution_runner import execution_step_subject
+        request = getattr(self, "_execution_request_v2", None)
+        selector = self._compose_selector_v2
+        if (request is None or not selector
+                or selector.get("snapshot") != request.compose_snapshot.as_mapping()
+                or type(subject) is not dict):
+            raise RemoteActivationError("init_mismatch")
+        contract = request.compose_snapshot.init_contract
+        progress = ExecutionProgressV2.create(graph=contract.graph,
+            request_digest=request.request_digest, snapshot_digest=request.compose_snapshot.snapshot_digest)
+        try:
+            expected = execution_step_subject(progress=progress, contract=contract, index=subject.get("step_index"))
+        except (ValueError, TypeError, KeyError):
+            raise RemoteActivationError("init_mismatch") from None
+        if subject != expected:
+            raise RemoteActivationError("init_mismatch")
+        initializer = subject["kind"] == "initializer"
+        declaration = next((row for row in contract.declarations
+                            if row.service == subject["services"][0]), None) if initializer else None
+        timeout = declaration.timeout_seconds if initializer else contract.graph.readiness_timeout_seconds
+        actions = {"create", "inspect", "start", "wait", "cleanup"} if initializer else {"replace", "ready"}
+        if (type(action) is not str or action not in actions or type(timeout_seconds) is not int
+                or timeout_seconds != timeout):
+            raise RemoteActivationError("init_mismatch")
+        if initializer and action != "create":
+            if type(container_identity) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}", container_identity) is None:
+                raise RemoteActivationError("init_mismatch")
+        elif container_identity is not None:
+            raise RemoteActivationError("init_mismatch")
+        by_image = {row["name"]: row for row in request.proof_set["observation"]["images"]}
+        bindings = dict(request.plan_set.policy.service_image_bindings)
+        identities = {name: {"image_ref": by_image[bindings[name]]["repo_digest"],
+            "config_digest": by_image[bindings[name]]["config_digest"],
+            "local_image_id": by_image[bindings[name]]["local_image_id"]}
+            for group in (*contract.graph.prerequisite_groups, *contract.graph.consumer_groups) for name in group}
+        source = {**selector["private_source"], "kind": "compose_graph_v2",
+                  "action": action, "subject": expected, "container_identity": container_identity,
+                  "execution_contract": contract.as_mapping(), "image_identities": identities,
+                  "render_digest": selector["render_digest"]}
+        result = self._invoke(("sandbox-activation-execute-graph-v2",), timeout_seconds=timeout,
+            environment=selector["environment"], private_environment_source=source)
+        if result.get("returncode") != 0 or result.get("terminated") is not True:
+            raise RemoteActivationError("effect_unknown")
+        try:
+            receipt = json.loads(result["stdout"])
+            if (type(receipt) is not dict or set(receipt) != {
+                    "subject_digest", "container_identity", "exit_code", "terminated"}
+                    or receipt["subject_digest"] != expected["subject_digest"]
+                    or receipt["terminated"] is not True):
+                raise ValueError()
+            if initializer:
+                identity = receipt["container_identity"]
+                if (type(identity) is not str
+                        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}", identity) is None
+                        or (container_identity is not None and identity != container_identity)):
+                    raise ValueError()
+            elif receipt["container_identity"] is not None:
+                raise ValueError()
+            if action == "wait":
+                if type(receipt["exit_code"]) is not int or not 0 <= receipt["exit_code"] <= 255:
+                    raise ValueError()
+            elif receipt["exit_code"] is not None:
+                raise ValueError()
+        except (ValueError, TypeError, KeyError):
+            raise RemoteActivationError("effect_unknown") from None
+        return receipt
 
     def replace_services_v2(self, *, compose_files: tuple[str, ...], project_name: str,
                             services: tuple[str, ...], service_image_bindings: dict[str, str],

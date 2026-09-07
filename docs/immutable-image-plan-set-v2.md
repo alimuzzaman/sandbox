@@ -170,6 +170,65 @@ Atomic activation
   --json
 ```
 
+New activation preparation uses the explicit `input_contract: candidate-v1`
+snapshot extension. Under the existing target owner it refuses any active
+activation before resolving application secrets. It renders manifest values,
+registered secrets and derived revision values from the signed image policy's
+source revision, using the existing registered loopback port. Missing port or
+secret authority refuses preparation.
+
+The local capture checks the clean selected application revision and exact tracked
+manifest/Compose bytes under the preparation broker guard. The fixed remote helper
+receives these bytes and private values only on stdin; it needs no remote Git
+checkout. It renders the complete selected topology and materializes supported
+environment-backed secrets into owner-only candidate files. External/file-backed
+input secrets, configs and source bind mounts refuse. Atomic publication pins
+directory descriptors and uses no-replace rename; a lost acknowledgement preserves
+the published candidate for exact verification. Candidate contents must match for
+publication replay. Runtime uses the retained effective render and candidate project
+directory. Its keyed identity includes the retained secret bytes; changing a secret
+file invalidates the snapshot. Legacy runtime files remain untouched.
+Legacy snapshots remain readable with their original paths and digest bytes;
+absence of the extension never means newly prepared inputs.
+
+The legacy v2 request format has no ordered initializer execution contract.
+Activation now refuses an init-bearing legacy request with `init_mismatch`
+before replacing services. Image staging alone is not initializer execution
+proof. Forward initializer execution and durable receipt integration are tracked
+in Feature 051 Phases 25–26; this guard alone does not make deployment ready.
+The append-only graph progress codec retains nonzero initializer exit codes before
+owned cleanup. A failed initializer can record cleanup but cannot advance to later
+initializers or consumers, and its graph can never count as complete. This codec
+now feeds an ordered driver that saves progress before each effect, requires
+subject-bound terminal receipts, and refuses replay of retained progress. Its
+transport adapter validates the exact rendered snapshot, request, graph step,
+action, deadline and returned container identity before accepting a receipt.
+Private initializer inspection now compares ownership, image identity and
+platform, command, entrypoint, user, environment, working directory, privileges,
+mounts and networks against retained inputs. Initializer lifecycle functions
+create only one service without implicit dependencies, refuse name collisions,
+start only a never-started container, verify terminal exit with a fresh inspect,
+and remove only that exact stopped container. These functions are tested through
+injected command ports. Initializer dispatch is connected to the host helper,
+with strict frame checks, a shared command deadline, bounded private output and
+fixed failure diagnostics. Assembled helper tests use synthetic Docker responses;
+runtime groups now carry exact staged image identities, use one no-build/no-pull
+up without implicit dependencies, and poll readiness against exact container and
+Compose identities. Image-inherited health checks also gate readiness. Polling
+has one finite deadline and never reissues up. Graph-bearing forward requests
+now run through the service and real state codec: each stage is durable before
+its next effect, and generation/edge binding retains the complete graph, signed
+snapshot and pre-forward grant. Lost start responses remain uncertain and retries
+do not start again. Real Docker acceptance, recovery/rollback integration and
+release gates remain incomplete. Graph-bearing service admission now
+retains the exact signed snapshot and pre-forward compatibility grant in the
+transaction; the repository validates their request and graph bindings before
+acceptance.
+The complete execution amendment also requires preparation replay without broker
+reads, first-target registration, graph receipts, readiness and legal incident
+settlement. Those integration gates remain incomplete; candidate helper tests are
+not deployment acceptance.
+
 Activation provisioning can renew a retained v2 bundle only after both its
 snapshot and signed rollback grant expire. The target and signing authority
 must match, and generation authority cannot move backwards. Under the target

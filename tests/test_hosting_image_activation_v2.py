@@ -308,6 +308,143 @@ def execute(repo, runtime, edge, request, grant):
 
 
 class ActivationV2Tests(unittest.TestCase):
+    def test_execution_graph_binds_prerequisites_order_and_dependency_conditions(self):
+        from sandbox.hosting.images.activation.v2_models import RuntimeExecutionGraphV2
+        dependencies = (
+            {"service": "topology", "dependency": "queue", "condition": "service_healthy"},
+            {"service": "web", "dependency": "migrate", "condition": "service_completed_successfully"},
+            {"service": "web", "dependency": "topology", "condition": "service_completed_successfully"},
+        )
+        graph = RuntimeExecutionGraphV2.create(prerequisite_groups=(("queue",),),
+            initializer_order=("migrate", "storage", "topology"), consumer_groups=(("web",),),
+            dependencies=dependencies, readiness_timeout_seconds=300)
+        self.assertEqual(RuntimeExecutionGraphV2.from_mapping(graph.as_mapping()), graph)
+        for changes in (
+            {"prerequisite_groups": (), "consumer_groups": (("web",), ("queue",))},
+            {"consumer_groups": (("web", "queue"),)},
+            {"initializer_order": ("topology", "migrate", "topology")},
+            {"dependencies": (*dependencies, {"service": "queue", "dependency": "web", "condition": "service_started"})},
+            {"dependencies": ({"service": "topology", "dependency": "queue", "condition": "service_completed_successfully"}, *dependencies[1:])},
+            {"readiness_timeout_seconds": 3601},
+        ):
+            values = {"prerequisite_groups": graph.prerequisite_groups,
+                "initializer_order": graph.initializer_order, "consumer_groups": graph.consumer_groups,
+                "dependencies": graph.dependencies, "readiness_timeout_seconds": graph.readiness_timeout_seconds}
+            with self.assertRaises(ValueError):
+                RuntimeExecutionGraphV2.create(**{**values, **changes})
+
+    def test_init_contract_is_bound_to_snapshot_request_and_exact_service_images(self):
+        from sandbox.hosting.images.activation.v2_models import InitDeclarationV2, InitExecutionContractV2
+
+        plan, proof, legacy = artifacts()
+        images = {row.name: row for row in plan.receipt.images}
+        bindings = {row["service"]: row for row in plan.as_mapping()["service_image_bindings"]}
+        declarations = []
+        for index, service in enumerate(reversed(plan.policy.one_shot_services)):
+            binding = bindings[service]; image = images[binding["image"]]
+            declarations.append(InitDeclarationV2.create(index=index, service=service,
+                image=image.name, image_ref=image.image_ref, config_digest=image.config_digest,
+                platform={"os": "linux", "architecture": "amd64"}, timeout_seconds=300,
+                environment_keys=(), dependency_services=(), target=TARGET,
+                snapshot_id=legacy.snapshot_id, configuration_digest=DIGEST_A))
+        contract = InitExecutionContractV2.create(declarations=tuple(declarations))
+        body = legacy.body_mapping(); body.pop("schema_version")
+        body["selected_services"] = tuple(body["selected_services"])
+        snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=contract)
+        self.assertEqual(PrivateComposeInputSnapshotV2.from_mapping(snapshot.as_mapping()), snapshot)
+        grant = grant_for(plan, proof)
+        request = request_for(plan, proof, snapshot, grant)
+        self.assertEqual(ActivationRequestV2.from_mapping(request.as_mapping()), request)
+        incomplete = InitExecutionContractV2.create(declarations=tuple(declarations[:-1]))
+        partial_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=incomplete)
+        with self.assertRaises(ValueError):
+            request_for(plan, proof, partial_snapshot, grant)
+        changed = InitDeclarationV2.create(**{**declarations[0].body_mapping(),
+                                            "image_ref": "ghcr.io/foreign/image@" + DIGEST_A})
+        wrong = InitExecutionContractV2.create(declarations=(changed, *declarations[1:]))
+        wrong_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=wrong)
+        with self.assertRaises(ValueError):
+            request_for(plan, proof, wrong_snapshot, grant)
+        with self.assertRaises(ValueError):
+            PrivateComposeInputSnapshotV2.create(**body, init_contract=contract)
+        from sandbox.hosting.images.activation.v2_models import RuntimeExecutionGraphV2
+        graph = RuntimeExecutionGraphV2.create(prerequisite_groups=(),
+            initializer_order=tuple(row.service for row in declarations),
+            consumer_groups=(plan.policy.persistent_services,), dependencies=(), readiness_timeout_seconds=300)
+        complete = InitExecutionContractV2.create(declarations=tuple(declarations), graph=graph)
+        complete_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=complete)
+        complete_request = request_for(plan, proof, complete_snapshot, grant)
+        self.assertNotEqual(complete_request.request_digest, request.request_digest)
+        self.assertEqual(ActivationRequestV2.from_mapping(complete_request.as_mapping()), complete_request)
+        partial = RuntimeExecutionGraphV2.create(prerequisite_groups=(), initializer_order=graph.initializer_order,
+            consumer_groups=(plan.policy.persistent_services[:-1],), dependencies=(), readiness_timeout_seconds=300)
+        partial_contract = InitExecutionContractV2.create(declarations=tuple(declarations), graph=partial)
+        partial_snapshot = PrivateComposeInputSnapshotV2.create(**body,
+            input_contract="candidate-v1", init_contract=partial_contract)
+        with self.assertRaises(ValueError):
+            request_for(plan, proof, partial_snapshot, grant)
+
+    def test_ordered_init_contract_is_closed_bounded_and_preserves_order(self):
+        from sandbox.hosting.images.activation.v2_models import InitDeclarationV2, InitExecutionContractV2
+
+        def declaration(index, service):
+            return InitDeclarationV2.create(index=index, service=service, image="worker",
+                image_ref="ghcr.io/acme/worker@" + DIGEST_A, config_digest=DIGEST_B,
+                platform={"os": "linux", "architecture": "amd64"}, timeout_seconds=300,
+                environment_keys=("DATABASE_URL",), dependency_services=(), target=TARGET,
+                snapshot_id="compose-snapshot/candidate-a", configuration_digest=DIGEST_A)
+
+        first, second = declaration(0, "z-migrate"), declaration(1, "a-storage")
+        contract = InitExecutionContractV2.create(declarations=(first, second))
+        self.assertEqual([row.service for row in contract.declarations], ["z-migrate", "a-storage"])
+        self.assertEqual(InitExecutionContractV2.from_mapping(contract.as_mapping()), contract)
+        self.assertEqual(contract.execution_revision, "ordered-init-v1")
+        for rows in ((second, first), (first, first), (first, declaration(2, "other"))):
+            with self.assertRaises(ValueError):
+                InitExecutionContractV2.create(declarations=rows)
+        for extra in ({"environment": {"TOKEN": "synthetic-canary"}},
+                      {"command": ["sh", "-c", "private"]}, {"mounts": ["/private"]}):
+            with self.assertRaises(ValueError):
+                InitDeclarationV2.from_mapping({**first.as_mapping(), **extra})
+        with self.assertRaises(ValueError):
+            InitDeclarationV2.create(**{**first.body_mapping(), "timeout_seconds": 0})
+        with self.assertRaises(ValueError):
+            InitExecutionContractV2.from_mapping({**contract.as_mapping(), "execution_revision": "unknown"})
+
+    def test_candidate_input_contract_is_explicit_and_legacy_digest_stays_stable(self):
+        _plan, _proof, legacy = artifacts()
+        body = legacy.body_mapping()
+        body.pop("schema_version")
+        body["selected_services"] = tuple(body["selected_services"])
+        candidate = PrivateComposeInputSnapshotV2.create(**body, input_contract="candidate-v1")
+        self.assertEqual(candidate.input_contract, "candidate-v1")
+        self.assertNotEqual(candidate.snapshot_digest, legacy.snapshot_digest)
+        self.assertEqual(PrivateComposeInputSnapshotV2.from_mapping(
+            candidate.as_mapping()), candidate)
+        self.assertNotIn("input_contract", legacy.as_mapping())
+        self.assertEqual(PrivateComposeInputSnapshotV2.from_mapping(
+            legacy.as_mapping()).snapshot_digest, legacy.snapshot_digest)
+        with self.assertRaises(ValueError):
+            PrivateComposeInputSnapshotV2.create(**body, input_contract="unknown")
+
+    def test_required_initializers_without_execution_contract_refuse_before_replacement(self):
+        plan, proof, snapshot = artifacts()
+        self.assertTrue(plan.policy.one_shot_services)
+        grant = grant_for(plan, proof)
+        request = request_for(plan, proof, snapshot, grant)
+        repo = FakeRepositoryV2(); runtime = FakeRuntimeV2()
+
+        result = execute(repo, runtime, FakeEdgeV2(), request, grant)
+
+        self.assertEqual(runtime.replacements, [])
+        self.assertEqual(repo.commits, 0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["result_class"], "refused")
+
     def test_all_images_are_proven_then_one_exact_atomic_compose_effect_commits(self):
         plan, proof, snapshot = artifacts(); grant = grant_for(plan, proof)
         request = request_for(plan, proof, snapshot, grant)
@@ -922,7 +1059,7 @@ class RemoteActivationTransportV2Tests(unittest.TestCase):
                 stdout = json.dumps({"services": services,
                     "x-sandbox-configuration-digest": DIGEST_B,
                     "x-sandbox-compose-config-hashes": {name: DIGEST_A for name in services},
-                    "x-sandbox-has-configs": False, "x-sandbox-has-secrets": True,
+                    "x-sandbox-has-configs": False, "x-sandbox-has-secrets": False,
                     "x-sandbox-has-external-networks": False})
             elif argv[:1] == ("sandbox-activation-observe-running-v2",):
                 config_by_ref = {item.image_ref: item.config_digest

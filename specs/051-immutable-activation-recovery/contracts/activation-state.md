@@ -46,3 +46,8 @@ the matrix-legal transaction promotion; one atomic outer replacement by `Recover
 both or neither and clears the provisional. Exact crash replay resumes only post-observation
 from the matching provisional. Existing failed-apply recovery state and request/result
 identities are not read as 051 authority or rewritten.
+
+New graph-phase receipts and explicit incident settlement follow
+[execution-v2.md](execution-v2.md). Historical absence is unknown; possible effects
+cannot be cleared by an empty runtime. Settlement preserves original uncertainty
+and generation and is not an observation-recovery success.

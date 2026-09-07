@@ -29,6 +29,141 @@ def private_config_hash_identity(service, raw_hash):
 
 
 class ActivationPrivateComposeSourceTests(unittest.TestCase):
+    def test_lenzora_private_transport_refuses_unsnapshotted_secret_sources(self):
+        from sandbox.commands.hosting import _host_image_argv_runner
+        from sandbox.hosting.images.activation.v2_models import PrivateComposeInputSnapshotV2
+        from sandbox.transports.remote_hosting_activation import (
+            RegisteredRemoteActivationTransport, RemoteActivationError,
+        )
+        from tests.fixtures.hosting_image_activation import lenzora_compose_fixture
+        from tests.test_hosting_image_activation_v2 import artifacts, TARGET
+
+        plan, _proof, _snapshot = artifacts()
+        fixture = lenzora_compose_fixture(plan)
+        rendered = fixture["compose"]
+        self.assertEqual(len(fixture["persistent_services"]), 17)
+        self.assertEqual(len(fixture["initializer_order"]), 3)
+        bindings = plan.as_mapping()["service_image_bindings"]
+        images = {row["service"]: row["image_ref"] for row in bindings if row["kind"] == "persistent"}
+        by_image = {row.name: row.image_ref for row in plan.receipt.images}
+        environment = {variable: by_image[name] for name, variable in plan.policy.activation_environment_bindings}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            env_file = root / "environment.env"
+            env_file.write_text("WORKER_TOKEN=" + fixture["environment"]["WORKER_TOKEN"] + "\n")
+            env_file.chmod(0o600)
+            docker = root / "docker"
+            docker.write_text("\n".join((
+                "#!/usr/bin/env python3", "import json,sys", "a=sys.argv[1:]",
+                "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
+                "if '--hash' in a: print(a[-1] + ' ' + 'b' * 64); sys.exit(0)",
+                "if '--profiles' in a: print('job-orchestration'); sys.exit(0)",
+                "if a and a[0]=='compose' and 'config' in a: print(" + repr(json.dumps(rendered)) + "); sys.exit(0)",
+                "sys.exit(99)")))
+            docker.chmod(0o700)
+            calls = []
+            def ssh(_entry, command, **kwargs):
+                result = run_test_process(shlex.split(command),
+                    env=synthetic_environment({"PATH": f"{root}:/usr/bin:/bin"}),
+                    input=kwargs.get("input_data"), text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls.append(result); return result
+            provider = {"snapshot_id": "compose-snapshot/full-topology",
+                "provider_revision": "fixture-v2", "target": TARGET,
+                "compose_files": (str(root / "compose.yml"),), "project_name": "fixture",
+                "project_directory": str(root), "environment_file": str(env_file)}
+            closed = {"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+            with patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh), \
+                    patch("sandbox.transports.remote_hosting_activation.CLOSED_ENVIRONMENT", closed):
+                transport = RegisteredRemoteActivationTransport(argv_runner=_host_image_argv_runner(
+                    {}, compose_snapshot_provider=provider), configuration_binding_key=CONFIGURATION_KEY)
+                arguments = {"compose_files": provider["compose_files"], "project_name": "fixture",
+                    "selected_services": fixture["persistent_services"],
+                    "allowed_services": tuple(sorted(rendered["services"])),
+                    "service_image_bindings": images, "environment_bindings": environment}
+                digest = transport.prepare_compose_snapshot_v2(**arguments, target=TARGET,
+                    snapshot_id=provider["snapshot_id"], provider_revision=provider["provider_revision"])
+                snapshot = PrivateComposeInputSnapshotV2.create(snapshot_id=provider["snapshot_id"],
+                    provider_revision=provider["provider_revision"], target=TARGET,
+                    plan_set_digest=plan.plan_set_digest, selected_services=fixture["persistent_services"],
+                    configuration_digest=digest, expires_at=4_000_000_000)
+                provider.update(snapshot_digest=snapshot.snapshot_digest, render_digest=digest)
+                transport = RegisteredRemoteActivationTransport(argv_runner=_host_image_argv_runner(
+                    {}, compose_snapshot_provider=provider), configuration_binding_key=CONFIGURATION_KEY)
+                with self.assertRaises(RemoteActivationError):
+                    transport.render_topology_v2(**arguments, topology_digest="sha256:" + "a" * 64,
+                        private_compose_snapshot=snapshot.as_mapping())
+            self.assertNotIn(fixture["environment"]["WORKER_TOKEN"],
+                             "".join(result.stdout + result.stderr for result in calls))
+
+    def test_candidate_inputs_are_private_atomic_and_bound_to_signed_source(self):
+        from sandbox.transports.remote_hosting_activation import PRIVATE_CANDIDATE_INPUT_PROGRAM
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); source = root / "source"; source.mkdir()
+            source.chmod(0o700)
+            compose = source / "compose.yml"
+            compose.write_text("services:\n  web:\n    image: synthetic\n")
+            for argv in (("git", "init", "-q"), ("git", "add", "compose.yml"),
+                         ("git", "-c", "user.name=Fixture", "-c",
+                          "user.email=fixture@example.invalid", "commit", "-qm", "fixture")):
+                run_test_process(argv, cwd=source, check=True, capture_output=True)
+            revision = run_test_process(("git", "rev-parse", "HEAD"), cwd=source,
+                                        check=True, capture_output=True, text=True).stdout.strip()
+            runtime = root / "runtime"; runtime.mkdir(mode=0o700)
+            legacy = runtime / "environment.env"; legacy.write_text("STALE=1\n")
+            canary = "synthetic-private-candidate-value"
+            frame = {"source_directory": str(source), "source_revision": revision,
+                     "runtime_directory": str(runtime), "candidate_id": "a" * 64,
+                     "compose_files": ["compose.yml"],
+                     "environment": "TOKEN=" + canary + "\n",
+                     "compose_override": "services: {}\n"}
+
+            def invoke(value):
+                return run_test_process(("python3", "-c", PRIVATE_CANDIDATE_INPUT_PROGRAM),
+                    input=json.dumps(value), text=True, capture_output=True)
+
+            first = invoke(frame)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(json.loads(first.stdout), {"ok": True, "result": "prepared"})
+            candidate = runtime / "activation-inputs" / ("a" * 64)
+            self.assertEqual((candidate / "environment.env").read_text(), frame["environment"])
+            self.assertEqual((candidate / "compose-0.yml").read_bytes(), compose.read_bytes())
+            self.assertEqual(candidate.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((candidate / "environment.env").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(invoke(frame).stdout)["result"], "replayed")
+            changed = invoke({**frame, "environment": "TOKEN=changed\n"})
+            self.assertNotEqual(changed.returncode, 0)
+            self.assertEqual((candidate / "environment.env").read_text(), frame["environment"])
+            mismatch = invoke({**frame, "candidate_id": "b" * 64,
+                               "source_revision": "f" * 40})
+            self.assertNotEqual(mismatch.returncode, 0)
+            self.assertFalse((runtime / "activation-inputs" / ("b" * 64)).exists())
+            original_compose = compose.read_bytes()
+            compose.write_text("services: {changed: {}}\n")
+            dirty = invoke({**frame, "candidate_id": "c" * 64})
+            self.assertNotEqual(dirty.returncode, 0)
+            self.assertFalse((runtime / "activation-inputs" / ("c" * 64)).exists())
+            compose.write_bytes(original_compose)
+            foreign = root / "foreign"; foreign.mkdir()
+            collision = runtime / "activation-inputs" / ("d" * 64)
+            collision.symlink_to(foreign, target_is_directory=True)
+            self.assertNotEqual(invoke({**frame, "candidate_id": "d" * 64}).returncode, 0)
+            self.assertTrue(collision.is_symlink())
+            self.assertEqual(list(foreign.iterdir()), [])
+            interrupted_program = PRIVATE_CANDIDATE_INPUT_PROGRAM.replace(
+                "publish(temporary, destination)", "raise OSError('synthetic interruption')")
+            interrupted = run_test_process(("python3", "-c", interrupted_program),
+                input=json.dumps({**frame, "candidate_id": "e" * 64}),
+                text=True, capture_output=True)
+            self.assertNotEqual(interrupted.returncode, 0)
+            self.assertFalse((runtime / "activation-inputs" / ("e" * 64)).exists())
+            self.assertEqual(list((runtime / "activation-inputs").glob(".candidate-*")), [])
+            self.assertEqual(legacy.read_text(), "STALE=1\n")
+            self.assertNotIn(canary, PRIVATE_CANDIDATE_INPUT_PROGRAM + first.stdout +
+                             first.stderr + changed.stdout + changed.stderr +
+                             dirty.stdout + dirty.stderr + interrupted.stdout + interrupted.stderr)
+
     def test_v2_prepare_identifies_private_render_without_exposing_it(self):
         from sandbox.commands.hosting import _host_image_argv_runner
         from sandbox.transports.remote_hosting_activation import RegisteredRemoteActivationTransport
@@ -39,10 +174,15 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); environment_file = root / "environment.env"
             environment_file.write_text(f"DATABASE_URL={canary}\n"); environment_file.chmod(0o600)
+            root = root.resolve()
+            secret_file = root / "secret-0"
+            secret_file.write_text(canary); secret_file.chmod(0o600)
             docker = root / "docker"
             rendered = {"services": {"web": {"image": image, "build": None,
                 "pull_policy": "never", "platform": "linux/amd64", "depends_on": {},
-                "environment": {"DATABASE_URL": canary}}}}
+                "environment": {"DATABASE_URL": canary},
+                "secrets": [{"source": "token", "target": "token"}]}},
+                "secrets": {"token": {"file": str(secret_file)}}}
             docker.write_text("\n".join((
                 "#!/usr/bin/env python3", "import json,sys", "a=sys.argv[1:]",
                 "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
@@ -56,9 +196,10 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                     input=kwargs.get("input_data"), text=True, capture_output=True)
                 results.append(result); return result
             provider = {"snapshot_id": "compose-snapshot/test-a",
+                "input_contract": "candidate-v1",
                 "provider_revision": "provider-v2", "target": target,
                 "compose_files": ("/synthetic/compose.yml",), "project_name": "widget",
-                "project_directory": "/synthetic", "environment_file": str(environment_file)}
+                "project_directory": str(root), "environment_file": str(environment_file)}
             closed = {"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
             with patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh_run), \
                     patch("sandbox.transports.remote_hosting_activation.CLOSED_ENVIRONMENT", closed):
@@ -70,7 +211,29 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                     compose_files=provider["compose_files"], project_name="widget",
                     selected_services=("web",), service_image_bindings={"web": image},
                     environment_bindings={"WEB_IMAGE": image}, target=target,
-                    snapshot_id=provider["snapshot_id"], provider_revision="provider-v2")
+                    snapshot_id=provider["snapshot_id"], provider_revision="provider-v2",
+                    input_contract="candidate-v1")
+                from sandbox.hosting.images.activation.v2_models import PrivateComposeInputSnapshotV2
+                snapshot = PrivateComposeInputSnapshotV2.create(
+                    snapshot_id=provider["snapshot_id"], provider_revision="provider-v2",
+                    target=target, plan_set_digest="sha256:" + "c" * 64,
+                    selected_services=("web",), configuration_digest=digest,
+                    expires_at=4_000_000_000, input_contract="candidate-v1")
+                provider.update(snapshot_digest=snapshot.snapshot_digest, render_digest=digest)
+                rendered_topology = transport.render_topology_v2(
+                    compose_files=provider["compose_files"], project_name="widget",
+                    selected_services=("web",), service_image_bindings={"web": image},
+                    environment_bindings={"WEB_IMAGE": image}, topology_digest="sha256:" + "d" * 64,
+                    private_compose_snapshot=snapshot.as_mapping())
+                self.assertEqual(rendered_topology["configuration_digest"], digest)
+                secret_file.write_text(canary + "-changed")
+                from sandbox.transports.remote_hosting_activation import RemoteActivationError
+                with self.assertRaises(RemoteActivationError):
+                    transport.render_topology_v2(
+                        compose_files=provider["compose_files"], project_name="widget",
+                        selected_services=("web",), service_image_bindings={"web": image},
+                        environment_bindings={"WEB_IMAGE": image}, topology_digest="sha256:" + "d" * 64,
+                        private_compose_snapshot=snapshot.as_mapping())
         self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn(canary, "".join(
             (item.stdout or "") + (item.stderr or "") for item in results))

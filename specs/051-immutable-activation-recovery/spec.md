@@ -8,6 +8,12 @@
 
 **Input**: Ready PRD at `specs/051-immutable-activation-recovery/prd.md`
 
+**Deployment amendment**: 2026-09-07, following the user-requested Astra XHigh
+end-to-end deployment audit and instruction for current-agent implementation.
+The original PRD/review remains historical. The requirements below extend the
+accepted execution contract; they do not authorize live incident settlement,
+credential access, data changes, or deployment.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Activate the Exact Staged Generation (Priority: P1)
@@ -134,6 +140,48 @@ data, second-oldest selection, and every registry/pull path.
    requested, **Then** it refuses before runtime effects.
 3. **Given** no previous generation or its local proof/image is unavailable, **When**
    rollback is requested, **Then** it refuses without registry, pull, or fallback.
+
+### User Story 6 - Complete a Cold Deployment Once (Priority: P1)
+
+A release operator deploys to a registered target without relying on stale source,
+private settings, existing queue processes, or already-configured routes. Each
+required startup job runs once, after its prerequisites and before its consumers.
+
+**Independent Test**: Start a synthetic Lenzora-shaped target with no running
+services, private file-backed credentials and delayed readiness. Prove prerequisite,
+initializer, consumer and edge ordering through one durable receipt chain. Repeat
+with failures at each boundary and prove no automatic duplicate effects.
+
+**Acceptance Scenarios**:
+
+1. **Given** an exact signed application and complete private candidate, **When**
+   activation starts, **Then** prerequisites become ready before dependent startup
+   jobs, jobs finish before consumers, and a bounded readiness wait precedes commit.
+2. **Given** two environments for one project, **When** one prepares source or
+   configuration, **Then** the other's running source and retained inputs remain intact.
+3. **Given** unavailable private credentials or known provider capability failure,
+   **When** preflight runs, **Then** no initializer, runtime or provider write starts.
+
+### User Story 7 - Settle an Uncertain Incident Without Inventing Success (Priority: P1)
+
+A production owner can explicitly settle a quiescent, preserved incident whose
+historical effects cannot be proven absent. Settlement preserves the uncertainty
+and does not claim successful deployment or reversal of data changes.
+
+**Independent Test**: Bind a synthetic uncertain transaction to exact containment,
+preservation, data-assessment and operator-approval evidence. Prove that settlement
+changes only terminal ownership, keeps generation/current unchanged, and requires
+explicit predecessor and data-compatibility authority for a new forward attempt.
+
+**Acceptance Scenarios**:
+
+1. **Given** missing quiescence, preservation, data assessment or approval evidence,
+   **When** settlement is requested, **Then** ownership remains fenced.
+2. **Given** complete unchanged evidence and exact approval, **When** settlement
+   commits, **Then** it records `abandoned_with_effects`, preserves the original
+   uncertainty, and performs no deployment, deletion, migration or provider effect.
+3. **Given** a settled incident, **When** a new activation omits its predecessor or
+   reviewed data-compatibility decision, **Then** it refuses before effects.
 
 ### Edge Cases
 
@@ -424,9 +472,25 @@ data, second-oldest selection, and every registry/pull path.
   exact pre-forward deterministic subject/grant referenced by forward acceptance and
   terminal generation, with zero credential/broker/registry/pull/build calls.
 - **SC-008**: Credential canaries, secret values, and Feature 049 trust-policy calls have
-  zero witnesses in 051 state, output, logs, adapters, and process inputs.
+  zero witnesses in public 051 state, output, logs and process arguments. Supported
+  application secret delivery uses only the private stdin/files allowed by FR-016 and
+  FR-053; the machine master never leaves its owner and the derived key never reaches
+  a child process. Activation after admission performs no broker or trust-policy calls.
 - **SC-009**: Non-opt-in and legacy Feature 048 compatibility suites retain their
   existing results and old opaque state is byte-preserved by no-op/read paths.
+- **SC-010**: A real disposable Lenzora-shaped cold deployment proves one queue
+  prerequisite, all three ordered initializer exit/termination/cleanup receipts,
+  all 17 exact healthy persistent services and the complete edge receipt before commit.
+  Every injected uncertain boundary produces zero additional automatic starts.
+- **SC-011**: Synthetic private-input tests prove exact secret-file delivery, unchanged
+  retained inputs on publication failure, replay without a second broker read, and no
+  cross-environment source mutation. Wrong application/control/tool identity refuses.
+- **SC-012**: Every settlement success preserves original uncertainty and generation,
+  requires exact approval/quiescence/preservation/data evidence, and performs zero
+  runtime, data, provider or deletion effects. Every missing or changed evidence case
+  stays fenced; no new forward operation omits predecessor/data authority.
+- **SC-013**: Opt-in development cold-start tests prove each initializer starts once
+  before its consumers, while the non-opt-in hosting compatibility suite remains green.
 
 ## Assumptions
 
@@ -452,3 +516,82 @@ data, second-oldest selection, and every registry/pull path.
   activation generation, identify private Compose input through target-scoped HMAC, mint
   a 60-3600 second snapshot, obtain and immediately verify a bounded rollback signature
   through ssh-agent using only command-installed public identity, and install owner-only.
+
+## Complete deployment execution amendment
+
+- **FR-052**: A new production candidate MUST bind the exact signed application
+  revision and tracked manifest/Compose bytes from the selected clean application
+  checkout. It MUST NOT rely on or alter a development checkout on the target.
+  Complete candidate inputs MUST be published atomically with owner-only access,
+  no replacement of retained inputs, bounded private transfer, and protected identities.
+- **FR-053**: An explicit new private-input contract MAY support environment-backed
+  Compose secrets only by capturing their exact registered values into candidate-owned
+  files and binding the bytes, declared service mappings and mount identities with
+  target-scoped HMAC. Application file-secret semantics MUST remain intact. Other
+  external secrets/configs, uncaptured file dependencies and production source bind
+  mounts MUST refuse. Secret material and raw verifiers MUST remain private per FR-016.
+- **FR-054**: Private preparation MUST resolve source and broker authority under
+  documented guards and use a distinct replay-safe preparation identity. Exact replay
+  MUST reuse retained inputs without resolving secrets again. Changed content under
+  the same identity MUST conflict; rotation requires an explicitly new preparation
+  with no conflicting active owner. Admission expiry MUST NOT erase recovery inputs.
+- **FR-055**: An explicit execution revision MUST bind a closed, acyclic dependency
+  graph covering prerequisite services, ordered initializers, consumer services and
+  dependency conditions. The graph MUST preserve declared initializer order, exact
+  image membership and bounded phase deadlines. No dependency may start implicitly.
+  For Lenzora, the exact queue prerequisite MUST be healthy before its topology gate;
+  migrate, storage and topology initialization MUST precede their consumers.
+- **FR-056**: Every prerequisite, initializer, consumer and edge phase MUST have a
+  durable preparation/effect/terminal boundary. Initializer exit and termination
+  evidence MUST be persisted before owned cleanup; cleanup completion MUST then be
+  persisted before dependents proceed. Possible effects MUST remain monotonic even
+  when later transport or persistence fails. All generation/edge/recovery authority
+  MUST bind the complete required receipt chain, never infer completion from absence.
+- **FR-057**: Readiness MUST converge through bounded read-only observations after
+  the admitted runtime effect. Legitimate startup may remain pending until its deadline;
+  changed image/configuration/target identity or incoherent evidence MUST fence the
+  operation. Waiting MUST NOT repeat runtime effects. Commit requires fresh complete
+  readiness and unchanged post-edge evidence.
+- **FR-058**: First-target port reservation, runtime registration and route/provider
+  setup MUST use the shared owner and existing provider mechanisms with bound intent
+  and terminal receipts. Known provider/zone capability failures MUST refuse before
+  initializer/runtime effects. A purge MUST NOT serve as a capability probe. Recovery
+  may assemble an aggregate from exact durable acknowledgements without resubmission.
+- **FR-059**: Observation recovery MUST resolve retained private selectors without
+  current source regeneration or new secret access. Empty runtime after any possible
+  prerequisite, initializer, consumer or edge effect MUST NOT authorize `no_effect`.
+  Historical records lacking execution evidence MUST remain explicitly unknown.
+- **FR-060**: New v2 forward acceptance and generations MUST retain the pre-forward
+  compatibility subject/grant required by FR-034. Later rollback MUST validate that
+  history, the previous private candidate and local images, and MUST NOT rerun forward
+  initialization. A new post-forward signature MUST NOT replace missing history.
+  Admission expiry and retained rollback validity MUST have distinct explicit meaning.
+- **FR-061**: A separate operator settlement MAY record `abandoned_with_effects` only
+  under exact machine-installed approval of a plan binding transaction, target/daemon,
+  generation, quiescent processes, preserved container/data identities, backup and
+  reviewed data-assessment evidence. Fresh observations MUST match before commit.
+  Settlement MUST preserve original uncertainty, keep generation/current unchanged,
+  perform no deployment/data/provider/deletion effects, and release proof custody only
+  after its immutable terminal ownership result is durable. Deploy MUST NOT invoke it
+  automatically; ordinary recovery MUST NOT use it to manufacture missing receipts.
+- **FR-062**: Forward activation after settlement MUST name that exact predecessor
+  and a separately reviewed data/schema compatibility decision. Missing or changed
+  evidence MUST refuse. Settlement MUST NOT authorize adoption, rollback, automatic
+  migration replay, source identity changes, or removal of retained data/artifacts.
+- **FR-063**: Deployment control revision, application revision and Sandbox revision
+  MUST be independently exact and reported. The application revision MUST match the
+  receipt, manifest/Compose bytes, images, derived environment and running evidence.
+  A reviewed control-only revision MAY operate on an unchanged signed application
+  checkout; it MUST NOT relabel changed application input or bypass target uncertainty.
+  Existing equal control/application defaults MUST remain compatible.
+- **FR-064**: The opt-in development deployment path MUST own the complete effective
+  prerequisite/initializer/consumer sequence exactly once and prepare environment-scoped
+  source without changing another environment's live mounts. Legacy source selectors
+  MUST remain readable; source relocation MUST be explicit and preserve mounted inputs.
+  The development server mode and non-opt-in hosting behavior MUST remain compatible.
+- **FR-065**: Deployment diagnostics MUST distinguish bounded fixed preparation,
+  source, secret, runtime, provider, schema and recovery refusal reasons without arbitrary
+  error output. Acceptance MUST include real disposable topology composition, private
+  secret delivery, cold prerequisites, delayed readiness and crash/no-replay evidence
+  in addition to local unit gates. Local, disposable runtime and production evidence
+  MUST remain separately identified.

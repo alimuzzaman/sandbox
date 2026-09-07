@@ -371,7 +371,9 @@ def recovery_decision(transaction: dict[str, Any], classification: str, *,
             and operation == "activate" and entered
             and phase in {"runtime_pending", "uncertain"}
             and classification == "exact_prior"):
-        return "recovery_no_effect", False, True
+        # Empty runtime describes containers only. A prerequisite, initializer
+        # or worker may already have changed persistent data before disappearing.
+        return "effect_unknown", False, False
     if phase in {"accepted", "preflight", "init_pending"} and not entered:
         if classification == "exact_prior": return "recovery_no_effect", False, True
         return "recovery_conflict", False, False

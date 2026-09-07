@@ -256,6 +256,15 @@ class CandidateInputTests(unittest.TestCase):
                                                          "/private/candidate", b"k" * 32)
         self.assertEqual(named_files, files)
         self.assertEqual(named_render["secrets"]["token"], {"name": "fixture_token", "file": "/private/candidate/secret-0"})
+        absolute = {**compose, "services": {"web": {
+            **compose["services"]["web"],
+            "secrets": [{"source": "token", "target": "/run/secrets/token"}],
+        }}}
+        absolute_render, absolute_files, _ = materialize_secrets(
+            absolute, {"WORKER_TOKEN": canary}, "/private/candidate", b"k" * 32)
+        self.assertEqual(absolute_files, files)
+        self.assertEqual(absolute_render["services"]["web"]["secrets"],
+                         [{"source": "token", "target": "/run/secrets/token"}])
         for secrets in ({}, {"WORKER_TOKEN": None}):
             with self.assertRaisesRegex(ValueError, "secret_source_refused"):
                 materialize_secrets(compose, secrets, "/private/candidate", b"k" * 32)

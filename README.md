@@ -846,6 +846,10 @@ plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a rem
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
 — see [`docs/remote-hosting.md`](docs/remote-hosting.md).
 
+Immutable multi-image activation prepares private candidate configuration without
+overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)
+for source binding, replay limits and required initializer execution proof.
+
 There is **no central project catalog** — each plugin self-describes.
 
 ### Clean URLs and host ingress

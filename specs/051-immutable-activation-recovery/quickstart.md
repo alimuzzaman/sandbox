@@ -3,6 +3,17 @@
 This is a post-implementation verification guide. Use only synthetic artifacts and fake
 runtime/edge adapters until separate remote/deployment authorization exists.
 
+For the complete v2 execution amendment, first exercise one Lenzora-shaped synthetic
+fixture through real codecs/private helpers and CLI composition. Cover candidate
+secret files, exact A/D/S, queue prerequisites, three ordered initializers, delayed
+readiness, graph-phase crash/replay, retained rollback authority, settlement refusal
+and opt-in dev initialization/source isolation. Follow `contracts/execution-v2.md`.
+Then run the existing local compatibility gates below and the required full suite.
+A separately authorized disposable Docker/Compose cold-start test must prove actual
+secret mounts, users, image identities and receipts; local fakes do not replace it.
+Installed-tool, provider, incident preservation/settlement and public production
+proof remain separate gates with explicit approval and exact identities.
+
 1. Run the focused 051 model/policy/repository/init/runtime/service/CLI suites.
 2. Prove caller plan/proof alone refuses; exact machine activation binding plus a Feature
    050 prepared proof lease/pin acquired before validation and held through durable host

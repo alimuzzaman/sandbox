@@ -315,3 +315,39 @@ class RaceHarness:
         self.owner = capability
         try: yield
         finally: self.owner = None
+
+
+def lenzora_compose_fixture(plan):
+    """Synthetic full topology; no real application settings or credentials."""
+    bindings = plan.as_mapping()["service_image_bindings"]
+    order = ("lenzora-migrate", "lenzora-storage-init", "lenzora-job-queue-topology-gate")
+    queue = "lenzora-job-queue"
+    secret_services = ("lenzora-web", "lenzora-job-worker", "lenzora-webhook-delivery-worker")
+    services = {}
+    for binding in bindings:
+        name = binding["service"]
+        services[name] = {"image": binding["image_ref"], "build": None,
+            "pull_policy": "never", "platform": "linux/amd64", "depends_on": {},
+            "environment": {"APP_REVISION": plan.policy.source_revision},
+            "networks": {"default": None}}
+        if binding["kind"] == "persistent" and name != queue:
+            services[name]["depends_on"] = {
+                init: {"condition": "service_completed_successfully"} for init in order}
+            services[name]["healthcheck"] = {
+                "test": ["CMD", "true"], "start_period": "10s", "interval": "1s"}
+        if name.startswith("lenzora-job-"):
+            services[name]["profiles"] = ["job-orchestration"]
+    services[order[-1]]["depends_on"] = {queue: {"condition": "service_healthy"}}
+    services[queue]["healthcheck"] = {"test": ["CMD", "true"], "interval": "1s"}
+    services[queue]["volumes"] = [{"type": "volume", "source": "queue-data", "target": "/data"}]
+    services[order[0]]["environment"]["DATABASE_URL"] = "postgresql://fixture:fixture@fixture-db/db"
+    for service in secret_services:
+        services[service]["secrets"] = [{"source": "worker-token", "target": "worker-token"}]
+        services[service]["environment"]["WORKER_TOKEN_FILE"] = "/run/secrets/worker-token"
+    return {"compose": {"services": services, "networks": {"default": {}},
+                        "volumes": {"queue-data": {}},
+                        "secrets": {"worker-token": {"environment": "WORKER_TOKEN"}}},
+            "environment": {"WORKER_TOKEN": "synthetic-lenzora-secret-never-public"},
+            "initializer_order": order, "prerequisites": (queue,),
+            "persistent_services": tuple(plan.policy.persistent_services),
+            "secret_services": secret_services}

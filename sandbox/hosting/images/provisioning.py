@@ -20,7 +20,7 @@ from typing import Any, Callable
 from sandbox.hosting.images.activation.models import activation_digest
 from sandbox.hosting.images.activation.policy import SshRollbackGrantVerifier
 from sandbox.hosting.images.activation.v2_models import (
-    PrivateComposeInputSnapshotV2, RollbackCompatibilityGrantV2,
+    InitExecutionContractV2, PrivateComposeInputSnapshotV2, RollbackCompatibilityGrantV2,
 )
 from sandbox.hosting.images.models import TargetScope, canonical_digest
 from sandbox.hosting.images.plan_set import (
@@ -40,6 +40,7 @@ class ProvisioningError(RuntimeError):
     CODES = frozenset({
         "authority_missing", "artifact_invalid", "conflict", "generation_mismatch",
         "ledger_mismatch", "path_unsafe", "signature_invalid", "target_mismatch",
+        "preparation_expired",
     })
 
     def __init__(self, code: str) -> None:
@@ -141,6 +142,72 @@ def install_owner_only_json(path: Path, value: dict[str, Any]) -> str:
             except OSError: pass
 
 
+def _validate_activation_bundle(raw):
+    if (type(raw) is not dict or set(raw) != {"schema_version", "compose_snapshot",
+            "rollback_grant", "rollback_grant_public_key", "stage_ledger"}
+            or type(raw["schema_version"]) is not int or raw["schema_version"] != 2):
+        raise ProvisioningError("conflict")
+    snapshot = PrivateComposeInputSnapshotV2.from_mapping(raw["compose_snapshot"])
+    grant = RollbackCompatibilityGrantV2.from_mapping(raw["rollback_grant"])
+    ledger = raw["stage_ledger"]
+    if (type(ledger) is not dict or set(ledger) != {"authority", "revision"}
+            or ledger["authority"] != "feature-050-stage-ledger-v2"
+            or type(ledger["revision"]) is not int or ledger["revision"] < 1
+            or type(raw["rollback_grant_public_key"]) is not str
+            or snapshot.target != grant.target
+            or snapshot.plan_set_digest != grant.candidate_plan_set_digest
+            or (snapshot.input_contract is not None
+                and grant.compose_snapshot_digest != snapshot.snapshot_digest)
+            or (grant.compose_snapshot_digest is not None
+                and grant.compose_snapshot_digest != snapshot.snapshot_digest)
+            or not SshRollbackGrantVerifier(raw["rollback_grant_public_key"],
+                grant.authority_id).verify(grant)):
+        raise ProvisioningError("conflict")
+    return snapshot, grant
+
+
+def reuse_activation_bundle(path: Path, *, plan: VerifiedImagePlanSet, proof: StagedImageProofSet,
+        current_generation: int, current_generation_digest: str, stage_ledger_revision: int,
+        snapshot_id: str, provider_revision: str, authority_id: str,
+        authority_revision: str, public_key: str, now: int | None = None) -> dict | None:
+    """Return exact retained admission authority without signing or secret reads.
+
+    Expired authority requires a distinct, explicitly admitted preparation. A
+    retry must not silently rotate the inputs behind an existing snapshot ID.
+    """
+    from sandbox.hosting.images.plan_set import read_stable_file
+    try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        raw = _load_json_bytes(read_stable_file(path, MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True))
+        snapshot, grant = _validate_activation_bundle(raw)
+        prior = activation_digest("sandbox.hosting.images.activation-genesis.v2",
+            {"target": proof.target.as_mapping(), "generation": 0}) if current_generation == 0 else current_generation_digest
+        if (snapshot.input_contract != "candidate-v1" or snapshot.snapshot_id != snapshot_id
+                or snapshot.provider_revision != provider_revision
+                or snapshot.plan_set_digest != plan.plan_set_digest
+                or snapshot.selected_services != plan.policy.persistent_services
+                or snapshot.target != proof.target.as_mapping()
+                or grant.expected_generation != current_generation
+                or grant.prior_generation_digest != prior
+                or grant.candidate_proof_set_digest != proof.proof_digest
+                or grant.policy_digest != plan.policy.policy_digest
+                or grant.authority_id != authority_id or grant.authority_revision != authority_revision
+                or raw["rollback_grant_public_key"] != public_key
+                or raw["stage_ledger"] != {"authority": "feature-050-stage-ledger-v2", "revision": stage_ledger_revision}):
+            raise ProvisioningError("conflict")
+        instant = int(time.time()) if now is None else now
+        if grant.issued_at > instant or min(snapshot.expires_at, grant.expires_at) <= instant:
+            raise ProvisioningError("preparation_expired")
+        return raw
+    except ProvisioningError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError):
+        raise ProvisioningError("artifact_invalid") from None
+
+
 def install_activation_bundle(path: Path, value: dict[str, Any], *, now: int | None = None) -> str:
     """Install/renew v2 authority while the caller holds the target mutation lock.
 
@@ -153,27 +220,9 @@ def install_activation_bundle(path: Path, value: dict[str, Any], *, now: int | N
         return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
                 info.st_ctime_ns, info.st_uid, info.st_mode, info.st_nlink)
 
-    def validate(raw):
-        if (type(raw) is not dict or set(raw) != {"schema_version", "compose_snapshot",
-                "rollback_grant", "rollback_grant_public_key", "stage_ledger"}
-                or type(raw["schema_version"]) is not int or raw["schema_version"] != 2):
-            raise ProvisioningError("conflict")
-        snapshot = PrivateComposeInputSnapshotV2.from_mapping(raw["compose_snapshot"])
-        grant = RollbackCompatibilityGrantV2.from_mapping(raw["rollback_grant"])
-        ledger = raw["stage_ledger"]
-        if (type(ledger) is not dict or set(ledger) != {"authority", "revision"}
-                or ledger["authority"] != "feature-050-stage-ledger-v2"
-                or type(ledger["revision"]) is not int or ledger["revision"] < 1
-                or type(raw["rollback_grant_public_key"]) is not str
-                or snapshot.target != grant.target
-                or snapshot.plan_set_digest != grant.candidate_plan_set_digest
-                or not SshRollbackGrantVerifier(raw["rollback_grant_public_key"],
-                    grant.authority_id).verify(grant)):
-            raise ProvisioningError("conflict")
-        return snapshot, grant
 
     try:
-        fresh_snapshot, fresh_grant = validate(value)
+        fresh_snapshot, fresh_grant = _validate_activation_bundle(value)
         try:
             return install_owner_only_json(path, value)
         except ProvisioningError as exc:
@@ -182,7 +231,7 @@ def install_activation_bundle(path: Path, value: dict[str, Any], *, now: int | N
         before = path.lstat()
         retained = read_stable_file(path, MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True)
         old = _load_json_bytes(retained)
-        snapshot, grant = validate(old)
+        snapshot, grant = _validate_activation_bundle(old)
         instant = int(time.time()) if now is None else now
         if (snapshot.expires_at > instant or grant.expires_at > instant
                 or fresh_snapshot.expires_at <= instant or fresh_grant.expires_at <= instant
@@ -547,7 +596,8 @@ def prepare_activation_bundle(*, plan: VerifiedImagePlanSet,
         configuration_digest: str, snapshot_id: str, provider_revision: str,
         snapshot_expires_at: int, authority_revision: str,
         signer: SshAgentRollbackSigner, grant_ttl_seconds: int = 900,
-        now: int | None = None) -> dict[str, Any]:
+        now: int | None = None, input_contract: str | None = None,
+        init_contract: InitExecutionContractV2 | None = None) -> dict[str, Any]:
     """Mint the post-stage activation bundle from retained repository evidence."""
     try:
         if (type(plan) is not VerifiedImagePlanSet or type(proof) is not StagedImageProofSet
@@ -574,7 +624,8 @@ def prepare_activation_bundle(*, plan: VerifiedImagePlanSet,
             snapshot_id=snapshot_id, provider_revision=provider_revision, target=target,
             plan_set_digest=plan.plan_set_digest,
             selected_services=plan.policy.persistent_services,
-            configuration_digest=configuration_digest, expires_at=snapshot_expires_at)
+            configuration_digest=configuration_digest, expires_at=snapshot_expires_at,
+            input_contract=input_contract, init_contract=init_contract)
         if type(grant_ttl_seconds) is not int or not 60 <= grant_ttl_seconds <= 3600:
             raise ProvisioningError("artifact_invalid")
         unsigned = {"schema_version": 2, "authority_id": signer.authority_id,
@@ -585,6 +636,8 @@ def prepare_activation_bundle(*, plan: VerifiedImagePlanSet,
             "candidate_proof_set_digest": proof.proof_digest,
             "policy_digest": plan.policy.policy_digest, "issued_at": issued,
             "expires_at": issued + grant_ttl_seconds}
+        if snapshot.input_contract is not None:
+            unsigned["compose_snapshot_digest"] = snapshot.snapshot_digest
         signature = signer.sign(unsigned)
         body = {**unsigned, "authority_proof": signature}
         grant = RollbackCompatibilityGrantV2(**body, grant_digest=activation_digest(

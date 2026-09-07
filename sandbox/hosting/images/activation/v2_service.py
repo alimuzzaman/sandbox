@@ -82,11 +82,15 @@ class ActivationServiceV2:
             grant = (grant_value if type(grant_value) is RollbackCompatibilityGrantV2
                      else RollbackCompatibilityGrantV2.from_mapping(grant_value))
             self._validate_grant(request, grant, prior_digest, chosen)
+            recovery_context = {"target": target, "compose_project": compose_project,
+                                "selected_services": list(request.compose_snapshot.selected_services)}
+            contract = request.compose_snapshot.init_contract
+            if contract is not None and contract.graph is not None:
+                recovery_context.update(compose_snapshot=request.compose_snapshot.as_mapping(),
+                                        compatibility_grant=grant.as_mapping())
             status, transaction = self.repository.accept_v2(
                 request, proof_set_digest=request.proof_set["proof_digest"],
-                recovery_context={"target": target, "compose_project": compose_project,
-                                  "selected_services": list(
-                                      request.compose_snapshot.selected_services)},
+                recovery_context=recovery_context,
                 prior_generation_digest=prior_digest,
                 admission_deadline=admission_deadline,
                 stage_ledger_authority=stage_ledger_authority,
@@ -107,6 +111,17 @@ class ActivationServiceV2:
                     "conflict": "request_conflict", "lease_conflict": "lease_conflict",
                 }.get(status, "artifact_invalid"))
             transaction_digest = transaction.get("transaction_digest", request.request_digest)
+            # The legacy v2 request binds a set of one-shot services but carries
+            # no authenticated execution order or terminal initializer receipts.
+            # Never treat their presence in an image proof as execution proof.
+            graph_contract = request.compose_snapshot.init_contract
+            has_graph = graph_contract is not None and graph_contract.graph is not None
+            if ((request.plan_set.policy.one_shot_services and not has_graph)
+                    or (graph_contract is not None and not has_graph)
+                    or (has_graph and (chosen is not None
+                        or not callable(getattr(self.runtime_adapter, "bind_execution_v2", None))
+                        or not callable(getattr(self.runtime_adapter, "execute_graph_step_v2", None))))):
+                raise ActivationContractError("init_mismatch")
             if chosen is None:
                 images, bindings, topology = self._preflight_candidate(
                     request, compose_files, compose_project)
@@ -139,16 +154,35 @@ class ActivationServiceV2:
                 compose_snapshot=request.compose_snapshot.as_mapping(),
                 images=images, service_image_bindings=bindings,
                 compose_projection=compose_projection, route_digest=edge_route_digest)
-            self.repository.transition_v2(target_key, request, "runtime_pending",
-                                          effect_entered=True,
-                                          replacement_intent=replacement_intent.as_mapping())
-            effect_entered = True
-            services = tuple(item["service"] for item in bindings)
-            self.runtime_adapter.replace_services_v2(
-                compose_files=compose_files, project_name=compose_project,
-                services=services, service_image_bindings=service_images,
-                environment_bindings=environment, snapshot_digest=snapshot_digest,
-                timeout_seconds=300)
+            execution_evidence = None
+            if has_graph:
+                from .execution_runner import execute_graph_v2
+                from .execution_state import ExecutionProgressV2
+                self.runtime_adapter.bind_execution_v2(request)
+                progress = ExecutionProgressV2.from_mapping(transaction["execution_progress"])
+                def persist_graph(candidate):
+                    nonlocal effect_entered
+                    # A lost durable-write acknowledgement is conservative:
+                    # this caller must not report no effect or attempt replay.
+                    effect_entered = True
+                    self.repository.transition_v2(target_key, request, "runtime_pending",
+                        effect_entered=True, replacement_intent=replacement_intent.as_mapping(),
+                        execution_progress=candidate.as_mapping())
+                progress = execute_graph_v2(progress=progress, contract=graph_contract,
+                    adapter=self.runtime_adapter, persist=persist_graph)
+                execution_evidence = {"compose_snapshot": request.compose_snapshot.as_mapping(),
+                    "compatibility_grant": grant.as_mapping(), "progress": progress.as_mapping()}
+            else:
+                self.repository.transition_v2(target_key, request, "runtime_pending",
+                                              effect_entered=True,
+                                              replacement_intent=replacement_intent.as_mapping())
+                effect_entered = True
+                services = tuple(item["service"] for item in bindings)
+                self.runtime_adapter.replace_services_v2(
+                    compose_files=compose_files, project_name=compose_project,
+                    services=services, service_image_bindings=service_images,
+                    environment_bindings=environment, snapshot_digest=snapshot_digest,
+                    timeout_seconds=300)
             observation = self.runtime_observer.observe(
                 target=target, compose_project=compose_project, bindings=bindings,
                 images=images, topology_digest=topology_digest,
@@ -168,6 +202,8 @@ class ActivationServiceV2:
                     "service_projection": tuple(observation["services"]),
                     "running_observation_digest": observation["observation_digest"],
                     "rollback_from_generation_digest": prior_digest}
+            if execution_evidence is not None:
+                base["execution_evidence"] = execution_evidence
             subject_digest = activation_digest(
                 "sandbox.hosting.images.activation-generation-subject.v2",
                 {key: (list(value) if isinstance(value, tuple) else value)
@@ -297,6 +333,10 @@ class ActivationServiceV2:
                 or grant.candidate_plan_set_digest != candidate_plan
                 or grant.candidate_proof_set_digest != candidate_proof
                 or grant.policy_digest != candidate_policy
+                or (request.compose_snapshot.input_contract is not None
+                    and grant.compose_snapshot_digest != request.compose_snapshot.snapshot_digest)
+                or (grant.compose_snapshot_digest is not None
+                    and grant.compose_snapshot_digest != request.compose_snapshot.snapshot_digest)
                 or not grant.issued_at <= now < grant.expires_at
                 or self.rollback_grant_verifier.verify(grant) is not True):
             raise ActivationContractError("rollback_grant_mismatch")

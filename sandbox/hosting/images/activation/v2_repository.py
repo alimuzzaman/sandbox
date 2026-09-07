@@ -13,8 +13,10 @@ from .models import (
 )
 from .v2_models import (
     ActivationRequestV2, GenerationBoundEdgeReceiptV2,
-    ReplacementIntentV2, VerifiedActivationGenerationV2, _local_image_id,
+    PrivateComposeInputSnapshotV2, ReplacementIntentV2, RollbackCompatibilityGrantV2,
+    VerifiedActivationGenerationV2, _local_image_id,
 )
+from .execution_state import ExecutionProgressV2
 
 
 V2_PHASES = frozenset({
@@ -74,6 +76,8 @@ def _validate_subject_v2(value: object, *, request_digest: str, target: dict,
         "compose_project", "images", "service_image_bindings", "compose_projection",
         "service_projection", "running_observation_digest",
         "rollback_from_generation_digest", "generation_subject_digest"}
+    if "execution_evidence" in subject:
+        required.add("execution_evidence")
     if (set(subject) != required or type(subject["schema_version"]) is not int
             or subject["schema_version"] != 2
             or type(subject["generation"]) is not int
@@ -151,6 +155,9 @@ def _validate_subject_v2(value: object, *, request_digest: str, target: dict,
                 or row["config_digest"] != image["config_digest"]
                 or row["compose_config_hash"] != compose[row["service"]]["compose_config_hash"]):
             raise ActivationContractError()
+    if "execution_evidence" in subject:
+        from .execution_evidence import validate_execution_evidence
+        subject["execution_evidence"] = validate_execution_evidence(subject["execution_evidence"], subject=subject)
     body = {key: item for key, item in subject.items()
             if key != "generation_subject_digest"}
     if subject["generation_subject_digest"] != activation_digest(
@@ -192,6 +199,8 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
                 "proof_pin", "prior_generation_digest", "recovery_context",
                 "replacement_intent", "running_observation", "generation_subject", "edge_result",
                 "candidate_generation", "result"}
+    if "execution_progress" in raw:
+        required.add("execution_progress")
     if (set(raw) != required or type(raw["schema_version"]) is not int
             or raw["schema_version"] != 2 or raw["operation"] not in {"activate", "rollback"}
             or raw["phase"] not in V2_PHASES or type(raw["effect_entered"]) is not bool
@@ -206,8 +215,10 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
     pin = validate_retained_proof_pin(raw["proof_pin"])
     if pin["holder"] != raw["holder"]:
         raise ActivationContractError()
-    context = _closed(raw["recovery_context"], frozenset({
-        "target", "compose_project", "selected_services"}))
+    context_fields = {"target", "compose_project", "selected_services"}
+    if "execution_progress" in raw:
+        context_fields.update(("compose_snapshot", "compatibility_grant"))
+    context = _closed(raw["recovery_context"], frozenset(context_fields))
     target = _closed(context["target"], frozenset({
         "machine_identity", "target_identity", "daemon_identity"}))
     for identity in target.values(): _text(identity, identity=True)
@@ -217,6 +228,24 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
             or services != sorted(services) or len(services) != len(set(services))):
         raise ActivationContractError()
     for service in services: _text(service, identity=True)
+    progress = None
+    if "execution_progress" in raw:
+        progress = ExecutionProgressV2.from_mapping(raw["execution_progress"])
+        snapshot = PrivateComposeInputSnapshotV2.from_mapping(context["compose_snapshot"])
+        grant = RollbackCompatibilityGrantV2.from_mapping(context["compatibility_grant"])
+        if (snapshot.init_contract is None or snapshot.init_contract.graph != progress.graph
+                or progress.request_digest != raw["request_digest"]
+                or progress.snapshot_digest != snapshot.snapshot_digest
+                or snapshot.target != target or list(snapshot.selected_services) != services
+                or grant.compose_snapshot_digest != snapshot.snapshot_digest or grant.target != target
+                or grant.expected_generation != raw["starting_generation"]
+                or grant.prior_generation_digest != raw["prior_generation_digest"]
+                or grant.candidate_plan_set_digest != snapshot.plan_set_digest
+                or grant.candidate_proof_set_digest != pin["proof_digest"]
+                or (progress.possible_effect and raw["effect_entered"] is not True)
+                or (raw["phase"] == "accepted" and progress.events)
+                or (raw["phase"] in {"runtime_proven", "edge_pending", "committed"} and not progress.complete)):
+            raise ActivationContractError("init_mismatch")
 
     replacement = raw["replacement_intent"]
     if replacement is not None:
@@ -228,6 +257,8 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
                 or replacement.compose_project != context["compose_project"]
                 or list(replacement.compose_snapshot["selected_services"]) != services):
             raise ActivationContractError()
+        if progress is not None and replacement.compose_snapshot != context["compose_snapshot"]:
+            raise ActivationContractError("init_mismatch")
     observation = raw["running_observation"]
     subject = raw["generation_subject"]
     edge = raw["edge_result"]
@@ -328,6 +359,13 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
     if raw["effect_entered"] and replacement is None:
         raise ActivationContractError()
     if subject is not None:
+        if progress is not None:
+            expected_evidence = {"compose_snapshot": context["compose_snapshot"],
+                "compatibility_grant": context["compatibility_grant"], "progress": progress.as_mapping()}
+            if subject.get("execution_evidence") != expected_evidence:
+                raise ActivationContractError("init_mismatch")
+        elif "execution_evidence" in subject:
+            raise ActivationContractError("init_mismatch")
         expected = replacement.as_mapping()
         for key in ("generation", "plan_set_digest", "proof_set_digest", "policy_digest",
                     "request_digest", "target", "topology_digest", "configuration_digest",
@@ -356,6 +394,9 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
                "replacement_intent": None, "running_observation": None,
                "generation_subject": None,
                "edge_result": None, "candidate_generation": None, "result": None}
+    if progress is not None:
+        initial["execution_progress"] = ExecutionProgressV2.create(graph=progress.graph,
+            request_digest=progress.request_digest, snapshot_digest=progress.snapshot_digest).as_mapping()
     transaction_digest = initial.pop("transaction_digest")
     if transaction_digest != activation_digest(
             "sandbox.hosting.images.activation-transaction.v2", initial):
@@ -373,6 +414,15 @@ def transaction_v2(request: ActivationRequestV2, *, holder: str, proof_pin: dict
             "recovery_context": json.loads(canonical_bytes(recovery_context)),
             "replacement_intent": None, "running_observation": None, "generation_subject": None,
             "edge_result": None, "candidate_generation": None, "result": None}
+    contract = request.compose_snapshot.init_contract
+    if contract is not None and contract.graph is not None:
+        if recovery_context.get("compose_snapshot") != request.compose_snapshot.as_mapping():
+            raise ActivationContractError("init_mismatch")
+        grant = RollbackCompatibilityGrantV2.from_mapping(recovery_context.get("compatibility_grant"))
+        if grant.grant_digest != request.rollback_grant_digest:
+            raise ActivationContractError("init_mismatch")
+        body["execution_progress"] = ExecutionProgressV2.create(graph=contract.graph,
+            request_digest=request.request_digest, snapshot_digest=request.compose_snapshot.snapshot_digest).as_mapping()
     body["transaction_digest"] = activation_digest(
         "sandbox.hosting.images.activation-transaction.v2", body)
     return validate_transaction_v2(body)
@@ -411,7 +461,7 @@ def transition_candidate_v2(state: dict, request: ActivationRequestV2, phase: st
                             *, effect_entered=None, replacement_intent=None,
                             running_observation=None,
                             generation_subject=None, edge_result=None,
-                            candidate_generation=None):
+                            candidate_generation=None, execution_progress=None):
     candidate = json.loads(canonical_bytes(state)); active = candidate.get("active")
     if type(active) is not dict or active.get("schema_version") != 2 \
             or active.get("request_digest") != request.request_digest:
@@ -422,6 +472,14 @@ def transition_candidate_v2(state: dict, request: ActivationRequestV2, phase: st
         if type(effect_entered) is not bool or (active["effect_entered"] and not effect_entered):
             raise ActivationContractError("request_conflict")
         active["effect_entered"] = effect_entered
+    if execution_progress is not None:
+        old = ExecutionProgressV2.from_mapping(active.get("execution_progress"))
+        new = ExecutionProgressV2.from_mapping(execution_progress)
+        if (new.graph != old.graph or new.request_digest != old.request_digest
+                or new.snapshot_digest != old.snapshot_digest
+                or len(new.events) != len(old.events) + 1 or new.events[:-1] != old.events):
+            raise ActivationContractError("init_mismatch")
+        active["execution_progress"] = new.as_mapping()
     if replacement_intent is not None:
         active["replacement_intent"] = ReplacementIntentV2.from_mapping(
             replacement_intent).as_mapping()

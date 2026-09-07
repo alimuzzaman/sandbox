@@ -4364,7 +4364,7 @@ def _host_image_argv_runner(entry, *, compose_snapshot_provider: dict | None = N
             " if list_profiles:a+=['--profiles']",
             " else:a+=['--format','json']",
             " q=subprocess.run(a,env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=((environment_fd,) if environment_fd is not None else ()),timeout=min(command_timeout,60))",
-            " if s.get('kind')=='compose_observe_v2':",
+            " if s.get('kind') in ('compose_observe_v2','compose_replace_v2'):",
             "  def matches(candidate):",
             "   if candidate.returncode!=0 or candidate.stderr or len(candidate.stdout)>1048576:return False",
             "   try:document=json.loads(candidate.stdout);services=document.get('services')",

@@ -59,11 +59,13 @@ class PostgresHelperTests(unittest.TestCase):
             with self.subTest(match=match), tempfile.TemporaryDirectory() as directory:
                 slot = Path(directory); identity = 'a' * 64
                 observed = {'schema_version': 1, 'ok': True, 'all_match': match,
+                    'container_id': 'b' * 64,
                     'target': 'sandbox-recovery-restore-' + identity[:24], 'volume': 'isolated-volume',
                     'target_database': 'lenzora', 'target_role': 'postgres',
                     'source_database_identity': 'db', 'dump_digest': 'sha256:' + 'b' * 64,
                     'observation': {}}
                 with patch.object(helper, 'inspect_restore', return_value=observed), \
+                        patch.object(helper, 'restore_target', return_value=({'Id': 'b' * 64, 'State': {'Running': True}}, {})), \
                         patch.object(helper, 'run', return_value=b'') as command, \
                         patch.object(helper.sys, 'stdout', SimpleNamespace(buffer=io.BytesIO())):
                     if match:

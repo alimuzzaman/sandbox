@@ -46,12 +46,16 @@ class RegisteredPostgresRecoveryTransport:
         result = lease.consume(lambda material: {"payload": consumer(material, opaque_revision(key, material))})
         return result["payload"]
 
-    def invoke(self, source: PostgresSource, operation: str, request_id: str, *, archive=b'', target_volume=None, resume_capture=False):
+    def invoke(self, source: PostgresSource, operation: str, request_id: str, *, archive=b'', target_volume=None, resume_capture=False, reopen_plan=None):
         source = recovery_source(source.as_mapping())
-        if operation not in {'observe', 'capture', 'restore', 'inspect-restore', 'verify-restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', request_id):
+        if operation not in {'observe', 'capture', 'restore', 'inspect-restore', 'verify-restore', 'reopen-restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', request_id):
             raise RecoveryError('PostgreSQL request is invalid', 'request_invalid')
-        if operation in {'inspect-restore', 'verify-restore'} and (source.profile != 'lenzora-dev' or target_volume is not None):
+        if operation in {'inspect-restore', 'verify-restore', 'reopen-restore'} and (source.profile != 'lenzora-dev' or target_volume is not None):
             raise RecoveryError('restore inspection is invalid', 'request_invalid')
+        if (operation == 'reopen-restore' and (source.credential_reference is not None
+                or type(reopen_plan) is not dict or not reopen_plan)
+                or operation != 'reopen-restore' and reopen_plan is not None):
+            raise RecoveryError('restore reopen is invalid', 'request_invalid')
         if resume_capture and (operation != 'capture' or source.profile != 'lenzora-dev'):
             raise RecoveryError('capture resume is invalid', 'request_invalid')
         entry = self.lookup(source.remote)
@@ -71,6 +75,7 @@ class RegisteredPostgresRecoveryTransport:
                 'credential_revision': revision, 'archive_size': len(archive),
                 'archive_digest': 'sha256:' + hashlib.sha256(archive).hexdigest(), 'target_volume': target_volume}
             if resume_capture: request['resume_capture'] = True
+            if reopen_plan is not None: request['reopen_plan'] = reopen_plan
             frame = json.dumps(request, sort_keys=True, separators=(',', ':')).encode() + b'\n' + material + archive
             result = self.process(entry, 'python3 -c ' + shlex.quote(helper), input_data=frame, timeout=3600)
             payload = getattr(result, 'stdout', b'')

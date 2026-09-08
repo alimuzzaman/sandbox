@@ -54,6 +54,19 @@ def _load_json_bytes(data):
         invalid()
 
 
+def _reopen_binding_matches(plan, reopen_plan, source_digest):
+    if type(reopen_plan) is not dict: return False
+    return not (reopen_plan.get('native_request_id') != plan['native_request_id']
+        or reopen_plan.get('source_digest') != source_digest
+        or reopen_plan.get('target') != plan['target']
+        or type(reopen_plan.get('container_id')) is not str
+        or not re.fullmatch(r'[a-f0-9]{64}', reopen_plan['container_id'])
+        or type(reopen_plan.get('plan_digest')) is not str
+        or not re.fullmatch(r'sha256:[a-f0-9]{64}', reopen_plan['plan_digest'])
+        or type(reopen_plan.get('generation')) is not int
+        or not 0 <= reopen_plan['generation'] < 16)
+
+
 class PostgresRecovery:
     def __init__(self, root: Path, transport, capture, catalog):
         self.root, self.transport, self.capture, self.catalog = root, transport, capture, catalog
@@ -227,17 +240,27 @@ class PostgresRecovery:
             'target_role': 'lenzora' if target_volume is not None else getattr(source, 'role', None), 'active_database_overwrite': False, 'published_ports': []}
         return {**body, 'plan_digest': digest(body)}
 
-    def restore(self, plan, *, confirm=False, inspect=False, verify=False):
-        if inspect and verify: raise RecoveryError('restore operation is ambiguous', 'request_invalid')
+    def restore(self, plan, *, confirm=False, inspect=False, verify=False, reopen=False, reopen_plan=None):
+        if (any(type(value) is not bool for value in (inspect, verify, reopen))
+                or sum((inspect, verify, reopen)) > 1
+                or (reopen and (type(reopen_plan) is not dict or not reopen_plan))
+                or (not reopen and reopen_plan is not None)):
+            raise RecoveryError('restore operation is ambiguous', 'request_invalid')
         if not confirm and not inspect: raise RecoveryError('restore drill requires confirmation', 'confirmation_required')
-        if (inspect or verify) and (plan.get('profile') != 'lenzora-dev' or plan.get('target_volume') is not None):
+        if (inspect or verify or reopen) and (plan.get('profile') != 'lenzora-dev' or plan.get('target_volume') is not None):
             raise RecoveryError('inspection is only for an isolated development restore', 'request_invalid')
+        source = self.source(plan['remote'], plan['profile'])
+        if reopen and source.credential_reference is not None:
+            raise RecoveryError('reopen is only for local development data', 'request_invalid')
         expected = self.restore_plan(plan['remote'], plan['profile'], plan['request_id'], plan['backup_id'], plan['target_volume'])
         if plan != expected: raise RecoveryError('restore plan changed', 'restore_plan_changed')
-        source = self.source(plan['remote'], plan['profile'])
+        if reopen and not _reopen_binding_matches(plan, reopen_plan, source.source_digest):
+            raise RecoveryError('stopped target plan does not match restore', 'reopen_plan_changed')
         receipt_path = self.root / 'restores' / (plan['native_request_id'] + '.json')
         retained = _read_owner_only_json(receipt_path)
-        if retained is not None: return retained
+        if retained is not None:
+            if reopen: raise RecoveryError('restore is already verified', 'request_invalid')
+            return retained
         manifest = verify_manifest(self.capture.drive, plan['backup_id'])
         with tempfile.TemporaryDirectory(prefix='postgres-restore-', dir=self.root) as temporary:
             work = Path(temporary); ciphertext = work / 'ciphertext'; plaintext = work / 'archive.tar'
@@ -250,10 +273,34 @@ class PostgresRecovery:
                 if len(members) != 1 or members[0].name != 'native-capture.tar' or not members[0].isfile() or members[0].size > 512 * 1024 * 1024:
                     raise RecoveryError('recovery archive is invalid', 'capture_invalid')
                 archive = bundle.extractfile(members[0]).read()
-            operation = 'verify-restore' if verify else 'inspect-restore' if inspect else 'restore'
-            result = _load_json_bytes(self.transport.invoke(source, operation, plan['native_request_id'], archive=archive, target_volume=plan['target_volume']))
+            operation = 'reopen-restore' if reopen else 'verify-restore' if verify else 'inspect-restore' if inspect else 'restore'
+            arguments = {'archive': archive, 'target_volume': plan['target_volume']}
+            if reopen: arguments['reopen_plan'] = reopen_plan
+            result = _load_json_bytes(self.transport.invoke(source, operation, plan['native_request_id'], **arguments))
+            if result.get('ok') is False:
+                code = result.get('code')
+                if code not in {'restore_target_changed', 'restore_target_stopped', 'restore_target_busy',
+                        'restore_data_invalid', 'reopen_plan_changed', 'reopen_pending', 'reopen_history_invalid',
+                        'restore_database_unavailable', 'restore_verification_failed', 'request_invalid',
+                        'archive_changed', 'source_changed', 'path_unsafe'}:
+                    code = 'acceptance_unknown'
+                raise RecoveryError('retained restore requires inspection', code)
+            if reopen:
+                if (result.get('ok') is not True or result.get('code') != 'restore_reopened'
+                        or result.get('target') != plan['target'] or result.get('database_available') is not True
+                        or result.get('container_id') != reopen_plan['container_id']
+                        or result.get('reopen_plan_digest') != reopen_plan['plan_digest']
+                        or type(result.get('reopen_generation')) is not int
+                        or result['reopen_generation'] != reopen_plan['generation']):
+                    raise RecoveryError('reopen evidence is unavailable', 'restore_verification_failed')
+                return result
             if inspect:
-                if result.get('ok') is not True or result.get('code') not in {'restore_inspected', 'restore_verified'} or result.get('target') != plan['target']:
+                if result.get('code') == 'restore_target_stopped' and (
+                        result.get('database_available') is not False or result.get('all_match') is not False
+                        or not _reopen_binding_matches(plan, result.get('reopen_plan'), source.source_digest)
+                        or result.get('container_id') != result['reopen_plan']['container_id']):
+                    raise RecoveryError('stopped restore evidence is unavailable', 'restore_verification_failed')
+                if result.get('ok') is not True or result.get('code') not in {'restore_inspected', 'restore_verified', 'restore_target_stopped'} or result.get('target') != plan['target']:
                     raise RecoveryError('restore inspection is unavailable', 'restore_verification_failed')
                 return result
             if not result.get('ok') or result.get('code') not in {'restore_verified', 'storage_restore_verified'} or result.get('target') != plan['target']:

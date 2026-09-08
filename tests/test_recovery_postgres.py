@@ -59,11 +59,21 @@ class FakeCapture:
         self.materialization_root = root / "materialized"
         self.materialization_root.mkdir(mode=0o700)
         self.drive = MemoryDrive()
+        self.crypto = FakeCrypto()
         self.publish_calls = []
 
     def publish_files(self, backup_id, artifacts, *, profiles, provenance, profile_bindings):
         self.publish_calls.append((backup_id, artifacts, profiles, provenance, profile_bindings))
-        ciphertext = b"ciphertext-for-" + backup_id.encode()
+        # The real restore path decrypts a wrapper containing native-capture.tar.
+        # Keep that boundary in the fixture so reopen tests prove the exact bytes
+        # handed to the transport instead of bypassing retained-archive loading.
+        native = Path(next(iter(artifacts.values()))).read_bytes()
+        wrapped = io.BytesIO()
+        with tarfile.open(fileobj=wrapped, mode="w") as archive:
+            info = tarfile.TarInfo("native-capture.tar")
+            info.size = len(native)
+            archive.addfile(info, io.BytesIO(native))
+        ciphertext = wrapped.getvalue()
         object_key = f"sets/{backup_id}/archive.tar.gpg"
         self.drive.put(object_key, ciphertext)
         artifact_path = Path(next(iter(artifacts.values())))
@@ -77,22 +87,32 @@ class FakeCapture:
             "ciphertext_object": object_key,
             "ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest(),
             "ciphertext_size": len(ciphertext),
-            "plaintext_sha256": "a" * 64,
+            "plaintext_sha256": hashlib.sha256(ciphertext).hexdigest(),
             "restore_compatibility": "sandbox-recovery-v1",
         }
         self.drive.put(f"sets/{backup_id}/manifest.json", json.dumps(manifest).encode())
         return manifest
 
 
+class FakeCrypto:
+    def decrypt_file(self, ciphertext: Path, plaintext: Path):
+        plaintext.write_bytes(ciphertext.read_bytes())
+
+
 class FakeTransport:
     def __init__(self, archive):
         self.archive = archive
         self.calls = []
+        self.responses = {}
 
-    def invoke(self, source_value, operation, request_id, *, archive=b""):
-        self.calls.append((source_value, operation, request_id, archive))
+    def invoke(self, source_value, operation, request_id, *, archive=b"", target_volume=None,
+               reopen_plan=None):
+        self.calls.append((source_value, operation, request_id, archive, target_volume, reopen_plan))
         if operation == "capture":
             return self.archive
+        if operation in self.responses:
+            response = self.responses[operation]
+            return response() if callable(response) else response
         return json.dumps({"ok": True, "code": "observed", "observation": {
             "major": 16}}).encode()
 
@@ -228,6 +248,227 @@ class PostgresRecoveryTests(unittest.TestCase):
             changed = dict(plan, target="sandbox-recovery-restore-forged")
             with self.assertRaisesRegex(RecoveryError, "restore plan changed"):
                 recovery.restore(changed, confirm=True)
+
+    def test_stopped_inspection_is_closed_and_does_not_install_a_restore_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            reopen_plan = self._reopen_plan(plan)
+            transport.responses["inspect-restore"] = json.dumps({
+                "schema_version": 1,
+                "ok": True,
+                "code": "restore_target_stopped",
+                "target": plan["target"],
+                "container_id": reopen_plan["container_id"],
+                "database_available": False,
+                "all_match": False,
+                "reopen_plan": reopen_plan,
+            }).encode()
+
+            result = recovery.restore(plan, inspect=True)
+
+            self.assertEqual(result["code"], "restore_target_stopped")
+            self.assertFalse(result["database_available"])
+            self.assertFalse(result["all_match"])
+            self.assertEqual(result["reopen_plan"], reopen_plan)
+            self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
+            self.assertEqual(transport.calls[-1][1:3], ("inspect-restore", plan["native_request_id"]))
+
+    def test_stopped_inspection_requires_closed_fields_and_bound_reopen_plan(self):
+        cases = (
+            ("database_available", True),
+            ("all_match", True),
+            ("reopen_plan", None),
+            ("native_request_id", "f" * 64),
+            ("source_digest", "sha256:" + "f" * 64),
+            ("target", "sandbox-recovery-restore-forged"),
+            ("container_id", "short"),
+            ("plan_digest", "forged"),
+            ("generation", "zero"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+                reopen_plan = self._reopen_plan(plan)
+                response = {
+                    "schema_version": 1,
+                    "ok": True,
+                    "code": "restore_target_stopped",
+                    "target": plan["target"],
+                    "database_available": False,
+                    "all_match": False,
+                    "reopen_plan": reopen_plan,
+                }
+                if field in {"database_available", "all_match", "reopen_plan"}:
+                    response[field] = value
+                else:
+                    response["reopen_plan"] = {**reopen_plan, field: value}
+                transport.responses["inspect-restore"] = json.dumps(response).encode()
+                with self.assertRaises(RecoveryError) as raised:
+                    recovery.restore(plan, inspect=True)
+                self.assertEqual(raised.exception.code, "restore_verification_failed")
+                self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
+
+    def test_reopen_requires_confirmation_one_mode_and_a_nonempty_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            reopen_plan = {"schema_version": 1, "generation": 1, "target": plan["target"]}
+            cases = (
+                ({"reopen": True, "reopen_plan": reopen_plan}, "confirmation_required"),
+                ({"confirm": True, "inspect": True, "reopen": True, "reopen_plan": reopen_plan}, "request_invalid"),
+                ({"confirm": True, "verify": True, "reopen": True, "reopen_plan": reopen_plan}, "request_invalid"),
+                ({"confirm": True, "reopen": True, "reopen_plan": {}}, "request_invalid"),
+                ({"confirm": True, "reopen": True, "reopen_plan": None}, "request_invalid"),
+                ({"confirm": True, "reopen": True, "reopen_plan": "forged"}, "request_invalid"),
+                ({"confirm": True, "reopen_plan": reopen_plan}, "request_invalid"),
+            )
+            for options, code in cases:
+                with self.subTest(options=options), self.assertRaises(RecoveryError) as raised:
+                    recovery.restore(plan, **options)
+                self.assertEqual(raised.exception.code, code)
+            self.assertEqual([call[1] for call in transport.calls], ["capture"])
+
+    def test_reopen_rejects_a_changed_original_restore_plan_before_transport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            changed = dict(plan, target="sandbox-recovery-restore-forged")
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.restore(changed, confirm=True, reopen=True,
+                                 reopen_plan={"schema_version": 1, "generation": 1})
+            self.assertEqual(raised.exception.code, "restore_plan_changed")
+            self.assertEqual([call[1] for call in transport.calls], ["capture"])
+
+    def test_reopen_is_limited_to_isolated_development_without_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            reopen_plan = {"schema_version": 1, "generation": 1, "target": plan["target"]}
+            for changed in (
+                dict(plan, profile="lenzora-prod"),
+                dict(plan, target_volume="lenzora-dev_postgres-data"),
+            ):
+                with self.subTest(changed=changed), self.assertRaises(RecoveryError) as raised:
+                    recovery.restore(changed, confirm=True, reopen=True, reopen_plan=reopen_plan)
+                self.assertEqual(raised.exception.code, "request_invalid")
+            self.assertEqual([call[1] for call in transport.calls], ["capture"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            mapping = source(profile="lenzora-prod-legacy", credential_reference="personal/PGPASSWORD")
+            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory), source_mapping=mapping)
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.restore(plan, confirm=True, reopen=True,
+                                 reopen_plan={"schema_version": 1, "generation": 1})
+            self.assertEqual(raised.exception.code, "request_invalid")
+            self.assertEqual([call[1] for call in transport.calls], ["capture"])
+
+    def test_reopen_preserves_original_identity_archive_target_and_plan_without_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, archive = self._prepared_plan(Path(directory))
+            reopen_plan = self._reopen_plan(plan)
+            transport.responses["reopen-restore"] = json.dumps({
+                "schema_version": 1,
+                "ok": True,
+                "code": "restore_reopened",
+                "target": plan["target"],
+                "container_id": reopen_plan["container_id"],
+                "volume": plan["target"] + "-data",
+                "reopen_generation": reopen_plan["generation"],
+                "reopen_plan_digest": reopen_plan["plan_digest"],
+                "database_available": True,
+                "all_match": False,
+            }).encode()
+
+            result = recovery.restore(plan, confirm=True, reopen=True, reopen_plan=reopen_plan)
+
+            self.assertEqual(result["code"], "restore_reopened")
+            self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
+            call = transport.calls[-1]
+            self.assertEqual(call[1], "reopen-restore")
+            self.assertEqual(call[2], plan["native_request_id"])
+            self.assertEqual(call[3], archive)
+            self.assertIsNone(call[4])
+            self.assertEqual(call[5], reopen_plan)
+
+    def test_reopen_rejects_returned_identity_or_plan_digest_without_a_receipt(self):
+        for field, value in (("container_id", "f" * 64),
+                             ("reopen_plan_digest", "sha256:" + "f" * 64)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+                reopen_plan = self._reopen_plan(plan)
+                result = {
+                    "schema_version": 1,
+                    "ok": True,
+                    "code": "restore_reopened",
+                    "target": plan["target"],
+                    "container_id": reopen_plan["container_id"],
+                    "volume": plan["target"] + "-data",
+                    "reopen_generation": reopen_plan["generation"],
+                    "reopen_plan_digest": reopen_plan["plan_digest"],
+                    "database_available": True,
+                }
+                result[field] = value
+                transport.responses["reopen-restore"] = json.dumps(result).encode()
+                with self.assertRaises(RecoveryError) as raised:
+                    recovery.restore(plan, confirm=True, reopen=True, reopen_plan=reopen_plan)
+                self.assertEqual(raised.exception.code, "restore_verification_failed")
+                self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
+
+    def test_reopen_rejects_an_existing_verified_receipt_without_transport(self):
+        from sandbox.hosting.images.provisioning import install_owner_only_json
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            receipt = recovery.root / "restores" / (plan["native_request_id"] + ".json")
+            install_owner_only_json(receipt, {
+                "schema_version": 1,
+                "ok": True,
+                "code": "restore_verified",
+                "target": plan["target"],
+                "plan_digest": plan["plan_digest"],
+            })
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.restore(plan, confirm=True, reopen=True, reopen_plan=self._reopen_plan(plan))
+            self.assertEqual(raised.exception.code, "request_invalid")
+            self.assertEqual([call[1] for call in transport.calls], ["capture"])
+
+    def test_reopen_failure_is_closed_and_does_not_write_a_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            reopen_plan = self._reopen_plan(plan)
+            transport.responses["reopen-restore"] = json.dumps({
+                "ok": False,
+                "code": "restore_reopen_failed",
+                "reason": "startup_failed",
+                "stderr": "private-password-canary",
+            }).encode()
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.restore(plan, confirm=True, reopen=True,
+                                 reopen_plan=reopen_plan)
+            self.assertEqual(raised.exception.code, "acceptance_unknown")
+            self.assertNotIn("private-password-canary", str(raised.exception))
+            self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
+            self.assertEqual(transport.calls[-1][1:3], ("reopen-restore", plan["native_request_id"]))
+
+    def _prepared_plan(self, root: Path, *, source_mapping=None, backup_id="backup-a"):
+        source_mapping = source_mapping or source()
+        source_value = PostgresSource.from_mapping(source_mapping)
+        archive, _evidence = capture_archive(source_value.source_digest)
+        transport = FakeTransport(archive)
+        recovery, capture = self._recovery(root, transport)
+        recovery.register(source_mapping, confirm=True)
+        recovery.create(source_value.remote, source_value.profile, "capture-a", backup_id, confirm=True)
+        plan = recovery.restore_plan(source_value.remote, source_value.profile, "restore-a", backup_id)
+        return recovery, capture, transport, plan, archive
+
+    @staticmethod
+    def _reopen_plan(plan):
+        return {
+            "schema_version": 1,
+            "generation": 0,
+            "native_request_id": plan["native_request_id"],
+            "source_digest": plan["source_digest"],
+            "target": plan["target"],
+            "container_id": "e" * 64,
+            "volume": plan["target"] + "-data",
+            "plan_digest": "sha256:" + "d" * 64,
+        }
 
 
 if __name__ == "__main__":

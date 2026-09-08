@@ -15,11 +15,12 @@ ROOT = Path(__file__).resolve().parents[2]
 def configure_recovery(parser) -> None:
     parser.description = "Plan and operate scoped encrypted recovery profiles"
     parser.add_argument("action", choices=("profiles", "plan", "create", "list", "verify", "restore", "retention", "schedule", "postgres", "data"))
-    parser.add_argument("--postgres-operation", choices=("register", "observe", "status", "capture", "restore-plan", "restore", "inspect-restore", "verify-restore", "readiness"))
+    parser.add_argument("--postgres-operation", choices=("register", "observe", "status", "capture", "restore-plan", "restore", "inspect-restore", "verify-restore", "reopen-restore", "readiness"))
     parser.add_argument("--resume-capture", action="store_true", help="resume only an inspected incomplete local development capture under its original identity")
     parser.add_argument("--source-binding", default=None, help="owner-only non-secret PostgreSQL source descriptor")
     parser.add_argument("--target-volume", default=None, help="explicit reviewed empty production transfer volume")
     parser.add_argument("--restore-plan", default=None, help="exact reviewed isolated PostgreSQL restore plan")
+    parser.add_argument("--reopen-plan", default=None, help="exact stopped-target reopen plan returned by development restore inspection")
     parser.add_argument("--request-id", default=None, help="immutable replay-safe PostgreSQL operation identity")
     parser.add_argument("--project-dir", default=None, help="project scope for an approved legacy credential reference")
     parser.add_argument("--remote", default=None)
@@ -116,9 +117,15 @@ def _postgres(cfg, args, service):
     from sandbox.hosting.images.plan_set import read_stable_file, _load_json_bytes
     root = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox")) / "recovery"
     try:
+        operation = args.postgres_operation
+        if args.reopen_plan is not None and operation != 'reopen-restore':
+            raise RecoveryError('reopen plan applies only to reopen-restore', 'request_invalid')
+        if operation == 'reopen-restore' and (not args.reopen_plan or not args.restore_plan):
+            raise RecoveryError('reopen requires both original restore and stopped-target plans', 'request_invalid')
+        if operation == 'reopen-restore' and not args.confirm:
+            raise RecoveryError('reopen requires confirmation', 'confirmation_required')
         transport = RegisteredPostgresRecoveryTransport(cfg=cfg, project_root=args.project_dir or ROOT, state_root=root)
         postgres = PostgresRecovery(root / "postgres", transport, service.capture, service.catalog)
-        operation = args.postgres_operation
         if args.resume_capture and operation != 'capture':
             raise RecoveryError('resume applies only to capture', 'request_invalid')
         if args.source_binding and operation not in {"register", "observe"}:
@@ -128,11 +135,14 @@ def _postgres(cfg, args, service):
             if source.get("remote") != args.remote or args.profile != [source.get("profile")]:
                 raise RecoveryError("source selectors differ", "source_binding_invalid")
             data = postgres.register(source, confirm=args.confirm)
-        elif operation in {"restore", "inspect-restore", "verify-restore"}:
+        elif operation in {"restore", "inspect-restore", "verify-restore", "reopen-restore"}:
             plan = _load_json_bytes(read_stable_file(Path(args.restore_plan), 16384, owner_only=True))
             if plan.get("remote") != args.remote or args.profile != [plan.get("profile")]:
                 raise RecoveryError("restore selectors differ", "restore_plan_changed")
-            data = postgres.restore(plan, confirm=args.confirm, inspect=operation == 'inspect-restore', verify=operation == 'verify-restore')
+            arguments = {'confirm': args.confirm, 'inspect': operation == 'inspect-restore', 'verify': operation == 'verify-restore'}
+            if operation == 'reopen-restore':
+                arguments.update(reopen=True, reopen_plan=_load_json_bytes(read_stable_file(Path(args.reopen_plan), 16384, owner_only=True)))
+            data = postgres.restore(plan, **arguments)
         else:
             if len(args.profile) != 1:
                 raise RecoveryError("one PostgreSQL profile is required", "source_binding_invalid")

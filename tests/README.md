@@ -15,6 +15,27 @@ The same full suite runs automatically in GitHub Actions for every pull request
 and every push to `latest` (`.github/workflows/python.yml`). The workflow prints
 the exact checked-out revision before running `./sb selftest`.
 
+Passing this suite is source-level evidence. It does not prove that WordPress
+starts, a clean URL serves requests, or a signed image deploys. Tests which mock
+Docker, HTTP, the controller or readiness cover the caller's contract only.
+
+Use the affected tests during development. Run broad checks after the relevant
+changes and reviews are complete; do not repeat the whole suite after each
+fixture correction. Report the observed behavior and its limits, not the test
+count as a measure of product readiness.
+
+Runtime acceptance is separate:
+
+| Path | Required evidence |
+|------|-------------------|
+| Local WordPress | Real CLI startup with captured output, canonical URL and REST response, repeated ensure, and stop/start with retained data. `./sb smoke` owns a disposable fixture. |
+| PostgreSQL recovery | `integration/recovery_reopen_canary.py --image sha256:...` uses real capture/restore, interrupts only the receipt write, then reopens and verifies the retained database. No Docker or SQL response is fabricated. Run explicitly through a finite Sandbox job on a Docker host. |
+| Hosted image deployment | Terminal deployment result, exact signed image/revision, required services and data checks, and public health. Python mocks and the recovery canary cannot supply this proof. |
+
+The smoke workflow is currently manual (`.github/workflows/smoke.yml`); it is
+not included in the automatic Python job. Never describe that job as a live
+startup or deployment gate.
+
 For a focused Python run, target a module, class, method, or filename pattern:
 
 ```sh
@@ -53,7 +74,7 @@ execution paths; none run the Sandbox Python package tests.
 |------|--------|
 | `test_sandbox.py` | package structure (40+ commands registered, no `DEFAULT_INSTANCE`, thin `sb`), pure helpers (`deep_merge`, `expand`, image/TLD/domain/site-url resolution, naming, `_php_literal`, wp-config + multisite rendering, server-runtime/herd/extra-mount), snapshot-name traversal guard, registry-sourced resolution + overlay |
 | `test_bridge.py` | spec-002 `_bridge_handle` — token auth (403/404/409), routing, **path-traversal rejection** (incl. an "outside dir survives" escape check); registry port overlay |
-| `test_cli.py` | end-to-end resolution gate via the real `sb` subprocess — instance-scoped commands error outside a project (never `main`), registry-wide run anywhere, unknown instance rejected |
+| `test_cli.py` | CLI resolution via the real `sb` subprocess — instance-scoped commands error outside a project (never `main`), registry-wide run anywhere, unknown instance rejected; no live startup proof |
 | `test_compose.py` | `render_compose` for apache/nginx/litespeed — ports, image, per-instance dir, services, `host.docker.internal` extra_hosts |
 | `test_mcp.py` | MCP server split — imports the thin `server.py` in its venv and asserts ≥26 tools + ≥8 prompts register (guards the decorator-drop class of bug) |
 

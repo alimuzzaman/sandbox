@@ -43,6 +43,7 @@ only that observed volume read-only in an owned, networkless reader.
 ./sb recovery data --postgres-operation restore-plan --remote REMOTE --profile PROFILE --request-id RESTORE_ID --backup-id BACKUP_ID --json
 ./sb recovery data --postgres-operation restore --remote REMOTE --profile PROFILE --restore-plan PLAN.json --confirm --json
 ./sb recovery data --postgres-operation inspect-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --json
+./sb recovery data --postgres-operation reopen-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --reopen-plan REOPEN.json --confirm --json
 ./sb recovery data --postgres-operation verify-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --confirm --json
 ./sb recovery data --postgres-operation readiness --remote REMOTE --profile PROFILE --target-volume VOLUME --json
 ```
@@ -62,6 +63,30 @@ encrypted backup. It requires the same plan, archive, owner-labelled container
 and volume, no network or ports, no other volume consumer, and no active importer.
 It reports bounded comparison results without reimporting, restarting, stopping,
 or marking the restore verified. An incomplete restore remains retained.
+An expired isolated drill returns `restore_target_stopped`, `all_match=false`,
+and a `reopen_plan`. Save that exact plan as an owner-only JSON file. The separate
+confirmed `reopen-restore` operation checks the original restore plan/archive,
+exact daemon and container IDs, pinned image, stopped state, initialized data
+markers, isolated configuration and sole owned data volume before startup.
+It starts only that existing container and PostgreSQL data directory. It never
+imports, initializes a database, recreates a target, removes a PID file, or
+recreates the transient initialization password.
+
+Reopening is a write operation: PostgreSQL startup may perform crash recovery
+on the retained files. A natural exit (0) or an explicitly stopped, non-OOM
+container exit (137) can be planned; the full stopped state is digest-bound.
+An existing verified restore receipt refuses reopening. Startup is permitted
+on the isolated restored cluster. It is limited to local `lenzora-dev` drills;
+production, legacy transfers and storage cannot use it. A reopen intent is
+retained under the original request before effects. Repeating the exact plan
+only recovers positive running/database evidence; it never repeats an uncertain
+start. An unresolved intent blocks another generation. After a completed reopen,
+a later expired drill needs a fresh inspected plan and explicit confirmation.
+The per-restore history is limited to 16 generations. Reopen records are separate
+from verified restore receipts, and `restore_reopened` does not satisfy readiness.
+Run `inspect-restore` immediately after reopening, then `verify-restore` only
+when every comparison succeeds. No new restore request or reimport is needed.
+
 For a schema mismatch, inspection also compares private schema records from the
 registered source and retained target. The source's original digest must still
 equal the captured digest; otherwise it reports `source_schema_changed`. A target
@@ -74,6 +99,8 @@ the comparison. Diagnostics do not change the failed schema acceptance gate.
 If every comparison matches, `verify-restore --confirm` repeats those checks under
 the original request lock, stops only that isolated target, and retains the verified
 receipt. It never imports again, repairs a mismatch, or replaces the target.
+Inspection and reopen refusals expose only closed reason codes; raw startup
+errors, configuration values and database rows remain private.
 
 Observe an uninstalled descriptor by adding `--source-binding SOURCE.json` to
 `observe`. This lets the operator establish the legacy server major before

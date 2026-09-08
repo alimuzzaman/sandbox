@@ -7,13 +7,40 @@ from unittest import mock
 
 
 class TestInstanceLifecycleConfig(unittest.TestCase):
-    def test_wordpress_power_uses_the_core_instance_owner(self):
-        import inspect
+    def test_wordpress_wake_reads_new_instance_and_probes_backend(self):
         from sandbox.application import context
+        from sandbox.runtimes.base import OperationRequest
+        import sandbox.core as core
+        import sandbox_core as registry
 
-        source = inspect.getsource(context.runtime_service)
-        self.assertIn("core.resolve_instances(cfg)", source)
-        self.assertNotIn("sc.resolve_instances(cfg)", source)
+        current = {'instances': {'new-site': {'wordpress_port': 8999}}}
+        with mock.patch.object(registry, 'registry_get', return_value={
+                'instance': 'new-site', 'root': '/fixture'}), \
+             mock.patch.object(registry, 'registry_all', return_value={'/fixture': {
+                 'instance': 'new-site', 'root': '/fixture', 'wordpress_port': 8998}}), \
+             mock.patch.object(core, 'compose', return_value=SimpleNamespace(
+                 returncode=0, stdout='', stderr='')), \
+             mock.patch.object(core, '_wait_reachable', return_value=True) as wait, \
+             mock.patch.object(registry, 'registry_put'), \
+             mock.patch.object(core, 'load_config', return_value=current):
+            service = context.runtime_service({'instances': {}})
+            result = service._adapters.for_kind('wordpress').adapter._operations['resume'](
+                OperationRequest('/fixture', 'resume'))
+        self.assertTrue(result['ok'])
+        self.assertEqual(wait.call_args.args[0]['wordpress_port'], 8999)
+        self.assertTrue(wait.call_args.kwargs['backend_only'])
+
+    def test_backend_readiness_never_enters_the_canonical_route(self):
+        from sandbox.core import _instances
+        response = mock.Mock(status=200)
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(_instances, 'site_url', side_effect=AssertionError('recursive route')), \
+             mock.patch('urllib.request.build_opener', return_value=opener):
+            self.assertTrue(_instances._wait_reachable(
+                {'wordpress_port': 8999, 'domain': 'fixture.tst'}, timeout=1, backend_only=True))
+        self.assertEqual(opener.open.call_args.args[0], 'http://localhost:8999')
+        response.close.assert_called_once()
 
     def test_omission_resolves_to_idle_stop_and_request_wake(self):
         from sandbox.config.instance_lifecycle import normalize_instance_lifecycle

@@ -94,3 +94,14 @@ PHPUnit with the runner tools; declared Compose modes and `matrix` do not use th
 PHP harness. Two real harness bugs were fixed while exercising it: composer couldn't
 fetch git-sourced deps (the `wordpress:cli` image is non-root + has no git), and the
 project root wasn't mounted in the test container for projects outside `plugins_home`.
+## WordPress lifecycle acceptance
+
+`./sb smoke` creates an owned disposable WordPress project through captured CLI
+calls, checks its advertised clean URL and REST response, repeats ensure, and
+checks the same data after `sb down` followed by ensure. It removes only its own
+fixture through normal instance deletion. Run this on a host with the default
+clean URL provider configured; localhost fallback fails this acceptance check.
+Successful `sb down` records the instance as stopped so ensure can resume its
+retained data. Failed stops do not change the registry status.
+Failed Docker teardown preserves local files and registry identity. Smoke retains
+its project directory when cleanup or ownership cannot be proved.

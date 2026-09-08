@@ -617,7 +617,7 @@ def _wait_http(port: int, timeout: int = 30) -> bool:
     return False
 
 
-def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
+def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = False) -> bool:
     """Wait for the instance's canonical URL without following redirects.
 
     ``site_url`` selects the real browser URL (including a secured proxy host)
@@ -638,7 +638,15 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
 
-    url = site_url(inst_cfg)
+    if backend_only:
+        # A forward-auth wake must not probe through its own pending gate.
+        # Check the owned backend directly and never follow its redirects.
+        port = inst_cfg.get("http_port", inst_cfg.get("wordpress_port"))
+        if type(port) is not int or not 1 <= port <= 65535:
+            return False
+        url = f"http://localhost:{port}"
+    else:
+        url = site_url(inst_cfg)
     ctx = ssl._create_unverified_context()
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
@@ -1396,6 +1404,13 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # installation, otherwise the first ensure fails before repair starts.
             if server != "herd":
                 _wait_http(ports["wordpress_port"])
+                # A fresh document root may not answer the proxy's route proof
+                # until installation completes. Retry the same owned route now.
+                if (_proxy_sudoers_installed()
+                        and (not secured or site_url(resolve_instances(cfg)[name]).startswith("http://localhost:"))
+                        and _secure_at_create(cfg, name)):
+                    secured = True
+                    cfg = load_config()
                 if block.get("php_extensions") is not None:
                     extension_status = php_extension_status(
                         resolve_instances(cfg)[name], instance=name,

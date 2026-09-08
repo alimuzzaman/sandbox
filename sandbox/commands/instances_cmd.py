@@ -974,7 +974,7 @@ def cmd_instance(cfg, args) -> None:
         _cleanup_herd_route(name, wp_dir(name) if wp_dir(name).exists() else None)
     else:
         info(f"stopping + removing containers + volume for '{name}'")
-        compose("down", "-v", instance=name, check=False)
+        compose("down", "-v", instance=name, check=True)
 
     # 2. Remove WP install dir + snapshots (+ MCP pinned-PHP shims, if any)
     for path in (wp_dir(name), snapshots_dir(name),

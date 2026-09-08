@@ -513,7 +513,19 @@ def cmd_down(cfg, args) -> None:
              "runs). Remove entirely with: ./sb instance delete "
              f"{args.resolved_instance}")
         return
-    compose("down", instance=args.resolved_instance)
+    if owner and owner.get("root"):
+        with _core().project_lock(owner["root"]):
+            current = _core().registry_get(
+                owner["root"], label=owner.get("label", "default"))
+            if not current or current.get("instance") != args.resolved_instance:
+                die("instance ownership changed; retry after checking status")
+            compose("down", instance=args.resolved_instance)
+            # A successful down removes containers. Record that transition so
+            # ensure resumes the retained data instead of attesting absent mounts.
+            _core().registry_put(owner["root"],
+                                 label=owner.get("label", "default"), status="stopped")
+    else:
+        compose("down", instance=args.resolved_instance)
 
 def cmd_status(cfg, args) -> None:
     include_stats = bool(getattr(args, "stats", False))
@@ -1646,90 +1658,120 @@ def cmd_doctor(cfg, args) -> None:
     ok("All checks passed.")
 
 def cmd_smoke(cfg, args) -> None:
-    """Self-test: boot a temporary instance, verify WP + REST, tear down.
+    """Exercise real captured CLI startup, reuse, URL health, and data restart."""
+    import tempfile
+    import urllib.request
+    from urllib.parse import urlsplit
+    from sandbox.services.environment import compatible_subprocess_environment
 
-    Validates the full create-install-probe cycle without touching any
-    project instance. Takes ~60s on a cold Docker image, ~20s warm.
-    """
-    import tempfile, time as _t, urllib.request as _ur, urllib.error as _ue
-
-    print("\nSandbox smoke test")
-    print("══════════════════")
-    problems = 0
-
-    def _check(label: str, ok_: bool, hint: str = "") -> None:
-        nonlocal problems
-        mark = "✓" if ok_ else "✗"
-        line = f"  {mark} {label}"
-        if not ok_:
-            problems += 1
-            if hint:
-                line += f"\n      → {hint}"
-        print(line)
-
-    # 1. Boot a fresh instance from a throw-away project dir under $HOME
-    #    (the project-root allowlist rejects system temp dirs like /var/folders).
     smoke_base = Path.home() / ".sandbox" / "smoke"
     smoke_base.mkdir(parents=True, exist_ok=True)
-    tmpdir = Path(tempfile.mkdtemp(prefix="sb-smoke-", dir=smoke_base))
-    import json as _json
-    (tmpdir / "sandbox.config.json").write_text(
-        _json.dumps({"slug": "smoke-test", "plugins": []}))
+    project = Path(tempfile.mkdtemp(prefix="sb-smoke-", dir=smoke_base)).resolve()
+    (project / "sandbox.config.json").write_text(json.dumps({"slug": "smoke-test", "plugins": {}}))
+    environment = compatible_subprocess_environment({"SANDBOX_HOME": str(BASE)})
+    problems = []
+    instance = None
 
-    print(f"\nTemp project dir: {tmpdir}")
-    print("\nBoot:")
-    t0 = _t.time()
+    def check(label, passed, hint=""):
+        print(f"{'PASS' if passed else 'FAIL'} {label}" + (f": {hint}" if hint and not passed else ""), flush=True)
+        if not passed:
+            problems.append(label)
+
+    def cli(*argv, timeout=180):
+        # Exercise the same captured-output interface used by project scripts.
+        # Progress and credentials stay private; print only the checks below.
+        return subprocess.run([str(ROOT / 'sb'), *argv], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=environment, timeout=timeout, check=False)
+
+    def ensure():
+        result = cli('ensure', '--local', '--project-dir', str(project), '--json')
+        try:
+            entry = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise RuntimeError('ensure_response_invalid') from None
+        if result.returncode or not isinstance(entry, dict) or not entry.get('instance'):
+            error = entry.get('error') if isinstance(entry, dict) else None
+            code = error.get('code') if isinstance(error, dict) else None
+            raise RuntimeError(code if isinstance(code, str) and re.fullmatch(r'[a-z_]{1,80}', code)
+                else 'ensure_failed')
+        if str(entry.get('url', '')).startswith('http://localhost:'):
+            from sandbox.core._remote import redact_text
+            for line in result.stdout.splitlines():
+                if any(marker in line for marker in ('proxy is running but', 'proxy startup failed', 'proxy container did not start')):
+                    print('Startup route diagnostic: ' + redact_text(line)[:1200], flush=True)
+        return entry
+
+    def wp(*argv):
+        result = cli('wp', '--local', '--instance', instance, '--timeout', '30', '--', *argv, timeout=45)
+        if result.returncode:
+            raise RuntimeError('wordpress_cli_failed')
+        return result.stdout.strip()
+
+    def verify(entry, stage):
+        url = entry.get('url', '').rstrip('/')
+        check(stage + ': same instance', entry.get('instance') == instance)
+        check(stage + ': WordPress installed', wp('core', 'is-installed') == '')
+        for option in ('home', 'siteurl'):
+            check(stage + ': ' + option + ' matches advertised URL', wp('option', 'get', option).rstrip('/') == url)
+        check(stage + ': retained data', wp('option', 'get', 'sandbox_smoke_marker') == project.name)
+        # The default clean-URL path must work; localhost alone is not proof.
+        check(stage + ': clean URL advertised', bool(urlsplit(url).hostname)
+            and urlsplit(url).hostname not in {'localhost', '127.0.0.1', '::1'})
+        if urlsplit(url).hostname in {'localhost', '127.0.0.1', '::1'}:
+            from sandbox.core._domains import sandbox_caddy_health
+            from sandbox.core import load_config
+            route_health = sandbox_caddy_health(load_config(),
+                domains=(entry.get('domain') or instance + '.tst',))
+            print('Route health: ' + json.dumps(_public_status_json(route_health), sort_keys=True), flush=True)
+        rest_url = url + '/wp-json/?sandbox-smoke=1'
+        try:
+            with urllib.request.urlopen(rest_url, timeout=15) as response:
+                body = response.read(1024 * 1024 + 1)
+                payload = json.loads(body) if len(body) <= 1024 * 1024 else None
+                ready = response.status == 200 and isinstance(payload, dict) and 'namespaces' in payload
+        except Exception:
+            ready = False
+        check(stage + ': canonical REST with query string', ready)
+
+    print('Sandbox real WordPress lifecycle smoke', flush=True)
+    print('Disposable project: ' + str(project), flush=True)
+    stage = 'captured CLI startup'
     try:
-        entry = ensure_instance(cfg, str(tmpdir))
-        inst = entry["instance"]
-        port = entry["wordpress_port"]
-        elapsed = _t.time() - t0
-        _check(f"instance '{inst}' booted ({elapsed:.0f}s)", True)
-    except Exception as exc:
-        _check("boot", False, str(exc))
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        sys.exit(1)
-
-    print("\nWordPress:")
-    r = wpcli(["core", "is-installed"], instance=inst, check=False, capture=True)
-    _check("WP installed", r.returncode == 0,
-           hint="check `./sb logs` for install errors")
-
-    print("\nREST:")
-    rest_url = f"http://localhost:{port}/wp-json/"
-    try:
-        with _ur.urlopen(rest_url, timeout=8) as resp:
-            rest_ok = resp.status == 200
-    except Exception:
-        rest_ok = False
-    _check(f"GET {rest_url}", rest_ok,
-           hint="check pretty-permalinks / AllowOverride in the container")
-
-    print("\nTeardown:")
-    try:
-        compose("down", "-v", instance=inst, check=False)
-        for path in (wp_dir(inst), snapshots_dir(inst)):
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=True)
-        for path in (focus_file(inst), active_project_file(inst), compose_file(inst)):
-            if path.exists():
-                path.unlink()
-        local = _local_yaml()
-        if inst in (local.get("instances") or {}):
-            del local["instances"][inst]
-            if not local["instances"]:
-                del local["instances"]
-            _write_local_yaml(local)
-        _core().registry_remove(str(tmpdir))
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        _check(f"instance '{inst}' deleted", True)
-    except Exception as exc:
-        _check("cleanup", False, str(exc))
-
-    print()
+        entry = ensure(); instance = entry['instance']
+        check(stage, True)
+        wp('option', 'update', 'sandbox_smoke_marker', project.name)
+        verify(entry, 'fresh')
+        stage = 'repeated ensure'
+        verify(ensure(), 'reuse')
+        stage = 'restart with retained data'
+        stopped = cli('down', '--instance', instance)
+        if stopped.returncode:
+            raise RuntimeError('stop_failed')
+        verify(ensure(), 'restart')
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        code = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+        check(stage, False, code)
+    finally:
+        # Use the normal owner-aware deletion path, including route cleanup.
+        owner = _core().registry_get(str(project))
+        if owner:
+            owned_name = owner.get('instance')
+            owned = owner.get('root') == str(project) and isinstance(owned_name, str) and (
+                instance is None or owned_name == instance)
+            if owned:
+                result = cli('instance', 'delete', owned_name, '--local', '--yes')
+                cleaned = result.returncode == 0 and _core().registry_get(str(project)) is None
+            else:
+                cleaned = False
+        else:
+            cleaned = instance is None
+        check('owned fixture cleanup', cleaned)
+        if cleaned:
+            shutil.rmtree(project)
     if problems:
-        die(f"{problems} check(s) failed — smoke test red")
-    ok("Smoke test green.")
+        die(f"WordPress lifecycle smoke failed ({len(problems)} checks)")
+    ok('WordPress lifecycle smoke passed.')
 
 def cmd_update(cfg, args) -> None:
     """`git pull --ff-only` the project repo this instance tracks (per-project

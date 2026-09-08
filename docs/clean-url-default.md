@@ -75,6 +75,9 @@ ensure. Unrelated stale hostnames do not fail an ensure for a newly created rout
 whose recorded URL still points at `localhost`. This recovery is instance-scoped: it
 does not assign domains to unrelated registry entries, and it returns localhost only
 when the default provider remains unavailable after that retry.
+Fresh creation also retries that route after WordPress installation and HTTP readiness,
+because an empty document root cannot satisfy the initial route proof. A successful
+retry repairs WordPress's canonical URL before returning the instance.
 Wildcard or probable listener evidence is reported as overlap; `listener_conflict`
 requires an exact bind plus proven ownership evidence.
 
@@ -89,6 +92,10 @@ server may canonicalize `X-Sandbox-Route-ID` to `X-Sandbox-Route-Id`; both spell
 refer to the same HTTP field and must authorize the same registered route.
 The wake adapter resolves WordPress instance state through `sandbox.core`; it does not
 depend on the retired `sandbox_core` compatibility namespace for runtime ownership.
+It reloads current instance config for each wake. Backend readiness uses the owned
+localhost port without following redirects: probing the canonical route during wake
+would re-enter the same pending forward-auth request. Public route acceptance remains
+a separate check in the lifecycle smoke.
 On macOS, the supervised activation service records the discovered Docker CLI directory
 in its bounded PATH so an OrbStack-backed wake can run outside an interactive shell.
 Exact-route creation allows one bounded five-second activation proof; broad managed-route

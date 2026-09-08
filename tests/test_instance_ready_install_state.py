@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -60,6 +61,25 @@ class _State:
 
 
 class TestWpCoreInstallState(unittest.TestCase):
+    def test_down_records_stopped_only_after_success(self):
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                state = _State()
+                owner = {"root": "/project", "instance": "fixture", "label": "default"}
+                state.registry_find_instance = mock.Mock(return_value=owner)
+                with mock.patch.object(_lifecycle, "_core", return_value=state), \
+                     mock.patch.object(_lifecycle, "_is_herd_instance", return_value=False), \
+                     mock.patch.object(_lifecycle, "compose", side_effect=(
+                         RuntimeError("stop failed") if fails else None)):
+                    if fails:
+                        with self.assertRaises(RuntimeError):
+                            _lifecycle.cmd_down({}, types.SimpleNamespace(resolved_instance="fixture"))
+                        state.registry_put.assert_not_called()
+                    else:
+                        _lifecycle.cmd_down({}, types.SimpleNamespace(resolved_instance="fixture"))
+                        state.registry_put.assert_called_once_with(
+                            "/project", label="default", status="stopped")
+
     def test_classifier_matrix_is_fail_closed(self):
         cases = (
             ([_Result(0)], _instances._WP_INSTALL_STATE_INSTALLED),

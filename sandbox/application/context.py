@@ -948,7 +948,9 @@ def runtime_service(cfg):
             return {"ok": False, "mutated": False,
                     "error": {"code": "unknown_instance", "message": "no provisioned instance exists"}}
         instance = str(entry["instance"])
-        instance_cfg = core.resolve_instances(cfg).get(instance) or {}
+        # The supervised activation service outlives config changes and newly
+        # created instances. Resolve this operation from the current config.
+        instance_cfg = core.resolve_instances(core.load_config()).get(instance) or {}
         if instance_cfg.get("server") == "herd":
             return {"ok": False, "mutated": False,
                     "error": {"code": "unsupported_runtime", "message": "host-served instances cannot be suspended"}}
@@ -971,7 +973,7 @@ def runtime_service(cfg):
         )
         command_ok = getattr(result, "returncode", 1) == 0
         ready = (command_ok and (operation != "resume" or core._wait_reachable(
-            instance_cfg, timeout=int(lifecycle["wakeTimeoutSeconds"]))))
+            instance_cfg, timeout=int(lifecycle["wakeTimeoutSeconds"]), backend_only=True)))
         ok = bool(command_ok and ready)
         data = {
             "instance": instance,

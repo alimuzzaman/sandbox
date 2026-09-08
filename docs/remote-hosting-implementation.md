@@ -401,3 +401,10 @@ Initializer replay checks normalize Compose `config --hash SERVICE` output
 full 64-character digest, project, config label, creation epoch, and successful
 exit still have to match; abbreviated, malformed, ambiguous, or different IDs
 remain non-authorizing.
+
+Compose's hash subcommand skips service environment-file resolution. Initializer
+proof resolves the model first and passes it only through stdin to the hash
+subcommand. Compose's resolved serialization escapes dollar signs for this
+second parse; disabling interpolation would incorrectly hash doubled dollars. The
+resolved model is never logged or written to disk. Both commands must succeed;
+all identity, creation-time, and terminal-exit checks remain mandatory.

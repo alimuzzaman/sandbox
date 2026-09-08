@@ -23,6 +23,12 @@ from urllib.parse import parse_qs, unquote, urlsplit
 # This helper is copied as source by the registered transport. Keep it stdlib-only.
 ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C.UTF-8"}
 MAX_ARCHIVE = 512 * 1024 * 1024
+MAX_SCHEMA_BYTES = 8 * 1024 * 1024
+_TEMP_COUNTS_SQL = 'CREATE TEMP TABLE recovery_counts (name text, count bigint);\n'
+_SCHEMA_FIELDS_SQL = r'''
+ 'constraints', (SELECT coalesce(json_agg(json_build_object('table',c.relname,'name',con.conname,'definition',pg_get_constraintdef(con.oid),'validated',con.convalidated) ORDER BY c.relname,con.conname),'[]') FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),
+ 'columns', (SELECT coalesce(json_agg(json_build_object('table',table_name,'column',column_name,'type',data_type,'nullable',is_nullable) ORDER BY table_name,ordinal_position),'[]') FROM information_schema.columns WHERE table_schema='public')
+'''
 
 
 def run(argv, *, data=None, timeout=60, output=None):
@@ -82,11 +88,119 @@ def sql(client, database, query):
         data=query.encode(), timeout=300).decode().strip()
 
 
+def _schema_projection(raw):
+    if type(raw) is not dict:
+        raise ValueError('schema_metadata_invalid')
+    projected = {}
+    for kind, identity, fields in (
+            ('constraints', 'name', {'table', 'name', 'definition', 'validated'}),
+            ('columns', 'column', {'table', 'column', 'type', 'nullable'})):
+        rows = raw.get(kind)
+        if type(rows) is not list or len(rows) > 10000:
+            raise ValueError('schema_metadata_invalid')
+        seen = set()
+        for row in rows:
+            if type(row) is not dict or set(row) != fields:
+                raise ValueError('schema_metadata_invalid')
+            for field in fields:
+                value = row[field]
+                if field == 'validated':
+                    if type(value) is not bool: raise ValueError('schema_metadata_invalid')
+                elif (type(value) is not str or not value
+                        or len(value.encode()) > (65536 if field == 'definition' else 128)):
+                    raise ValueError('schema_metadata_invalid')
+            if kind == 'columns' and row['nullable'] not in {'YES', 'NO'}:
+                raise ValueError('schema_metadata_invalid')
+            key = (row['table'], row[identity])
+            if key in seen: raise ValueError('schema_metadata_invalid')
+            seen.add(key)
+        projected[kind] = rows
+    if len(canonical(projected)) > MAX_SCHEMA_BYTES:
+        raise ValueError('schema_metadata_invalid')
+    return projected
+
+
+def _schema_digest(value):
+    return 'sha256:' + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def schema_records(client, database):
+    # Match observation's session context, including its temporary namespace.
+    # Only session-local DDL precedes the read-only metadata query.
+    payload = sql(client, database, _TEMP_COUNTS_SQL
+        + 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\nSELECT json_build_object('
+        + _SCHEMA_FIELDS_SQL + ');')
+    if len(payload.encode()) > MAX_SCHEMA_BYTES:
+        raise ValueError('schema_metadata_invalid')
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result: raise ValueError('schema_metadata_invalid')
+            result[key] = value
+        return result
+    try:
+        return _schema_projection(json.loads(payload, object_pairs_hook=pairs))
+    except (ValueError, RecursionError):
+        raise ValueError('schema_metadata_invalid') from None
+
+
+def schema_diagnostic(source, target_client, captured_digest, observed_target_digest):
+    """Explain a mismatch without changing any restore acceptance decision."""
+    inspect_source(source)
+    original = schema_records(local_client(source), source['database'])
+    restored = schema_records(target_client, source['database'])
+    inspect_source(source)
+    source_digest, target_digest = _schema_digest(original), _schema_digest(restored)
+    result = {'schema_version': 1, 'captured_digest': captured_digest,
+        'source_digest': source_digest, 'target_digest': target_digest,
+        'source_matches_capture': source_digest == captured_digest}
+    if not result['source_matches_capture']:
+        return {**result, 'code': 'source_schema_changed'}
+    if target_digest != observed_target_digest:
+        return {**result, 'code': 'target_schema_changed'}
+    differences = []; components = {}; record_sets_equal = True
+    for kind, identity in (('constraints', 'name'), ('columns', 'column')):
+        left = {(row['table'], row[identity]): row for row in original[kind]}
+        right = {(row['table'], row[identity]): row for row in restored[kind]}
+        equal = left == right
+        record_sets_equal = record_sets_equal and equal
+        components[kind] = {'source_count': len(left), 'target_count': len(right),
+            'source_digest': _schema_digest(original[kind]), 'target_digest': _schema_digest(restored[kind]),
+            'records_equal': equal, 'record_order_equal': original[kind] == restored[kind]}
+        for key in sorted(left.keys() | right.keys()):
+            if key not in right:
+                change, fields = 'missing', []
+            elif key not in left:
+                change, fields = 'extra', []
+            else:
+                fields = sorted(field for field in left[key] if left[key][field] != right[key][field])
+                if not fields: continue
+                change = 'changed'
+            differences.append({'kind': kind, 'table': key[0], 'name': key[1],
+                                'change': change, 'fields': fields})
+    def column_sequences(schema):
+        sequences = {}
+        for row in schema['columns']:
+            sequences.setdefault(row['table'], []).append(row['column'])
+        return sequences
+    left_order, right_order = column_sequences(original), column_sequences(restored)
+    for table in sorted(left_order.keys() & right_order.keys()):
+        if set(left_order[table]) == set(right_order[table]) and left_order[table] != right_order[table]:
+            differences.append({'kind': 'columns', 'table': table, 'name': '',
+                                'change': 'changed', 'fields': ['order']})
+    column_order_equal = left_order == right_order
+    return {**result, 'code': 'schema_compared', 'components': components,
+        'record_sets_equal': record_sets_equal, 'column_order_equal': column_order_equal,
+        'ordering_only': record_sets_equal and column_order_equal and source_digest != target_digest,
+        'difference_count': len(differences), 'differences': differences[:32],
+        'truncated': len(differences) > 32}
+
+
 def observation(client, database, prefix=""):
     # Identifiers come only from pg_catalog and are quoted by format('%I').
     # CREATE is forbidden inside READ ONLY, even for temporary tables. Create
     # the session-local accumulator before importing the read-only snapshot.
-    query = 'CREATE TEMP TABLE recovery_counts (name text, count bigint);\n' + prefix + r'''
+    query = _TEMP_COUNTS_SQL + prefix + r'''
 DO $body$ DECLARE item record; amount bigint; BEGIN
  FOR item IN SELECT schemaname, tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename LOOP
  EXECUTE format('SELECT count(*) FROM %I.%I',item.schemaname,item.tablename) INTO amount;
@@ -97,9 +211,7 @@ SELECT json_build_object(
  'major', current_setting('server_version_num')::int/10000,
  'database_identity', md5(current_database()),
  'tables', (SELECT coalesce(json_agg(json_build_object('name',name,'count',count) ORDER BY name),'[]') FROM recovery_counts),
- 'constraints', (SELECT coalesce(json_agg(json_build_object('table',c.relname,'name',con.conname,'definition',pg_get_constraintdef(con.oid),'validated',con.convalidated) ORDER BY c.relname,con.conname),'[]') FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),
- 'columns', (SELECT coalesce(json_agg(json_build_object('table',table_name,'column',column_name,'type',data_type,'nullable',is_nullable) ORDER BY table_name,ordinal_position),'[]') FROM information_schema.columns WHERE table_schema='public'));
-'''
+''' + _SCHEMA_FIELDS_SQL + ');'
     # Writes touch only the already-created session-local temporary table.
     raw = json.loads(sql(client, database, query))
     migrations = sql(client, database, prefix + r'''
@@ -110,7 +222,7 @@ SELECT CASE WHEN to_regclass('public._prisma_migrations') IS NULL THEN 'absent' 
         checksum = sql(client, database, prefix + '''SELECT md5(coalesce(string_agg(migration_name || ':' || checksum || ':' || (finished_at IS NOT NULL)::text || ':' || (rolled_back_at IS NOT NULL)::text, ',' ORDER BY migration_name),'')) FROM public._prisma_migrations;''')
     return {"major": raw["major"], "database_identity": raw["database_identity"],
         "table_counts": raw["tables"], "migration_checksum": checksum,
-        "schema_digest": "sha256:" + hashlib.sha256(canonical({"constraints": raw["constraints"], "columns": raw["columns"]})).hexdigest(),
+        "schema_digest": _schema_digest(_schema_projection(raw)),
         "constraints_valid": all(row["validated"] for row in raw["constraints"])}
 
 
@@ -220,7 +332,7 @@ def inspect_restore(source, archive, work, name):
         raise ValueError('restore_target_changed')
     consumers = run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'volume=' + volume]).decode().split()
     if consumers != [row.get('Id')]: raise ValueError('restore_target_changed')
-    client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + source['role'], name]
+    client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + source['role'], row['Id']]
     base = {'schema_version': 1, 'ok': True, 'code': 'restore_inspected', 'target': name, 'volume': volume}
     try:
         importers = sql(client, source['database'], "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND application_name='pg_restore';")
@@ -234,12 +346,19 @@ def inspect_restore(source, archive, work, name):
     actual_counts = {row['name']: row['count'] for row in actual['table_counts']}
     different = sorted(name for name in expected_counts.keys() | actual_counts.keys()
         if expected_counts.get(name) != actual_counts.get(name))
+    diagnostic = {}
+    if not matches['schema_digest']:
+        try:
+            diagnostic['schema_diagnostic'] = schema_diagnostic(source, client,
+                evidence['schema_digest'], actual['schema_digest'])
+        except (ValueError, OSError, KeyError, subprocess.TimeoutExpired):
+            diagnostic['schema_diagnostic'] = {'schema_version': 1, 'code': 'schema_diagnostic_unavailable'}
     return {**base, 'database_available': True, 'matches': matches, 'all_match': all(matches.values()),
         'observation': actual, 'dump_digest': evidence['dump_digest'],
         'source_database_identity': evidence['database_identity'],
         'target_database': source['database'], 'target_role': source['role'],
         'source_table_count': len(expected_counts), 'restored_table_count': len(actual_counts),
-        'mismatched_table_count': len(different), 'mismatched_tables': different[:32]}
+        'mismatched_table_count': len(different), 'mismatched_tables': different[:32], **diagnostic}
 
 
 def restore(source, archive, work, name, target_volume=None, target_password=b''):

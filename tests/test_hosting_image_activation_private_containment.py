@@ -51,7 +51,7 @@ class DockerFixture:
         if argv[:3] == ["docker", "stop", "--time"]:
             identity = argv[4]
             row = next(row for row in self.rows if row["Id"] == identity)
-            row["State"].update(Pid=0, Running=False, Status="exited")
+            row["State"].update(Pid=0, Running=False, Restarting=False, Status="exited")
             return b""
         raise AssertionError(f"unexpected docker command: {argv}")
 
@@ -68,14 +68,56 @@ def frame(operation="plan", containers=None):
     }
 
 
+class ProcessBindingTests(unittest.TestCase):
+    def test_process_exit_during_either_read_is_changed_evidence(self):
+        for reads in ([FileNotFoundError()], [b'1' * 64, FileNotFoundError()]):
+            with self.subTest(reads=len(reads)), patch.object(
+                    private_containment.Path, 'read_bytes', side_effect=reads):
+                with self.assertRaisesRegex(ValueError, '^evidence_changed$'):
+                    private_containment._process_binding(123, '1' * 64)
+
+
 class PrivateContainmentTests(unittest.TestCase):
     def test_unstable_state_returns_closed_reason_without_any_write(self):
         for field, value, code in (('Paused', True, 'container_paused'),
-                ('Restarting', True, 'container_restarting'), ('Pid', -1, 'container_state_invalid')):
+                ('Restarting', True, 'container_state_invalid'), ('Pid', -1, 'container_state_invalid')):
             with self.subTest(field=field):
                 docker = DockerFixture(); docker.rows[0]['State'][field] = value
                 self.assertEqual(self._run_main(frame(), docker), {'ok': False, 'code': code})
                 self.assertFalse(any(call[1] in {'update', 'stop'} for call in docker.calls))
+
+    def test_exact_restart_wait_is_planned_and_stopped_without_a_fake_process_binding(self):
+        docker = DockerFixture()
+        docker.rows[0]['State'].update(Restarting=True, Running=True, Pid=0, Status='restarting')
+        with patch.object(private_containment, '_process_binding') as process:
+            planned = self._run_main(frame(), docker)
+            self.assertEqual(planned['code'], 'planned')
+            self.assertTrue(planned['containers'][0]['running'])
+            result = self._run_main(frame('apply', planned['containers']), docker)
+            self.assertEqual(result['code'], 'contained')
+            process.assert_not_called()
+        writes = [call for call in docker.calls if call[1] in {'update', 'stop'}]
+        self.assertEqual(writes, [['docker', 'update', '--restart=no', '1' * 64],
+                                 ['docker', 'stop', '--time', '30', '1' * 64]])
+        self.assertEqual(docker.rows[0]['Mounts'], rows()[0]['Mounts'])
+
+    def test_restart_wait_contradictions_and_transition_refuse_without_writes(self):
+        for field, value in (('Running', False), ('Pid', 123), ('Status', 'running'),
+                             ('Restarting', 1), ('Paused', None)):
+            with self.subTest(field=field):
+                docker = DockerFixture()
+                docker.rows[0]['State'].update(Restarting=True, Running=True, Pid=0, Status='restarting')
+                docker.rows[0]['State'][field] = value
+                self.assertEqual(self._run_main(frame(), docker)['code'], 'container_state_invalid')
+                self.assertFalse(any(call[1] in {'update', 'stop'} for call in docker.calls))
+        docker = DockerFixture()
+        docker.rows[0]['State'].update(Restarting=True, Running=True, Pid=0, Status='restarting')
+        planned = self._run_main(frame(), docker)
+        self.assertEqual(planned['code'], 'planned')
+        docker.rows[0]['State'].update(Restarting=False, Running=True, Pid=123, Status='running')
+        result = self._run_main(frame('apply', planned['containers']), docker)
+        self.assertEqual(result['code'], 'evidence_changed')
+        self.assertFalse(any(call[1] in {'update', 'stop'} for call in docker.calls))
 
     def setUp(self):
         self.process_binding = patch.object(

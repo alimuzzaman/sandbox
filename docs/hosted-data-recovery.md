@@ -62,6 +62,15 @@ encrypted backup. It requires the same plan, archive, owner-labelled container
 and volume, no network or ports, no other volume consumer, and no active importer.
 It reports bounded comparison results without reimporting, restarting, stopping,
 or marking the restore verified. An incomplete restore remains retained.
+For a schema mismatch, inspection also compares private schema records from the
+registered source and retained target. The source's original digest must still
+equal the captured digest; otherwise it reports `source_schema_changed`. A target
+that changes between reads reports `target_schema_changed`. Successful diagnosis
+returns component digests, counts, ordering flags and at most 32 changed object
+identifiers/field names, with a total and truncation flag. Definitions, SQL
+literals and rows never leave the helper. Private metadata is bounded to 8 MiB
+and 10,000 records per component. Column order within each table remains part of
+the comparison. Diagnostics do not change the failed schema acceptance gate.
 If every comparison matches, `verify-restore --confirm` repeats those checks under
 the original request lock, stops only that isolated target, and retains the verified
 receipt. It never imports again, repairs a mismatch, or replaces the target.

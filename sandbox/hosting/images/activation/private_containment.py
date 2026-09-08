@@ -12,9 +12,14 @@ _ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 
 def _process_binding(pid, container_id):
     root = Path('/proc') / str(pid)
-    cgroup = (root / 'cgroup').read_bytes()
+    try:
+        cgroup = (root / 'cgroup').read_bytes()
+        value = (root / 'stat').read_bytes()
+    except FileNotFoundError:
+        # The inspected process can exit while Docker enters restart backoff.
+        raise ValueError('evidence_changed') from None
     if container_id.encode() not in cgroup: raise ValueError('process_owner_unavailable')
-    value = (root / 'stat').read_bytes(); tail = value[value.rfind(b')') + 2:].split()
+    tail = value[value.rfind(b')') + 2:].split()
     if len(tail) < 20: raise ValueError('process_owner_unavailable')
     return {'pid': pid, 'started': int(tail[19]), 'cgroup_digest': hashlib.sha256(cgroup).hexdigest()}
 
@@ -36,11 +41,19 @@ def snapshot(frame, command):
         if row.get('Config', {}).get('Labels', {}).get('com.docker.compose.project') != project:
             raise ValueError('evidence_changed')
         state = row['State']; pid = state.get('Pid')
-        if state.get('Paused'): raise ValueError('container_paused')
-        if state.get('Restarting'): raise ValueError('container_restarting')
-        if type(pid) is not int or pid < 0: raise ValueError('container_state_invalid')
-        running = state.get('Running')
-        if type(running) is not bool or running != (pid > 0): raise ValueError('container_state_invalid')
+        paused, restarting, running = (state.get(field) for field in ('Paused', 'Restarting', 'Running'))
+        if paused is True: raise ValueError('container_paused')
+        if (any(type(value) is not bool for value in (paused, restarting, running))
+                or type(pid) is not int or pid < 0 or state.get('Dead', False) is not False):
+            raise ValueError('container_state_invalid')
+        if restarting:
+            # Docker's restart manager has no current process during backoff.
+            # Running stays true so the approved operation still issues stop.
+            if not running or pid != 0 or state.get('Status') != 'restarting':
+                raise ValueError('container_state_invalid')
+        elif (running != (pid > 0)
+                or state.get('Status') not in ({'running'} if running else {'created', 'exited'})):
+            raise ValueError('container_state_invalid')
         process = _process_binding(pid, row['Id']) if pid else None
         policy = row.get('HostConfig', {}).get('RestartPolicy')
         if not isinstance(policy, dict) or policy.get('Name') not in {'', 'no', 'always', 'unless-stopped', 'on-failure'}:

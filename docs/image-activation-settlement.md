@@ -39,6 +39,17 @@ disable restart policies. Any necessary containment is a separate, explicitly
 authorized operation. `observation_unavailable`, `evidence_changed`, and
 `remote_runtime_revision_mismatch` also leave the incident intact.
 
+`containment-plan` can bind Docker's exact restart-wait state: running and
+restarting, not paused, status `restarting`, and PID 0. That state has no current
+process, but is not quiescent. Positive PIDs still require the existing cgroup
+and process-start proof. A process disappearing during that read returns
+`evidence_changed` without substituting a process identity. All container, image, mount, label, restart-policy,
+daemon, transaction and generation bindings remain checked. The separately
+approved `containment-apply` disables restart and stops only those exact IDs,
+preserving their volumes. A changed state before effects invalidates the plan;
+the helper does not retry or replace an uncertain request. Final stopped and
+no-restart evidence, then independent settlement observation, are still required.
+
 Prepare a closed `SettlementDataAssessment` JSON artifact containing the exact
 target, incident transaction, intended application revision, one to eight sorted
 backup receipt digests, and the reviewed `forward_initialization_reviewed`

@@ -180,9 +180,10 @@ class TestModularityInventory(unittest.TestCase):
                 "cli_commands": 91,
                 "mcp_tools": 44,
                 "wildcard_imports": 19,
-                # Settlement approval storage adds three record-kind guards;
-                # these do not dispatch on a runtime/project kind.
-                "kind_referencing_conditionals": 251,
+                # Settlement storage adds three record-kind guards; recovery
+                # schema diagnosis adds one column/constraint category guard.
+                # Neither dispatches on a runtime/project kind.
+                "kind_referencing_conditionals": 252,
             },
         )
 

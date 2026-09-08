@@ -13,12 +13,45 @@ import tarfile
 import tempfile
 
 from sandbox.hosting.images.provisioning import install_owner_only_json, _read_owner_only_json, _owned_directory
-from sandbox.hosting.images.plan_set import read_stable_file, _load_json_bytes
+from sandbox.hosting.images.plan_set import read_stable_file
 from .database import DatabaseCapture
 from .errors import RecoveryError
 from .integrity import sha256_file
 from .postgres_contract import recovery_source, digest
 from .restore import verify_manifest
+
+
+def _load_json_bytes(data):
+    """Decode bounded recovery evidence independently of image service limits."""
+    def invalid():
+        raise RecoveryError('PostgreSQL evidence is invalid', 'observation_invalid')
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value: invalid()
+            value[key] = item
+        return value
+    if type(data) is not bytes or not data or len(data) > 1024 * 1024:
+        invalid()
+    try:
+        value = json.loads(data.decode('utf-8'), object_pairs_hook=pairs,
+                           parse_constant=lambda _: invalid())
+        remaining = 100000
+        def check(item, depth=0):
+            nonlocal remaining
+            remaining -= 1
+            if depth > 32 or remaining < 0: invalid()
+            if type(item) in (dict, list):
+                if len(item) > 10000: invalid()
+                for child in (item.values() if type(item) is dict else item):
+                    check(child, depth + 1)
+            elif item is not None and type(item) not in (str, int, bool):
+                invalid()
+        check(value)
+        if type(value) is not dict: invalid()
+        return value
+    except (UnicodeError, ValueError, RecursionError):
+        invalid()
 
 
 class PostgresRecovery:

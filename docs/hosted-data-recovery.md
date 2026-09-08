@@ -5,6 +5,10 @@ conversion. `recovery postgres` is an alias. It uses registered remotes, the
 existing encrypted staging/publication coordinator and native capture validation.
 These are component restore drills, not full control-plane disaster restores.
 
+Recovery evidence accepts up to 1 MiB of JSON, 10,000 entries per collection,
+100,000 values, and 32 nesting levels. Duplicate keys and non-integer numbers
+are rejected. Database table inventories do not use the image-plan service cap.
+
 The source descriptor is owner-only JSON with a closed schema. PostgreSQL binds
 `schema_version=1`, `profile` (`lenzora-dev`, `lenzora-prod`, or
 `lenzora-prod-legacy`), registered `remote`, `compose_project`, full observed

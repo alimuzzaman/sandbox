@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError
-from sandbox.recovery.postgres import PostgresRecovery
+from sandbox.recovery.postgres import PostgresRecovery, _load_json_bytes
 from sandbox.recovery.postgres_contract import PostgresSource
 
 
@@ -97,6 +97,17 @@ class FakeTransport:
 
 
 class PostgresRecoveryTests(unittest.TestCase):
+    def test_evidence_accepts_realistic_table_inventory(self):
+        value = {'table_counts': [{'name': f'table_{i}', 'count': i} for i in range(307)]}
+        self.assertEqual(_load_json_bytes(json.dumps(value).encode()), value)
+
+    def test_evidence_rejects_ambiguous_or_unbounded_json(self):
+        for payload in (b'{"x":1,"x":2}', b'{"x":NaN}', b'{"x":1.5}',
+                        b'[]', b' ' * (1024 * 1024 + 1),
+                        b'{"x":' + b'[' * 34 + b'0' + b']' * 34 + b'}'):
+            with self.subTest(payload_size=len(payload)), self.assertRaises(RecoveryError):
+                _load_json_bytes(payload)
+
     def _recovery(self, root: Path, transport: FakeTransport):
         root = Path(os.path.realpath(root))
         capture = FakeCapture(root)

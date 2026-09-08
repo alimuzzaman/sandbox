@@ -159,7 +159,7 @@ class HostingActivationTopologyCanaryTests(unittest.TestCase):
                 }
             return row
 
-        return {
+        document = {
             "services": {
                 "queue": service(
                     "test \"$(id -u)\" = \"1000\"; test -r /run/secrets/token; "
@@ -183,6 +183,16 @@ class HostingActivationTopologyCanaryTests(unittest.TestCase):
             },
             "secrets": {"token": {"environment": "SANDBOX_ACTIVATION_SECRET_0"}},
         }
+        document["services"]["migrate"]["depends_on"] = {
+            "queue": {"condition": "service_healthy"}}
+        document["services"]["storage"]["depends_on"] = {
+            "migrate": {"condition": "service_completed_successfully"}}
+        document["services"]["topology"]["depends_on"] = {
+            "storage": {"condition": "service_completed_successfully"}}
+        for name in ("web", "worker"):
+            document["services"][name]["depends_on"] = {
+                "topology": {"condition": "service_completed_successfully"}}
+        return document
 
     def _contract(self, image: str, image_id: str):
         from sandbox.hosting.images.activation.v2_models import (
@@ -287,7 +297,9 @@ class HostingActivationTopologyCanaryTests(unittest.TestCase):
         project = "sandbox-activation-topology-" + uuid.uuid4().hex
         for row in document["services"].values():
             row["labels"]["sandbox.activation-topology-canary"] = project
-        candidate = self._candidate(root, document)
+        candidate_root = root / ("failure" if failing else "success")
+        candidate_root.mkdir(mode=0o700)
+        candidate = self._candidate(candidate_root, document)
         contract = self._contract(image, image_identity["local_image_id"])
         identities = {name: dict(image_identity)
                       for name in ("queue", "web", "worker")}

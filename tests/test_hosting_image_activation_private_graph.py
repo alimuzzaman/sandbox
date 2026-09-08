@@ -60,6 +60,22 @@ class PrivateGraphTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 validate_init_container(**{**kwargs, "image": {**image, **change}})
 
+    def test_network_mode_none_matches_docker_network_identity(self):
+        from sandbox.hosting.images.activation.private_graph import validate_init_container
+
+        kwargs = inspection_fixture()
+        kwargs["document"]["services"]["migrate"]["network_mode"] = "none"
+        kwargs["container"]["HostConfig"]["NetworkMode"] = "none"
+        kwargs["container"]["NetworkSettings"] = {"Networks": {"none": {}}}
+        validate_init_container(**kwargs)
+        with self.assertRaises(ValueError):
+            validate_init_container(**{**kwargs, "container": {
+                **kwargs["container"], "HostConfig": {
+                    **kwargs["container"]["HostConfig"], "NetworkMode": "host"}}})
+        with self.assertRaises(ValueError):
+            validate_init_container(**{**kwargs, "container": {
+                **kwargs["container"], "NetworkSettings": {"Networks": {}}}})
+
     def test_candidate_v2_accepts_only_generated_environment_secret_sources(self):
         from sandbox.hosting.images.activation.private_graph import validate_init_container
         kwargs = inspection_fixture()
@@ -315,7 +331,7 @@ class PrivateGraphTests(unittest.TestCase):
                 out = (fixture["container"]["Id"] + "\n").encode()
             elif argv[1] == "inspect":
                 out = json.dumps([fixture["container"]]).encode()
-            elif argv[1] == "compose" and "create" in argv:
+            elif argv[1] == "compose" and "up" in argv:
                 out = b""
             else:
                 self.fail(argv)
@@ -334,7 +350,10 @@ class PrivateGraphTests(unittest.TestCase):
                 execute_private_runtime(source=source, document=fixture["document"],
                     environment={"PATH": "/synthetic/bin"}, timeout_seconds=60,
                     input_contract="candidate-v2")
-        self.assertTrue(any(argv[1] == "compose" and "create" in argv for argv in calls))
+        compose_up = [argv for argv in calls if argv[1] == "compose" and "up" in argv]
+        self.assertEqual(len(compose_up), 1)
+        self.assertEqual(compose_up[0][-8:], ["up", "--no-start", "--no-deps", "--no-build",
+                                              "--pull", "never", "--force-recreate", "queue"])
         self.assertFalse(any(argv[1] == "start" for argv in calls))
 
     def test_graph_command_bounds_streamed_output(self):
@@ -404,7 +423,7 @@ class PrivateGraphTests(unittest.TestCase):
                         "com.docker.compose.config-hash": "c" * 64}},
                     "State": {"Status": "created", "Running": False}}
                 out = json.dumps([row]).encode()
-            elif argv[1] == "compose" and "create" in argv:
+            elif argv[1] == "compose" and "up" in argv:
                 out = b""
             elif argv[1] == "start":
                 out = b""
@@ -424,5 +443,8 @@ class PrivateGraphTests(unittest.TestCase):
             execute_private_runtime(source=source, document=fixture["document"],
                 environment={"PATH": "/synthetic/bin"}, timeout_seconds=60,
                 input_contract="candidate-v2")
-        self.assertFalse(any(argv[1] == "up" for argv in calls))
+        compose_up = [argv for argv in calls if argv[1] == "compose" and "up" in argv]
+        self.assertEqual(len(compose_up), 1)
+        self.assertEqual(compose_up[0][-9:], ["up", "--no-start", "--no-deps", "--no-build",
+                                              "--pull", "never", "--force-recreate", "queue", "web"])
         self.assertEqual({argv[2] for argv in calls if argv[1] == "start"}, set(ids.values()))

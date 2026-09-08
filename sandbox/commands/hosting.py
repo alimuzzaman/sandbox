@@ -5124,15 +5124,46 @@ def _cmd_host_image(validated: dict, args) -> None:
                         configuration_digest=bundle["configuration_digest"],
                         init_data_contract_digest=bundle["init_data_contract_digest"],
                         edge_required=bundle["edge_required"], ownership_held=True)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError, RuntimeError):
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, RuntimeError) as exc:
+        from sandbox.hosting.images.activation.models import RESULT_CODES
+        from sandbox.transports.remote_hosting_activation import PUBLIC_ACTIVATION_DETAILS
+        # Only the closed public vocabulary may escape. Never print dependency
+        # exception text: private Compose/broker failures can carry input bytes.
+        diagnostic = str(exc)
+        public_code = diagnostic if diagnostic in RESULT_CODES else "policy_mismatch"
         payload = {"schema_version": response_schema, "ok": False, "result_class": "refused",
-                   "code": ("artifact_invalid" if response_schema == 0 else "policy_mismatch"),
+                   "code": ("artifact_invalid" if response_schema == 0 else public_code),
                    "operation": action,
                    "request_id": str(getattr(args, "request_id", ""))[:256],
                    "starting_generation": int(args.expected_generation),
                    "resulting_generation": int(args.expected_generation)}
+        detail_code = getattr(exc, "detail_code", None)
+        if type(detail_code) is str and detail_code in PUBLIC_ACTIVATION_DETAILS:
+            payload["detail_code"] = detail_code
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     if payload.get("ok") is not True: raise SystemExit(1)
+
+
+def _cmd_host_image_status(validated: dict, args) -> None:
+    from sandbox.hosting.images.activation.repository import ActivationRepository
+    from sandbox.hosting.images.activation.status import activation_status
+
+    try:
+        with remote.registered_remote_lock():
+            if not remote.get_remote(args.remote):
+                raise ValueError("registered remote unavailable")
+            target = hosting.state_key(args.remote, validated)
+        recovery = RecoveryRepository()
+        repository = ActivationRepository(
+            host_state_port=recovery.activation_host_state_port(),
+            stage_repository=None,
+            target_mutation_port=recovery.target_mutation_port("image-recover"))
+        payload = activation_status(repository.snapshot(target))
+    except Exception:
+        payload = {"schema_version": 1, "ok": False, "code": "state_unavailable"}
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    if not payload["ok"]:
+        raise SystemExit(1)
 
 
 def cmd_host(cfg, args) -> None:
@@ -5148,14 +5179,14 @@ def cmd_host(cfg, args) -> None:
             "--environment": getattr(args, "environment", None),
             "--remote": getattr(args, "remote", None),
         }
-        if getattr(args, "image_action", None) != "provision":
+        if getattr(args, "image_action", None) not in {"provision", "status"}:
             required["--request-id"] = getattr(args, "request_id", None)
         missing = [name for name, value in required.items()
                    if not isinstance(value, str) or not value.strip()]
         if getattr(args, "image_action", None) not in {
-                "provision", "activate", "adopt", "rollback", "recover"}:
+                "provision", "status", "activate", "adopt", "rollback", "recover"}:
             missing.append("image action")
-        if getattr(args, "image_action", None) != "provision" \
+        if getattr(args, "image_action", None) not in {"provision", "status"} \
                 and getattr(args, "expected_generation", None) is None:
             missing.append("--expected-generation")
         if missing:
@@ -5208,6 +5239,9 @@ def cmd_host(cfg, args) -> None:
             die("--remote is required for host image actions")
         if getattr(args, "image_action", None) == "provision":
             _cmd_host_image_provision(cfg, validated, args)
+            return
+        if getattr(args, "image_action", None) == "status":
+            _cmd_host_image_status(validated, args)
             return
         _cmd_host_image(validated, args)
         return

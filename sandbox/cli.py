@@ -872,7 +872,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["provision", "verify", "activate", "adopt", "rollback", "recover"],
+        choices=["provision", "verify", "status", "activate", "adopt", "rollback", "recover"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")

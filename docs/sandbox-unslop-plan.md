@@ -372,3 +372,52 @@ legacy-replacement refusal). Corrected that inventory expectation and reran
 the modularity/architecture modules; no production code changed afterward.
 The original full job remains recorded as failed. Lenzora's final wrapper run
 again passed 261 tests with 27 skips after the v2-value capability check.
+
+
+### Recovery review follow-up — 2026-09-08
+
+The complete disposable Linux graph passed in job
+`d8a94b26bd3f01aefe0e352307e0caa6` (exit 0): cold prerequisite readiness,
+three ordered initializers, two dependent consumers with delayed health,
+synthetic private inputs, initializer failure fencing, refusal to replay an
+uncertain execution, and exact owned-container cleanup. This used the existing
+signed worker image, not a new application build. Earlier job
+`68e55c62049bf2dad49f350747bc844c` exposed Docker's explicit `none` network
+identity. The validator now checks both that identity and HostConfig.NetworkMode;
+other special network modes remain refused. A separate real Compose defect was
+fixed: candidate-v2 uses supported `up --no-start --no-deps --no-build --pull
+never --force-recreate`, then exact stopped-container verification and private
+preparation before direct start. `compose create --no-deps` is unsupported.
+
+`host image status` now reads the activation repository under its shared locks
+without opening stage custody, acquiring credentials, or observing the runtime.
+It reports retained schema/request/transaction/generation selectors; corrupt or
+unavailable state reports `state_unavailable`, never an invented empty target.
+Activation errors retain only fixed public codes and bounded diagnostic enums.
+
+The live production owner remains an uncertain, effect-entered transaction at
+generation 0. Ordinary observation recovery refused with `topology_mismatch`;
+it did not clear that owner or create runtime receipts. No deployment is justified
+by the disposable graph check. The separate FR-061/062 settlement boundary remains
+incomplete: its closed value, signature-verification and pure candidate helpers
+are internal foundations only, with no CLI apply route or custody release.
+Do not wire settlement into activation until fresh process/container/data
+observations, installed approval, durable terminal custody and separate forward
+compatibility admission are implemented and independently accepted together.
+
+The Lenzora source audit found no production backup receipt or restore evidence
+for application `fa945494a20852a46697fc1f105efe4233895c44`. Its backup/restore
+runbook and business-readiness register still require an assigned owner, provider
+backup identity and isolated database-plus-artifact restore proof. A backup
+receipt and reviewed initialization compatibility decision have been requested.
+They cannot be synthesized from source tests, healthy containers or a canary.
+
+
+Final source acceptance for this follow-up passed in local durable job
+`ddb93d29c9daa438cd146f65f806c0c8`: 5,556 tests, 13 skipped, exit 0 in
+635.784 seconds. The 23 focused settlement model/policy/candidate tests also
+passed, including a real retained graph transaction, historical generation
+preservation, original-result tampering, request collision and SSH namespace
+refusals. No production source changed after the full suite began. This closes
+the earlier full-suite failure; it does not close T165, install a settlement
+command, update the remote runtime, or establish production recovery.

@@ -1513,6 +1513,19 @@ first runtime effect.
 
 Image staging samples the authenticated machine projection at both observation boundaries. A projection change fails closed even when the private raw machine epoch and Docker daemon remain stable; raw machine identity is never emitted.
 
+### Retained activation diagnostics
+
+`host image status --project-dir DIR --environment ENV --remote NAME --json`
+reads the local retained activation repository for the exact registered target.
+It reports generation and the active request/transaction digest, phase and effect
+flag under the shared owner. It needs no confirmation, plan, credential access
+or remote runtime call. `state_unavailable` is not an empty state. The outer state
+schema and active transaction schema are separate fields. This diagnostic does
+not establish runtime health, release custody, or authorize a deployment retry.
+Activation failures preserve fixed public result codes and may include an optional
+`detail_code` from a closed diagnostic list. Private dependency error text is
+never returned as a diagnostic.
+
 ### Opt-in stopped-container file secrets
 
 `host image provision --provision-phase activation-bundle

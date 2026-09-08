@@ -181,8 +181,22 @@ sys.stdout.write(json.dumps({"ok": True, "result": result}, separators=(",", ":"
 '''
 
 
+PUBLIC_ACTIVATION_DETAILS = frozenset({
+    "configuration_binding_unavailable", "compose_secret_unavailable",
+    "compose_secret_environment_conflict", "compose_environment_unavailable",
+    "compose_environment_unsafe", "compose_environment_changed",
+    "compose_daemon_mismatch", "compose_profile_invalid", "compose_profile_unavailable",
+    "compose_source_mismatch", "compose_source_refused", "compose_source_oversized",
+    "compose_source_malformed", "compose_config_failed", "compose_secret_changed",
+    "private_render_unavailable", "private_render_identity_mismatch",
+    "private_render_schema_mismatch",
+})
+
+
 class RemoteActivationError(RuntimeError):
-    pass
+    def __init__(self, code: str, *, detail_code: str | None = None):
+        super().__init__(code)
+        self.detail_code = detail_code if detail_code in PUBLIC_ACTIVATION_DETAILS else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,10 +329,15 @@ class RegisteredRemoteActivationTransport:
             result = self._invoke(tuple(argv), timeout_seconds=60,
                                   environment=render_environment,
                                   private_environment_source=source)
+            if result["returncode"] != 0 or result["terminated"] is not True:
+                fixed = result["stderr"].strip()
+                raise RemoteActivationError("topology_mismatch", detail_code=(
+                    fixed if fixed in PUBLIC_ACTIVATION_DETAILS else "private_render_unavailable"))
             try:
                 rendered = json.loads(result["stdout"])
             except (TypeError, json.JSONDecodeError):
-                raise RemoteActivationError("topology_mismatch") from None
+                raise RemoteActivationError("topology_mismatch",
+                    detail_code="private_render_schema_mismatch") from None
             return result, rendered
 
         result, rendered = render()
@@ -337,7 +356,8 @@ class RegisteredRemoteActivationTransport:
             if snapshot.input_contract in ("candidate-v1", "candidate-v2"):
                 # Candidate preparation froze the complete profile selection.
                 # A changed digest cannot be repaired by discovering new input.
-                raise RemoteActivationError("topology_mismatch")
+                raise RemoteActivationError("topology_mismatch",
+                    detail_code="private_render_identity_mismatch")
             profile_argv = ["docker", "compose"]
             for path in compose_files:
                 profile_argv.extend(("--file", path))

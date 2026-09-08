@@ -191,15 +191,28 @@ def validate_init_container(*, document, declaration, project, owner, container,
                       row.get("Destination"), row.get("RW")) for row in container.get("Mounts") or []]
     if sorted(actual_mounts) != sorted(expected_mounts):
         raise ValueError("graph_configuration_mismatch")
-    networks = service.get("networks") or {}
-    if not isinstance(networks, dict):
-        raise ValueError("graph_configuration_mismatch")
     expected_networks = set()
-    for name in networks:
-        network = (document.get("networks") or {}).get(name)
-        if not isinstance(network, dict) or network.get("external") not in (None, False):
+    network_mode = service.get("network_mode")
+    if network_mode is not None:
+        # Docker exposes the special ``none`` network as a named entry in
+        # NetworkSettings.Networks. Require Docker's HostConfig mode too;
+        # service and container modes depend on another runtime identity and
+        # cannot be proven from this isolated initializer inspection.
+        if network_mode == "none":
+            if (container.get("HostConfig") or {}).get("NetworkMode") != "none":
+                raise ValueError("graph_configuration_mismatch")
+            expected_networks.add("none")
+        else:
             raise ValueError("graph_configuration_mismatch")
-        expected_networks.add(network.get("name") or project + "_" + name)
+    else:
+        networks = service.get("networks") or {}
+        if not isinstance(networks, dict):
+            raise ValueError("graph_configuration_mismatch")
+        for name in networks:
+            network = (document.get("networks") or {}).get(name)
+            if not isinstance(network, dict) or network.get("external") not in (None, False):
+                raise ValueError("graph_configuration_mismatch")
+            expected_networks.add(network.get("name") or project + "_" + name)
     actual_networks = (container.get("NetworkSettings") or {}).get("Networks") or {}
     if set(actual_networks) != expected_networks:
         raise ValueError("graph_configuration_mismatch")
@@ -640,10 +653,12 @@ def execute_private_runtime(*, source, document, environment, timeout_seconds,
         command(base + ["up", "--detach", "--no-build", "--pull", "never", "--no-deps", *services], input=raw)
     elif source["action"] == "replace":
         # Candidate-v2 never delegates start or dependency selection to
-        # Compose. Create the exact services, prove each stopped container,
-        # prepare/read back every private file, then start only those IDs.
+        # Compose. ``create`` has no portable ``--no-deps`` option, so use
+        # ``up --no-start`` with the supported dependency and pull/build
+        # guards, then prove each stopped container before private preparation.
         _require_archive_capability(command)
-        command(base + ["create", "--no-build", "--pull", "never", "--no-deps", *services], input=raw)
+        command(base + ["up", "--no-start", "--no-deps", "--no-build", "--pull", "never",
+                        "--force-recreate", *services], input=raw)
         selected = {}
         for name in services:
             ids = command(base + ["ps", "--all", "--quiet", name], input=raw).decode().split()

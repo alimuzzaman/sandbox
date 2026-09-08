@@ -218,7 +218,9 @@ def restore(source, archive, work, name, target_volume=None, target_password=b''
     if result.returncode: raise ValueError('restore_failed')
     actual = observation(client, database)
     comparison = set(actual) - ({'database_identity'} if target_volume is not None else set())
-    if any(actual[key] != evidence[key] for key in comparison) or not actual['constraints_valid']:
+    # The schema digest includes each constraint's validation state. Preserve
+    # deliberately NOT VALID source constraints without silently validating them.
+    if any(actual[key] != evidence[key] for key in comparison):
         raise ValueError('restore_verification_failed')
     run(['docker', 'exec', '--user', 'postgres', name, 'pg_ctl', '-D', '/var/lib/postgresql/data', '-m', 'fast', '-w', 'stop'])
     run(['docker', 'stop', '--time', '30', name])

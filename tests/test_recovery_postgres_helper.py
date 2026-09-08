@@ -31,14 +31,14 @@ def source(**changes):
     return value
 
 
-def capture_archive(dump=b"PGDMP\x00synthetic"):
+def capture_archive(dump=b"PGDMP\x00synthetic", constraints_valid=True):
     evidence = {
         "major": 16,
         "database_identity": "database-identity",
         "table_counts": [],
         "migration_checksum": "absent",
         "schema_digest": "sha256:" + "a" * 64,
-        "constraints_valid": True,
+        "constraints_valid": constraints_valid,
         "dump_digest": "sha256:" + hashlib.sha256(dump).hexdigest(),
     }
     stream = io.BytesIO()
@@ -54,6 +54,25 @@ def capture_archive(dump=b"PGDMP\x00synthetic"):
 
 
 class PostgresHelperTests(unittest.TestCase):
+    def test_restore_preserves_source_constraint_state_and_rejects_schema_changes(self):
+        archive, evidence = capture_archive(constraints_valid=False)
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                path = work / 'input.tar'
+                path.write_bytes(archive)
+                actual = {key: value for key, value in evidence.items() if key != 'dump_digest'}
+                if changed: actual['schema_digest'] = 'sha256:' + 'b' * 64
+                with patch.object(helper, 'run', return_value=b''), \
+                        patch.object(helper, 'observation', return_value=actual), \
+                        patch.object(helper.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
+                    if changed:
+                        with self.assertRaisesRegex(ValueError, 'restore_verification_failed'):
+                            helper.restore(source(), path, work, 'sandbox-recovery-restore-' + 'a' * 24)
+                    else:
+                        result = helper.restore(source(), path, work, 'sandbox-recovery-restore-' + 'a' * 24)
+                        self.assertEqual(result['code'], 'restore_verified')
+
     def test_legacy_database_source_binds_stopped_application_storage(self):
         value = source(profile="lenzora-prod-legacy", credential_reference="personal/DATABASE_URL")
         row = {"Id": value["container_id"], "Image": value["image_id"],

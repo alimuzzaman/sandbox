@@ -66,7 +66,8 @@ Storage captures twice and compares file manifests before publication.
 A restore plan binds the ciphertext, source and exact new target. A drill creates
 a new owned volume and networkless container with no ports. Existing target
 volumes are refused. The database restore compares major, schema, migration
-checksums, table counts and validated constraints; storage compares file
+checksums, table counts and exact constraint validation states (including intentional
+`NOT VALID` source constraints); storage compares file
 manifests. Verified target containers are stopped and retained with their
 volumes. Cleanup requires a separate explicit decision.
 

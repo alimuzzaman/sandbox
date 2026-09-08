@@ -16,6 +16,15 @@ also names a registered `credential_reference` and, for final transfer, a
 to null. Select a client major compatible with the observed server; a newer
 server must never be downgraded. No image is pulled by recovery.
 
+`recovery plan --remote REMOTE` includes `remote_inventory.container_bindings`
+alongside its mounts. These bounded records expose the full container and image
+IDs, Compose project, running state, and only the non-secret `POSTGRES_DB` and
+`POSTGRES_USER` fields when present. They never expose other environment values.
+Use the same container record and observed mount when preparing a source.
+For the legacy external database, bind the production application container and
+its `/app/storage` volume; it can be stopped for the final quiescent capture.
+The brokered database client is separate from that application container.
+
 Storage uses `profile=lenzora-prod-storage`, the same remote/project/container,
 volume and image bindings, `mount_path=/app/storage`, and a null credential
 reference. It omits the database, role and client image fields. Capture mounts

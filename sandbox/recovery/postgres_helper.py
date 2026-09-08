@@ -49,11 +49,13 @@ def inspect_source(source):
         raise ValueError("source_changed")
     value = value[0]
     labels = value.get("Config", {}).get("Labels") or {}
+    application_source = source.get("profile") in {"lenzora-prod-legacy", "lenzora-prod-storage"}
+    mount_path = "/app/storage" if application_source else "/var/lib/postgresql/data"
     if (value["Id"] != source["container_id"] or value["Image"] != source["image_id"]
             or labels.get("com.docker.compose.project") != source["compose_project"]
-            or (source.get("profile") != "lenzora-prod-storage" and not value.get("State", {}).get("Running"))
+            or (not application_source and not value.get("State", {}).get("Running"))
             or not any(m.get("Type") == "volume" and m.get("Name") == source["volume"]
-                and m.get("Destination") == source.get("mount_path", "/var/lib/postgresql/data") for m in value.get("Mounts", []))):
+                and m.get("Destination") == mount_path for m in value.get("Mounts", []))):
         raise ValueError("source_changed")
     return {"container_id": value["Id"], "image_id": value["Image"], "volume": source["volume"]}
 

@@ -54,6 +54,19 @@ def capture_archive(dump=b"PGDMP\x00synthetic"):
 
 
 class PostgresHelperTests(unittest.TestCase):
+    def test_legacy_database_source_binds_stopped_application_storage(self):
+        value = source(profile="lenzora-prod-legacy", credential_reference="personal/DATABASE_URL")
+        row = {"Id": value["container_id"], "Image": value["image_id"],
+            "Config": {"Labels": {"com.docker.compose.project": value["compose_project"]}},
+            "State": {"Running": False}, "Mounts": [{"Type": "volume", "Name": value["volume"],
+                "Destination": "/app/storage"}]}
+        with patch.object(helper, "run", return_value=json.dumps([row]).encode()):
+            self.assertEqual(helper.inspect_source(value)["container_id"], value["container_id"])
+        row["Mounts"][0]["Destination"] = "/var/lib/postgresql/data"
+        with patch.object(helper, "run", return_value=json.dumps([row]).encode()):
+            with self.assertRaisesRegex(ValueError, "source_changed"): helper.inspect_source(value)
+            with self.assertRaisesRegex(ValueError, "source_changed"): helper.inspect_source(source())
+
     def test_final_transfer_uses_fixed_lenzora_database_and_role_for_legacy_source(self):
         source_value = source(profile="lenzora-prod-legacy", database="legacy_db",
                               role="legacy_owner", credential_reference="personal/PGPASSWORD",

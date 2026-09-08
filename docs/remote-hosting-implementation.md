@@ -392,3 +392,12 @@ The in-memory selector carries only Compose files, project, public synthetic ima
 canonical sanitized render digest. The remote source rerun uses those exact overrides and rejects
 nonzero status, any stderr, malformed JSON, missing declared keys, or sanitized digest divergence before
 the values can enter the private child environment. The selector and activation state contain no values.
+
+### Initializer identity output formats
+
+Initializer replay checks normalize Compose `config --hash SERVICE` output
+(`SERVICE HASH` or a bare full SHA-256) and image IDs with or without the
+`sha256:` prefix before comparing them with Docker inspect. The service name,
+full 64-character digest, project, config label, creation epoch, and successful
+exit still have to match; abbreviated, malformed, ambiguous, or different IDs
+remain non-authorizing.

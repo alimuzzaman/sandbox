@@ -100,6 +100,29 @@ class SettlementApprovalStore:
             raise SettlementError("authority_mismatch")
         return approval
 
+    def find_forward(self, subject: dict, *, now: int):
+        """Resolve an exact prepared successor using only verified installed records."""
+        target = subject["target"]
+        directory = self._path("forward", target, "sha256:" + "0" * 64).parent
+        if not directory.exists():
+            return None
+        from ..provisioning import _owned_directory
+        _owned_directory(directory, create=False)
+        paths = list(directory.glob("forward-*.json"))
+        if len(paths) > 200:
+            raise SettlementError("authority_mismatch")
+        matches = []
+        for path in paths:
+            digest = "sha256:" + path.name[len("forward-"):-len(".json")]
+            approval = self.read_forward_claim(target, digest)
+            raw = approval.as_mapping()
+            if all(raw.get(key) == value for key, value in subject.items()):
+                if approval.expires_at > now:
+                    matches.append(self.read_forward(target, digest, now=now))
+        if len(matches) > 1:
+            raise SettlementError("authority_mismatch")
+        return matches[0] if matches else None
+
     def read_forward_claim(self, target: dict, approval_digest: str):
         """Identify a retained request; current admission must verify again."""
         approval, authority = self._read("forward", target, approval_digest)

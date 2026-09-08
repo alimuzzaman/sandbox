@@ -1012,3 +1012,8 @@ Hermes scheduled state is reproducible from the committed cron catalog: use
 `sb hermes cron reconcile --remote NAME` to preview, then repeat with
 `--confirm --force-replace`. `sb hermes health` reports false-green provider
 errors, catalog drift, competing gateway owners, and dirty managed worktrees.
+
+Hosted image conversion can use [component data recovery](docs/hosted-data-recovery.md)
+for encrypted PostgreSQL/storage checkpoints and isolated restore evidence.
+Immutable image preparation exposes public authority discovery and an explicit
+operator handoff; see [remote hosting](docs/remote-hosting.md).

@@ -872,7 +872,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
@@ -914,6 +914,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--credential-source-reference", default=None,
         metavar="SOURCE/KEY")
     host_p.add_argument("--credential-expires-at", default=None, metavar="RFC3339")
+    host_p.add_argument("--use-installed-authority", action="store_true",
+        help="reuse the exact target-installed rollback authority for machine policy")
     host_p.add_argument("--rollback-public-key", default=None, metavar="PATH")
     host_p.add_argument("--rollback-authority-id", default=None)
     host_p.add_argument("--rollback-authority-revision", default=None)
@@ -932,7 +934,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--activation-transaction", default=None, metavar="DIGEST",
         help="exact active transaction digest for `host image recover`")
     host_p.add_argument("--settlement-phase", default=None,
-        choices=["observe", "plan", "install-approval", "install-forward-approval", "apply"],
+        choices=["observe", "plan", "containment-plan", "containment-apply", "sign-approval", "sign-forward-approval", "install-approval", "install-forward-approval", "apply"],
         help="separate incident review, installed approval, and settlement phases")
     host_p.add_argument("--settlement-plan", default=None, metavar="PATH")
     host_p.add_argument("--settlement-data-assessment", default=None, metavar="PATH")
@@ -941,6 +943,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--approval-public-key", default=None, metavar="PATH")
     host_p.add_argument("--settlement-forward-approval", default=None, metavar="DIGEST",
         help="installed separate approval for this exact successor activation")
+    host_p.add_argument("--forward-review", default=None, metavar="PATH")
     host_p.add_argument("--settlement-predecessor", default=None, metavar="DIGEST",
         help="exact terminal settlement receipt for the successor activation")
     host_p.add_argument("--stage-status", action="store_true",

@@ -18,6 +18,22 @@ class SettlementObserver:
         self.identity_observer = identity_observer
         self.binding_key = binding_key
 
+    def containment(self, *, transaction, generation, containers=None):
+        from . import private_containment
+        context = transaction["recovery_context"]; target = context["target"]
+        expected = {key: target[key] for key in ("machine_identity", "target_identity")}
+        if self.identity_observer() != expected: raise SettlementError("evidence_changed")
+        frame = {"target": target, "compose_project": context["compose_project"],
+            "transaction_digest": transaction["transaction_digest"], "generation": generation,
+            "binding_key": base64.b64encode(self.binding_key).decode("ascii"),
+            "operation": "plan" if containers is None else "apply", "containers": containers}
+        program = inspect.getsource(private_containment) + "\n" + inspect.getsource(graph_command_port) + "\nmain()\n"
+        result = self.runner(program=program, input_data=json.dumps(frame, sort_keys=True, separators=(",", ":")),
+            timeout_seconds=250, max_output_bytes=65536)
+        if type(result) is not dict or result.get("ok") is not True or self.identity_observer() != expected:
+            raise SettlementError("observation_unavailable")
+        return result
+
     def observe(self, *, transaction, generation):
         context = transaction["recovery_context"]
         target = context["target"]

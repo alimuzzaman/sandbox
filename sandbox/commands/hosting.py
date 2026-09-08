@@ -4015,6 +4015,80 @@ def _host_image_staging_policy_path(scope_id: str, plan_set_digest: str | None =
     return _paths.RUNTIME_DIR / "hosting" / "image-staging" / "policies" / name
 
 
+def _cmd_host_image_forward_review(validated: dict, args) -> None:
+    """Read the exact native successor subject without minting any approval."""
+    from sandbox.hosting.images.activation.repository import ActivationRepository
+    from sandbox.hosting.images.activation.settlement_forward import required_predecessor
+    from sandbox.hosting.images.activation.settlement_store import SettlementApprovalStore
+    from sandbox.hosting.images.provisioning import (
+        _read_owner_only_json, _validate_activation_bundle, target_policy_selector,
+    )
+    from sandbox.hosting.images.plan_set import VerifiedImagePlanSet, _load_json_bytes, read_stable_file, MAX_V2_DOCUMENT_BYTES
+    from sandbox.hosting.images.staging_v2 import StagedImageProofSet
+    try:
+        target = hosting.state_key(args.remote, validated)
+        recovery = RecoveryRepository()
+        repository = ActivationRepository(host_state_port=recovery.activation_host_state_port(),
+            stage_repository=None, target_mutation_port=recovery.target_mutation_port("image-recover"))
+        with repository.operation_transaction(target):
+            state = repository.snapshot(target)
+            if state["active"] is not None or state["generation"] != args.expected_generation:
+                raise ValueError("generation mismatch")
+            predecessor = required_predecessor(state)
+            if predecessor is None:
+                result = {"schema_version": 1, "ok": True, "code": "not_required"}
+            else:
+                plan = VerifiedImagePlanSet.from_mapping(_load_json_bytes(read_stable_file(
+                    Path(args.verified_plan), MAX_V2_DOCUMENT_BYTES)))
+                proof = StagedImageProofSet.from_mapping(_load_json_bytes(read_stable_file(
+                    Path(args.staged_proof), MAX_V2_DOCUMENT_BYTES)))
+                selector = target_policy_selector(args.remote, validated["project"], args.environment)
+                bundle = _read_owner_only_json(RUNTIME_DIR / "hosting" / "image-activation" / "policies" / f"{selector}.json")
+                snapshot, grant = _validate_activation_bundle(bundle)
+                if (snapshot.target != proof.target.as_mapping() or proof.target.target_identity != target
+                        or snapshot.plan_set_digest != plan.plan_set_digest
+                        or grant.candidate_proof_set_digest != proof.proof_digest
+                        or grant.expected_generation != args.expected_generation
+                        or snapshot.expires_at <= int(time.time()) or grant.expires_at <= int(time.time())
+                        or plan.policy.target_scope.as_mapping() != {"remote": args.remote,
+                            "project": validated["project"], "environment": args.environment}):
+                    raise ValueError("prepared subject mismatch")
+                subject = {"operation": "activate", "target": proof.target.as_mapping(),
+                    "request_id": args.request_id, "expected_generation": args.expected_generation,
+                    "predecessor_digest": predecessor["terminal_receipt"]["terminal_digest"],
+                    "transaction_digest": predecessor["transaction_digest"],
+                    "application_revision": plan.receipt.source_sha,
+                    "plan_set_digest": plan.plan_set_digest, "proof_set_digest": proof.proof_digest,
+                    "compose_snapshot_digest": snapshot.snapshot_digest,
+                    "policy_digest": plan.policy.policy_digest, "rollback_grant_digest": grant.grant_digest}
+                store = SettlementApprovalStore(RUNTIME_DIR / "hosting" / "image-activation" / "settlements")
+                approval = store.find_forward(subject, now=int(time.time()))
+                result = {"schema_version": 1, "ok": True,
+                    "code": "approved" if approval is not None else "approval_required", "subject": subject,
+                    "approval_digest": None if approval is None else approval.approval_digest}
+    except (OSError, TypeError, ValueError, RuntimeError):
+        result = {"schema_version": 1, "ok": False, "code": "authority_unavailable"}
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
+def _cmd_host_image_authority(validated: dict, args) -> None:
+    from sandbox.hosting.images.provisioning import (
+        read_installed_authority, public_authority_projection, target_policy_selector,
+    )
+    try:
+        selector = target_policy_selector(args.remote, validated["project"], args.environment)
+        authority = read_installed_authority(RUNTIME_DIR / "hosting" / "image-activation"
+            / "authorities" / f"{selector}.json")
+        result = public_authority_projection(authority)
+    except (OSError, ValueError, RuntimeError):
+        result = {"schema_version": 2, "ok": False, "code": "authority_unavailable"}
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
 def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
     """Prepare one dependency-ordered, target-locked v2 machine artifact."""
     from sandbox.transports.remote_hosting_activation import RemoteActivationError
@@ -4041,6 +4115,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
         )
         from sandbox.hosting.images.provisioning import (
             ProvisioningError, SshAgentRollbackSigner, install_owner_only_json,
+            read_installed_authority,
             install_owner_only_json_pair,
             prepare_activation_bundle, prepare_machine_policy, prepare_stage_binding,
             prepare_stage_bundle, reuse_owner_only_stage_bundle,
@@ -4055,9 +4130,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
         target_id = hosting.state_key(args.remote, validated)
         root = RUNTIME_DIR / "hosting"
         if phase == "machine-policy" and not all((args.signed_receipt_directory,
-                args.policy_authority_id, args.policy_revision, args.rollback_public_key,
-                args.rollback_authority_id, args.rollback_authority_revision,
-                args.compose_provider_revision, args.service_image_binding,
+                args.policy_authority_id, args.policy_revision, args.service_image_binding,
                 args.activation_environment_binding)):
             raise ValueError("machine policy authority is incomplete")
         if phase == "stage-bundle" and (not all((args.verified_plan,
@@ -4068,6 +4141,14 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                 args.staged_proof)) or args.expected_generation is None
                 or args.snapshot_expires_at is None):
             raise ValueError("activation authority is incomplete")
+        use_installed = getattr(args, "use_installed_authority", False)
+        explicit_authority = tuple(getattr(args, name, None) for name in (
+            "rollback_public_key", "rollback_authority_id",
+            "rollback_authority_revision", "compose_provider_revision"))
+        if use_installed and (phase != "machine-policy" or any(explicit_authority)):
+            raise ValueError("installed authority selection conflicts with explicit authority")
+        if phase == "machine-policy" and not use_installed and not all(explicit_authority):
+            raise ValueError("machine policy authority is incomplete")
         recovery = RecoveryRepository()
         with recovery.target_mutation_port("image-provision").target_mutation_transaction(target_id):
             if phase == "machine-policy":
@@ -4092,16 +4173,18 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     activation_environment_bindings=_provision_pairs(
                         args.activation_environment_binding,
                         "activation environment binding"))
-                signer = SshAgentRollbackSigner(
-                    Path(args.rollback_public_key).expanduser(),
-                    args.rollback_authority_id)
-                authority = {"schema_version": 2,
-                    "rollback_authority_id": args.rollback_authority_id,
-                    "rollback_authority_revision": args.rollback_authority_revision,
-                    "rollback_public_key_path": str(signer.path),
-                    "rollback_public_key": signer.public_key,
-                    "compose_provider_revision": args.compose_provider_revision}
                 authority_path = root / "image-activation" / "authorities" / f"{selector}.json"
+                if use_installed:
+                    authority = read_installed_authority(authority_path)
+                else:
+                    signer = SshAgentRollbackSigner(
+                        Path(args.rollback_public_key).expanduser(), args.rollback_authority_id)
+                    authority = {"schema_version": 2,
+                        "rollback_authority_id": args.rollback_authority_id,
+                        "rollback_authority_revision": args.rollback_authority_revision,
+                        "rollback_public_key_path": str(signer.path),
+                        "rollback_public_key": signer.public_key,
+                        "compose_provider_revision": args.compose_provider_revision}
                 policy_identity = policy.policy_digest.removeprefix("sha256:")
                 path = (root / "image-verification" / "policies"
                         / f"{selector}-{policy_identity}.json")
@@ -4234,14 +4317,7 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                     current_digest = (current.get("generation_digest")
                                       if type(current) is dict else "sha256:" + "0" * 64)
                     authority_path = root / "image-activation" / "authorities" / f"{selector}.json"
-                    signer_config = _load_json_bytes(read_stable_file(
-                        authority_path, MAX_V2_DOCUMENT_BYTES, owner_only=True))
-                    if type(signer_config) is not dict or set(signer_config) != {
-                            "schema_version", "rollback_authority_id",
-                            "rollback_authority_revision", "rollback_public_key_path",
-                            "rollback_public_key", "compose_provider_revision"} \
-                            or signer_config["schema_version"] != 2:
-                        raise ValueError("machine provisioning authority is unavailable")
+                    signer_config = read_installed_authority(authority_path)
                     snapshot_subject = f"{target_id}\0{plan.plan_set_digest}\0{proof.proof_digest}\0{generation}"
                     if input_contract == "candidate-v2":
                         snapshot_subject = "candidate-v2\0" + snapshot_subject
@@ -4322,7 +4398,9 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         rollback_grant_digest=bundle["rollback_grant"]["grant_digest"],
                         stage_generation=proof.staging_generation,
                         stage_ledger_revision=record["ledger_revision"],
-                        activation_generation=generation, installed_path=str(path))
+                        activation_generation=generation, installed_path=str(path),
+                        snapshot_expires_at=bundle["compose_snapshot"]["expires_at"],
+                        grant_expires_at=bundle["rollback_grant"]["expires_at"])
     except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         response["code"] = getattr(exc, "code", "artifact_invalid")
         # Preserve the public refusal code while exposing only fixed adapter
@@ -5200,7 +5278,7 @@ def _cmd_host_image_status(validated: dict, args) -> None:
             host_state_port=recovery.activation_host_state_port(),
             stage_repository=None,
             target_mutation_port=recovery.target_mutation_port("image-recover"))
-        payload = activation_status(repository.snapshot(target))
+        payload = activation_status(repository.snapshot(target), getattr(args, "request_id", None))
     except Exception:
         payload = {"schema_version": 1, "ok": False, "code": "state_unavailable"}
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
@@ -5223,6 +5301,10 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
         store = SettlementApprovalStore(Path(RUNTIME_DIR) / "hosting" / "image-activation" / "settlements")
         class Observer:
             def observe(self, *, transaction, generation):
+                return self._invoke(transaction=transaction, generation=generation)
+            def containment(self, *, transaction, generation, containers=None):
+                return self._invoke(transaction=transaction, generation=generation, containment=True, containers=containers)
+            def _invoke(self, *, transaction, generation, containment=False, containers=None):
                 # Durable apply replay never enters this closure, the broker,
                 # registered transport, or the runtime observation helper.
                 authority = transaction["recovery_context"]["target"]
@@ -5253,9 +5335,20 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
                                 "target_identity": hosting.state_key(args.remote, validated)}
                     observer = SettlementObserver(runner=runner,
                         identity_observer=identity, binding_key=key)
+                    if containment:
+                        return observer.containment(transaction=transaction, generation=generation, containers=containers)
                     return observer.observe(transaction=transaction, generation=generation)
+        signer = None
+        if getattr(args, "settlement_phase", None) in {"sign-approval", "sign-forward-approval"}:
+            if not getattr(args, "confirm", False): raise ValueError("confirmation required")
+            from sandbox.hosting.images.activation.settlement_signer import SettlementSshSigner
+            from sandbox.hosting.images.provisioning import read_installed_authority, target_policy_selector
+            selector = target_policy_selector(args.remote, validated["project"], args.environment)
+            authority = read_installed_authority(RUNTIME_DIR / "hosting" / "image-activation" / "authorities" / f"{selector}.json")
+            signer = SettlementSshSigner(authority["rollback_public_key_path"],
+                authority["rollback_authority_id"], authority["rollback_authority_revision"])
         payload = run_settlement(args, target=target, repository=repository,
-            approval_store=store, observer=Observer())
+            approval_store=store, observer=Observer(), signer=signer)
     except Exception:
         payload = {"schema_version": 1, "ok": False, "code": "artifact_invalid", "operation": "settle"}
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
@@ -5276,14 +5369,14 @@ def cmd_host(cfg, args) -> None:
             "--environment": getattr(args, "environment", None),
             "--remote": getattr(args, "remote", None),
         }
-        if getattr(args, "image_action", None) not in {"provision", "status"}:
+        if getattr(args, "image_action", None) not in {"authority", "provision", "status"}:
             required["--request-id"] = getattr(args, "request_id", None)
         missing = [name for name, value in required.items()
                    if not isinstance(value, str) or not value.strip()]
         if getattr(args, "image_action", None) not in {
-                "provision", "status", "activate", "adopt", "rollback", "recover", "settle"}:
+                "authority", "forward-review", "provision", "status", "activate", "adopt", "rollback", "recover", "settle"}:
             missing.append("image action")
-        if getattr(args, "image_action", None) not in {"provision", "status"} \
+        if getattr(args, "image_action", None) not in {"authority", "provision", "status"} \
                 and getattr(args, "expected_generation", None) is None:
             missing.append("--expected-generation")
         if missing:
@@ -5334,6 +5427,12 @@ def cmd_host(cfg, args) -> None:
     if args.action == "image":
         if not args.remote:
             die("--remote is required for host image actions")
+        if getattr(args, "image_action", None) == "forward-review":
+            _cmd_host_image_forward_review(validated, args)
+            return
+        if getattr(args, "image_action", None) == "authority":
+            _cmd_host_image_authority(validated, args)
+            return
         if getattr(args, "image_action", None) == "provision":
             _cmd_host_image_provision(cfg, validated, args)
             return

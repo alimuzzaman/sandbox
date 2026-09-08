@@ -48,15 +48,18 @@ def _plan(args, target):
     return plan
 
 
-def run_settlement(args, *, target, repository, approval_store, observer, clock=None):
+def run_settlement(args, *, target, repository, approval_store, observer, clock=None, signer=None):
     now = clock or time.time
     phase = getattr(args, "settlement_phase", None)
     try:
         _text(args.request_id, identity=True); _integer(args.expected_generation)
-        if phase not in {"observe", "plan", "install-approval", "install-forward-approval", "apply"}:
+        if phase not in {"observe", "plan", "containment-plan", "containment-apply", "sign-approval", "sign-forward-approval", "install-approval", "install-forward-approval", "apply"}:
             raise SettlementError("artifact_invalid")
-        if phase not in {"observe", "plan"} and getattr(args, "confirm", False) is not True:
+        if phase not in {"observe", "plan", "containment-plan"} and getattr(args, "confirm", False) is not True:
             raise SettlementError("authority_missing")
+        if phase in {"containment-plan", "containment-apply"}:
+            from .settlement_containment import containment
+            return containment(args, target=target, repository=repository, observer=observer, store=approval_store)
         service = SettlementService(repository=repository, observer=observer,
             approval_store=approval_store, clock=now)
         if phase == "observe":
@@ -76,6 +79,26 @@ def run_settlement(args, *, target, repository, approval_store, observer, clock=
                 transaction_digest=args.activation_transaction,
                 expected_generation=args.expected_generation, data_assessment=assessment)
             return {"schema_version": 1, "ok": True, "code": "planned", "plan": plan.as_mapping()}
+        if phase == "sign-forward-approval":
+            if signer is None: raise SettlementError("authority_missing")
+            review = read_document(getattr(args, "forward_review", None))
+            subject = review.get("subject") if type(review) is dict else None
+            assessment = SettlementDataAssessment.from_mapping(read_document(
+                getattr(args, "settlement_data_assessment", None)))
+            with repository.operation_transaction(target):
+                state = repository.snapshot(target); head = required_predecessor(state)
+                if (type(subject) is not dict or head is None or state["active"] is not None
+                        or subject.get("target") != head["plan"]["target"]
+                        or subject.get("request_id") != args.request_id
+                        or subject.get("expected_generation") != args.expected_generation
+                        or state["generation"] != args.expected_generation
+                        or subject.get("predecessor_digest") != head["terminal_receipt"]["terminal_digest"]
+                        or subject.get("transaction_digest") != head["transaction_digest"]):
+                    raise SettlementError("authority_mismatch")
+                instant = int(now())
+                approval = signer.forward(subject, assessment, issued_at=instant, expires_at=instant + 3600)
+                return {**approval_store.install_forward(approval, signer.public_key, now=int(now())),
+                        "approval": approval.as_mapping()}
         if phase == "install-forward-approval":
             approval = ForwardSettlementApproval.from_mapping(read_document(getattr(args, "approval_file", None)))
             public = read_document(getattr(args, "approval_public_key", None), text=True)
@@ -95,9 +118,9 @@ def run_settlement(args, *, target, repository, approval_store, observer, clock=
                     raise SettlementError("authority_mismatch")
                 return approval_store.install_forward(approval, public, now=int(now()))
         plan = _plan(args, target)
-        if phase == "install-approval":
-            approval = SettlementApproval.from_mapping(read_document(getattr(args, "approval_file", None)))
-            public = read_document(getattr(args, "approval_public_key", None), text=True)
+        if phase in {"install-approval", "sign-approval"}:
+            approval = None if phase == "sign-approval" else SettlementApproval.from_mapping(read_document(getattr(args, "approval_file", None)))
+            public = None if phase == "sign-approval" else read_document(getattr(args, "approval_public_key", None), text=True)
             with repository.operation_transaction(target):
                 state = repository.snapshot(target)
                 active = service._active(state, target=target, transaction_digest=plan.transaction_digest,
@@ -107,7 +130,13 @@ def run_settlement(args, *, target, repository, approval_store, observer, clock=
                         or active["recovery_context"]["target"] != plan.target.as_mapping()
                         or (state.get("current") or {}).get("generation_digest") != plan.current_generation_digest):
                     raise SettlementError("settlement_conflict")
-                return approval_store.install_settlement(plan, approval, public, now=int(now()))
+                if phase == "sign-approval":
+                    if signer is None: raise SettlementError("authority_missing")
+                    instant = int(now())
+                    approval = signer.settlement(plan, issued_at=instant, expires_at=instant + 3600)
+                    public = signer.public_key
+                return {**approval_store.install_settlement(plan, approval, public, now=int(now())),
+                        "approval": approval.as_mapping()}
         return service.apply(plan, approval_digest=getattr(args, "settlement_approval", None))
     except Exception as exc:
         return {"schema_version": 1, "ok": False, "code": _code(exc, "artifact_invalid"),

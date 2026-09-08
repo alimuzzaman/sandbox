@@ -1550,3 +1550,42 @@ expired old admission authority, with no active owner; the old document remains
 archived. Selecting v2 does not settle an uncertain activation or authorize data
 reset, rollback, or deployment. Release and production use require review of this
 security-control change plus Linux and installed-controller acceptance.
+
+### Deployment preparation and operator handoff
+
+`host image authority --project-dir ... --environment ... --remote ... --json`
+returns only configured authority identity, revision and public-key digest.
+`host image provision --provision-phase machine-policy --use-installed-authority`
+reuses that exact target-installed authority. It conflicts with explicit rollback
+key/authority/provider fields and never chooses or generates another key.
+Activation-bundle provisioning now returns snapshot and grant expiry timestamps.
+
+`host image forward-review` takes the exact plan, staged proof, request ID and
+expected generation. It returns `not_required`, a native `approval_required`
+subject, or an installed cryptographically verified matching approval. It never
+signs. The deployment frontend can pause between a successful durable preparation
+job and an independently reserved activation job without generic job retry.
+
+Incident `host image settle` adds `containment-plan` and `containment-apply`.
+The confirmed apply binds the exact transaction, generation and container
+identities, disables their restart policies and stops them. Its plan retains the
+original restart policy; volumes, images and containers are not deleted. It does
+not kill unrelated host processes or claim settlement quiescence. A partial apply
+requires retained-request inspection, not a second identity.
+
+`sign-approval` and `sign-forward-approval` are separate protected settlement
+phases. Both require `--confirm` and the exact reviewed inputs. They use the
+already installed public authority and SSH agent, sign distinct fixed namespaces,
+verify the signature, then install it in the existing approval store. The forward
+phase also takes `--forward-review` and `--settlement-data-assessment`. Neither
+phase is invoked automatically by deployment. These consequential authority
+changes require human review before release.
+
+Database and artifact preservation use the bounded [hosted data recovery](hosted-data-recovery.md)
+operations. Public interface additions require source gates and a supported remote
+service migration; verify installed/local runtime revision equality before use.
+
+`host image status --request-id ID` returns the exact retained terminal result,
+active status, unknown status, or retained-without-result marker through the
+activation owner. It never re-enters activation. A frontend can recover a lost
+committed reply even after its original admission deadline expires.

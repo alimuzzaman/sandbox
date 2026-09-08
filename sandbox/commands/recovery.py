@@ -14,7 +14,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def configure_recovery(parser) -> None:
     parser.description = "Plan and operate scoped encrypted recovery profiles"
-    parser.add_argument("action", choices=("profiles", "plan", "create", "list", "verify", "restore", "retention", "schedule"))
+    parser.add_argument("action", choices=("profiles", "plan", "create", "list", "verify", "restore", "retention", "schedule", "postgres", "data"))
+    parser.add_argument("--postgres-operation", choices=("register", "observe", "capture", "restore-plan", "restore", "readiness"))
+    parser.add_argument("--source-binding", default=None, help="owner-only non-secret PostgreSQL source descriptor")
+    parser.add_argument("--target-volume", default=None, help="explicit reviewed empty production transfer volume")
+    parser.add_argument("--restore-plan", default=None, help="exact reviewed isolated PostgreSQL restore plan")
+    parser.add_argument("--request-id", default=None, help="immutable replay-safe PostgreSQL operation identity")
+    parser.add_argument("--project-dir", default=None, help="project scope for an approved legacy credential reference")
     parser.add_argument("--remote", default=None)
     parser.add_argument("--destination", default=None,
                         help="validated rclone destination (non-secret; defaults to RECOVERY_RCLONE_DESTINATION)")
@@ -102,9 +108,51 @@ def _parse_artifacts(values: list[str]) -> dict[str, Path]:
     return artifacts
 
 
+def _postgres(cfg, args, service):
+    from sandbox.recovery.errors import RecoveryError, result
+    from sandbox.recovery.postgres import PostgresRecovery
+    from sandbox.transports.remote_postgres_recovery import RegisteredPostgresRecoveryTransport
+    from sandbox.hosting.images.plan_set import read_stable_file, _load_json_bytes
+    root = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox")) / "recovery"
+    try:
+        transport = RegisteredPostgresRecoveryTransport(cfg=cfg, project_root=args.project_dir or ROOT, state_root=root)
+        postgres = PostgresRecovery(root / "postgres", transport, service.capture, service.catalog)
+        operation = args.postgres_operation
+        if args.source_binding and operation not in {"register", "observe"}:
+            raise RecoveryError("source binding is only for registration or observation", "source_binding_invalid")
+        if operation == "register":
+            source = _load_json_bytes(read_stable_file(Path(args.source_binding), 16384, owner_only=True))
+            if source.get("remote") != args.remote or args.profile != [source.get("profile")]:
+                raise RecoveryError("source selectors differ", "source_binding_invalid")
+            data = postgres.register(source, confirm=args.confirm)
+        elif operation == "restore":
+            plan = _load_json_bytes(read_stable_file(Path(args.restore_plan), 16384, owner_only=True))
+            if plan.get("remote") != args.remote or args.profile != [plan.get("profile")]:
+                raise RecoveryError("restore selectors differ", "restore_plan_changed")
+            data = postgres.restore(plan, confirm=args.confirm)
+        else:
+            if len(args.profile) != 1:
+                raise RecoveryError("one PostgreSQL profile is required", "source_binding_invalid")
+            profile = args.profile[0]
+            if operation == "readiness": data = postgres.readiness(args.remote, profile, args.target_volume)
+            elif operation == "observe":
+                binding = None if not args.source_binding else _load_json_bytes(read_stable_file(Path(args.source_binding), 16384, owner_only=True))
+                data = postgres.observe(args.remote, profile, args.request_id, binding=binding)
+            elif operation == "capture": data = postgres.create(args.remote, profile, args.request_id, args.backup_id, confirm=args.confirm)
+            elif operation == "restore-plan": data = postgres.restore_plan(args.remote, profile, args.request_id, args.backup_id, args.target_volume)
+            else: raise RecoveryError("PostgreSQL operation is required", "request_invalid")
+        return result(True, "postgres", remote=args.remote, status=data.get("code", "planned"), data=data)
+    except Exception as exc:
+        return result(False, "postgres", remote=args.remote,
+            error=RecoveryError("PostgreSQL recovery requires inspection; retained requests are preserved",
+                exc.code if isinstance(exc, RecoveryError) else "postgres_recovery_failed"))
+
+
 def cmd_recovery(_cfg, args) -> None:
     service = recovery_service(ROOT, destination=getattr(args, "destination", None))
-    if args.action == "profiles":
+    if args.action in {"postgres", "data"}:
+        payload = _postgres(_cfg, args, service)
+    elif args.action == "profiles":
         payload = service.profiles(args.remote)
     elif args.action == "plan":
         payload = service.plan(tuple(args.profile), args.remote)

@@ -55,6 +55,34 @@ def target_policy_selector(remote: str, project: str, environment: str) -> str:
     return hashlib.sha256("\0".join(values).encode()).hexdigest()
 
 
+def read_installed_authority(path: Path) -> dict[str, Any]:
+    """Read only the target-selected authority through its owning service."""
+    from sandbox.hosting.images.plan_set import read_stable_file
+    try:
+        raw = _load_json_bytes(read_stable_file(path, MAX_PROVISIONING_DOCUMENT_BYTES,
+                                               owner_only=True))
+    except FileNotFoundError:
+        raise ProvisioningError("authority_missing") from None
+    fields = {"schema_version", "rollback_authority_id", "rollback_authority_revision",
+              "rollback_public_key_path", "rollback_public_key", "compose_provider_revision"}
+    if (type(raw) is not dict or set(raw) != fields or type(raw["schema_version"]) is not int
+            or raw["schema_version"] != 2
+            or any(type(raw[key]) is not str or not raw[key] for key in fields - {"schema_version"})):
+        raise ProvisioningError("artifact_invalid")
+    # Validate the selected public key without invoking a signer or exposing its path.
+    SshRollbackGrantVerifier(raw["rollback_public_key"], raw["rollback_authority_id"])
+    return raw
+
+
+def public_authority_projection(authority: dict[str, Any]) -> dict[str, Any]:
+    return {"schema_version": 2, "ok": True, "code": "configured",
+            "authority_id": authority["rollback_authority_id"],
+            "authority_revision": authority["rollback_authority_revision"],
+            "compose_provider_revision": authority["compose_provider_revision"],
+            "public_key_digest": "sha256:" + hashlib.sha256(
+                authority["rollback_public_key"].encode()).hexdigest()}
+
+
 def _owned_directory(path: Path, *, create: bool) -> None:
     """Walk/create an owner-only directory without following symlinks."""
     path = path.expanduser()

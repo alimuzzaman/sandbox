@@ -94,7 +94,7 @@ that changes between reads reports `target_schema_changed`. Successful diagnosis
 returns component digests, counts, ordering flags and at most 32 changed object
 identifiers/field names, with a total and truncation flag. Changed constraints also
 include bounded syntax labels (keywords, punctuation, and identifier/string/number
-placeholders) to locate expression grouping differences. These labels never make
+placeholders in `syntax_labels`) to locate expression grouping differences. These labels never make
 an equivalence or acceptance claim. Definitions, SQL literals and rows never leave
 the helper. Private metadata is bounded to 8 MiB
 and 10,000 records per component. Column order within each table remains part of

@@ -145,7 +145,7 @@ def _definition_shape(value):
         else:
             label = 'identifier'
         shape.append(label)
-    return {'tokens': shape, 'truncated': len(tokens) > 512}
+    return {'syntax_labels': shape, 'truncated': len(tokens) > 512}
 
 
 def schema_records(client, database):

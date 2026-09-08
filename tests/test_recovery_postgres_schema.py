@@ -90,10 +90,13 @@ class PostgresSchemaTests(unittest.TestCase):
         rendered = json.dumps(shape)
         for private in ('private_identifier', 'private_literal', 'other_private_name', '987654'):
             self.assertNotIn(private, rendered)
-        self.assertIn('AND', shape['tokens'])
-        self.assertIn('string', shape['tokens'])
-        self.assertIn('number', shape['tokens'])
+        self.assertIn('AND', shape['syntax_labels'])
+        self.assertIn('string', shape['syntax_labels'])
+        self.assertIn('number', shape['syntax_labels'])
         self.assertTrue(helper._definition_shape('a ' * 600)['truncated'])
+        from sandbox.recovery.errors import redact
+        from sandbox.services.redaction import redact_structure
+        self.assertEqual(redact_structure(redact(shape)), shape)
 
     def test_missing_and_extra_records_are_reported_and_examples_are_bounded(self):
         original = records(); restored = copy.deepcopy(original)

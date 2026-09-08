@@ -1,0 +1,143 @@
+{
+  "backup_set_capture_identity": {
+    "distinct_set_ids": true,
+    "generated_cache_program_exit_codes": [
+      0,
+      0
+    ],
+    "same_controller_request": true,
+    "same_published_content": true,
+    "scope": "synthetic pre-existing archive; native tar validation and live content update not exercised",
+    "second_matches_current_content": false
+  },
+  "cancellation": {
+    "first_lifecycle": "cancelling",
+    "force_error": "invalid job lifecycle transition: cancelling -> cancelling",
+    "synthetic_signals": [
+      15
+    ]
+  },
+  "compose_status": {
+    "empty": {
+      "observation": {
+        "freshness": "live",
+        "source": "compose"
+      },
+      "ok": true,
+      "status": "ready"
+    },
+    "empty_array": {
+      "observation": {
+        "freshness": "live",
+        "source": "compose"
+      },
+      "ok": true,
+      "status": "ready"
+    },
+    "exited_array": {
+      "observation": {
+        "freshness": "live",
+        "source": "compose"
+      },
+      "ok": true,
+      "status": "ready"
+    },
+    "exited_row": {
+      "observation": {
+        "freshness": "live",
+        "source": "compose"
+      },
+      "ok": true,
+      "status": "stopped"
+    },
+    "malformed": {
+      "observation": {
+        "freshness": "live",
+        "source": "compose"
+      },
+      "ok": true,
+      "status": "ready"
+    },
+    "running_row": {
+      "observation": {
+        "freshness": "live",
+        "source": "compose"
+      },
+      "ok": true,
+      "status": "ready"
+    }
+  },
+  "ensure_progress_redaction": {
+    "exit_code": 1,
+    "final_json_contains_marker": false,
+    "final_json_ok": false,
+    "progress_contains_synthetic_login_marker": true,
+    "reveal_login": false,
+    "scope": "real progress expression and cmd_ensure; synthetic runtime failure"
+  },
+  "failed_ensure_cleanup": {
+    "error": "caller A: remote completion unknown; remote instance cleanup removed the newly created instance",
+    "synthetic_deleted_names": [
+      "created-by-caller-b"
+    ]
+  },
+  "initializer": {
+    "compose_formats": {
+      "schema_version": 1,
+      "status": "foreign"
+    },
+    "config_format_only": {
+      "schema_version": 1,
+      "status": "foreign"
+    },
+    "foreign_project_control": {
+      "schema_version": 1,
+      "status": "foreign"
+    },
+    "image_format_only": {
+      "schema_version": 1,
+      "status": "foreign"
+    },
+    "invented_matching_formats": {
+      "schema_version": 1,
+      "status": "succeeded"
+    }
+  },
+  "preview_selector": {
+    "command": "cd /synthetic/project && /synthetic/sb wp option update home https://preview.example.test && /synthetic/sb wp option update siteurl https://preview.example.test",
+    "explicit_preview_instance": "new-preview",
+    "implicit_instance": "existing-default"
+  },
+  "remote_json_boundary": {
+    "large_accepted": false,
+    "large_bytes": 1048617,
+    "large_is_valid_json": true,
+    "limit_bytes": 1048576,
+    "small_accepted": true
+  },
+  "scope": "synthetic adapter boundary; no runtime effects",
+  "wordpress_readiness": [
+    {
+      "http_wait_calls": 1,
+      "http_wait_result": false,
+      "multisite": false,
+      "multisite_wait_calls": 0,
+      "registry_statuses": [
+        "pending",
+        "ready"
+      ],
+      "returned_status": "ready"
+    },
+    {
+      "http_wait_calls": 1,
+      "http_wait_result": false,
+      "multisite": true,
+      "multisite_wait_calls": 1,
+      "registry_statuses": [
+        "pending",
+        "ready"
+      ],
+      "returned_status": "ready"
+    }
+  ]
+}

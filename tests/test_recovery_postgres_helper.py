@@ -54,6 +54,50 @@ def capture_archive(dump=b"PGDMP\x00synthetic", constraints_valid=True):
 
 
 class PostgresHelperTests(unittest.TestCase):
+    def test_observation_creates_temp_accumulator_before_importing_read_only_snapshot(self):
+        queries = []
+        def sql(_client, _database, query):
+            queries.append(query)
+            if 'json_build_object' in query:
+                return json.dumps({'major': 16, 'database_identity': 'db', 'tables': [], 'constraints': [], 'columns': []})
+            return 'absent'
+        prefix = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT 'ABC-1';\n"
+        with patch.object(helper, 'sql', side_effect=sql):
+            helper.observation([], 'database', prefix)
+        self.assertLess(queries[0].index('CREATE TEMP TABLE'), queries[0].index('BEGIN'))
+        self.assertLess(queries[0].index('SET TRANSACTION SNAPSHOT'), queries[0].index('DO $body$'))
+
+    def test_retained_capture_status_is_read_only_and_resume_requires_explicit_same_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(os.path.realpath(directory))
+            identity = 'a' * 64
+            slot = root / identity; slot.mkdir(mode=0o700)
+            request = {'operation': 'capture', 'source': source(), 'request_id': identity, 'root': str(root),
+                'credential_size': 0, 'credential_revision': None, 'archive_size': 0,
+                'archive_digest': 'sha256:' + hashlib.sha256(b'').hexdigest(), 'target_volume': None}
+            helper.private_write(slot / 'request.json', helper.canonical(request))
+            saved = (slot / 'request.json').read_bytes()
+            def invoke(value):
+                output = io.BytesIO()
+                with patch.object(helper.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(helper.canonical(value) + b'\n'))), \
+                        patch.object(helper.sys, 'stdout', SimpleNamespace(buffer=output)):
+                    helper.main()
+                return output.getvalue()
+            result = json.loads(invoke({**request, 'operation': 'status'}))
+            self.assertEqual(result['code'], 'retained_without_result')
+            self.assertEqual(list(slot.iterdir()), [slot / 'request.json'])
+            with self.assertRaisesRegex(ValueError, 'acceptance_unknown'):
+                invoke(request)
+            def capture(_source, _client, work):
+                path = work / 'capture.tar'; helper.private_write(path, b'synthetic archive'); return path
+            with patch.object(helper, 'inspect_source'), patch.object(helper, 'capture', side_effect=capture) as collect:
+                self.assertEqual(invoke({**request, 'resume_capture': True}), b'synthetic archive')
+                self.assertEqual(invoke(request), b'synthetic archive')
+                self.assertEqual(collect.call_count, 1)
+                changed = {**request, 'source': source(database='different'), 'resume_capture': True}
+                with self.assertRaisesRegex(ValueError, 'acceptance_unknown'): invoke(changed)
+            self.assertEqual((slot / 'request.json').read_bytes(), saved)
+
     def test_restore_preserves_source_constraint_state_and_rejects_schema_changes(self):
         archive, evidence = capture_archive(constraints_valid=False)
         for changed in (False, True):

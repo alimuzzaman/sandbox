@@ -5,6 +5,7 @@ import os
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 from sandbox.recovery.drive import MemoryDrive
@@ -97,6 +98,49 @@ class FakeTransport:
 
 
 class PostgresRecoveryTests(unittest.TestCase):
+    def test_readiness_uses_verified_ciphertext_channel_without_passphrase(self):
+        from sandbox.hosting.images.provisioning import install_owner_only_json
+        with tempfile.TemporaryDirectory() as directory:
+            value = PostgresSource.from_mapping(source())
+            archive, evidence = capture_archive(value.source_digest)
+            recovery, capture = self._recovery(Path(directory), FakeTransport(archive))
+            capture.drive.destination = 'gdrive:synthetic-recovery'
+            recovery.register(source(), confirm=True)
+            recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True)
+            install_owner_only_json(recovery.root / 'restores' / 'receipt.json', {
+                'source_digest': value.source_digest, 'backup_id': 'backup-a',
+                'dump_digest': evidence['dump_digest'], 'plan_digest': 'sha256:' + 'c' * 64})
+            readonly = PostgresRecovery(recovery.root, None, None, None)
+            with patch('sandbox.recovery.drive.RcloneDrive', return_value=capture.drive) as configured:
+                result = readonly.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
+            self.assertEqual(result['code'], 'data_ready')
+            self.assertEqual(configured.call_args.args[1], 'gdrive:synthetic-recovery')
+            capture.drive.objects.clear()
+            with patch('sandbox.recovery.drive.RcloneDrive', return_value=capture.drive), self.assertRaises(RecoveryError):
+                readonly.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
+
+    def test_capture_resume_inspects_original_identity_and_refuses_other_states(self):
+        for code in ('retained_without_result', 'terminal_available'):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                value = PostgresSource.from_mapping(source())
+                archive, _ = capture_archive(value.source_digest)
+                transport = Mock()
+                transport.invoke.side_effect = [json.dumps({'ok': True, 'code': code,
+                    'operation': 'capture', 'source_digest': value.source_digest}).encode(), archive]
+                recovery, capture = self._recovery(Path(directory), transport)
+                recovery.register(source(), confirm=True)
+                if code == 'terminal_available':
+                    with self.assertRaises(RecoveryError):
+                        recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True, resume=True)
+                    self.assertEqual(len(capture.publish_calls), 0)
+                else:
+                    result = recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True, resume=True)
+                    self.assertEqual(result['code'], 'captured')
+                    first, second = transport.invoke.call_args_list
+                    self.assertEqual(first.args[1], 'status')
+                    self.assertEqual(first.args[2], second.args[2])
+                    self.assertEqual(second.kwargs, {'resume_capture': True})
+
     def test_evidence_accepts_realistic_table_inventory(self):
         value = {'table_counts': [{'name': f'table_{i}', 'count': i} for i in range(307)]}
         self.assertEqual(_load_json_bytes(json.dumps(value).encode()), value)

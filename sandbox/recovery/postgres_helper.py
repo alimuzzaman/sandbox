@@ -7,11 +7,13 @@ private capture archive. No source rows, connection strings or errors are logged
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import sys
 import tarfile
 import tempfile
@@ -43,6 +45,21 @@ def private_write(path, data):
         handle.write(data); handle.flush(); os.fsync(handle.fileno())
 
 
+def owned_read(path, maximum):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > maximum):
+            raise ValueError('path_unsafe')
+        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
+            data = stream.read(maximum + 1)
+        if len(data) > maximum: raise ValueError('path_unsafe')
+        return data
+    finally:
+        os.close(descriptor)
+
+
 def inspect_source(source):
     value = json.loads(run(["docker", "inspect", source["container_id"]]))
     if len(value) != 1:
@@ -67,8 +84,9 @@ def sql(client, database, query):
 
 def observation(client, database, prefix=""):
     # Identifiers come only from pg_catalog and are quoted by format('%I').
-    query = prefix + r'''
-CREATE TEMP TABLE recovery_counts (name text, count bigint);
+    # CREATE is forbidden inside READ ONLY, even for temporary tables. Create
+    # the session-local accumulator before importing the read-only snapshot.
+    query = 'CREATE TEMP TABLE recovery_counts (name text, count bigint);\n' + prefix + r'''
 DO $body$ DECLARE item record; amount bigint; BEGIN
  FOR item IN SELECT schemaname, tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename LOOP
  EXECUTE format('SELECT count(*) FROM %I.%I',item.schemaname,item.tablename) INTO amount;
@@ -82,7 +100,7 @@ SELECT json_build_object(
  'constraints', (SELECT coalesce(json_agg(json_build_object('table',c.relname,'name',con.conname,'definition',pg_get_constraintdef(con.oid),'validated',con.convalidated) ORDER BY c.relname,con.conname),'[]') FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),
  'columns', (SELECT coalesce(json_agg(json_build_object('table',table_name,'column',column_name,'type',data_type,'nullable',is_nullable) ORDER BY table_name,ordinal_position),'[]') FROM information_schema.columns WHERE table_schema='public'));
 '''
-    # Read-only snapshots permit temp objects; all permanent tables are read only.
+    # Writes touch only the already-created session-local temporary table.
     raw = json.loads(sql(client, database, query))
     migrations = sql(client, database, prefix + r'''
 SELECT CASE WHEN to_regclass('public._prisma_migrations') IS NULL THEN 'absent' ELSE 'present' END;
@@ -315,10 +333,14 @@ def main():
     line = sys.stdin.buffer.readline(32769)
     if len(line) > 32768: raise ValueError('request_invalid')
     request = json.loads(line)
+    resume = request.pop('resume_capture', False)
+    if type(resume) is not bool: raise ValueError('request_invalid')
     if set(request) != {'operation', 'source', 'request_id', 'root', 'credential_size', 'credential_revision', 'archive_size', 'archive_digest', 'target_volume'}:
         raise ValueError('request_invalid')
     source = request['source']; operation = request['operation']; identity = request['request_id']
-    if operation not in {'observe', 'capture', 'restore'} or not re.fullmatch(r'[a-f0-9]{64}', identity):
+    if operation not in {'observe', 'capture', 'restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', identity):
+        raise ValueError('request_invalid')
+    if resume and (operation != 'capture' or source['profile'] != 'lenzora-dev' or source['credential_reference'] is not None):
         raise ValueError('request_invalid')
     if type(request['credential_size']) is not int or not 0 <= request['credential_size'] <= 16384:
         raise ValueError('request_invalid')
@@ -332,23 +354,52 @@ def main():
         raise ValueError('archive_changed')
     root = Path(request['root'])
     if not root.is_absolute() or '..' in root.parts: raise ValueError('path_unsafe')
-    root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if operation != 'status': root.mkdir(parents=True, mode=0o700, exist_ok=True)
     if root.is_symlink() or root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise ValueError('path_unsafe')
     slot = root / identity
     if slot.is_symlink(): raise ValueError('path_unsafe')
-    if slot.exists():
-        if slot.stat().st_uid != os.getuid() or slot.stat().st_mode & 0o077: raise ValueError('path_unsafe')
-        terminal = slot / ('capture.tar' if operation == 'capture' else 'result.json')
-        saved = json.loads((slot / 'request.json').read_bytes())
-        if saved != request or not terminal.is_file() or terminal.is_symlink():
-            raise ValueError('acceptance_unknown')
-        metadata = terminal.lstat()
-        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077 or metadata.st_nlink != 1 or metadata.st_size > MAX_ARCHIVE:
-            raise ValueError('path_unsafe')
-        sys.stdout.buffer.write(terminal.read_bytes()); return
-    slot.mkdir(mode=0o700)
-    private_write(slot / 'request.json', canonical(request))
+    if resume and not slot.exists(): raise ValueError('acceptance_unknown')
+    created = False
+    if operation != 'status':
+        try:
+            slot.mkdir(mode=0o700); created = True
+        except FileExistsError: pass
+    descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077: raise ValueError('path_unsafe')
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if created:
+            if resume: raise ValueError('acceptance_unknown')
+            private_write(slot / 'request.json', canonical(request))
+        else:
+            saved = json.loads(owned_read(slot / 'request.json', 32768))
+            if operation == 'status':
+                if saved.get('source') != source or saved.get('request_id') != identity:
+                    raise ValueError('request_invalid')
+                original = saved.get('operation')
+                if original not in {'observe', 'capture', 'restore'}: raise ValueError('request_invalid')
+                terminal = slot / ('capture.tar' if original == 'capture' else 'result.json')
+                if terminal.is_symlink(): raise ValueError('path_unsafe')
+                # Status never returns archive bytes or credentials.
+                available = terminal.exists()
+                if available: owned_read(terminal, MAX_ARCHIVE)
+                result = {'ok': True, 'code': 'terminal_available' if available else 'retained_without_result',
+                    'operation': original, 'source_digest': 'sha256:' + hashlib.sha256(canonical(source)).hexdigest()}
+                sys.stdout.buffer.write(canonical(result)); return
+            if saved != request: raise ValueError('acceptance_unknown')
+            terminal = slot / ('capture.tar' if operation == 'capture' else 'result.json')
+            if terminal.is_symlink(): raise ValueError('path_unsafe')
+            if terminal.exists():
+                sys.stdout.buffer.write(owned_read(terminal, MAX_ARCHIVE)); return
+            if not resume: raise ValueError('acceptance_unknown')
+        _execute(request, source, operation, identity, slot, credential, archive_bytes)
+    finally:
+        os.close(descriptor)
+
+
+def _execute(request, source, operation, identity, slot, credential, archive_bytes):
     storage = source['profile'] == 'lenzora-prod-storage'
     if operation != 'restore':
         inspect_source(source)

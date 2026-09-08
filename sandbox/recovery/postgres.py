@@ -93,6 +93,18 @@ class PostgresRecovery:
             raise RecoveryError('observation is unavailable', 'observation_invalid')
         return {**value, 'source_digest': source.source_digest}
 
+    def status(self, remote, profile, request_id):
+        source = self.source(remote, profile)
+        if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', request_id):
+            raise RecoveryError('request ID is invalid', 'request_invalid')
+        body = _read_owner_only_json(self.root / 'requests' / (hashlib.sha256(request_id.encode()).hexdigest() + '.json'))
+        if body is None or body.get('source_digest') != source.source_digest or body.get('request_id') != request_id:
+            raise RecoveryError('retained request does not match source', 'request_invalid')
+        value = _load_json_bytes(self.transport.invoke(source, 'status', digest(body)[7:]))
+        if value.get('ok') is not True or value.get('source_digest') != source.source_digest:
+            raise RecoveryError('retained status is unavailable', 'acceptance_unknown')
+        return value
+
     @staticmethod
     def _unpack_capture(archive, destination, storage=False):
         with tarfile.open(archive, 'r') as bundle:
@@ -114,23 +126,30 @@ class PostgresRecovery:
             raise RecoveryError('PostgreSQL capture digest differs', 'capture_invalid')
         return evidence
 
-    def create(self, remote, profile, request_id, backup_id, *, confirm=False):
+    def create(self, remote, profile, request_id, backup_id, *, confirm=False, resume=False):
         if not confirm: raise RecoveryError('capture requires confirmation', 'confirmation_required')
         if self.capture is None: raise RecoveryError('encrypted recovery is not configured', 'recovery_not_configured')
         source = self.source(remote, profile)
+        if resume and profile != 'lenzora-dev':
+            raise RecoveryError('only local development capture can resume', 'request_invalid')
         identity = self._request(source, 'capture', request_id, backup_id)
         receipt_path = self.root / 'captures' / (identity + '.json')
         retained = _read_owner_only_json(receipt_path)
         if retained is not None:
             verify_manifest(self.capture.drive, backup_id)
             return retained
+        if resume:
+            status = self.status(remote, profile, request_id)
+            if status.get('code') != 'retained_without_result' or status.get('operation') != 'capture':
+                raise RecoveryError('capture is not resumable', 'acceptance_unknown')
         material_root = self.capture.materialization_root
         if material_root is None: raise RecoveryError('owned materialization is unavailable', 'recovery_not_configured')
         _owned_directory(material_root, create=True)
         with tempfile.TemporaryDirectory(prefix='postgres-', dir=material_root) as temporary:
             work = Path(temporary)
             archive = work / 'capture.tar'
-            payload = self.transport.invoke(source, 'capture', identity)
+            options = {'resume_capture': True} if resume else {}
+            payload = self.transport.invoke(source, 'capture', identity, **options)
             with archive.open('xb') as handle:
                 os.chmod(archive, 0o600); handle.write(payload)
             evidence = self._unpack_capture(archive, work, storage=profile == 'lenzora-prod-storage')
@@ -141,6 +160,10 @@ class PostgresRecovery:
                 profile_bindings={profile: {'dependencies': [], 'restore_target': 'isolated-postgresql-volume',
                     'allowed_roots': ['registered-postgresql-source']}})
             verify_manifest(self.capture.drive, backup_id)
+            destination = getattr(self.capture.drive, 'destination', None)
+            if destination is not None:
+                install_owner_only_json(self.root / 'channels' / f'{remote}-{profile}.json',
+                    {'schema_version': 1, 'source_digest': source.source_digest, 'destination': destination})
             result = {'code': 'captured', 'backup_id': backup_id, 'source_digest': source.source_digest,
                 'ciphertext_digest': 'sha256:' + manifest['ciphertext_sha256'], 'evidence': evidence}
             install_owner_only_json(receipt_path, result)
@@ -148,7 +171,18 @@ class PostgresRecovery:
 
     def readiness(self, remote, profile, target_volume):
         source = self.source(remote, profile)
-        if self.capture is None: raise RecoveryError('encrypted recovery is not configured', 'recovery_not_configured')
+        if self.capture is not None:
+            drive = self.capture.drive
+        else:
+            # Readiness verifies published ciphertext; it never decrypts and
+            # must not require delivering the encryption passphrase again.
+            channel = _read_owner_only_json(self.root / 'channels' / f'{remote}-{profile}.json')
+            if (type(channel) is not dict or set(channel) != {'schema_version', 'source_digest', 'destination'}
+                    or channel['schema_version'] != 1 or channel['source_digest'] != source.source_digest):
+                raise RecoveryError('verified recovery channel is unavailable', 'recovery_not_configured')
+            from .drive import RcloneDrive
+            from sandbox.services.process import BoundedProcessRunner
+            drive = RcloneDrive(BoundedProcessRunner(), channel['destination'])
         directory = self.root / 'restores'
         if not directory.exists(): raise RecoveryError('a verified restore drill is required', 'restore_verification_required')
         _owned_directory(directory, create=False)
@@ -161,7 +195,7 @@ class PostgresRecovery:
             if profile == 'lenzora-prod-legacy':
                 if receipt.get('production_transfer') is not True or receipt.get('volume') != target_volume: continue
             elif source.volume != target_volume: continue
-            manifest = verify_manifest(self.capture.drive, receipt['backup_id'])
+            manifest = verify_manifest(drive, receipt['backup_id'])
             evidence = manifest.get('provenance', {}).get('observation')
             if (not isinstance(evidence, dict) or evidence.get('source_digest') != source.source_digest
                     or receipt.get('dump_digest', receipt.get('archive_digest')) != evidence.get('dump_digest', evidence.get('archive_digest'))):

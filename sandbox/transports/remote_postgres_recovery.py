@@ -46,10 +46,12 @@ class RegisteredPostgresRecoveryTransport:
         result = lease.consume(lambda material: {"payload": consumer(material, opaque_revision(key, material))})
         return result["payload"]
 
-    def invoke(self, source: PostgresSource, operation: str, request_id: str, *, archive=b'', target_volume=None):
+    def invoke(self, source: PostgresSource, operation: str, request_id: str, *, archive=b'', target_volume=None, resume_capture=False):
         source = recovery_source(source.as_mapping())
-        if operation not in {'observe', 'capture', 'restore'} or not re.fullmatch(r'[a-f0-9]{64}', request_id):
+        if operation not in {'observe', 'capture', 'restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', request_id):
             raise RecoveryError('PostgreSQL request is invalid', 'request_invalid')
+        if resume_capture and (operation != 'capture' or source.profile != 'lenzora-dev'):
+            raise RecoveryError('capture resume is invalid', 'request_invalid')
         entry = self.lookup(source.remote)
         if not isinstance(entry, dict) or entry.get('provisioned') is not True:
             raise RecoveryError('registered remote is unavailable', 'remote_unavailable')
@@ -66,6 +68,7 @@ class RegisteredPostgresRecoveryTransport:
                 'root': home + '/runtime/postgres-recovery', 'credential_size': len(material),
                 'credential_revision': revision, 'archive_size': len(archive),
                 'archive_digest': 'sha256:' + hashlib.sha256(archive).hexdigest(), 'target_volume': target_volume}
+            if resume_capture: request['resume_capture'] = True
             frame = json.dumps(request, sort_keys=True, separators=(',', ':')).encode() + b'\n' + material + archive
             result = self.process(entry, 'python3 -c ' + shlex.quote(helper), input_data=frame, timeout=3600)
             payload = getattr(result, 'stdout', b'')
@@ -77,6 +80,6 @@ class RegisteredPostgresRecoveryTransport:
             if not source.target_password_reference:
                 raise RecoveryError('target password binding is required', 'target_password_unavailable')
             return self.broker(source, invoke, reference=source.target_password_reference)
-        if source.credential_reference is not None and operation != 'restore':
+        if source.credential_reference is not None and operation not in {'restore', 'status'}:
             return self.broker(source, invoke)
         return invoke(b'', None)

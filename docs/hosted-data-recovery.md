@@ -38,11 +38,22 @@ only that observed volume read-only in an owned, networkless reader.
 ./sb recovery data --postgres-operation register --remote REMOTE --profile PROFILE --source-binding SOURCE.json --json
 ./sb recovery data --postgres-operation register --remote REMOTE --profile PROFILE --source-binding SOURCE.json --confirm --json
 ./sb recovery data --postgres-operation observe --remote REMOTE --profile PROFILE --request-id OBSERVATION_ID --json
+./sb recovery data --postgres-operation status --remote REMOTE --profile PROFILE --request-id CAPTURE_ID --json
 ./sb recovery data --postgres-operation capture --remote REMOTE --profile PROFILE --request-id CAPTURE_ID --backup-id BACKUP_ID --confirm --json
 ./sb recovery data --postgres-operation restore-plan --remote REMOTE --profile PROFILE --request-id RESTORE_ID --backup-id BACKUP_ID --json
 ./sb recovery data --postgres-operation restore --remote REMOTE --profile PROFILE --restore-plan PLAN.json --confirm --json
 ./sb recovery data --postgres-operation readiness --remote REMOTE --profile PROFILE --target-volume VOLUME --json
 ```
+
+`status` inspects the original retained request without consuming database credentials
+or returning archive bytes. An incomplete local `lenzora-dev` capture can be resumed
+with its same request and backup IDs plus `--resume-capture --confirm`, after status
+reports `retained_without_result`. The helper locks the request directory, checks
+the exact original request and source, and returns an existing archive unchanged.
+It never replaces a completed archive. This exception applies only to read-only
+development capture; restore, production and storage uncertainty cannot resume.
+Snapshot capture creates its session-local temporary accumulator before importing
+the read-only transaction, so it performs no forbidden DDL inside that transaction.
 
 Observe an uninstalled descriptor by adding `--source-binding SOURCE.json` to
 `observe`. This lets the operator establish the legacy server major before
@@ -56,6 +67,9 @@ choosing another identity. Run long capture/restore operations through durable
 jobs with finite timeouts and retained job IDs.
 
 Capture requires the normal configured recovery encryption and destination.
+Successful capture retains its validated non-secret destination against the exact
+source. Later readiness checks reuse that channel to verify ciphertext and the
+restore receipt, without loading the encryption passphrase or decrypting data.
 Legacy credentials are consumed only by a destination-specific broker callback,
 passed privately to an owned client tmpfs, and never returned or written into a
 source descriptor. Captured database bytes stay within private recovery staging;

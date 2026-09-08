@@ -29,6 +29,12 @@ def source(**changes):
 
 
 class RemotePostgresRecoveryTests(unittest.TestCase):
+    def test_status_does_not_consume_external_credentials(self):
+        def broker(*_args):
+            self.fail('status must not consume credentials')
+        self._transport(broker=broker).invoke(source(profile='lenzora-prod-legacy',
+            credential_reference='personal/PGPASSWORD'), 'status', 'a' * 64)
+
     def _transport(self, *, lookup=None, status=None, home=None, process=None, broker=None):
         return RegisteredPostgresRecoveryTransport(
             cfg={}, project_root=Path("/synthetic/project"), state_root=Path("/synthetic/state"),

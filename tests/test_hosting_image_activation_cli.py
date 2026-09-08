@@ -306,6 +306,7 @@ class ActivationCliTests(unittest.TestCase):
 
         class Repository:
             def operation_transaction(self, _target): return nullcontext()
+            def lookup_terminal_v2(self, _target, **_selectors): return None
 
         class Service:
             def __init__(self, **kwargs): captured["service"] = kwargs
@@ -347,6 +348,9 @@ class ActivationCliTests(unittest.TestCase):
                     patch("sandbox.commands.hosting.remote.resolve_sandbox_home",
                           return_value="/srv/sandbox"), \
                     patch("sandbox.commands.hosting._verify_edge"), \
+                    patch("sandbox.commands.hosting._guarded_host_apply_plan",
+                          return_value={"records": [], "cloudflare": {
+                              "configured": True, "records": []}}), \
                     patch("sandbox.hosting.images.activation.repository.ActivationRepository",
                           return_value=Repository()), \
                     patch("sandbox.hosting.images.activation.v2_service.ActivationServiceV2",

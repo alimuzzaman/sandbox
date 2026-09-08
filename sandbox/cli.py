@@ -872,7 +872,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["provision", "verify", "status", "activate", "adopt", "rollback", "recover"],
+        choices=["provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
@@ -931,6 +931,18 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="finite proof-custody admission deadline for a new image activation acceptance")
     host_p.add_argument("--activation-transaction", default=None, metavar="DIGEST",
         help="exact active transaction digest for `host image recover`")
+    host_p.add_argument("--settlement-phase", default=None,
+        choices=["observe", "plan", "install-approval", "install-forward-approval", "apply"],
+        help="separate incident review, installed approval, and settlement phases")
+    host_p.add_argument("--settlement-plan", default=None, metavar="PATH")
+    host_p.add_argument("--settlement-data-assessment", default=None, metavar="PATH")
+    host_p.add_argument("--settlement-approval", default=None, metavar="DIGEST")
+    host_p.add_argument("--approval-file", default=None, metavar="PATH")
+    host_p.add_argument("--approval-public-key", default=None, metavar="PATH")
+    host_p.add_argument("--settlement-forward-approval", default=None, metavar="DIGEST",
+        help="installed separate approval for this exact successor activation")
+    host_p.add_argument("--settlement-predecessor", default=None, metavar="DIGEST",
+        help="exact terminal settlement receipt for the successor activation")
     host_p.add_argument("--stage-status", action="store_true",
         help="read the exact Feature 050 request status without helper or credential access")
     host_p.add_argument("--reconcile", action="store_true",

@@ -249,20 +249,21 @@ renders are represented outside the host by target-scoped HMAC identities under
 `sandbox-hosting-private-compose-render.v2`; raw environment values, raw config
 hashes, paths, and credentials never cross that boundary or enter durable state.
 
-Before the first runtime effect, edge reachability may be deferred at generation
-zero with no current, previous, active, tombstone, or recovery state. Retained
-terminal refusals at generation zero permit this same bootstrap path; uncertain
-or successful history does not. Post-effect edge verification remains required.
+Before the first runtime effect, provider preflight validates the configured DNS
+route and strict TLS policy without requiring the old origin to be healthy.
+Post-effect origin and edge verification remains required for a new generation.
 
 The public Compose projection treats absent/null `depends_on` as an empty
 dependency map. Explicit malformed non-map values retain an invalid marker.
 Recovery profile discovery admits the manifest's persistent and initializer
 services while retaining only the selected persistent service projection.
 For an entered first activation at generation zero with no current or previous
-generation, recovery may observe an empty runtime as the exact prior state.
-The observation must succeed with stable target/daemon identities; partial
-service sets and malformed observations remain refused. This closes recovery
-without promoting a generation or retrying a runtime effect.
+generation, recovery may classify an empty runtime as the prior topology.
+That classification does not prove that initialization had no data effects and
+does not release the uncertain owner. The observation must succeed with stable
+target/daemon identities; partial service sets and malformed observations remain
+refused. See the separate [settlement procedure](image-activation-settlement.md)
+when ordinary observation recovery cannot establish the outcome.
 Retained v2 replacement intents use their observation-bound projection directly;
 they do not require a candidate generation merely to enter recovery.
 Empty observations use the retained intent sentinel without attempting candidate

@@ -847,15 +847,21 @@ class _ActivationHostStatePort:
             return False
         record = self._record(target)
         try:
-            from sandbox.hosting.images.activation.repository import decode_activation_state
+            from sandbox.hosting.images.activation.repository import decode_activation_state, ActivationRepositoryError
             nested = decode_activation_state(record.get("image_activation"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, ActivationRepositoryError):
             return False
         terminal = next((item for item in (nested.get("results") or {}).values()
                          if isinstance(item, dict) and isinstance(item.get("result"), dict)
+                         and item["result"].get("result_class") != "uncertain"
                          and item["result"].get("transaction_digest") == evidence.terminal_receipt), None)
         if terminal is None:
-            return False
+            settled = next((item for item in nested.get("settlements", {}).values()
+                if item["terminal_receipt"]["terminal_digest"] == evidence.terminal_receipt), None)
+            if settled is None:
+                return False
+            pin = settled["proof_pin"]
+            terminal = {"proof_pin": pin, "holder": pin["holder"], "proof_digest": pin["proof_digest"]}
         pin = terminal.get("proof_pin")
         return (isinstance(pin, dict) and terminal.get("holder") == evidence.holder
                 and terminal.get("proof_digest") == evidence.proof_digest

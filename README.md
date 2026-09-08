@@ -852,6 +852,8 @@ host so every instance there lists the same slugs on **Plugins → Sandbox On-De
 Immutable multi-image activation prepares private candidate configuration without
 overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)
 for source binding, replay limits and required initializer execution proof.
+An effect-entered incident stays fenced until recovery proves its outcome or an
+operator completes the separate [settlement procedure](docs/image-activation-settlement.md).
 
 There is **no central project catalog** — each plugin self-describes.
 

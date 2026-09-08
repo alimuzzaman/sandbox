@@ -180,8 +180,9 @@ class TestModularityInventory(unittest.TestCase):
                 "cli_commands": 91,
                 "mcp_tools": 44,
                 "wildcard_imports": 19,
-                # candidate-v2 refuses the legacy compose_replace_v2 path.
-                "kind_referencing_conditionals": 248,
+                # Settlement approval storage adds three record-kind guards;
+                # these do not dispatch on a runtime/project kind.
+                "kind_referencing_conditionals": 251,
             },
         )
 

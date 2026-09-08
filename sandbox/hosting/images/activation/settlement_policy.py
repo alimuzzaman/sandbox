@@ -16,6 +16,7 @@ from .settlement_models import SettlementApproval, SettlementPlan
 
 
 SETTLEMENT_NAMESPACE = "sandbox-feature-051-settlement"
+FORWARD_NAMESPACE = "sandbox-feature-051-settlement-forward"
 _PRINCIPAL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _PUBLIC_KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]+={0,3}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -86,7 +87,28 @@ class SettlementApprovalVerifier:
                     or approval.expires_at - approval.issued_at > 3600
                     or not approval.issued_at <= checked_at < approval.expires_at):
                 return False
-            signature = base64.b64decode(approval.signature.encode("ascii"), validate=True)
+            return self._verify_signature(approval.signature, approval.signature_payload(), SETTLEMENT_NAMESPACE)
+        except (OSError, ValueError, TypeError, UnicodeError, subprocess.SubprocessError):
+            return False
+
+    def verify_forward(self, approval: object, *, now: int | None = None) -> bool:
+        from .settlement_forward import ForwardSettlementApproval
+        try:
+            checked_at = int(time.time()) if now is None else now
+            if (type(approval) is not ForwardSettlementApproval or type(checked_at) is not int
+                    or approval.authority_id != self.authority_id
+                    or approval.authority_revision != self.authority_revision
+                    or not approval.issued_at <= checked_at < approval.expires_at):
+                return False
+            return self._verify_signature(approval.signature, approval.signature_payload(), FORWARD_NAMESPACE)
+        except (OSError, ValueError, TypeError, UnicodeError, subprocess.SubprocessError):
+            return False
+
+    def _verify_signature(self, value: str, payload: bytes, namespace: str) -> bool:
+        try:
+            if namespace not in {SETTLEMENT_NAMESPACE, FORWARD_NAMESPACE}:
+                return False
+            signature = base64.b64decode(value.encode("ascii"), validate=True)
             if not 1 <= len(signature) <= 4096:
                 return False
             with tempfile.TemporaryDirectory(prefix="sandbox-settlement-verify-") as directory:
@@ -98,8 +120,8 @@ class SettlementApprovalVerifier:
                 proof.write_bytes(signature)
                 result = subprocess.run(
                     ("/usr/bin/ssh-keygen", "-Y", "verify", "-f", str(allowed),
-                     "-I", self.authority_id, "-n", SETTLEMENT_NAMESPACE,
-                     "-s", str(proof)), input=approval.signature_payload(),
+                     "-I", self.authority_id, "-n", namespace,
+                     "-s", str(proof)), input=payload,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     timeout=10, check=False, env=_ENVIRONMENT)
             return result.returncode == 0

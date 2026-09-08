@@ -7,7 +7,10 @@ def validate_execution_evidence(value, *, subject):
     from .execution_runner import execution_step_subject
     from .execution_state import ExecutionProgressV2
     from .v2_models import PrivateComposeInputSnapshotV2, RollbackCompatibilityGrantV2
-    raw = _closed(value, frozenset({"compose_snapshot", "compatibility_grant", "progress"}))
+    fields = {"compose_snapshot", "compatibility_grant", "progress"}
+    if type(value) is dict and "settlement_forward" in value:
+        fields.add("settlement_forward")
+    raw = _closed(value, frozenset(fields))
     snapshot = PrivateComposeInputSnapshotV2.from_mapping(raw["compose_snapshot"])
     grant = RollbackCompatibilityGrantV2.from_mapping(raw["compatibility_grant"])
     progress = ExecutionProgressV2.from_mapping(raw["progress"])
@@ -37,5 +40,11 @@ def validate_execution_evidence(value, *, subject):
         expected = execution_step_subject(progress=progress, contract=contract, index=event["step_index"])
         if event["subject_digest"] != expected["subject_digest"]:
             raise ActivationContractError("init_mismatch")
-    return {"compose_snapshot": snapshot.as_mapping(), "compatibility_grant": grant.as_mapping(),
-            "progress": progress.as_mapping()}
+    result = {"compose_snapshot": snapshot.as_mapping(), "compatibility_grant": grant.as_mapping(),
+              "progress": progress.as_mapping()}
+    if "settlement_forward" in raw:
+        from .settlement_forward import validate_retained_forward
+        result["settlement_forward"] = validate_retained_forward(raw["settlement_forward"],
+            target=subject["target"], snapshot=snapshot, grant=grant,
+            expected_generation=subject["generation"] - 1)
+    return result

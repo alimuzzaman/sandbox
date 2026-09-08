@@ -23,7 +23,7 @@ from .models import (
     activation_digest,
     canonical_bytes,
 )
-from .settlement_models import SettlementPlan
+from .settlement_models import SettlementApproval, SettlementPlan
 
 
 MAX_SETTLEMENTS = 32
@@ -36,12 +36,14 @@ _SETTLEMENT_FIELDS = frozenset({
     "active_request_id", "active_request_digest", "transaction_digest", "generation",
     "current_generation_digest", "plan", "original_transaction", "original_result",
     "proof_pin", "terminal_receipt",
+    "approval", "authorized_at", "sequence", "previous_terminal_digest",
 })
 _TERMINAL_FIELDS = frozenset({
     "schema_version", "code", "result_class", "ok", "settlement_request_id",
     "plan_digest", "approval_digest", "request_id", "request_digest",
     "transaction_digest", "starting_generation", "resulting_generation",
     "generation_digest", "current_generation_digest", "terminal_digest",
+    "authorized_at", "sequence", "previous_terminal_digest",
 })
 
 
@@ -149,6 +151,10 @@ def _terminal_receipt(value: object) -> dict[str, Any]:
     if raw["current_generation_digest"] is not None:
         _digest(raw["current_generation_digest"])
     _digest(raw["terminal_digest"])
+    _integer(raw["sequence"], minimum=1)
+    _integer(raw["authorized_at"])
+    if raw["previous_terminal_digest"] is not None:
+        _digest(raw["previous_terminal_digest"])
     body = {key: item for key, item in raw.items() if key != "terminal_digest"}
     if raw["terminal_digest"] != activation_digest(
             "sandbox.hosting.images.settlement-terminal.v1", body):
@@ -165,6 +171,10 @@ def _validate_record(value: object, *, key: str, state: dict[str, Any]) -> dict[
     _text(raw["active_request_id"], identity=True)
     _digest(raw["active_request_digest"]); _digest(raw["transaction_digest"])
     _integer(raw["generation"])
+    _integer(raw["sequence"], minimum=1)
+    _integer(raw["authorized_at"])
+    if raw["previous_terminal_digest"] is not None:
+        _digest(raw["previous_terminal_digest"])
     current = state.get("current")
     current_digest = None if current is None else current.get("generation_digest")
     if type(state.get("generation")) is not int or state["generation"] < raw["generation"]:
@@ -174,6 +184,11 @@ def _validate_record(value: object, *, key: str, state: dict[str, Any]) -> dict[
     if current_digest is not None:
         _digest(current_digest)
     plan = SettlementPlan.from_mapping(raw["plan"])
+    approval = SettlementApproval.from_mapping(raw["approval"])
+    if (approval.approval_digest != raw["approval_digest"]
+            or approval.plan_digest != plan.plan_digest
+            or not approval.issued_at <= raw["authorized_at"] < approval.expires_at):
+        _fail("persistence_uncertain")
     if (plan.plan_digest != raw["plan_digest"]
             or plan.request_id != key
             or plan.active_request_id != raw["active_request_id"]
@@ -211,23 +226,25 @@ def _validate_record(value: object, *, key: str, state: dict[str, Any]) -> dict[
             or receipt["request_digest"] != raw["active_request_digest"]
             or receipt["transaction_digest"] != raw["transaction_digest"]
             or receipt["starting_generation"] != raw["generation"]
+            or receipt["sequence"] != raw["sequence"]
+            or receipt["previous_terminal_digest"] != raw["previous_terminal_digest"]
+            or receipt["authorized_at"] != raw["authorized_at"]
             or receipt["current_generation_digest"] != raw["current_generation_digest"]):
         _fail("persistence_uncertain")
     return raw
 
 
-def validate_settlements(state: object) -> dict[str, Any]:
+def validate_settlements(state: object, *, validate_base: bool = True) -> dict[str, Any]:
     """Validate the optional settlement map without owning outer state."""
     if type(state) is not dict:
         _fail("persistence_uncertain")
     safe = _copy(state)
     try:
-        # Validate the ordinary activation envelope without teaching that
-        # decoder about settlement fields. This foundation is not installed as
-        # an outer-state hook; a future service must own the durable transition.
-        from .repository import decode_activation_state
-        base = {key: value for key, value in safe.items() if key != "settlements"}
-        decode_activation_state(base)
+        # The outer decoder calls this hook with validate_base=False. Pure
+        # candidates validate the ordinary envelope first without recursion.
+        if validate_base:
+            from .repository import decode_activation_state
+            return decode_activation_state(safe)
     except SettlementRepositoryError:
         raise
     except Exception:
@@ -248,7 +265,72 @@ def validate_settlements(state: object) -> dict[str, Any]:
     subjects = [row["transaction_digest"] for row in settlements.values()]
     if len(set(subjects)) != len(subjects):
         _fail("persistence_uncertain")
+    previous = None
+    prior_generation = 0
+    target = None
+    ordered = sorted(settlements.values(), key=lambda r: r["sequence"])
+    for sequence, row in enumerate(ordered, 1):
+        row_target = row["plan"]["target"]
+        target = row_target if target is None else target
+        if (row["sequence"] != sequence or row["previous_terminal_digest"] != previous
+                or row["generation"] < prior_generation
+                or row_target != target
+                or (safe.get("active") or {}).get("transaction_digest") == row["transaction_digest"]):
+            _fail("persistence_uncertain")
+        previous = row["terminal_receipt"]["terminal_digest"]
+        prior_generation = row["generation"]
+        predecessors = [item for item in ordered if item["sequence"] < sequence
+                        and item["generation"] == row["generation"]]
+        _validate_successor_link(row["original_transaction"]["recovery_context"].get("settlement_forward"),
+            predecessors[-1] if predecessors else None, starting_generation=row["generation"])
+    active = safe.get("active")
+    if target is not None:
+        for generation in (safe.get("current"), safe.get("previous")):
+            if generation is not None and generation.get("target") != target:
+                _fail("persistence_uncertain")
+        if active is not None and active["recovery_context"]["target"] != target:
+            _fail("persistence_uncertain")
+    if active is not None:
+        predecessors = [row for row in ordered if row["generation"] == active["starting_generation"]]
+        _validate_successor_link(active["recovery_context"].get("settlement_forward"),
+            predecessors[-1] if predecessors else None, starting_generation=active["starting_generation"])
+    for generation in (safe.get("current"), safe.get("previous")):
+        if generation is None:
+            continue
+        starting = generation["generation"] - 1
+        predecessors = [row for row in ordered if row["generation"] == starting]
+        value = (generation.get("execution_evidence") or {}).get("settlement_forward")
+        _validate_successor_link(value, predecessors[-1] if predecessors else None,
+                                 starting_generation=starting)
+        if value is not None:
+            result = safe["results"].get(value["request_id"])
+            terminal = result["result"] if result else safe["tombstones"].get(value["request_id"])
+            if terminal is None or terminal["request_digest"] != generation["request_digest"]:
+                _fail("persistence_uncertain")
     return safe
+
+
+def _validate_successor_link(value, predecessor, *, starting_generation):
+    if predecessor is None:
+        if value is not None:
+            _fail("persistence_uncertain")
+        return
+    from .settlement_forward import ForwardSettlementApproval
+    try:
+        approval = ForwardSettlementApproval.from_mapping(value)
+        if (approval.predecessor_digest != predecessor["terminal_receipt"]["terminal_digest"]
+                or approval.transaction_digest != predecessor["transaction_digest"]
+                or approval.target.as_mapping() != predecessor["plan"]["target"]
+                or approval.expected_generation != starting_generation):
+            _fail("persistence_uncertain")
+    except (TypeError, ValueError):
+        _fail("persistence_uncertain")
+
+
+def latest_settlement(state: object) -> dict[str, Any] | None:
+    safe = validate_settlements(state)
+    records = safe.get("settlements", {})
+    return max(records.values(), key=lambda row: row["sequence"]) if records else None
 
 
 def _validate_active_for_plan(state: dict[str, Any], plan: SettlementPlan) -> tuple[dict, dict, dict]:
@@ -288,7 +370,9 @@ def _validate_active_for_plan(state: dict[str, Any], plan: SettlementPlan) -> tu
 
 
 def _make_terminal(plan: SettlementPlan, approval_digest: str, active: dict,
-                   generation: int, current_generation_digest: str | None) -> dict[str, Any]:
+                   generation: int, current_generation_digest: str | None, *,
+                   authorized_at: int, sequence: int,
+                   previous_terminal_digest: str | None) -> dict[str, Any]:
     body = {
         "schema_version": 1, "code": "abandoned_with_effects",
         "result_class": "uncertain", "ok": False,
@@ -298,21 +382,25 @@ def _make_terminal(plan: SettlementPlan, approval_digest: str, active: dict,
         "transaction_digest": active["transaction_digest"],
         "starting_generation": generation, "resulting_generation": generation,
         "generation_digest": None, "current_generation_digest": current_generation_digest,
+        "authorized_at": authorized_at, "sequence": sequence,
+        "previous_terminal_digest": previous_terminal_digest,
     }
     return {**body, "terminal_digest": activation_digest(
         "sandbox.hosting.images.settlement-terminal.v1", body)}
 
 
-def settle_candidate(state: object, plan: object, approval_digest: str):
+def settle_candidate(state: object, plan: object, approval: object, *, authorized_at: int):
     """Return ``(status, candidate, settlement_record)`` for one settlement.
 
-    ``approval_digest`` is supplied by the separately verified operator
-    authority.  This function still binds it immutably into the terminal
-    receipt, but does not verify its signature.
+    The service verifies the installed approval before calling this pure
+    transition. Its complete signed value is retained for later audit.
     """
-    if type(plan) is not SettlementPlan or type(approval_digest) is not str:
+    if type(plan) is not SettlementPlan or type(approval) is not SettlementApproval:
         _fail("artifact_invalid")
-    _digest(approval_digest)
+    _integer(authorized_at)
+    approval_digest = approval.approval_digest
+    if approval.plan_digest != plan.plan_digest:
+        _fail("authority_mismatch")
     safe = validate_settlements(state)
     settlements = safe.get("settlements")
     if settlements is None:
@@ -324,6 +412,8 @@ def settle_candidate(state: object, plan: object, approval_digest: str):
                 or existing["approval_digest"] != approval_digest):
             return "conflict", safe, None
         return "replay", safe, _copy(existing)
+    if not approval.issued_at <= authorized_at < approval.expires_at:
+        _fail("approval_expired")
     if any(plan.request_id in safe[name] for name in ("results", "tombstones", "recovery_results")):
         return "conflict", safe, None
     if len(settlements) >= MAX_SETTLEMENTS:
@@ -337,7 +427,11 @@ def settle_candidate(state: object, plan: object, approval_digest: str):
     generation = safe["generation"]
     current = safe.get("current")
     current_digest = None if current is None else current.get("generation_digest")
-    terminal = _make_terminal(plan, approval_digest, active, generation, current_digest)
+    head = max(settlements.values(), key=lambda row: row["sequence"]) if settlements else None
+    sequence = len(settlements) + 1
+    previous = head["terminal_receipt"]["terminal_digest"] if head else None
+    terminal = _make_terminal(plan, approval_digest, active, generation, current_digest,
+        authorized_at=authorized_at, sequence=sequence, previous_terminal_digest=previous)
     record = {
         "schema_version": 1, "settlement_request_id": plan.request_id,
         "plan_digest": plan.plan_digest, "approval_digest": approval_digest,
@@ -349,11 +443,14 @@ def settle_candidate(state: object, plan: object, approval_digest: str):
         "original_transaction": _copy(active),
         "original_result": _copy(original_result),
         "proof_pin": _copy(pin), "terminal_receipt": terminal,
+        "approval": approval.as_mapping(), "authorized_at": authorized_at,
+        "sequence": sequence, "previous_terminal_digest": previous,
     }
     candidate = _copy(safe)
     candidate["settlements"] = dict(settlements)
     candidate["settlements"][plan.request_id] = record
     candidate["active"] = None
+    candidate["reserved_terminal_bytes"] = 0
     validate_settlements(candidate)
     return "settled", candidate, _copy(record)
 

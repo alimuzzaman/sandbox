@@ -421,3 +421,57 @@ preservation, original-result tampering, request collision and SSH namespace
 refusals. No production source changed after the full suite began. This closes
 the earlier full-suite failure; it does not close T165, install a settlement
 command, update the remote runtime, or establish production recovery.
+
+
+### Active image-deployment goal: settlement integration package
+
+The goal covers successful image-based deployment of both Lenzora environments,
+not only a reusable secret-copy primitive. The next implementation package closes
+T165 before any production owner is released. One current-agent owner performs
+implementation and integration; no new delegates are needed.
+
+1. Complete the optional settlement state extension through ActivationRepository
+   and its existing shared host-state port. Preserve legacy state bytes when no
+   settlement exists. Retain full original uncertainty, exact approved plan and
+   approval, and a bounded ordered terminal chain. Commit before proof-custody
+   release. A lost commit or release acknowledgement must replay only the exact
+   durable result/release; it must not observe or deploy again.
+2. Implement a separate plan/install-approval/apply command. Planning and apply
+   use retained target/Compose selectors, fresh bounded observations of the
+   machine/daemon, exact stopped container identities and preserved volume/layer
+   identities, and explicit reviewed backup/data-assessment input. Apply performs
+   two fresh matching observations under target ownership and rechecks installed
+   approval before commit. No runtime, data, provider or deletion effect is an
+   allowed settlement operation. Missing quiescence remains a refusal.
+3. Store each reviewed approval immutably using the existing owner-only artifact
+   installer. Verify the exact plan with a dedicated SSH signing namespace; a
+   separately installed forward approval uses another namespace and binds the
+   next request ID, target, generation, plan/proof/snapshot, application revision,
+   prior settlement and reviewed data decision. Do not add an automatic signer
+   to deployment or settlement apply.
+4. Add an optional signed forward subject to v2 activation requests and retained
+   graph evidence without changing legacy request/digest bytes. Immediately after
+   settlement, refuse missing/mismatched/expired approval before custody or runtime
+   effects. Only a new graph activation can consume that authority; adoption,
+   rollback and replay of the original incident cannot. Preserve the approval
+   through transaction, generation and recovery evidence.
+5. Prove actual shared-repository persistence and custody crash boundaries, CLI
+   confirmation/selector/refusal behavior, signature separation, observer drift,
+   corrupt history, and forward-admission failures. Run the focused affected
+   suites and full selftest before supported controller rollout.
+
+After settlement integration, complete the image-based development route using
+its own host configuration, target authority, secrets and exact build/application
+identity. Preserve the signed production application bundle and do not relabel
+its inputs as a different build. Final acceptance requires successful durable
+image activation, all required runtime services at the selected source/image
+identity, and the public routes for each environment. Backup/approval evidence
+and any needed containment remain explicit operational prerequisites, not values
+that tests or synthetic canaries may manufacture.
+
+Settlement integration full gate `3167c20c75b14672c0b83709811b7b13` ran 5588
+tests in 636.493 seconds. Its sole failure was the historical broad `kind`
+conditional inventory: 251 observed versus 248 expected. The three additions
+are approval-record guards in `settlement_store.py` (`_path`, `_read`, and the
+approval decoder selector); they do not add runtime-kind dispatch. The inventory
+is updated to 251. A passing rerun is still required before controller rollout.

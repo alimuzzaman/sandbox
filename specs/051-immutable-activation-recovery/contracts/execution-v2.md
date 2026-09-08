@@ -112,6 +112,15 @@ terminal ownership. Settlement replay has zero effects. A subsequent forward
 activation must name the settlement and separately approved data assessment; it
 cannot silently replay the uncertain operation or use settlement for rollback/adoption.
 
+The CLI exposes `host image settle --settlement-phase` with closed phases
+`observe`, `plan`, `install-approval`, `install-forward-approval`, and `apply`.
+Every phase requires explicit project, environment, registered remote, request
+and generation selectors. Only observe/plan are read-only; the other phases
+require `--confirm`. Artifact arguments and replay rules are specified in
+[`docs/image-activation-settlement.md`](../../../docs/image-activation-settlement.md).
+Approval installation accepts an operator-supplied signature and public key;
+neither settlement nor deployment signs its own authority.
+
 ## Development and release control
 
 Opt-in development uses one owner for its effective dependency closure and exactly

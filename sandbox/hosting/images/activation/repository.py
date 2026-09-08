@@ -62,7 +62,8 @@ def decode_activation_state(value: object | None) -> dict[str, Any]:
     required = {"schema_version", "generation", "current", "previous", "active", "results",
                 "tombstones", "recovery_provisional", "recovery_results",
                 "reserved_terminal_bytes"}
-    if type(value) is not dict or set(value) != required \
+    allowed_fields = required | {"settlements"}
+    if type(value) is not dict or not required <= set(value) <= allowed_fields \
             or type(value["schema_version"]) is not int or value["schema_version"] != 1 \
             or type(value["generation"]) is not int or value["generation"] < 0 \
             or any(type(value[name]) is not dict for name in ("results", "tombstones", "recovery_results")) \
@@ -202,6 +203,16 @@ def decode_activation_state(value: object | None) -> dict[str, Any]:
     if len(recovery_subjects) != len(set(recovery_subjects)) \
             or any(subject not in terminal_or_active for subject in recovery_subjects):
         raise ActivationRepositoryError("persistence_uncertain")
+    if "settlements" in safe:
+        try:
+            from .settlement_repository import validate_settlements
+            validate_settlements(safe, validate_base=False)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise ActivationRepositoryError("persistence_uncertain") from None
+    elif ((safe.get("active") or {}).get("recovery_context", {}).get("settlement_forward") is not None
+            or any((generation or {}).get("execution_evidence", {}).get("settlement_forward") is not None
+                   for generation in (safe.get("current"), safe.get("previous")))):
+        raise ActivationRepositoryError("persistence_uncertain")
     return safe
 
 
@@ -267,6 +278,11 @@ def accept_candidate(state: object, request: ActivationRequest, *, holder: str,
         return "busy", current, None
     if current["generation"] != request.expected_generation:
         return "generation_conflict", current, None
+    from .settlement_forward import required_predecessor
+    if request.request_id in current.get("settlements", {}):
+        return "conflict", current, None
+    if required_predecessor(current) is not None:
+        return "authority_mismatch", current, None
     if len(current["results"]) >= MAX_RESULTS and len(current["tombstones"]) >= MAX_TOMBSTONES:
         return "retention_full", current, None
     candidate = json.loads(canonical_bytes(current))
@@ -346,7 +362,10 @@ def commit_candidate(state: object, request: ActivationRequest, result: Activati
     if result.result_class != "uncertain":
         candidate["active"] = None
     while len(candidate["results"]) > MAX_RESULTS:
-        request_id = next(iter(candidate["results"]))
+        protected = {row["active_request_id"] for row in candidate.get("settlements", {}).values()}
+        request_id = next((key for key in candidate["results"] if key not in protected), None)
+        if request_id is None:
+            raise ActivationRepositoryError("retention_full")
         terminal = candidate["results"].pop(request_id)["result"]
         if len(candidate["tombstones"]) >= MAX_TOMBSTONES:
             raise ActivationRepositoryError("retention_full")
@@ -703,7 +722,44 @@ class ActivationRepository:
     def snapshot_under_target_mutation(self, target: str) -> dict:
         """Read state while the caller already holds shared target ownership."""
         with self.host_state.atomic_host_state_transaction(target):
-            return decode_activation_state(self.host_state.read_activation_nested(target))
+            state = decode_activation_state(self.host_state.read_activation_nested(target))
+            if any(row["plan"]["target"]["target_identity"] != target
+                   for row in state.get("settlements", {}).values()):
+                raise ActivationRepositoryError("persistence_uncertain")
+            return state
+
+    def lookup_settlement(self, target: str, *, request_id: str,
+                          plan_digest: str, approval_digest: str) -> dict | None:
+        state = self.snapshot(target)
+        record = state.get("settlements", {}).get(request_id)
+        if record is not None and (record["plan_digest"] != plan_digest
+                or record["approval_digest"] != approval_digest):
+            raise ActivationRepositoryError("request_conflict")
+        return record
+
+    def commit_settlement(self, target: str, plan, approval, *, authorized_at: int) -> dict:
+        from .settlement_repository import settle_candidate
+        with self.operation_transaction(target), self.host_state.atomic_host_state_transaction(target):
+            def update(current):
+                status, candidate, _record = settle_candidate(
+                    decode_activation_state(current), plan, approval, authorized_at=authorized_at)
+                if status not in {"settled", "replay"}:
+                    raise ActivationRepositoryError("request_conflict")
+                return candidate
+            state = self.host_state.update_activation_nested(target, plan.generation, update)
+            return decode_activation_state(state)["settlements"][plan.request_id]
+
+    def release_settlement_pin(self, target: str, record: dict) -> None:
+        pin = validate_retained_proof_pin(record["proof_pin"])
+        with self.stage_repository.proof_custody_transaction(
+                target, target_mutation_port=self.target_mutation,
+                host_state_port=self.host_state) as custody:
+            lease = custody.lookup(pin["lease_id"])
+            if lease is None:
+                return
+            evidence = self.host_state.durable_terminal_authority_evidence(
+                lease, terminal_receipt=record["terminal_receipt"]["terminal_digest"])
+            custody.release(lease, evidence)
 
     def commit(self, target: str, request: ActivationRequest, result: ActivationResult,
                generation: dict | None = None) -> dict:

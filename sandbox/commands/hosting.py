@@ -3582,6 +3582,19 @@ class _HostImageEdgeAdapter:
     def clear_generation_checkpoint(self) -> None:
         self._generation_checkpoint = None
 
+    def preflight(self, entry, remote_name):
+        """Check known provider failures before runtime; origin proof follows it."""
+        plan = _guarded_host_apply_plan(self.validated, entry, remote_name,
+                                       allow_zone_ssl_change=False)
+        provider = plan.get("cloudflare")
+        if (type(provider) is not dict or provider.get("configured") is not True
+                or provider.get("error") or type(provider.get("records")) is not list
+                or len(provider["records"]) != len(plan["records"])
+                or any(row.get("exists") is not True for row in provider["records"])):
+            from sandbox.hosting.images.activation.models import ActivationContractError
+            raise ActivationContractError("edge_incomplete")
+        return self._route_plan()
+
     def observe_plan(self):
         from sandbox.hosting.images.activation.models import activation_digest
         # A first immutable activation may legitimately have no origin yet:
@@ -3636,6 +3649,10 @@ class _HostImageEdgeAdapter:
             _verify_edge(self.validated["routes"],
                          healthcheck_path=self.validated["healthcheck"]["path"],
                          basic_auth_enabled=bool(self.validated.get("basic_auth")))
+        return self._route_plan()
+
+    def _route_plan(self):
+        from sandbox.hosting.images.activation.models import activation_digest
         health_path = self.validated["healthcheck"]["path"]
         routes = sorted(({
             "hostname": item["hostname"], "mode": item["mode"],
@@ -5043,13 +5060,38 @@ def _cmd_host_image(validated: dict, args) -> None:
                         or type(ledger["revision"]) is not int
                         or isinstance(ledger["revision"], bool) or ledger["revision"] < 1):
                     raise ValueError("v2 stage ledger authority is invalid")
+                from sandbox.hosting.images.activation.settlement_store import SettlementApprovalStore
+                settlement_store = SettlementApprovalStore(
+                    Path(RUNTIME_DIR) / "hosting" / "image-activation" / "settlements")
+                forward_digest = getattr(args, "settlement_forward_approval", None)
+                predecessor = getattr(args, "settlement_predecessor", None)
+                forward = None
+                if forward_digest is not None or predecessor is not None:
+                    if not forward_digest or not predecessor or action != "activate":
+                        raise ValueError("authority_mismatch")
+                    forward = settlement_store.read_forward_claim(
+                        proof.target.as_mapping(), forward_digest)
+                    if forward.predecessor_digest != predecessor:
+                        raise ValueError("authority_mismatch")
                 request = ActivationRequestV2.create(
                     request_id=args.request_id, operation=action,
                     expected_generation=args.expected_generation,
                     policy_digest=plan.policy.policy_digest, plan_set=plan,
                     proof_set=proof, compose_snapshot=snapshot,
-                    rollback_grant_digest=grant.grant_digest, confirmed=True)
+                    rollback_grant_digest=grant.grant_digest, confirmed=True,
+                    settlement_forward=None if forward is None else forward.as_mapping())
+                terminal = activation_repository.lookup_terminal_v2(
+                    proof.target.target_identity, request_id=request.request_id,
+                    request_digest=request.request_digest)
+                if terminal is not None:
+                    print(json.dumps(terminal, sort_keys=True, separators=(",", ":")))
+                    if terminal.get("ok") is not True:
+                        raise SystemExit(1)
+                    return
             else:
+                if (getattr(args, "settlement_forward_approval", None) is not None
+                        or getattr(args, "settlement_predecessor", None) is not None):
+                    raise ValueError("authority_mismatch")
                 if "schema_version" in bundle:
                     raise ValueError("v1 plan cannot use a v2 machine bundle")
                 policy = ActivationPolicy.from_mapping(bundle["policy"])
@@ -5095,10 +5137,10 @@ def _cmd_host_image(validated: dict, args) -> None:
                 if is_v2:
                     service = ActivationServiceV2(
                         repository=activation_repository, runtime_adapter=transport,
-                        edge_adapter=edge,
+                        edge_adapter=edge, settlement_approval_verifier=settlement_store,
                         rollback_grant_verifier=SshRollbackGrantVerifier(
                             bundle["rollback_grant_public_key"], grant.authority_id))
-                    route_digest = edge.observe_plan()["route_digest"]
+                    route_digest = edge.preflight(entry, args.remote)["route_digest"]
                     payload = service.execute(
                         request, rollback_grant=grant,
                         compose_files=selector["compose_files"],
@@ -5166,6 +5208,61 @@ def _cmd_host_image_status(validated: dict, args) -> None:
         raise SystemExit(1)
 
 
+def _cmd_host_image_settle(validated: dict, args) -> None:
+    from sandbox.hosting.images.activation.repository import ActivationRepository
+    from sandbox.hosting.images.activation.settlement_cli import run_settlement
+    from sandbox.hosting.images.activation.settlement_observer import SettlementObserver
+    from sandbox.hosting.images.activation.settlement_store import SettlementApprovalStore
+    from sandbox.hosting.images.staging_repository import StageRepository
+
+    try:
+        target = hosting.state_key(args.remote, validated)
+        recovery = RecoveryRepository()
+        repository = ActivationRepository(host_state_port=recovery.activation_host_state_port(),
+            stage_repository=StageRepository(), target_mutation_port=recovery.target_mutation_port("image-settle"))
+        store = SettlementApprovalStore(Path(RUNTIME_DIR) / "hosting" / "image-activation" / "settlements")
+        class Observer:
+            def observe(self, *, transaction, generation):
+                # Durable apply replay never enters this closure, the broker,
+                # registered transport, or the runtime observation helper.
+                authority = transaction["recovery_context"]["target"]
+                with remote.registered_remote_lock():
+                    entry = remote.get_remote(args.remote)
+                    if entry is None or authority["target_identity"] != target:
+                        raise ValueError("evidence_changed")
+                    binding, _version = personal_secrets.hosting_binding_key(create=False)
+                    key = _host_image_target_configuration_key(binding, authority["machine_identity"], target)
+                    def runner(*, program, input_data, timeout_seconds, max_output_bytes):
+                        result = remote.ssh_run(entry, shlex.join(["sudo", "-n", "python3", "-c", program]),
+                            timeout=timeout_seconds, input_data=input_data)
+                        stdout = getattr(result, "stdout", "")
+                        stderr = getattr(result, "stderr", "")
+                        if (getattr(result, "returncode", 1) != 0 or stderr
+                                or type(stdout) is not str or len(stdout.encode()) > max_output_bytes):
+                            raise ValueError("observation_unavailable")
+                        return json.loads(stdout)
+                    def identity():
+                        try:
+                            machine = _authenticated_machine_identity(args.remote, allow_partial=True)
+                        except RecoveryAuthorityError as exc:
+                            cause = exc.__cause__
+                            if getattr(cause, "code", None) == "remote_runtime_revision_mismatch":
+                                raise ValueError("remote_runtime_revision_mismatch") from None
+                            raise
+                        return {"machine_identity": machine,
+                                "target_identity": hosting.state_key(args.remote, validated)}
+                    observer = SettlementObserver(runner=runner,
+                        identity_observer=identity, binding_key=key)
+                    return observer.observe(transaction=transaction, generation=generation)
+        payload = run_settlement(args, target=target, repository=repository,
+            approval_store=store, observer=Observer())
+    except Exception:
+        payload = {"schema_version": 1, "ok": False, "code": "artifact_invalid", "operation": "settle"}
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    if not payload["ok"]:
+        raise SystemExit(1)
+
+
 def cmd_host(cfg, args) -> None:
     if args.action == "image" and getattr(args, "image_action", None) == "verify":
         _cmd_host_image_verify(args)
@@ -5184,7 +5281,7 @@ def cmd_host(cfg, args) -> None:
         missing = [name for name, value in required.items()
                    if not isinstance(value, str) or not value.strip()]
         if getattr(args, "image_action", None) not in {
-                "provision", "status", "activate", "adopt", "rollback", "recover"}:
+                "provision", "status", "activate", "adopt", "rollback", "recover", "settle"}:
             missing.append("image action")
         if getattr(args, "image_action", None) not in {"provision", "status"} \
                 and getattr(args, "expected_generation", None) is None:
@@ -5242,6 +5339,9 @@ def cmd_host(cfg, args) -> None:
             return
         if getattr(args, "image_action", None) == "status":
             _cmd_host_image_status(validated, args)
+            return
+        if getattr(args, "image_action", None) == "settle":
+            _cmd_host_image_settle(validated, args)
             return
         _cmd_host_image(validated, args)
         return

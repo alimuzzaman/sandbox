@@ -6,7 +6,9 @@ from .repository import decode_activation_state
 def activation_status(value: object) -> dict:
     state = decode_activation_state(value)
     active = state["active"]
-    return {
+    from .settlement_forward import required_predecessor
+    predecessor = required_predecessor(state)
+    result = {
         "schema_version": 1, "ok": True, "code": "observed",
         "state_schema_version": state["schema_version"],
         "generation": state["generation"],
@@ -18,3 +20,8 @@ def activation_status(value: object) -> dict:
         "retained_result_count": len(state["results"]),
         "retained_recovery_count": len(state["recovery_results"]),
     }
+    if "settlements" in state:
+        result.update(retained_settlement_count=len(state["settlements"]),
+            required_settlement_predecessor=None if predecessor is None else
+                predecessor["terminal_receipt"]["terminal_digest"])
+    return result

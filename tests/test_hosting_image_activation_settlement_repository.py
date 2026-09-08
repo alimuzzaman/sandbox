@@ -1,17 +1,26 @@
 import copy
+import base64
 import unittest
 
 from sandbox.hosting.images.activation.models import activation_digest
 from sandbox.hosting.images.activation.settlement_models import (
-    SettlementDataAssessment, SettlementObservation, SettlementPlan,
+    SettlementApproval, SettlementDataAssessment, SettlementObservation, SettlementPlan,
 )
 from sandbox.hosting.images.activation.settlement_repository import (
-    SettlementRepositoryError, settle_candidate, validate_settlements,
+    SettlementRepositoryError, settle_candidate as propose_settlement, validate_settlements,
 )
 from sandbox.hosting.images.staging_models import StagingTarget
 
 
-TARGET = StagingTarget("machine-a", "remote/project/production", "daemon-a")
+def settle_candidate(state, plan, signature_identity):
+    signature = base64.b64encode(("-----BEGIN SSH SIGNATURE-----\n" +
+        signature_identity + "\n-----END SSH SIGNATURE-----\n").encode()).decode()
+    approval = SettlementApproval.create(authority_id="operator", authority_revision="1",
+        plan_digest=plan.plan_digest, issued_at=50, expires_at=200, signature=signature)
+    return propose_settlement(state, plan, approval, authorized_at=100)
+
+
+TARGET = StagingTarget("machine-a", "target-a", "daemon-a")
 TX = "sha256:" + "a" * 64
 REQUEST_DIGEST = "sha256:" + "b" * 64
 PROOF_DIGEST = "sha256:" + "c" * 64
@@ -124,12 +133,15 @@ class SettlementRepositoryTests(unittest.TestCase):
         self.assertIsNone(record)
 
     def test_later_generation_does_not_rewrite_historical_settlement(self):
-        from tests.test_hosting_image_activation_v2_cli import recovery_state
-        _, settled, record = settle_candidate(_state(), _plan(), "sha256:" + "9" * 64)
-        _state_with_later_incident, generation = recovery_state(genesis=False)
-        settled["generation"] = generation["generation"]
-        settled["current"] = generation
-        checked = validate_settlements(settled)
+        from tests.test_hosting_image_activation_settlement_forward import (
+            successor_fixture, signed_request, SettlementForwardTests,
+        )
+        state, request, grant, approval = successor_fixture()
+        record = copy.deepcopy(state["settlements"]["settlement-a"])
+        result, host, _stage, _runtime = SettlementForwardTests()._execute(
+            state, signed_request(request, approval), grant, allowed=True)
+        self.assertTrue(result["ok"], result)
+        checked = validate_settlements(host.state)
         self.assertEqual(checked["settlements"]["settlement-a"], record)
         self.assertIsNone(record["current_generation_digest"])
 

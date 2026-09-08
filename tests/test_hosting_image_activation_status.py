@@ -11,6 +11,18 @@ from sandbox.hosting.images.activation.repository import empty_activation_state
 
 
 class ActivationStatusTests(unittest.TestCase):
+    def test_settled_status_retains_uncertainty_and_exposes_required_successor(self):
+        from sandbox.hosting.images.activation.status import activation_status
+        from tests.test_hosting_image_activation_settlement_repository import _state, _plan, settle_candidate
+        _, state, record = settle_candidate(_state(), _plan(), "sha256:" + "9" * 64)
+        result = activation_status(state)
+        self.assertEqual(result["retained_settlement_count"], 1)
+        self.assertEqual(result["required_settlement_predecessor"], record["terminal_receipt"]["terminal_digest"])
+        self.assertEqual(result["generation"], 0)
+        self.assertIsNone(result["current_generation_digest"])
+        self.assertEqual(result["retained_result_count"], 1)
+        self.assertNotIn("signature", json.dumps(result))
+
     def test_fixed_failure_codes_survive_without_dependency_error_text(self):
         from sandbox.commands.hosting import _cmd_host_image
         from tests.test_hosting_image_activation_v2 import artifacts

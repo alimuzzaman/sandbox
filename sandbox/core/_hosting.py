@@ -36,6 +36,7 @@ TARGET_MUTATION_CAPABILITIES = {
     "adopt": "hosting.image-adopt.v1",
     "rollback": "hosting.image-rollback.v1",
     "image-recover": "hosting.image-recover.v1",
+    "image-settle": "hosting.image-settle.v1",
 }
 
 

@@ -227,8 +227,11 @@ class PostgresRecovery:
             'target_role': 'lenzora' if target_volume is not None else getattr(source, 'role', None), 'active_database_overwrite': False, 'published_ports': []}
         return {**body, 'plan_digest': digest(body)}
 
-    def restore(self, plan, *, confirm=False):
-        if not confirm: raise RecoveryError('restore drill requires confirmation', 'confirmation_required')
+    def restore(self, plan, *, confirm=False, inspect=False, verify=False):
+        if inspect and verify: raise RecoveryError('restore operation is ambiguous', 'request_invalid')
+        if not confirm and not inspect: raise RecoveryError('restore drill requires confirmation', 'confirmation_required')
+        if (inspect or verify) and (plan.get('profile') != 'lenzora-dev' or plan.get('target_volume') is not None):
+            raise RecoveryError('inspection is only for an isolated development restore', 'request_invalid')
         expected = self.restore_plan(plan['remote'], plan['profile'], plan['request_id'], plan['backup_id'], plan['target_volume'])
         if plan != expected: raise RecoveryError('restore plan changed', 'restore_plan_changed')
         source = self.source(plan['remote'], plan['profile'])
@@ -247,7 +250,12 @@ class PostgresRecovery:
                 if len(members) != 1 or members[0].name != 'native-capture.tar' or not members[0].isfile() or members[0].size > 512 * 1024 * 1024:
                     raise RecoveryError('recovery archive is invalid', 'capture_invalid')
                 archive = bundle.extractfile(members[0]).read()
-            result = _load_json_bytes(self.transport.invoke(source, 'restore', plan['native_request_id'], archive=archive, target_volume=plan['target_volume']))
+            operation = 'verify-restore' if verify else 'inspect-restore' if inspect else 'restore'
+            result = _load_json_bytes(self.transport.invoke(source, operation, plan['native_request_id'], archive=archive, target_volume=plan['target_volume']))
+            if inspect:
+                if result.get('ok') is not True or result.get('code') not in {'restore_inspected', 'restore_verified'} or result.get('target') != plan['target']:
+                    raise RecoveryError('restore inspection is unavailable', 'restore_verification_failed')
+                return result
             if not result.get('ok') or result.get('code') not in {'restore_verified', 'storage_restore_verified'} or result.get('target') != plan['target']:
                 raise RecoveryError('restore evidence is incomplete', 'restore_verification_failed')
             if plan['profile'] != 'lenzora-prod-storage':

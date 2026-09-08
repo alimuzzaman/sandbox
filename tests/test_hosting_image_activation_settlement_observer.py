@@ -44,6 +44,17 @@ class Commands:
 
 
 class SettlementObserverTests(unittest.TestCase):
+    def test_containment_preserves_only_closed_native_refusals(self):
+        transaction = _state()['active']
+        target = transaction['recovery_context']['target']
+        for native, expected in (('container_restarting', 'container_restarting'),
+                                ('private-secret-canary', 'observation_unavailable')):
+            observer = SettlementObserver(runner=lambda **_kwargs: {'ok': False, 'code': native},
+                identity_observer=lambda: {key: target[key] for key in ('machine_identity', 'target_identity')},
+                binding_key=KEY)
+            with self.assertRaisesRegex(ValueError, '^' + expected + '$'):
+                observer.containment(transaction=transaction, generation=0)
+
     def invoke(self, commands, epoch=None):
         frame = {"target": TARGET, "compose_project": "app", "transaction_digest": _plan().transaction_digest,
             "generation": 0, "binding_key": base64.b64encode(KEY).decode()}

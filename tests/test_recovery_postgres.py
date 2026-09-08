@@ -98,6 +98,12 @@ class FakeTransport:
 
 
 class PostgresRecoveryTests(unittest.TestCase):
+    def test_retained_verification_requires_confirmation_and_unambiguous_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _ = self._recovery(Path(directory), FakeTransport(b''))
+            for options in ({'verify': True}, {'verify': True, 'inspect': True}):
+                with self.assertRaises(RecoveryError): recovery.restore({}, **options)
+
     def test_readiness_uses_verified_ciphertext_channel_without_passphrase(self):
         from sandbox.hosting.images.provisioning import install_owner_only_json
         with tempfile.TemporaryDirectory() as directory:

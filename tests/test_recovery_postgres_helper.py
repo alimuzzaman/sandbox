@@ -54,6 +54,56 @@ def capture_archive(dump=b"PGDMP\x00synthetic", constraints_valid=True):
 
 
 class PostgresHelperTests(unittest.TestCase):
+    def test_verify_retained_restore_never_imports_and_refuses_mismatches_before_stopping(self):
+        for match in (False, True):
+            with self.subTest(match=match), tempfile.TemporaryDirectory() as directory:
+                slot = Path(directory); identity = 'a' * 64
+                observed = {'schema_version': 1, 'ok': True, 'all_match': match,
+                    'target': 'sandbox-recovery-restore-' + identity[:24], 'volume': 'isolated-volume',
+                    'target_database': 'lenzora', 'target_role': 'postgres',
+                    'source_database_identity': 'db', 'dump_digest': 'sha256:' + 'b' * 64,
+                    'observation': {}}
+                with patch.object(helper, 'inspect_restore', return_value=observed), \
+                        patch.object(helper, 'run', return_value=b'') as command, \
+                        patch.object(helper.sys, 'stdout', SimpleNamespace(buffer=io.BytesIO())):
+                    if match:
+                        helper._execute({}, source(), 'verify-restore', identity, slot, b'', b'archive')
+                        self.assertEqual(json.loads((slot / 'result.json').read_bytes())['code'], 'restore_verified')
+                        self.assertEqual(len(command.call_args_list), 2)
+                        self.assertTrue(all('pg_restore' not in call.args[0] for call in command.call_args_list))
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'restore_verification_failed'):
+                            helper._execute({}, source(), 'verify-restore', identity, slot, b'', b'archive')
+                        command.assert_not_called()
+                        self.assertFalse((slot / 'result.json').exists())
+
+    def test_inspection_checks_retained_isolated_target_without_reimport(self):
+        name = 'sandbox-recovery-restore-' + 'a' * 24; value = source()
+        archive, evidence = capture_archive()
+        row = {'Id': 'b' * 64, 'Name': '/' + name, 'Image': value['client_image_id'],
+            'Config': {'Labels': {'sandbox.recovery.owner': name}}, 'State': {'Running': True},
+            'HostConfig': {'NetworkMode': 'none', 'PortBindings': {}},
+            'Mounts': [{'Type': 'volume', 'Name': name + '-data', 'Destination': '/var/lib/postgresql/data'}]}
+        calls = []
+        def run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[:2] == ['docker', 'inspect']: return json.dumps([row]).encode()
+            if argv[:3] == ['docker', 'volume', 'inspect']:
+                return json.dumps([{'Labels': {'sandbox.recovery.owner': name}}]).encode()
+            if argv[:2] == ['docker', 'ps']: return ('b' * 64).encode()
+            self.fail('unexpected mutation or command')
+        actual = {key: item for key, item in evidence.items() if key != 'dump_digest'}
+        actual['table_counts'] = [{'name': 'unexpected_table', 'count': 1}]
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory); path = work / 'input.tar'; path.write_bytes(archive)
+            with patch.object(helper, 'run', side_effect=run), patch.object(helper, 'sql', return_value='0'), \
+                    patch.object(helper, 'observation', return_value=actual):
+                result = helper.inspect_restore(value, path, work, name)
+        self.assertFalse(result['all_match'])
+        self.assertFalse(result['matches']['table_counts'])
+        self.assertEqual(result['mismatched_tables'], ['unexpected_table'])
+        self.assertTrue(all(call[1] in {'inspect', 'volume', 'ps'} for call in calls))
+
     def test_observation_creates_temp_accumulator_before_importing_read_only_snapshot(self):
         queries = []
         def sql(_client, _database, query):

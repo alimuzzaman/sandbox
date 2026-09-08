@@ -13,9 +13,9 @@ _ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 def _process_binding(pid, container_id):
     root = Path('/proc') / str(pid)
     cgroup = (root / 'cgroup').read_bytes()
-    if container_id.encode() not in cgroup: raise ValueError('owner_unavailable')
+    if container_id.encode() not in cgroup: raise ValueError('process_owner_unavailable')
     value = (root / 'stat').read_bytes(); tail = value[value.rfind(b')') + 2:].split()
-    if len(tail) < 20: raise ValueError('owner_unavailable')
+    if len(tail) < 20: raise ValueError('process_owner_unavailable')
     return {'pid': pid, 'started': int(tail[19]), 'cgroup_digest': hashlib.sha256(cgroup).hexdigest()}
 
 
@@ -36,10 +36,11 @@ def snapshot(frame, command):
         if row.get('Config', {}).get('Labels', {}).get('com.docker.compose.project') != project:
             raise ValueError('evidence_changed')
         state = row['State']; pid = state.get('Pid')
-        if state.get('Paused') or state.get('Restarting') or type(pid) is not int or pid < 0:
-            raise ValueError('owner_unavailable')
+        if state.get('Paused'): raise ValueError('container_paused')
+        if state.get('Restarting'): raise ValueError('container_restarting')
+        if type(pid) is not int or pid < 0: raise ValueError('container_state_invalid')
         running = state.get('Running')
-        if type(running) is not bool or running != (pid > 0): raise ValueError('owner_unavailable')
+        if type(running) is not bool or running != (pid > 0): raise ValueError('container_state_invalid')
         process = _process_binding(pid, row['Id']) if pid else None
         policy = row.get('HostConfig', {}).get('RestartPolicy')
         if not isinstance(policy, dict) or policy.get('Name') not in {'', 'no', 'always', 'unless-stopped', 'on-failure'}:
@@ -84,5 +85,7 @@ def main():
             if snapshot(frame, command) != before: raise ValueError('evidence_changed')
             result = {'ok': True, 'code': 'planned', 'containers': before}
     except Exception as exc:
-        result = {'ok': False, 'code': str(exc) if str(exc) in {'owner_unavailable', 'evidence_changed'} else 'acceptance_unknown'}
+        result = {'ok': False, 'code': str(exc) if str(exc) in {
+            'process_owner_unavailable', 'container_paused', 'container_restarting',
+            'container_state_invalid', 'evidence_changed'} else 'acceptance_unknown'}
     sys.stdout.write(json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n')

@@ -42,6 +42,8 @@ only that observed volume read-only in an owned, networkless reader.
 ./sb recovery data --postgres-operation capture --remote REMOTE --profile PROFILE --request-id CAPTURE_ID --backup-id BACKUP_ID --confirm --json
 ./sb recovery data --postgres-operation restore-plan --remote REMOTE --profile PROFILE --request-id RESTORE_ID --backup-id BACKUP_ID --json
 ./sb recovery data --postgres-operation restore --remote REMOTE --profile PROFILE --restore-plan PLAN.json --confirm --json
+./sb recovery data --postgres-operation inspect-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --json
+./sb recovery data --postgres-operation verify-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --confirm --json
 ./sb recovery data --postgres-operation readiness --remote REMOTE --profile PROFILE --target-volume VOLUME --json
 ```
 
@@ -54,6 +56,15 @@ It never replaces a completed archive. This exception applies only to read-only
 development capture; restore, production and storage uncertainty cannot resume.
 Snapshot capture creates its session-local temporary accumulator before importing
 the read-only transaction, so it performs no forbidden DDL inside that transaction.
+
+`inspect-restore` compares a retained isolated development restore with its exact
+encrypted backup. It requires the same plan, archive, owner-labelled container
+and volume, no network or ports, no other volume consumer, and no active importer.
+It reports bounded comparison results without reimporting, restarting, stopping,
+or marking the restore verified. An incomplete restore remains retained.
+If every comparison matches, `verify-restore --confirm` repeats those checks under
+the original request lock, stops only that isolated target, and retains the verified
+receipt. It never imports again, repairs a mismatch, or replaces the target.
 
 Observe an uninstalled descriptor by adding `--source-binding SOURCE.json` to
 `observe`. This lets the operator establish the legacy server major before

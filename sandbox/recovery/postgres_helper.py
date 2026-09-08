@@ -186,7 +186,7 @@ def capture(source, client, work):
             except subprocess.TimeoutExpired: hold.kill(); hold.wait()
 
 
-def restore(source, archive, work, name, target_volume=None, target_password=b''):
+def restore_input(archive, work):
     with tarfile.open(archive, 'r') as tar:
         members = tar.getmembers()
         if sorted(item.name for item in members) != ['database.dump', 'evidence.json'] or any(
@@ -198,6 +198,52 @@ def restore(source, archive, work, name, target_volume=None, target_password=b''
     dump = work / 'database.dump'
     if evidence['dump_digest'] != 'sha256:' + hashlib.sha256(dump.read_bytes()).hexdigest():
         raise ValueError('dump_changed')
+    return evidence, dump
+
+
+def inspect_restore(source, archive, work, name):
+    evidence, _dump = restore_input(archive, work)
+    volume = name + '-data'
+    rows = json.loads(run(['docker', 'inspect', name]))
+    if len(rows) != 1: raise ValueError('restore_target_changed')
+    row = rows[0]
+    state = row.get('State') or {}; config = row.get('HostConfig') or {}
+    if (row.get('Name') != '/' + name or row.get('Image') != source['client_image_id']
+            or row.get('Config', {}).get('Labels', {}).get('sandbox.recovery.owner') != name
+            or state.get('Running') is not True or state.get('Paused') or state.get('Restarting')
+            or config.get('NetworkMode') != 'none' or config.get('PortBindings')
+            or not any(m.get('Type') == 'volume' and m.get('Name') == volume
+                and m.get('Destination') == '/var/lib/postgresql/data' for m in row.get('Mounts', []))):
+        raise ValueError('restore_target_changed')
+    volumes = json.loads(run(['docker', 'volume', 'inspect', volume]))
+    if len(volumes) != 1 or volumes[0].get('Labels', {}).get('sandbox.recovery.owner') != name:
+        raise ValueError('restore_target_changed')
+    consumers = run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'volume=' + volume]).decode().split()
+    if consumers != [row.get('Id')]: raise ValueError('restore_target_changed')
+    client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + source['role'], name]
+    base = {'schema_version': 1, 'ok': True, 'code': 'restore_inspected', 'target': name, 'volume': volume}
+    try:
+        importers = sql(client, source['database'], "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND application_name='pg_restore';")
+    except ValueError:
+        return {**base, 'database_available': False, 'all_match': False, 'matches': {}}
+    if importers != '0':
+        raise ValueError('restore_target_busy')
+    actual = observation(client, source['database'])
+    matches = {key: actual[key] == evidence.get(key) for key in actual}
+    expected_counts = {row['name']: row['count'] for row in evidence['table_counts']}
+    actual_counts = {row['name']: row['count'] for row in actual['table_counts']}
+    different = sorted(name for name in expected_counts.keys() | actual_counts.keys()
+        if expected_counts.get(name) != actual_counts.get(name))
+    return {**base, 'database_available': True, 'matches': matches, 'all_match': all(matches.values()),
+        'observation': actual, 'dump_digest': evidence['dump_digest'],
+        'source_database_identity': evidence['database_identity'],
+        'target_database': source['database'], 'target_role': source['role'],
+        'source_table_count': len(expected_counts), 'restored_table_count': len(actual_counts),
+        'mismatched_table_count': len(different), 'mismatched_tables': different[:32]}
+
+
+def restore(source, archive, work, name, target_volume=None, target_password=b''):
+    evidence, dump = restore_input(archive, work)
     password = target_password if target_volume is not None else os.urandom(48).hex().encode()
     if not password or len(password) > 4096 or any(c in password for c in (b'\n', b'\r', b'\0')):
         raise ValueError('target_password_invalid')
@@ -338,7 +384,9 @@ def main():
     if set(request) != {'operation', 'source', 'request_id', 'root', 'credential_size', 'credential_revision', 'archive_size', 'archive_digest', 'target_volume'}:
         raise ValueError('request_invalid')
     source = request['source']; operation = request['operation']; identity = request['request_id']
-    if operation not in {'observe', 'capture', 'restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', identity):
+    if operation not in {'observe', 'capture', 'restore', 'inspect-restore', 'verify-restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', identity):
+        raise ValueError('request_invalid')
+    if operation in {'inspect-restore', 'verify-restore'} and (source['profile'] != 'lenzora-dev' or request['target_volume'] is not None):
         raise ValueError('request_invalid')
     if resume and (operation != 'capture' or source['profile'] != 'lenzora-dev' or source['credential_reference'] is not None):
         raise ValueError('request_invalid')
@@ -354,14 +402,14 @@ def main():
         raise ValueError('archive_changed')
     root = Path(request['root'])
     if not root.is_absolute() or '..' in root.parts: raise ValueError('path_unsafe')
-    if operation != 'status': root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if operation not in {'status', 'inspect-restore', 'verify-restore'}: root.mkdir(parents=True, mode=0o700, exist_ok=True)
     if root.is_symlink() or root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise ValueError('path_unsafe')
     slot = root / identity
     if slot.is_symlink(): raise ValueError('path_unsafe')
     if resume and not slot.exists(): raise ValueError('acceptance_unknown')
     created = False
-    if operation != 'status':
+    if operation not in {'status', 'inspect-restore', 'verify-restore'}:
         try:
             slot.mkdir(mode=0o700); created = True
         except FileExistsError: pass
@@ -388,18 +436,35 @@ def main():
                 result = {'ok': True, 'code': 'terminal_available' if available else 'retained_without_result',
                     'operation': original, 'source_digest': 'sha256:' + hashlib.sha256(canonical(source)).hexdigest()}
                 sys.stdout.buffer.write(canonical(result)); return
-            if saved != request: raise ValueError('acceptance_unknown')
+            expected = {**request, 'operation': 'restore'} if operation in {'inspect-restore', 'verify-restore'} else request
+            if saved != expected: raise ValueError('acceptance_unknown')
             terminal = slot / ('capture.tar' if operation == 'capture' else 'result.json')
             if terminal.is_symlink(): raise ValueError('path_unsafe')
             if terminal.exists():
                 sys.stdout.buffer.write(owned_read(terminal, MAX_ARCHIVE)); return
-            if not resume: raise ValueError('acceptance_unknown')
+            if not resume and operation not in {'inspect-restore', 'verify-restore'}: raise ValueError('acceptance_unknown')
         _execute(request, source, operation, identity, slot, credential, archive_bytes)
     finally:
         os.close(descriptor)
 
 
 def _execute(request, source, operation, identity, slot, credential, archive_bytes):
+    if operation in {'inspect-restore', 'verify-restore'}:
+        with tempfile.TemporaryDirectory(prefix='inspect-', dir=slot) as temporary:
+            work = Path(temporary); archive = work / 'input.tar'
+            private_write(archive, archive_bytes)
+            result = inspect_restore(source, archive, work, 'sandbox-recovery-restore-' + identity[:24])
+            if operation == 'verify-restore':
+                if result.get('all_match') is not True: raise ValueError('restore_verification_failed')
+                name = result['target']
+                run(['docker', 'exec', '--user', 'postgres', name, 'pg_ctl', '-D', '/var/lib/postgresql/data', '-m', 'fast', '-w', 'stop'])
+                run(['docker', 'stop', '--time', '30', name])
+                result = {key: result[key] for key in ('schema_version', 'ok', 'target', 'volume',
+                    'target_database', 'target_role', 'source_database_identity', 'dump_digest', 'observation')}
+                result['code'] = 'restore_verified'
+                private_write(slot / 'result.json', canonical(result))
+            sys.stdout.buffer.write(canonical(result))
+        return
     storage = source['profile'] == 'lenzora-prod-storage'
     if operation != 'restore':
         inspect_source(source)

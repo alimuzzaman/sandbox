@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def configure_recovery(parser) -> None:
     parser.description = "Plan and operate scoped encrypted recovery profiles"
     parser.add_argument("action", choices=("profiles", "plan", "create", "list", "verify", "restore", "retention", "schedule", "postgres", "data"))
-    parser.add_argument("--postgres-operation", choices=("register", "observe", "status", "capture", "restore-plan", "restore", "readiness"))
+    parser.add_argument("--postgres-operation", choices=("register", "observe", "status", "capture", "restore-plan", "restore", "inspect-restore", "verify-restore", "readiness"))
     parser.add_argument("--resume-capture", action="store_true", help="resume only an inspected incomplete local development capture under its original identity")
     parser.add_argument("--source-binding", default=None, help="owner-only non-secret PostgreSQL source descriptor")
     parser.add_argument("--target-volume", default=None, help="explicit reviewed empty production transfer volume")
@@ -128,11 +128,11 @@ def _postgres(cfg, args, service):
             if source.get("remote") != args.remote or args.profile != [source.get("profile")]:
                 raise RecoveryError("source selectors differ", "source_binding_invalid")
             data = postgres.register(source, confirm=args.confirm)
-        elif operation == "restore":
+        elif operation in {"restore", "inspect-restore", "verify-restore"}:
             plan = _load_json_bytes(read_stable_file(Path(args.restore_plan), 16384, owner_only=True))
             if plan.get("remote") != args.remote or args.profile != [plan.get("profile")]:
                 raise RecoveryError("restore selectors differ", "restore_plan_changed")
-            data = postgres.restore(plan, confirm=args.confirm)
+            data = postgres.restore(plan, confirm=args.confirm, inspect=operation == 'inspect-restore', verify=operation == 'verify-restore')
         else:
             if len(args.profile) != 1:
                 raise RecoveryError("one PostgreSQL profile is required", "source_binding_invalid")

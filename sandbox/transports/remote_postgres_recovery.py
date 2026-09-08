@@ -48,8 +48,10 @@ class RegisteredPostgresRecoveryTransport:
 
     def invoke(self, source: PostgresSource, operation: str, request_id: str, *, archive=b'', target_volume=None, resume_capture=False):
         source = recovery_source(source.as_mapping())
-        if operation not in {'observe', 'capture', 'restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', request_id):
+        if operation not in {'observe', 'capture', 'restore', 'inspect-restore', 'verify-restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', request_id):
             raise RecoveryError('PostgreSQL request is invalid', 'request_invalid')
+        if operation in {'inspect-restore', 'verify-restore'} and (source.profile != 'lenzora-dev' or target_volume is not None):
+            raise RecoveryError('restore inspection is invalid', 'request_invalid')
         if resume_capture and (operation != 'capture' or source.profile != 'lenzora-dev'):
             raise RecoveryError('capture resume is invalid', 'request_invalid')
         entry = self.lookup(source.remote)

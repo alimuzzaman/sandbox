@@ -1572,6 +1572,9 @@ identities, disables their restart policies and stops them. Its plan retains the
 original restart policy; volumes, images and containers are not deleted. It does
 not kill unrelated host processes or claim settlement quiescence. A partial apply
 requires retained-request inspection, not a second identity.
+Read-only containment refusals distinguish paused/restarting containers, invalid
+container state, and missing process ownership through fixed codes. They expose
+no process command lines, inspected environment, or private binding material.
 
 `sign-approval` and `sign-forward-approval` are separate protected settlement
 phases. Both require `--confirm` and the exact reviewed inputs. They use the

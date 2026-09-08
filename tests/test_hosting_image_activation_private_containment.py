@@ -69,6 +69,14 @@ def frame(operation="plan", containers=None):
 
 
 class PrivateContainmentTests(unittest.TestCase):
+    def test_unstable_state_returns_closed_reason_without_any_write(self):
+        for field, value, code in (('Paused', True, 'container_paused'),
+                ('Restarting', True, 'container_restarting'), ('Pid', -1, 'container_state_invalid')):
+            with self.subTest(field=field):
+                docker = DockerFixture(); docker.rows[0]['State'][field] = value
+                self.assertEqual(self._run_main(frame(), docker), {'ok': False, 'code': code})
+                self.assertFalse(any(call[1] in {'update', 'stop'} for call in docker.calls))
+
     def setUp(self):
         self.process_binding = patch.object(
             private_containment, "_process_binding",

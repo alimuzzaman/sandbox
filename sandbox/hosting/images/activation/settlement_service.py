@@ -13,6 +13,7 @@ SETTLEMENT_CODES = frozenset({
     "approval_expired", "request_conflict", "generation_conflict", "settlement_conflict",
     "observation_unavailable", "not_quiescent", "evidence_changed", "retention_full",
     "persistence_uncertain", "custody_pending", "target_busy", "path_unsafe", "remote_runtime_revision_mismatch",
+    "process_owner_unavailable", "container_paused", "container_restarting", "container_state_invalid",
 })
 
 

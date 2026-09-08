@@ -133,9 +133,15 @@ def _closed_plan(value: object) -> dict:
 def _closed_plan_v2(value: object) -> dict:
     fields = {"schema_version", "unit_name", "plan_set_digest", "images",
               "service_image_bindings", "target", "request_id", "helper"}
+    version = value.get("receipt_schema_version", 1) if type(value) is dict else 1
+    if type(value) is dict and "receipt_schema_version" in value:
+        fields.add("receipt_schema_version")
+        if type(version) is not int or version != 2:
+            raise ValueError("protocol_invalid")
+    expected_names = ["queue", "web", "worker"] if version == 1 else ["database", "queue", "web", "worker"]
     if type(value) is not dict or set(value) != fields \
             or type(value["schema_version"]) is not int or value["schema_version"] != 2 \
-            or type(value["images"]) is not list or len(value["images"]) != 3 \
+            or type(value["images"]) is not list or len(value["images"]) != len(expected_names) \
             or type(value["service_image_bindings"]) is not list:
         raise ValueError("protocol_invalid")
     if type(value["plan_set_digest"]) is not str \
@@ -159,7 +165,7 @@ def _closed_plan_v2(value: object) -> dict:
                 "name", "repository", "repository_qualified_digest", "manifest_digest",
                 "config_digest", "platform"}:
             raise ValueError("protocol_invalid")
-        if image["name"] not in {"queue", "web", "worker"} \
+        if image["name"] not in expected_names \
                 or type(image["repository"]) is not str \
                 or _REPOSITORY.fullmatch(image["repository"]) is None \
                 or type(image["manifest_digest"]) is not str \
@@ -174,7 +180,7 @@ def _closed_plan_v2(value: object) -> dict:
                 or image["platform"] != "linux/amd64":
             raise ValueError("protocol_invalid")
         names.append(image["name"])
-    if names != ["queue", "web", "worker"]:
+    if names != expected_names:
         raise ValueError("protocol_invalid")
     bindings = value["service_image_bindings"]
     if not bindings or len(bindings) > 64 \
@@ -499,7 +505,8 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                 or not daemon_start or daemon_start != daemon_end \
                 or daemon_start != plan["target"]["daemon_identity"]:
             raise ValueError("observation_invalid")
-        body = {"target_epoch_start": projected_identity,
+        body = {**({"receipt_schema_version": 2} if plan.get("receipt_schema_version") == 2 else {}),
+                "target_epoch_start": projected_identity,
                 "target_epoch_end": projected_identity_end,
                 "daemon_epoch_start": daemon_start, "daemon_epoch_end": daemon_end,
                 "target": plan["target"], "images": observations}

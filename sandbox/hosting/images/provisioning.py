@@ -24,7 +24,7 @@ from sandbox.hosting.images.activation.v2_models import (
 )
 from sandbox.hosting.images.models import TargetScope, canonical_digest
 from sandbox.hosting.images.plan_set import (
-    HostedProductionReceiptV1, MachineImagePlanSetPolicy, SIGNATURE_MODE,
+    decode_hosted_image_receipt, MachineImagePlanSetPolicy, SIGNATURE_MODE,
     VerifiedImagePlanSet, WorkflowIdentityV2, _load_json_bytes,
 )
 from sandbox.hosting.images.staging_models import HelperIdentity, StagingTarget
@@ -431,9 +431,12 @@ def prepare_machine_policy(*, receipt_bytes: bytes, authority_id: str,
         activation_environment_bindings: dict[str, str]) -> MachineImagePlanSetPolicy:
     """Mint the exact policy from a closed receipt plus explicit machine authority."""
     try:
-        receipt = HostedProductionReceiptV1.from_mapping(_load_json_bytes(receipt_bytes))
+        receipt = decode_hosted_image_receipt(_load_json_bytes(receipt_bytes))
         scope = TargetScope.from_mapping(target_scope)
+        if receipt.schema_version == 2 and receipt.target != scope.environment:
+            raise ProvisioningError("artifact_invalid")
         body = {
+            **({"receipt_schema_version": 2} if receipt.schema_version == 2 else {}),
             "schema_version": 2, "authority_id": authority_id,
             "policy_revision": policy_revision, "target_scope": scope.as_mapping(),
             "approved_receipt_digest": "sha256:" + hashlib.sha256(receipt_bytes).hexdigest(),

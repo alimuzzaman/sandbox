@@ -1,7 +1,7 @@
 # Immutable multi-image trust plan v2
 
 The schema-version 2 flow is an additive bridge for a hosted-production
-multi-image release receipt. It does not change the v1 single-image policy,
+multi-image release receipt for production or development. It does not change the v1 single-image policy,
 plan, staging, activation, or recovery schemas.
 
 Trust verification is read-only:
@@ -15,7 +15,13 @@ Trust verification is read-only:
 
 The receipt directory is closed. It must contain only `receipt.json`,
 `receipt.sha256`, `receipt.bundle`, and the `queue`, `web`, and `worker`
-`.payload.json` and `.bundle` pairs. Symlinks are refused. The checksum, each
+`.payload.json` and `.bundle` pairs for retained receipt v1 (nine files, four
+signatures). Receipt v2 requires exactly `database,queue,web,worker` in that order,
+adding `database.payload.json` and `database.bundle` (eleven files, five signatures).
+Each signature bundle remains capped at 1 MiB; the whole directory is capped at
+5 MiB for receipt v1 and 6 MiB for receipt v2.
+It binds production to `refs/heads/main` and development to `refs/heads/dev`.
+The receipt target must match the machine policy environment. Symlinks are refused. The checksum, each
 payload digest, each bundle digest, source revision, workflow claims, platform,
 and complete service/image bindings are checked before a plan set exists.
 Cosign runs with `verify-blob --offline --new-bundle-format` and exact policy-pinned
@@ -75,6 +81,15 @@ The machine policy is a closed schema-version 2 object. It pins:
   `{image,environment_variable}`; and
 - `signature_mode: cosign_keyless_offline_bundle_v1`.
 
+New four-image policies also carry `receipt_schema_version: 2`; omission retains
+the three-image v1 receipt contract. The verified plan's receipt claims carry
+`schema_version: 2` and the signed `target`. The staging helper request and its
+hashed observation carry the same explicit receipt contract. Proof validation
+requires it to match the verified plan. Counts alone never select a contract.
+Old policy, plan and observation mappings retain their original bytes and digests.
+A controller upgrade through supported remote-service migration is required before
+using this contract; historical three-image approvals do not authorize a database.
+
 Each receipt-bound machine policy is stored under an immutable,
 content-addressed path. A later release installs a new policy without replacing
 or conflicting with the prior release policy; replaying the same receipt is
@@ -88,7 +103,7 @@ For the current Lenzora overlay the machine-owned activation bindings are
 authority and must not be inferred from or added to the signed release receipt.
 
 Success emits schema version 2 with `result_class: verified` and a closed
-`plan_set`. The plan set carries three exact image identities, exhaustive
+`plan_set`. The plan set carries the contract's three or four exact image identities, exhaustive
 per-service immutable image refs, the activation environment bindings, receipt
 and workflow identity, verified-signature claims, and
 `plan_set_digest = sha256(domain || NUL || canonical JSON)` under domain

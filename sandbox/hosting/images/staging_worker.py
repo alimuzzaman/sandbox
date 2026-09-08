@@ -89,7 +89,8 @@ class StageWorkerV2:
         bindings = [{"service": row["service"], "image": row["image"],
                      "image_ref": row["image_ref"]}
                     for row in plan.as_mapping()["service_image_bindings"]]
-        frame = {"schema_version": 2,
+        frame = {**({"receipt_schema_version": 2} if plan.receipt.schema_version == 2 else {}),
+                 "schema_version": 2,
                  "unit_name": unit_name(request.request_id, request.request_digest),
                  "request_id": request.request_id,
                  "plan_set_digest": plan.plan_set_digest, "images": images,

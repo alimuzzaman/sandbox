@@ -908,9 +908,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--policy-authority-id", default=None)
     host_p.add_argument("--policy-revision", type=int, default=None)
     host_p.add_argument("--service-image-binding", action="append", default=None,
-        metavar="SERVICE=queue|web|worker")
+        metavar="SERVICE=database|queue|web|worker")
     host_p.add_argument("--activation-environment-binding", action="append", default=None,
-        metavar="queue|web|worker=ENVIRONMENT_VARIABLE")
+        metavar="database|queue|web|worker=ENVIRONMENT_VARIABLE")
     host_p.add_argument("--credential-source-reference", default=None,
         metavar="SOURCE/KEY")
     host_p.add_argument("--credential-expires-at", default=None, metavar="RFC3339")

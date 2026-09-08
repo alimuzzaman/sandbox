@@ -352,37 +352,55 @@ class ComposeAdapter:
 
         if op == "status":
             result = self.dependencies.process.run(["docker", "compose", *project_args, "ps", "--format", "json"], cwd=descriptor["root"], timeout=30)
-            compose_output = result.stdout[-10000:]
+            raw_output = result.stdout or ""
+            compose_output = raw_output[-10000:]
             states = []
-            for line in compose_output.splitlines():
+            malformed = (getattr(result, "stdout_truncated", False) is True
+                         or len(raw_output.encode("utf-8")) > 1024 * 1024)
+            if raw_output.strip() and not malformed:
                 try:
-                    item = json.loads(line)
+                    # Compose versions emit either one array or JSON rows.
+                    decoded = json.loads(raw_output)
+                    states = decoded if isinstance(decoded, list) else [decoded]
                 except (TypeError, ValueError):
-                    continue
-                if isinstance(item, dict):
-                    states.append(item)
-            service_state = next(
-                (item.get("State") for item in states
-                 if item.get("Service") == service),
-                None,
-            )
-            if result.returncode != 0:
+                    try:
+                        states = [json.loads(line) for line in raw_output.splitlines()
+                                  if line.strip()]
+                    except (TypeError, ValueError):
+                        malformed = True
+                malformed = malformed or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("Service"), str)
+                    or not isinstance(item.get("State"), str)
+                    for item in states
+                )
+            matching = [] if malformed else [
+                item for item in states if item["Service"] == service
+            ]
+            health_state = "unknown"
+            if result.returncode != 0 or malformed or len(matching) > 1:
                 status = "error"
-            elif service_state is None:
-                # Preserve the historical ready result for older Compose
-                # implementations that return non-JSON output, while an
-                # explicit service row is authoritative when available.
-                status = "ready" if not states else "stopped"
+            elif not matching:
+                status = "stopped"
+            elif matching[0]["State"] != "running":
+                status = "stopped"
+            elif matching[0].get("Health") in {"unhealthy", "starting"}:
+                status = "unhealthy"
+                health_state = matching[0]["Health"]
             else:
-                status = "ready" if service_state == "running" else "stopped"
+                healthy = self.dependencies.http.probe(
+                    f"http://127.0.0.1:{http_port}" + descriptor["health_path"], timeout=2
+                )
+                health_state = "healthy" if healthy else "unhealthy"
+                status = "ready" if healthy else "unhealthy"
             lifecycle_state = (
                 "ready" if status == "ready" else
                 "asleep" if status == "stopped" and descriptor["instanceLifecycle"]["mode"] == "idle_stop" else
                 "stopped" if status == "stopped" else
                 "error"
             )
-            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": status, "lifecycleState": lifecycle_state, "instanceLifecycle": descriptor["instanceLifecycle"], "compose": compose_output, "observation": {"source": "compose", "freshness": "live"}}
-            return OperationResult(result.returncode == 0, op, descriptor["root"], "compose", data)
+            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": status, "health": health_state, "lifecycleState": lifecycle_state, "instanceLifecycle": descriptor["instanceLifecycle"], "compose": compose_output, "observation": {"source": "compose", "freshness": "live", "complete": not malformed}}
+            return OperationResult(result.returncode == 0 and not malformed and len(matching) <= 1, op, descriptor["root"], "compose", data)
 
         commands = {
             "start": ["start", service],

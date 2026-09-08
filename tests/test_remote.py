@@ -3620,11 +3620,11 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     sr.get_remote("myvps"), "default-demo.sandbox.asb.bd", 8188
                 )
                 mock_url.assert_called_once_with(
-                    sr.get_remote("myvps"), "/remote/demo",
+                    sr.get_remote("myvps"), "/remote/demo", "demo",
                     "https://default-demo.sandbox.asb.bd"
                 )
 
-    def test_failed_remote_ensure_removes_only_new_default_instance(self):
+    def test_failed_remote_ensure_retains_new_row_without_creation_ownership(self):
         entry = {"ssh": "ubuntu@example.test", "provisioned": True}
         baseline = [{"name": "existing", "label": "default"}]
         after_failure = [
@@ -3637,9 +3637,9 @@ class TestDeployEnsureExpose(unittest.TestCase):
                           side_effect=RuntimeError("remote ensure timed out")), \
              patch.object(sr, "delete_remote_instance") as delete:
             with self.assertRaisesRegex(
-                    RuntimeError, "cleanup removed the newly created instance"):
+                    RuntimeError, "state retained"):
                 deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
-        delete.assert_called_once_with(entry, "orphan")
+        delete.assert_not_called()
 
     def test_failed_remote_ensure_does_not_guess_when_multiple_instances_are_new(self):
         entry = {"ssh": "ubuntu@example.test", "provisioned": True}
@@ -3652,7 +3652,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                           side_effect=RuntimeError("remote ensure failed")), \
              patch.object(sr, "delete_remote_instance") as delete:
             with self.assertRaisesRegex(
-                    RuntimeError, "multiple new instances matched"):
+                    RuntimeError, "state retained"):
                 deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
         delete.assert_not_called()
 

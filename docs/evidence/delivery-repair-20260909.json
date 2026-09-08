@@ -1,0 +1,644 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-08T19:55:27.787915+00:00",
+  "scope": "Owned local fixtures and read-only registered remote observations; no deployment or production capture.",
+  "jobs": {
+    "cancel_escalation": {
+      "job_id": "f7c7d874aa67996c057e61afbe1262fe",
+      "request_id": "delivery-repair-cancel-20260909-01",
+      "lifecycle": "cancelled",
+      "exit_code": -9,
+      "termination_reason": "cancelled_by_request",
+      "started_at": "2026-09-08T18:39:40.513415Z",
+      "finished_at": "2026-09-08T18:40:12.007769Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "wordpress_initial": {
+      "job_id": "34b9b6c64aa6385f1e7b51c902722e4d",
+      "request_id": "delivery-repair-wordpress-ensure-20260909-01",
+      "lifecycle": "failed",
+      "exit_code": 1,
+      "termination_reason": "exit_nonzero",
+      "started_at": "2026-09-08T18:41:15.336996Z",
+      "finished_at": "2026-09-08T18:42:52.967335Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "wordpress_duplicate_ports": {
+      "job_id": "29029332256e8435a63d9ed4b15d5858",
+      "request_id": "delivery-repair-wordpress-isolated-20260909-01",
+      "lifecycle": "failed",
+      "exit_code": 1,
+      "termination_reason": "exit_nonzero",
+      "started_at": "2026-09-08T18:44:15.981559Z",
+      "finished_at": "2026-09-08T18:44:27.964855Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "wordpress_resumed": {
+      "job_id": "f5131bec861bf144c67ae63df22c2e02",
+      "request_id": "delivery-repair-wordpress-resume-20260909-01",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T18:50:17.001359Z",
+      "finished_at": "2026-09-08T18:51:23.425705Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "generic_ensure": {
+      "job_id": "bb9486cdd4b8bedf8daa419dca5ac4ae",
+      "request_id": "delivery-repair-generic-ensure-20260909-01",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T18:53:21.374728Z",
+      "finished_at": "2026-09-08T18:53:33.353998Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "initializer_ensure": {
+      "job_id": "ab11da5343e96e66d92e5ad50d0a31f1",
+      "request_id": "delivery-repair-generic-initializer-20260909-01",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T18:57:23.992304Z",
+      "finished_at": "2026-09-08T18:57:25.849256Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "initializer_observer": {
+      "job_id": "96650d637e7ad282e705a1fa3634b35f",
+      "request_id": "delivery-repair-initializer-observer-20260909-01",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:02:20.344347Z",
+      "finished_at": "2026-09-08T19:02:24.123946Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "focused_first": {
+      "job_id": "0ac905ed6eda45f8654cf2430c527735",
+      "request_id": "delivery-repair-focused-20260909-01",
+      "lifecycle": "failed",
+      "exit_code": 1,
+      "termination_reason": "exit_nonzero",
+      "started_at": "2026-09-08T19:08:21.710441Z",
+      "finished_at": "2026-09-08T19:09:04.218685Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete",
+      "output_summary": [
+        "Ran 501 tests in 42.116s",
+        "FAILED (failures=1)"
+      ]
+    },
+    "focused_corrected": {
+      "job_id": "c67f8ce9eaf6d650787189a18dfb3822",
+      "request_id": "delivery-repair-focused-20260909-02",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:10:27.311643Z",
+      "finished_at": "2026-09-08T19:10:27.928601Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete",
+      "output_summary": [
+        "Ran 54 tests in 0.270s",
+        "OK"
+      ]
+    },
+    "smoke": {
+      "job_id": "4c2d53ee3e8c0b3a641cf0cafb704c70",
+      "request_id": "delivery-repair-smoke-20260909-01",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:11:47.344102Z",
+      "finished_at": "2026-09-08T19:14:30.276777Z",
+      "source_commit": "a1b6658fd51a75295563879a8df029b6ba28ff58",
+      "source_dirty_digest": "sha256:704975d7b693b720aa2d3346ca5259d62faf2df8e1ab9b4d1fb8f3aa84a9f20e",
+      "output_completeness": "complete",
+      "output_summary": [
+        "PASS captured CLI startup",
+        "PASS fresh: same instance",
+        "PASS fresh: WordPress installed",
+        "PASS fresh: home matches advertised URL",
+        "PASS fresh: siteurl matches advertised URL",
+        "PASS fresh: retained data",
+        "PASS fresh: clean URL advertised",
+        "PASS fresh: canonical REST with query string",
+        "PASS reuse: same instance",
+        "PASS reuse: WordPress installed",
+        "PASS reuse: home matches advertised URL",
+        "PASS reuse: siteurl matches advertised URL",
+        "PASS reuse: retained data",
+        "PASS reuse: clean URL advertised",
+        "PASS reuse: canonical REST with query string",
+        "PASS restart: same instance",
+        "PASS restart: WordPress installed",
+        "PASS restart: home matches advertised URL",
+        "PASS restart: siteurl matches advertised URL",
+        "PASS restart: retained data",
+        "PASS restart: clean URL advertised",
+        "PASS restart: canonical REST with query string",
+        "PASS owned fixture cleanup"
+      ]
+    },
+    "selftest_cancelled_before_start": {
+      "job_id": "160051bd1b18e553b21e2141fa5ee85a",
+      "request_id": "delivery-repair-selftest-20260909-01",
+      "lifecycle": "cancelled",
+      "exit_code": null,
+      "termination_reason": "cancelled_before_process_start",
+      "started_at": null,
+      "finished_at": "2026-09-08T19:14:07.700521Z",
+      "source_commit": "a1b6658fd51a75295563879a8df029b6ba28ff58",
+      "source_dirty_digest": "sha256:704975d7b693b720aa2d3346ca5259d62faf2df8e1ab9b4d1fb8f3aa84a9f20e",
+      "output_completeness": "active"
+    },
+    "reused_url_mismatch": {
+      "job_id": "51944e1241ace1da8abb4c65912aee41",
+      "request_id": "delivery-repair-wordpress-reuse-20260909-01",
+      "lifecycle": "failed",
+      "exit_code": 1,
+      "termination_reason": "exit_nonzero",
+      "started_at": "2026-09-08T19:14:43.181924Z",
+      "finished_at": "2026-09-08T19:15:37.729158Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "snapshot_mount_refusal": {
+      "job_id": "d45ba08df5aa249e5a5e1102c1f8e140",
+      "request_id": "delivery-repair-wordpress-url-repair-20260909-01",
+      "lifecycle": "failed",
+      "exit_code": 1,
+      "termination_reason": "exit_nonzero",
+      "started_at": "2026-09-08T19:19:29.420699Z",
+      "finished_at": "2026-09-08T19:19:30.347848Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "apply_corrected_syntax": {
+      "job_id": "eebeec0602789516bc261eeaf0d006d3",
+      "request_id": "delivery-repair-wordpress-apply-20260909-02",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:21:32.320236Z",
+      "finished_at": "2026-09-08T19:21:49.816147Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "reuse_accepted": {
+      "job_id": "6ded418a4e0f3b5e8eb4adead7316ac6",
+      "request_id": "delivery-repair-wordpress-url-repair-20260909-02",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:22:37.151122Z",
+      "finished_at": "2026-09-08T19:23:53.658979Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete"
+    },
+    "readiness_regressions": {
+      "job_id": "214a9b8db6de2217e08c3f9607696ae1",
+      "request_id": "delivery-repair-ready-regressions-20260909-01",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:25:33.631168Z",
+      "finished_at": "2026-09-08T19:25:34.313738Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete",
+      "output_summary": [
+        "Ran 48 tests in 0.355s",
+        "OK"
+      ]
+    },
+    "selftest_initial": {
+      "job_id": "6ea97f40aab013548cd47e1a48448829",
+      "request_id": "delivery-repair-selftest-20260909-02",
+      "lifecycle": "failed",
+      "exit_code": 1,
+      "termination_reason": "exit_nonzero",
+      "started_at": "2026-09-08T19:27:41.323156Z",
+      "finished_at": "2026-09-08T19:36:14.981927Z",
+      "source_commit": "a1b6658fd51a75295563879a8df029b6ba28ff58",
+      "source_dirty_digest": "sha256:bdcbd5f193153ac20f24f207a0a866cd3565bcc902798f97605c004d823ae1e8",
+      "output_completeness": "complete",
+      "output_summary": [
+        "FAIL: test_6bc4c6d5_job_list_keeps_the_top_level_jobs_envelope (test_remote_job_runtime_acceptance.DurableRuntimeAcceptanceTests.test_6bc4c6d5_job_list_keeps_the_top_level_jobs_envelope)",
+        "FAIL: test_proxy_transport_failure_detail_preserves_listener_recovery_evidence (test_sandbox.TestProxyTransportHealth.test_proxy_transport_failure_detail_preserves_listener_recovery_evidence)",
+        "FAIL: test_next_compose_session_reflects_mutated_runtime_and_new_generation (test_state_freshness.TestStateFreshness.test_next_compose_session_reflects_mutated_runtime_and_new_generation)",
+        "Ran 5698 tests in 509.185s",
+        "FAILED (failures=3, skipped=21)"
+      ]
+    },
+    "full_suite_fixture_corrections": {
+      "job_id": "0f68e94814913929ec3b41e8c5195c5d",
+      "request_id": "delivery-repair-suite-fixtures-20260909-01",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:42:09.154693Z",
+      "finished_at": "2026-09-08T19:42:12.287841Z",
+      "source_commit": null,
+      "source_dirty_digest": null,
+      "output_completeness": "complete",
+      "output_summary": [
+        "Ran 39 tests in 2.629s",
+        "OK"
+      ]
+    },
+    "smoke_final": {
+      "job_id": "635f4f0bb19716e2e6a08b6ec915cb4c",
+      "request_id": "delivery-repair-smoke-20260909-02",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:44:20.897137Z",
+      "finished_at": "2026-09-08T19:47:26.185661Z",
+      "source_commit": "a1b6658fd51a75295563879a8df029b6ba28ff58",
+      "source_dirty_digest": "sha256:c0ce43e70d833bb6163c3be317ab41e821ee89faaa91174ccfb25eae71e6756d",
+      "output_completeness": "complete",
+      "output_summary": [
+        "PASS captured CLI startup",
+        "PASS fresh: same instance",
+        "PASS fresh: WordPress installed",
+        "PASS fresh: home matches advertised URL",
+        "PASS fresh: siteurl matches advertised URL",
+        "PASS fresh: retained data",
+        "PASS fresh: clean URL advertised",
+        "PASS fresh: canonical REST with query string",
+        "PASS reuse: same instance",
+        "PASS reuse: WordPress installed",
+        "PASS reuse: home matches advertised URL",
+        "PASS reuse: siteurl matches advertised URL",
+        "PASS reuse: retained data",
+        "PASS reuse: clean URL advertised",
+        "PASS reuse: canonical REST with query string",
+        "PASS restart: same instance",
+        "PASS restart: WordPress installed",
+        "PASS restart: home matches advertised URL",
+        "PASS restart: siteurl matches advertised URL",
+        "PASS restart: retained data",
+        "PASS restart: clean URL advertised",
+        "PASS restart: canonical REST with query string",
+        "PASS owned fixture cleanup"
+      ],
+      "passed_checks": 23
+    },
+    "selftest_final": {
+      "job_id": "19f1f8cd348603a9af989b5f55dd4571",
+      "request_id": "delivery-repair-selftest-20260909-03",
+      "lifecycle": "succeeded",
+      "exit_code": 0,
+      "termination_reason": null,
+      "started_at": "2026-09-08T19:47:34.435797Z",
+      "finished_at": "2026-09-08T19:53:39.518882Z",
+      "source_commit": "a1b6658fd51a75295563879a8df029b6ba28ff58",
+      "source_dirty_digest": "sha256:c0ce43e70d833bb6163c3be317ab41e821ee89faaa91174ccfb25eae71e6756d",
+      "output_completeness": "complete",
+      "output_summary": [
+        "Ran 5698 tests in 362.846s",
+        "OK (skipped=21)"
+      ]
+    }
+  },
+  "verification_inputs": {
+    "scope": "Changed product source, tests and workflow files; documentation excluded from execution digest. Unchanged files are bound by base_commit.",
+    "base_commit": "a1b6658fd51a75295563879a8df029b6ba28ff58",
+    "dirty_digest": "sha256:c0ce43e70d833bb6163c3be317ab41e821ee89faaa91174ccfb25eae71e6756d",
+    "files": {
+      ".github/workflows/smoke.yml": "95459dd8af1c0bcf07c5d3f2e31471f582a8db127067113477db17ad3b2e9c19",
+      "mcp/wp-server/tools/jobs.py": "20ec0f8692f48663890d4e80c46a5666510aa1289cbc031f19ff340a753a9b6e",
+      "sandbox/application/job_service.py": "d50aaac49376ffef8b95ee7c7f580fc4ac0c8ff395cdc78e1449507f0f8cfc2f",
+      "sandbox/commands/debug.py": "952cfd227fc27d2d4df3f2ed43bc6e020fc46fd1fdabb3bc8270cf0404e5a7e7",
+      "sandbox/commands/deploy.py": "70af265205c217441dc17146da99ba73ee77ca95a6316b7d4a440953b5929076",
+      "sandbox/commands/hosting.py": "0a41126ab61426aec6daf5c239e9c5c38ab11c7c059e614d34181a043c1a74a6",
+      "sandbox/commands/instances_cmd.py": "68a62d59ca4c01eab0e6bf185c5bae1f2ca1c0b23aafefe352bdefb2cc86c4c6",
+      "sandbox/commands/jobs_runtime.py": "03144486868f33c7229a5e321fadc3ea71652dd316681b07a157364c6e80a423",
+      "sandbox/commands/lifecycle.py": "7bab80c39d0829f9dbb69cbdc7add7048e88d2a148323f694d313ec72747a694",
+      "sandbox/commands/preview.py": "a398ba4d8c3d24c954943855c61e7ed5742722c7178bfa4795514e000f175217",
+      "sandbox/core/_instances.py": "fcbe6bbf91564c82d14cfb8cc334f4e33b0d8e15df15a100f46cc5b2f36749a5",
+      "sandbox/core/_remote.py": "e5cdb26bb000429cbd0afa7b5f42e9036781756c9feac95ce227a7f0e28c7207",
+      "sandbox/jobs/listing.py": "5ef4f2fd53816ae94d59471f593ba4148fe59e4d6031d3e7ef0940e5e04d75b6",
+      "sandbox/recovery/hosted.py": "0a7fdb293308aae2497bfc1161ac71f2f3157d65ce5b55000c1a039c12e78fae",
+      "sandbox/recovery/materialize.py": "09bf1d7e7836296f62b917366e2927858270e075f5a741b7edda08db12ec5d55",
+      "sandbox/runtimes/compose.py": "e07e7eab6858f9ce219769519168a65e78b0578ccfbac0399f0740cb494ffee3",
+      "sandbox/transports/remote_jobs.py": "f27ea4b531f644a304b533939b6902a52dfbd134f11a7e45d9b5c757046b8d23",
+      "sandbox/transports/remote_recovery.py": "1abb3fbf09bb7b9a3138aba374389079010c9d700ad8c0c2dd7c9f619ec30e90",
+      "tests/test_debug_selftest.py": "eabf9e1d06a9c37ac7970e6bd29a2e77dd1cdfb640cbb204746158a9091713d9",
+      "tests/test_delivery_repair.py": "06e80bce53512d957c218954bd581b5e5fc0df5d2b321dd5569d8593c045ff22",
+      "tests/test_generic_compose.py": "fd2a13ec9dd3a56265bebb835a43ea2f47d4519ca8e1c225a26ebde67b47722e",
+      "tests/test_hosting.py": "fb86585904595f49f64fcc9bc46352b23cdfa688db326b3aafc8a09f961671e4",
+      "tests/test_instance_ready_install_state.py": "44ce1b471cd8cce02e2da87ac04ff17fa272fbc6550afa64aa3ab0cfe2ae5e1a",
+      "tests/test_job_cli.py": "6d9879fdfb86daad2b046a53ef7c3b434a6e45c1a507d5d44644a557fb7f8df5",
+      "tests/test_php_extension_integration.py": "e9e9133b90e4733872eee29cdbe4ae0feb16ddbacbc988e9d78b7cb35189679c",
+      "tests/test_recovery_hosted.py": "44bfd58ab66e5bd0753f9dd7bbf1d053a0661b47d8da93868b05443ddcb57f5d",
+      "tests/test_recovery_materialize.py": "6f8cdb1755dffc6d7c3882bd2185fef22868891cbe8a76e09e0597162262dd11",
+      "tests/test_remote.py": "0495f850855063d1bc7769340f8b796ff6aac01fee1babb0043303c21ec29269",
+      "tests/test_remote_job_runtime_acceptance.py": "bdd2ee10d6f012b51c6c077127d98da8326c569a3f2ef9fb4375ce00fc9937c6",
+      "tests/test_remote_recovery.py": "ceae4ebde7849cecaa7d982a117f9bf9636518b2261681e408b4d74f8beb80bf",
+      "tests/test_sandbox.py": "0d5696849a94e9d37d519485399305d59ac6bee55e6fd671098880b4dfbc9507",
+      "tests/test_state_freshness.py": "6e2b9efa059f1f2ba4e003e22123125a62b23b326ad3874dc4fbab91f448cf8b"
+    }
+  },
+  "local_pagination": {
+    "pages": [
+      {
+        "command": [
+          "./sb",
+          "job-list",
+          "--limit",
+          "100",
+          "--json"
+        ],
+        "exit_code": 0,
+        "bytes": 115991,
+        "count": 100,
+        "page": {
+          "completeness": "bounded",
+          "has_more": true,
+          "limit": 100,
+          "max_bytes": 524288,
+          "next_cursor": "9adb9a3ba198d3bb8812f17a8b83c1cc",
+          "row_format": "summary-v1",
+          "schema_version": 2
+        },
+        "forbidden_fields_present": []
+      },
+      {
+        "command": [
+          "./sb",
+          "job-list",
+          "--limit",
+          "100",
+          "--cursor-job-id",
+          "9adb9a3ba198d3bb8812f17a8b83c1cc",
+          "--json"
+        ],
+        "exit_code": 0,
+        "bytes": 117374,
+        "count": 100,
+        "page": {
+          "completeness": "bounded",
+          "has_more": true,
+          "limit": 100,
+          "max_bytes": 524288,
+          "next_cursor": "d321d44d3f802601e0700b6a8794c064",
+          "row_format": "summary-v1",
+          "schema_version": 2
+        },
+        "forbidden_fields_present": null
+      }
+    ],
+    "overlap_count": 0
+  },
+  "observations": {
+    "initializer-observed": {
+      "observations": [
+        {
+          "exit_code": 0,
+          "receipt": {
+            "schema_version": 1,
+            "status": "succeeded"
+          },
+          "counter": 1
+        },
+        {
+          "exit_code": 0,
+          "receipt": {
+            "schema_version": 1,
+            "status": "succeeded"
+          },
+          "counter": 1
+        }
+      ],
+      "service": "init",
+      "project": "sandbox-generic",
+      "env_file_contains_literal_dollar": true
+    },
+    "http-404-observed": {
+      "observed_http_status": 404,
+      "backend_liveness": true,
+      "application_ready": false
+    },
+    "wordpress-reuse-observed": [
+      {
+        "ok": null,
+        "instance": "wordpress-i-codex-delive",
+        "status": "ready",
+        "url": "https://wordpress-i-codex-delive.tst",
+        "instance_incarnation_id": "inc_43fa4f152997ce77179e545be847de1b",
+        "error": null,
+        "attempt": 1,
+        "exit_code": 0,
+        "token_in_output": false,
+        "home": "https://wordpress-i-codex-delive.tst",
+        "home_matches": true,
+        "siteurl": "https://wordpress-i-codex-delive.tst",
+        "siteurl_matches": true,
+        "browser": {
+          "status": 200,
+          "title": "Sandbox wordpress-i-codex-delive",
+          "errors": [],
+          "network_failures": []
+        },
+        "browser_exit_code": 0
+      },
+      {
+        "ok": null,
+        "instance": "wordpress-i-codex-delive",
+        "status": "ready",
+        "url": "https://wordpress-i-codex-delive.tst",
+        "instance_incarnation_id": "inc_43fa4f152997ce77179e545be847de1b",
+        "error": null,
+        "attempt": 2,
+        "exit_code": 0,
+        "token_in_output": false,
+        "home": "https://wordpress-i-codex-delive.tst",
+        "home_matches": true,
+        "siteurl": "https://wordpress-i-codex-delive.tst",
+        "siteurl_matches": true,
+        "browser": {
+          "status": 200,
+          "title": "Sandbox wordpress-i-codex-delive",
+          "errors": [],
+          "network_failures": []
+        },
+        "browser_exit_code": 0
+      }
+    ],
+    "generic-stopped": {
+      "ok": true,
+      "instance": "generic",
+      "status": "stopped",
+      "health": "unknown",
+      "lifecycleState": "asleep",
+      "observation": {
+        "complete": true,
+        "freshness": "live",
+        "observation_generation": "f7f47bfde91bff2995d702ab51176319cdd600344d31aba47a493e34a7147d45",
+        "observed_at": "2026-09-08T19:27:42.680003Z",
+        "source": "compose",
+        "stale": false
+      },
+      "exit_code": 0
+    },
+    "controller-status-final": {
+      "command": [
+        "./sb",
+        "remote",
+        "service",
+        "status",
+        "scaleway-sandbox",
+        "--json"
+      ],
+      "exit_code": 0,
+      "result": {
+        "authenticated": true,
+        "installed_runtime_revision": "bebe6ee03db17fb10c4c1b73",
+        "local_runtime_revision": "8159b8e1995c97ff93ba6c07",
+        "runtime_revision_state": "mismatch"
+      }
+    },
+    "remote-job-page-10": {
+      "command": [
+        "./sb",
+        "job-list",
+        "--remote",
+        "scaleway-sandbox",
+        "--limit",
+        "10",
+        "--json"
+      ],
+      "exit_code": 0,
+      "bytes": 12921,
+      "ok": true,
+      "code": null,
+      "error": null,
+      "page": {
+        "completeness": "unknown",
+        "has_more": null,
+        "limit": 10,
+        "max_bytes": 524288,
+        "next_cursor": "c6c29fb278fa711fbaf1889f89b3d69e",
+        "row_format": "summary-v1",
+        "schema_version": 2
+      },
+      "count": 10
+    },
+    "remote-job-page-100": {
+      "command": [
+        "./sb",
+        "job-list",
+        "--remote",
+        "scaleway-sandbox",
+        "--limit",
+        "100",
+        "--json"
+      ],
+      "exit_code": 1,
+      "bytes": 362,
+      "ok": false,
+      "code": "remote_job_transport_error",
+      "error": "remote job control operation failed: response_too_large: 1181179 bytes exceeds 1048576; use a smaller job-list --limit and continue with --cursor-job-id",
+      "page": null,
+      "count": 0
+    }
+  },
+  "feedback": {
+    "port_collision": "09ad4193b523fe2fee23e4a0bb4feaaf",
+    "url_selection_mismatch": "d985c36db6a7fae6c16652e4c80fca4e",
+    "snapshot_mount_policy_followup": "68cefe5c696e2fa79102b3a269178eb0",
+    "invalid_initial_root_claim": "7b15b46cdce2e3e3ed5ea88ce9abff38"
+  },
+  "limits": [
+    "Protected production capture freshness unrun",
+    "Remote two-instance data and URL acceptance unrun",
+    "Shared controller not migrated",
+    "Hosted deployment initializer acceptance unrun",
+    "Triggered Linux CI unrun",
+    "Snapshot/predispatch mount-policy issue retained for follow-up"
+  ],
+  "fixture_cleanup": {
+    "generic": "stopped; data retained",
+    "wordpress-i-codex-delive": "stopped; data and named snapshot retained",
+    "sandbox-codex-sandbo": "stopped; data retained",
+    "smoke_fixture": "owner-checked deletion completed by smoke command"
+  },
+  "initial_verification_inputs": {
+    "base_commit": "a1b6658fd51a75295563879a8df029b6ba28ff58",
+    "dirty_digest": "sha256:bdcbd5f193153ac20f24f207a0a866cd3565bcc902798f97605c004d823ae1e8",
+    "files": {
+      ".github/workflows/smoke.yml": "95459dd8af1c0bcf07c5d3f2e31471f582a8db127067113477db17ad3b2e9c19",
+      "AGENTS.md": "2040146cf8bb94707e05dc5c594b2e134f3cd798b43d7d059142b60fd73f840c",
+      "README.md": "1a464fedd0869994bcd09121a7b4e9436be41bac61324dc4373f4ebd84066fac",
+      "docs/delivery-repair-implementation.md": "390341a3365b41051b970f49cf2fcf7148e18160f43fe954f65d3f9cd3d476e4",
+      "docs/recovery.md": "d5e080ecd89233ea58010f4e0f09de9c330d545d5979a5eb82a98bacfe5c7543",
+      "docs/remote-hosting-implementation.md": "2146d77623174b139b2461ed28e21715c1289a6d289cbd023c893c9896f7bb4f",
+      "docs/remote-job-runtime.md": "b0f240209cb08725567c5dec6ea3916540114ec15ed0bc3c609a4362f3b5c723",
+      "mcp/wp-server/tools/jobs.py": "20ec0f8692f48663890d4e80c46a5666510aa1289cbc031f19ff340a753a9b6e",
+      "sandbox/application/job_service.py": "d50aaac49376ffef8b95ee7c7f580fc4ac0c8ff395cdc78e1449507f0f8cfc2f",
+      "sandbox/commands/debug.py": "952cfd227fc27d2d4df3f2ed43bc6e020fc46fd1fdabb3bc8270cf0404e5a7e7",
+      "sandbox/commands/deploy.py": "70af265205c217441dc17146da99ba73ee77ca95a6316b7d4a440953b5929076",
+      "sandbox/commands/hosting.py": "0a41126ab61426aec6daf5c239e9c5c38ab11c7c059e614d34181a043c1a74a6",
+      "sandbox/commands/instances_cmd.py": "68a62d59ca4c01eab0e6bf185c5bae1f2ca1c0b23aafefe352bdefb2cc86c4c6",
+      "sandbox/commands/jobs_runtime.py": "03144486868f33c7229a5e321fadc3ea71652dd316681b07a157364c6e80a423",
+      "sandbox/commands/lifecycle.py": "7bab80c39d0829f9dbb69cbdc7add7048e88d2a148323f694d313ec72747a694",
+      "sandbox/commands/preview.py": "a398ba4d8c3d24c954943855c61e7ed5742722c7178bfa4795514e000f175217",
+      "sandbox/core/_instances.py": "fcbe6bbf91564c82d14cfb8cc334f4e33b0d8e15df15a100f46cc5b2f36749a5",
+      "sandbox/core/_remote.py": "e5cdb26bb000429cbd0afa7b5f42e9036781756c9feac95ce227a7f0e28c7207",
+      "sandbox/jobs/listing.py": "5ef4f2fd53816ae94d59471f593ba4148fe59e4d6031d3e7ef0940e5e04d75b6",
+      "sandbox/recovery/hosted.py": "0a7fdb293308aae2497bfc1161ac71f2f3157d65ce5b55000c1a039c12e78fae",
+      "sandbox/recovery/materialize.py": "09bf1d7e7836296f62b917366e2927858270e075f5a741b7edda08db12ec5d55",
+      "sandbox/runtimes/compose.py": "e07e7eab6858f9ce219769519168a65e78b0578ccfbac0399f0740cb494ffee3",
+      "sandbox/transports/remote_jobs.py": "f27ea4b531f644a304b533939b6902a52dfbd134f11a7e45d9b5c757046b8d23",
+      "sandbox/transports/remote_recovery.py": "1abb3fbf09bb7b9a3138aba374389079010c9d700ad8c0c2dd7c9f619ec30e90",
+      "tests/test_debug_selftest.py": "eabf9e1d06a9c37ac7970e6bd29a2e77dd1cdfb640cbb204746158a9091713d9",
+      "tests/test_delivery_repair.py": "06e80bce53512d957c218954bd581b5e5fc0df5d2b321dd5569d8593c045ff22",
+      "tests/test_generic_compose.py": "fd2a13ec9dd3a56265bebb835a43ea2f47d4519ca8e1c225a26ebde67b47722e",
+      "tests/test_hosting.py": "fb86585904595f49f64fcc9bc46352b23cdfa688db326b3aafc8a09f961671e4",
+      "tests/test_instance_ready_install_state.py": "44ce1b471cd8cce02e2da87ac04ff17fa272fbc6550afa64aa3ab0cfe2ae5e1a",
+      "tests/test_job_cli.py": "6d9879fdfb86daad2b046a53ef7c3b434a6e45c1a507d5d44644a557fb7f8df5",
+      "tests/test_php_extension_integration.py": "e9e9133b90e4733872eee29cdbe4ae0feb16ddbacbc988e9d78b7cb35189679c",
+      "tests/test_recovery_hosted.py": "44bfd58ab66e5bd0753f9dd7bbf1d053a0661b47d8da93868b05443ddcb57f5d",
+      "tests/test_recovery_materialize.py": "6f8cdb1755dffc6d7c3882bd2185fef22868891cbe8a76e09e0597162262dd11",
+      "tests/test_remote.py": "0495f850855063d1bc7769340f8b796ff6aac01fee1babb0043303c21ec29269",
+      "tests/test_remote_recovery.py": "ceae4ebde7849cecaa7d982a117f9bf9636518b2261681e408b4d74f8beb80bf"
+    }
+  },
+  "unchanged_proxy_module_sha256": "cd31f34838dab07ad04b358ea1ffdd4c1742e2feecec7d7213839c8653d3dc55",
+  "final_verification": {
+    "source_and_test_hashes_match": true,
+    "changed_python_files_parsed": 31,
+    "local_markdown_links_checked": 29,
+    "local_markdown_broken_links": 0,
+    "high_signal_secret_pattern_candidates": 0,
+    "full_suite_tests": 5698,
+    "full_suite_skipped": 21,
+    "full_suite_failures": 0,
+    "full_suite_seconds": 362.846,
+    "real_lifecycle_smoke_checks": 23,
+    "research_package_changed": false,
+    "original_postgresql_checkout_modified_by_this_task": false
+  }
+}

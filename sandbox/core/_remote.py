@@ -1582,18 +1582,32 @@ def delete_remote_instance_for_label(remote: dict, target_path: str, label: str)
     return True
 
 
-def set_remote_instance_url(remote: dict, target_path: str, url: str) -> None:
-    """Set WordPress home/siteurl for the remote project."""
+def set_remote_instance_url(remote: dict, target_path: str,
+                            instance_name: str, url: str) -> None:
+    """Update and read back options on the exact ensured project instance."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,30}", instance_name or ""):
+        raise ValueError("invalid remote Sandbox instance name")
+    rows = list_remote_instances(remote, target_path)
+    matches = [row for row in rows if isinstance(row, dict)
+               and row.get("name") == instance_name]
+    if len(matches) != 1:
+        raise RuntimeError("remote URL target is not uniquely registered to this project")
     sb = remote_sb_path(remote)
+    wp = shlex.join([sb, "--instance", instance_name, "wp", "--local",
+                     "--project-dir", target_path])
+    # Clear ambient label routing as well as explicitly selecting the instance.
+    # Readback uses the same selector; a partial write never reports completion.
     cmd = (
-        f"cd {shlex.quote(target_path)} && "
-        f"{shlex.quote(sb)} wp option update home {shlex.quote(url)} && "
-        f"{shlex.quote(sb)} wp option update siteurl {shlex.quote(url)}"
+        f"unset SANDBOX_INSTANCE SANDBOX_LABEL; cd {shlex.quote(target_path)} && "
+        f"{wp} option update home {shlex.quote(url)} && "
+        f"{wp} option update siteurl {shlex.quote(url)} && "
+        f"test \"$({wp} option get home)\" = {shlex.quote(url)} && "
+        f"test \"$({wp} option get siteurl)\" = {shlex.quote(url)}"
     )
     res = ssh_run(remote, cmd, timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
-            f"could not set remote instance URL: "
+            f"remote_instance_url_incomplete: inspect the exact target before retrying: "
             f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 

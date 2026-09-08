@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -237,11 +238,12 @@ def _pick_instance_ports(cfg: dict) -> dict[str, int]:
     base_wp = runtime.get("wordpress_port", 8188)
     base_db = runtime.get("db_port", 3318)
     base_mp = runtime.get("mailpit_port", 8125)
-    return {
-        "wordpress_port": _next_free_port(base_wp, used),
-        "db_port": _next_free_port(base_db, used),
-        "mailpit_port": _next_free_port(base_mp, used),
-    }
+    ports = {}
+    for key, base in (("wordpress_port", base_wp), ("db_port", base_db),
+                      ("mailpit_port", base_mp)):
+        ports[key] = _next_free_port(base, used)
+        used.add(ports[key])
+    return ports
 
 
 def _port_busy_by_other(port: int, own_project: str) -> bool:
@@ -265,7 +267,7 @@ def _port_busy_by_other(port: int, own_project: str) -> bool:
     return own_project not in names
 
 
-def _resolve_port_conflicts(cfg: dict) -> dict:
+def _resolve_port_conflicts(cfg: dict, *, instance_names: set[str] | None = None) -> dict:
     """Before booting, ensure each instance's ports are free (or already ours).
     If a port collides with another listener, bump the whole instance to a free
     trio and persist to sandbox.local.yml. Returns the (possibly reloaded) cfg.
@@ -277,15 +279,23 @@ def _resolve_port_conflicts(cfg: dict) -> dict:
     changed = False
     local = _local_yaml()
     for name, ic in instances.items():
+        if instance_names is not None and name not in instance_names:
+            continue
         proj = project_name(name)
         wp, db, mp = ic["wordpress_port"], ic["db_port"], ic["mailpit_port"]
-        conflict = (_port_busy_by_other(wp, proj)
+        conflict = (len({wp, db, mp}) != 3
+                    or _port_busy_by_other(wp, proj)
                     or _port_busy_by_other(db, proj)
                     or _port_busy_by_other(mp, proj))
         if not conflict:
             continue
         # Pick a fresh free trio (avoid all currently-claimed ports).
-        used.discard(wp); used.discard(db); used.discard(mp)
+        # A duplicate can also belong to another registered instance. Rebuild
+        # reservations without only this owner instead of discarding a shared
+        # value from the global set.
+        used = {other[key] for other_name, other in instances.items()
+                if other_name != name
+                for key in ("wordpress_port", "db_port", "mailpit_port")}
         new_wp = _next_free_port(max(wp, 8188), used); used.add(new_wp)
         new_db = _next_free_port(max(db, 3318), used); used.add(new_db)
         new_mp = _next_free_port(max(mp, 8125), used); used.add(new_mp)
@@ -294,6 +304,8 @@ def _resolve_port_conflicts(cfg: dict) -> dict:
         blk = local.setdefault("instances", {}).setdefault(name, {})
         blk["wordpress_port"], blk["db_port"], blk["mailpit_port"] = \
             new_wp, new_db, new_mp
+        instances[name] = dict(ic, wordpress_port=new_wp,
+                               db_port=new_db, mailpit_port=new_mp)
         changed = True
     if changed:
         _write_local_yaml(local)
@@ -606,18 +618,16 @@ def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
 
 
 def _wait_http(port: int, timeout: int = 30) -> bool:
-    import urllib.request
-    import time
-    for _ in range(timeout):
-        try:
-            urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
-            return True
-        except Exception:
-            time.sleep(1)
-    return False
+    # WordPress can already redirect to its configured clean URL. Following
+    # that redirect mixes backend liveness with DNS/TLS and can reject a working
+    # backend before the owned route has been repaired. Final route acceptance
+    # is a separate gate after installation and URL reconciliation.
+    return _wait_reachable({"wordpress_port": port}, timeout=timeout, backend_only=True)
 
 
-def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = False) -> bool:
+def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = False,
+                    require_application_success: bool = False,
+                    canonical_url: str | None = None) -> bool:
     """Wait for the instance's canonical URL without following redirects.
 
     ``site_url`` selects the real browser URL (including a secured proxy host)
@@ -633,6 +643,7 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = F
     import time
     import urllib.error
     import urllib.request
+    from urllib.parse import urljoin, urlsplit
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -646,7 +657,25 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = F
             return False
         url = f"http://localhost:{port}"
     else:
-        url = site_url(inst_cfg)
+        url = canonical_url if canonical_url is not None else site_url(inst_cfg)
+
+    def acceptable(status, headers) -> bool:
+        if not require_application_success:
+            return 200 <= status < 500
+        if 200 <= status < 300:
+            return True
+        if 300 <= status < 400:
+            location = headers.get("Location") if headers is not None else None
+            if not location:
+                return False
+            try:
+                original = urlsplit(url)
+                destination = urlsplit(urljoin(url, location))
+            except ValueError:
+                return False
+            return (destination.scheme, destination.netloc) == (original.scheme, original.netloc)
+        return False
+
     ctx = ssl._create_unverified_context()
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
@@ -660,7 +689,7 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = F
                 status = getattr(response, "status", None)
                 if status is None:
                     status = response.getcode()
-                if 200 <= status < 500:
+                if acceptable(status, getattr(response, "headers", None)):
                     return True
             finally:
                 close = getattr(response, "close", None)
@@ -668,10 +697,11 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = F
                     close()
         except urllib.error.HTTPError as e:
             status = e.code
+            accepted = acceptable(status, e.headers)
             close = getattr(e, "close", None)
             if close is not None:
                 close()
-            if 200 <= status < 500:
+            if accepted:
                 return True
         except Exception:
             pass
@@ -1097,7 +1127,7 @@ def _mount_attestation_refusal(code: object, project_dir: str,
             "error": {"code": code, "message": message}}
 
 
-def _auto_heal_wp_url(name: str) -> bool:
+def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
     """Reconcile WordPress with the currently reachable browser URL.
 
     The persisted clean hostname is not authoritative: a host ingress can be
@@ -1108,7 +1138,7 @@ def _auto_heal_wp_url(name: str) -> bool:
     """
     cfg = load_config()
     ic = resolve_instances(cfg).get(name) or {}
-    expected = site_url(ic)
+    expected = expected_url if expected_url is not None else site_url(ic)
     if not expected.startswith(("http://", "https://")):
         return False
 
@@ -1130,7 +1160,7 @@ def _auto_heal_wp_url(name: str) -> bool:
 
 
 def _refresh_registered_url(sc, root: str, label: str, existing: dict,
-                            cfg: dict) -> dict:
+                            cfg: dict, *, expected_url: str | None = None) -> dict:
     """Re-record the instance URL from live state on the ready fast path.
 
     A clean URL can be assigned AFTER an instance was registered — `./sb domains
@@ -1144,7 +1174,8 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
     resolved = resolve_instances(cfg).get(name) if name else None
     if not resolved:
         return existing
-    fresh = site_url({k: v for k, v in resolved.items() if k != "url"})
+    fresh = expected_url if expected_url is not None else site_url(
+        {k: v for k, v in resolved.items() if k != "url"})
     if not fresh:
         return existing
     block = _local_yaml().get("instances", {}).get(name, {})
@@ -1285,7 +1316,9 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # ports before the ready fast path; otherwise ensure can report a
             # healthy HTTP container while the next compose up partially fails and
             # leaves WP's database network unusable.
-            cfg = _resolve_port_conflicts(cfg)
+            cfg = _resolve_port_conflicts(
+                cfg, instance_names={existing["instance"]}
+                if existing and existing.get("instance") else set())
             resolved_existing = (
                 resolve_instances(cfg).get(existing.get("instance"))
                 if existing and existing.get("instance") else None
@@ -1313,8 +1346,21 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                     # before returning it; do not require the machine-wide
                     # `domains setup` path or assign names to unrelated records.
                     cfg = load_config()
-                _auto_heal_wp_url(existing["instance"])
-                return _refresh_registered_url(sc, root, label, existing, cfg)
+                route_cfg = resolve_instances(cfg).get(existing["instance"]) or existing
+                # Proxy availability can change between observations. Reconcile,
+                # prove and publish one selected URL within this ensure call.
+                advertised_url = site_url(route_cfg)
+                _auto_heal_wp_url(existing["instance"], expected_url=advertised_url)
+                if not _wait_reachable(
+                        route_cfg, require_application_success=True,
+                        canonical_url=advertised_url):
+                    error = sc.ConfigError(
+                        f"instance_route_unavailable: '{existing['instance']}' did not "
+                        "answer successfully at its advertised URL; its state is retained.")
+                    error.code = "instance_route_unavailable"
+                    raise error
+                return _refresh_registered_url(sc, root, label, existing, cfg,
+                                               expected_url=advertised_url)
 
             if not existing and label != "default" and not create:
                 known = [e["label"] for e in sc.registry_list_for_root(root)]
@@ -1403,7 +1449,11 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # document root before WordPress can answer HTTP. Probe only after core
             # installation, otherwise the first ensure fails before repair starts.
             if server != "herd":
-                _wait_http(ports["wordpress_port"])
+                if not _wait_http(ports["wordpress_port"]):
+                    raise sc.ConfigError(
+                        f"instance_backend_unavailable: '{name}' did not answer HTTP "
+                        "after installation; its pending state is retained. Retry "
+                        f"`./sb ensure --local --project-dir {shlex.quote(str(root))} --label {label}`.")
                 # A fresh document root may not answer the proxy's route proof
                 # until installation completes. Retry the same owned route now.
                 if (_proxy_sudoers_installed()
@@ -1437,9 +1487,20 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 compose("up", "-d", "--force-recreate", "wp",
                         *(["nginx"] if server == "nginx" else []),
                         instance=name, check=False)
-                _wait_reachable(resolve_instances(cfg)[name])
+                if not _wait_reachable(resolve_instances(cfg)[name]):
+                    raise sc.ConfigError(
+                        f"instance_multisite_unavailable: '{name}' did not become "
+                        "reachable after recreation; its pending state is retained.")
             _wire_project_plugins(name, root, pconf, error_factory=sc.ConfigError)
             _wire_project_themes(name, root, pconf)
+
+            final_route = resolve_instances(cfg)[name]
+            _base_url = site_url(final_route)
+            if not _wait_reachable(final_route, require_application_success=True,
+                                   canonical_url=_base_url):
+                raise sc.ConfigError(
+                    f"instance_route_unavailable: '{name}' did not answer at its "
+                    "advertised URL; its pending state is retained.")
 
             # Spec 008: a newly provisioned instance gets both restore points only
             # after its project plugins/themes are in their final installed state.
@@ -1455,7 +1516,6 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                           .get("autologin_token", ""))
             # Report the instance's real browser URL: its clean https://<name>.<tld>
             # when secured (herd, or secure-at-create above), else localhost:<port>.
-            _base_url = site_url(resolve_instances(cfg)[name])
             _login_url = f"{_base_url}/?sandbox_autologin={_autologin}" if _autologin else ""
 
             return sc.registry_put(

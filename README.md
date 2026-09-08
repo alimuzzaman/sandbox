@@ -60,6 +60,11 @@ phpunit tests** — no central catalog, nothing to pre-register.
 
 ## Get started
 
+The [delivery repair implementation](docs/delivery-repair-implementation.md) tracks
+the current instance, initializer, job-control and backup-freshness corrections and
+their actual command acceptance. A ready result requires the declared service to
+be usable; accepted jobs and configured routes remain distinct from completion.
+
 > **Note:** This is a major rewrite to the per-project model hosted at
 > [`alimuzzaman/sandbox`](https://github.com/alimuzzaman/sandbox). Install:
 

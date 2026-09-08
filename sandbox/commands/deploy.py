@@ -71,13 +71,11 @@ def _failed_ensure_cleanup(
     *,
     label: str = "default",
 ) -> str:
-    """Remove only a uniquely new instance after a failed remote ensure.
+    """Observe partial creation without treating inventory drift as ownership.
 
-    The remote CLI can register its instance before it emits a usable JSON
-    response. Cleanup therefore compares a read-only inventory captured before
-    ensure with a second inventory after failure. Never delete a baseline row,
-    and never guess when the inventory is unavailable or produces multiple
-    candidates.
+    Another caller can create the only new row while this ensure loses its
+    response. Neither the row's name nor its label proves creation authority
+    or that the original child has stopped. Retain it for reconciliation.
     """
     try:
         current = sr.list_remote_instances(entry, target)
@@ -96,17 +94,15 @@ def _failed_ensure_cleanup(
     ]
     if not candidates:
         return "remote instance cleanup found no new instance"
-    if len(candidates) != 1:
-        return "remote instance cleanup is unverified: multiple new instances matched"
-    try:
-        sr.delete_remote_instance(entry, candidates[0])
-    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
-        return "remote instance cleanup failed for the newly created instance"
-    return "remote instance cleanup removed the newly created instance"
+    return (
+        "remote instance state retained: creation ownership and terminal ensure "
+        "completion are unverified; inspect this project's remote instances "
+        "before resuming the same target"
+    )
 
 
 def _ensure_remote_instance_transactional(entry: dict, target: str) -> dict:
-    """Ensure the default remote instance without leaving an orphan on failure."""
+    """Ensure the default remote instance and preserve uncertain partial state."""
     try:
         baseline = sr.list_remote_instances(entry, target)
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
@@ -344,7 +340,7 @@ def cmd_deploy(cfg, args) -> None:
                     sr.remove_instance_https_route(entry, host)
                     pruned.append(host)
             if is_wordpress:
-                sr.set_remote_instance_url(entry, target, public_url)
+                sr.set_remote_instance_url(entry, target, instance["instance"], public_url)
             instance["url"] = public_url
             instance["aliases"] = aliases
             instance["alias_urls"] = [f"https://{a}" for a in aliases]

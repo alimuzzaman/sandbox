@@ -264,6 +264,15 @@ def _error_detail(payload: dict | None, result: object) -> str:
     job logs and makes a malformed page look like a usable diagnostic.  The
     controller's stderr remains a bounded diagnostic after redaction.
     """
+    output = getattr(result, "stdout", "")
+    if isinstance(output, str):
+        observed_bytes = len(output.encode("utf-8", errors="replace"))
+        if observed_bytes > _MAX_REMOTE_JSON_BYTES:
+            return (
+                f"response_too_large: {observed_bytes} bytes exceeds "
+                f"{_MAX_REMOTE_JSON_BYTES}; use a smaller job-list --limit "
+                "and continue with --cursor-job-id"
+            )
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict):

@@ -393,7 +393,8 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
         # URL nor token is copied into this public document.
         payload.pop("login_url_redacted", None)
         revealed = ""
-        if (reveal_login and isinstance(document, Mapping)):
+        if (reveal_login and not os.environ.get("SANDBOX_DURABLE_JOB_ID")
+                and isinstance(document, Mapping)):
             revealed = _autologin_url_to_reveal(document)
             if revealed:
                 payload["login_url"] = revealed

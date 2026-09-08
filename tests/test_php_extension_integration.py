@@ -611,6 +611,8 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         local = {"instances": {"fixture": {"autologin_token": "opaque"}}}
         with ExitStack() as stack:
             stack.enter_context(patch.object(instances, "_core", return_value=FakeCore()))
+            stack.enter_context(patch.object(instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(patch.object(instances, "_wait_reachable", return_value=True))
             stack.enter_context(patch.object(instances, "_local_yaml", return_value=local))
             stack.enter_context(patch.object(instances, "_write_local_yaml"))
             stack.enter_context(patch.object(instances, "_resolve_port_conflicts", return_value={}))
@@ -689,6 +691,8 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 yield
 
         with patch.object(instances, "_core", return_value=FakeCore()), \
+                patch.object(instances, "docker_daemon_preflight", return_value={"ok": True}), \
+                patch.object(instances, "_wait_reachable", return_value=True), \
                 patch.object(instances, "_resolve_port_conflicts", return_value={}), \
                 patch.object(instances, "resolve_instances", return_value={"fixture": existing}), \
                 patch.object(instances, "_desired_source_mounts", return_value=["/plugins"]), \

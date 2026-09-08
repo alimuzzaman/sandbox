@@ -464,12 +464,10 @@ class TestProxyTransportHealth(unittest.TestCase):
             self.assertFalse(domains_core._proxy_transport_serving({}))
 
     def test_proxy_transport_failure_detail_preserves_listener_recovery_evidence(self):
-        with mock.patch.object(domains_core, "resolve_instances", return_value={
-                "demo": {"domain": "demo.tst", "tld": "tst"},
-            }), mock.patch.object(domains_core, "_generic_proxy_entries",
-                                  return_value=[]), \
-             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
-                               return_value=False), \
+        with mock.patch.object(domains_core, "sandbox_caddy_health", return_value={
+                "ok": False, "reason": {"code": "sandbox_caddy_route_unreachable",
+                "message": "Sandbox Caddy route probe failed for demo.tst."},
+            }), \
              mock.patch.object(domains_core, "_published_listener_check", return_value={
                  "label": "proxy published on 127.0.0.77:80 but nginx owns 80",
                  "hint": "free the port or select an adopted ingress",

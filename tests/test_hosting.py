@@ -979,15 +979,17 @@ class TestHostingManifest(unittest.TestCase):
                 "import json,os,sys\n"
                 "args=sys.argv[1:]\n"
                 "if args and args[0]=='compose':\n"
-                " if 'config' in args: print('hash-1')\n"
-                " elif 'images' in args: print('img-1')\n"
+                " if 'config' in args:\n"
+                "  if '--hash' in args: print('setup ' + 'a'*64)\n"
+                "  else: print(json.dumps({'services':{'setup':{'environment':{'PROOF':'cost$$5'}}}}))\n"
+                " elif 'images' in args: print('b'*64)\n"
                 " elif 'ps' in args: print('' if os.environ.get('NO_CONTAINER') else 'container-1')\n"
                 " else: raise SystemExit(2)\n"
                 "elif args and args[0]=='inspect':\n"
-                f" print(json.dumps({{'Created': {created!r}, 'Image': 'img-1', "
+                f" print(json.dumps({{'Created': {created!r}, 'Image': 'sha256:' + 'b'*64, "
                 "'Config': {'Labels': {'com.docker.compose.project': 'example', "
                 "'com.docker.compose.service': 'setup', "
-                "'com.docker.compose.config-hash': 'hash-1'}}, "
+                "'com.docker.compose.config-hash': 'a'*64}}, "
                 "'State': {'Status': 'exited', 'ExitCode': 0}}))\n"
                 "else: raise SystemExit(2)\n"
             )
@@ -3660,7 +3662,7 @@ class TestRemotePreviewIdentity(unittest.TestCase):
                 diff_text="", untracked=["sandbox.config.json"],
             )
 
-    def test_preview_rolls_back_a_partial_instance_when_ensure_fails(self):
+    def test_preview_retains_uncertain_instance_when_ensure_fails(self):
         args = types.SimpleNamespace(
             action="create", json=True, confirm=True, ttl_hours=24,
             remote="preview", project_dir="/tmp/project", name=None,
@@ -3686,7 +3688,7 @@ class TestRemotePreviewIdentity(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 preview.cmd_preview(None, args)
 
-        cleanup.assert_called_once_with(entry, "/srv/demo", "preview-label")
+        cleanup.assert_not_called()
 
     def test_preview_failure_json_always_names_label_and_instance(self):
         args = types.SimpleNamespace(

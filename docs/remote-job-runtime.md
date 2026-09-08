@@ -8,6 +8,22 @@ child pipes.
 
 ## Normal operation
 
+`job-list --json` returns bounded summaries, not stored command, submission,
+environment, result, or output payloads. Use `job-status JOB` and `job-output JOB`
+for those detail surfaces. Each CLI/MCP page is capped at 512 KiB and carries
+`page.schema_version: 2`, `row_format: summary-v1`, `has_more`, `next_cursor`, and
+`completeness`. CLI continuation is `--cursor-job-id <page.next_cursor>`; MCP keeps
+its opaque `cursor`/`next_cursor` fields. A byte-limited page never consumes the
+first omitted row. An older controller's missing completeness metadata remains
+unknown. A response above the existing 1 MiB transport limit fails with a safe
+`response_too_large` diagnostic; use a smaller limit until that controller is
+updated through the supported lifecycle.
+
+Cancellation can be repeated while a job is cancelling. `job-cancel JOB --force`
+revalidates the original process identity and escalates to its owned group.
+A concurrent terminal transition returns its observed result without signaling a
+replacement process. A cancelling result still needs a terminal status observation.
+
 The examples use the repository launcher (`./sb`). From another checkout, use
 the installed `sb` command; the command surface and selectors are the same.
 

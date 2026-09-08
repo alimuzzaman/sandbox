@@ -1005,10 +1005,36 @@ class JobService:
         # racing from ``failed`` back to ``cancelling`` after signal delivery.
         if not verify_owned_process_identity(identity):
             raise RuntimeError("process_identity_mismatch")
-        self.repository.transition(job_id, Lifecycle.CANCELLING)
+        if snapshot["lifecycle"] != Lifecycle.CANCELLING.value:
+            try:
+                self.repository.transition(job_id, Lifecycle.CANCELLING)
+            except ValueError:
+                # A second canceller or the supervisor can win this transition.
+                current = self.repository.snapshot(job_id)
+                if current["lifecycle"] in {item.value for item in (
+                        Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                        Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+                    return current
+                if current["lifecycle"] != Lifecycle.CANCELLING.value:
+                    raise
+        current = self.repository.snapshot(job_id)
+        if current["lifecycle"] != Lifecycle.CANCELLING.value:
+            return current
+        identity_fields = ("host_boot_id", "child_pid", "child_pgid",
+                           "child_start_identity", "supervisor_nonce_hash")
+        if any((current.get("process") or {}).get(key) != process.get(key)
+               for key in identity_fields):
+            raise RuntimeError("process_identity_mismatch")
         # A child can still exit in the short interval after verification.  The
         # supervisor sees the persisted intent and finalizes it as cancelled.
-        signal_owned_process_group(identity, 9 if force else 15)
+        try:
+            delivered = signal_owned_process_group(identity, 9 if force else 15)
+        except ProcessLookupError:
+            # The supervisor still owns terminal classification after a natural
+            # exit. Persisted cancelling state is not a claim that a signal ran.
+            delivered = False
+        if not delivered:
+            return self.repository.snapshot(job_id) | {"signal_delivery": "process_unavailable"}
         return self.repository.snapshot(job_id)
 
     def list_artifacts(self, job_id: str):

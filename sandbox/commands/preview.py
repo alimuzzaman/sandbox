@@ -196,7 +196,7 @@ def cmd_preview(cfg, args) -> None:
         remote.configure_instance_https_route(entry, domain, int(instance["wordpress_port"]))
         route_configured = True
         url = f"https://{domain}"
-        remote.set_remote_instance_url(entry, target, url)
+        remote.set_remote_instance_url(entry, target, instance["instance"], url)
         login_url = remote.rewrite_instance_url(instance.get("login_url"), url) if instance.get("login_url") else ""
     except (RuntimeError, ValueError, cloudflare.CloudflareError, KeyError) as exc:
         # Best-effort rollback is deliberately restricted to resources whose
@@ -211,16 +211,9 @@ def cmd_preview(cfg, args) -> None:
                 client.delete_record(zone["id"], record["id"])
             except cloudflare.CloudflareError:
                 pass
-        if instance:
-            try:
-                remote.delete_remote_instance(entry, instance["instance"])
-            except (RuntimeError, KeyError):
-                pass
-        elif target and label:
-            try:
-                remote.delete_remote_instance_for_label(entry, target, label)
-            except (RuntimeError, ValueError):
-                pass
+        # Ensure can reuse an existing labelled instance, or lose its response
+        # after creating one. Neither result gives this caller deletion authority.
+        # Keep its data and identity available for the next explicit operation.
         identity = {
             "label": label,
             "instance": instance.get("instance") if isinstance(instance, dict) else None,
@@ -228,7 +221,8 @@ def cmd_preview(cfg, args) -> None:
         message = (
             "remote preview create failed "
             f"(label={identity['label'] or 'unknown'}, "
-            f"instance={identity['instance'] or 'not-returned'}): {exc}"
+            f"instance={identity['instance'] or 'not-returned'}): {exc}; "
+            "instance state retained for explicit reconciliation"
         )
         if args.json:
             print(json.dumps({"ok": False, "preview": identity, "error": message}))

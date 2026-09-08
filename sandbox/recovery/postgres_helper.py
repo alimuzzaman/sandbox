@@ -125,6 +125,29 @@ def _schema_digest(value):
     return 'sha256:' + hashlib.sha256(canonical(value)).hexdigest()
 
 
+def _definition_shape(value):
+    """Bounded syntax labels only; never emit identifiers or literal values."""
+    keywords = {'CHECK', 'AND', 'OR', 'NOT', 'IS', 'NULL', 'TRUE', 'FALSE',
+        'ANY', 'ALL', 'ARRAY', 'BETWEEN', 'IN', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END'}
+    tokens = re.findall(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|[A-Za-z_][A-Za-z_0-9$]*|[0-9]+|[^\s]", value)
+    shape = []
+    for token in tokens[:512]:
+        if token.startswith("'"):
+            label = 'string'
+        elif token.startswith('"'):
+            label = 'identifier'
+        elif token.upper() in keywords:
+            label = token.upper()
+        elif token.isdigit():
+            label = 'number'
+        elif len(token) == 1 and token in '(),[]:+-*/%<>=!~|&.^':
+            label = token
+        else:
+            label = 'identifier'
+        shape.append(label)
+    return {'tokens': shape, 'truncated': len(tokens) > 512}
+
+
 def schema_records(client, database):
     # Match observation's session context, including its temporary namespace.
     # Only session-local DDL precedes the read-only metadata query.
@@ -177,8 +200,12 @@ def schema_diagnostic(source, target_client, captured_digest, observed_target_di
                 fields = sorted(field for field in left[key] if left[key][field] != right[key][field])
                 if not fields: continue
                 change = 'changed'
-            differences.append({'kind': kind, 'table': key[0], 'name': key[1],
-                                'change': change, 'fields': fields})
+            difference = {'kind': kind, 'table': key[0], 'name': key[1],
+                          'change': change, 'fields': fields}
+            if change == 'changed' and kind == 'constraints' and 'definition' in fields:
+                difference['source_shape'] = _definition_shape(left[key]['definition'])
+                difference['target_shape'] = _definition_shape(right[key]['definition'])
+            differences.append(difference)
     def column_sequences(schema):
         sequences = {}
         for row in schema['columns']:

@@ -92,8 +92,11 @@ registered source and retained target. The source's original digest must still
 equal the captured digest; otherwise it reports `source_schema_changed`. A target
 that changes between reads reports `target_schema_changed`. Successful diagnosis
 returns component digests, counts, ordering flags and at most 32 changed object
-identifiers/field names, with a total and truncation flag. Definitions, SQL
-literals and rows never leave the helper. Private metadata is bounded to 8 MiB
+identifiers/field names, with a total and truncation flag. Changed constraints also
+include bounded syntax labels (keywords, punctuation, and identifier/string/number
+placeholders) to locate expression grouping differences. These labels never make
+an equivalence or acceptance claim. Definitions, SQL literals and rows never leave
+the helper. Private metadata is bounded to 8 MiB
 and 10,000 records per component. Column order within each table remains part of
 the comparison. Diagnostics do not change the failed schema acceptance gate.
 If every comparison matches, `verify-restore --confirm` repeats those checks under

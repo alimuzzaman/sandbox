@@ -84,6 +84,17 @@ class PostgresSchemaTests(unittest.TestCase):
                 self.assertNotIn('SECRET_CANARY_84', json.dumps(result))
                 self.assertNotIn('CHECK (', json.dumps(result))
 
+    def test_definition_shape_redacts_identifiers_strings_and_numbers(self):
+        value = 'CHECK ("private_identifier" = \'private_literal\' AND other_private_name > 987654)'
+        shape = helper._definition_shape(value)
+        rendered = json.dumps(shape)
+        for private in ('private_identifier', 'private_literal', 'other_private_name', '987654'):
+            self.assertNotIn(private, rendered)
+        self.assertIn('AND', shape['tokens'])
+        self.assertIn('string', shape['tokens'])
+        self.assertIn('number', shape['tokens'])
+        self.assertTrue(helper._definition_shape('a ' * 600)['truncated'])
+
     def test_missing_and_extra_records_are_reported_and_examples_are_bounded(self):
         original = records(); restored = copy.deepcopy(original)
         restored['constraints'].pop(0)

@@ -33,7 +33,8 @@ def source(**changes):
     return value
 
 
-def capture_archive(source_digest, *, dump=b"PGDMP\x00synthetic", major=16):
+def capture_archive(source_digest, *, dump=b"PGDMP\x00synthetic", major=16, schema_version=1,
+                    evidence_changes=None):
     evidence = {
         "major": major,
         "database_identity": "database-identity",
@@ -44,6 +45,13 @@ def capture_archive(source_digest, *, dump=b"PGDMP\x00synthetic", major=16):
         "dump_digest": "sha256:" + hashlib.sha256(dump).hexdigest(),
         "source_digest": source_digest,
     }
+    if schema_version == 2:
+        evidence.update({
+            "schema_fingerprint_version": 2,
+            "schema_structure_digest": "sha256:" + "c" * 64,
+        })
+    if evidence_changes:
+        evidence.update(evidence_changes)
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w") as archive:
         info = tarfile.TarInfo("database.dump"); info.size = len(dump)
@@ -52,6 +60,89 @@ def capture_archive(source_digest, *, dump=b"PGDMP\x00synthetic", major=16):
         info = tarfile.TarInfo("evidence.json"); info.size = len(raw)
         archive.addfile(info, io.BytesIO(raw))
     return stream.getvalue(), evidence
+
+
+def restore_receipt(plan, evidence, *, observation=None, schema_verification=None):
+    actual = dict(observation or evidence)
+    receipt = {
+        "schema_version": 1,
+        "ok": True,
+        "code": "restore_verified",
+        "target": plan["target"],
+        "volume": plan["target"] + "-data",
+        "target_database": plan["target_database"],
+        "target_role": plan["target_role"],
+        "source_database_identity": evidence["database_identity"],
+        "dump_digest": evidence["dump_digest"],
+        "observation": actual,
+        "database_available": True,
+        "all_match": all(actual.get(key) == evidence.get(key)
+                           for key in ("major", "database_identity", "table_counts",
+                                       "migration_checksum", "schema_digest", "constraints_valid")),
+        "plan_digest": plan["plan_digest"],
+        "backup_id": plan["backup_id"],
+        "source_digest": plan["source_digest"],
+        "production_transfer": False,
+    }
+    if schema_verification is not None:
+        receipt["schema_verification"] = schema_verification
+    return receipt
+
+
+def raw_schema_proof(source_value, evidence, actual, plan, archive):
+    return {
+        "native_request_id": plan["native_request_id"],
+        "source_digest": source_value.source_digest,
+        "archive_digest": "sha256:" + hashlib.sha256(archive).hexdigest(),
+        "dump_digest": evidence["dump_digest"],
+        "image_id": source_value.client_image_id,
+        "database": plan["target_database"],
+        "role": plan["target_role"],
+        "captured_schema_digest": evidence["schema_digest"],
+        "schema_version": 1,
+        "method": "raw-capture-equality",
+        "observed_schema_digest": actual["schema_digest"],
+        "verified_at": 100,
+        "target_schema_digest": None,
+        "reference": None,
+    }
+
+
+def archived_schema_proof(source_value, evidence, actual, plan, archive,
+                          *, reference_schema_digest=None):
+    archive_digest = "sha256:" + hashlib.sha256(archive).hexdigest()
+    reference = {
+        "native_request_id": plan["native_request_id"],
+        "source_digest": source_value.source_digest,
+        "archive_digest": archive_digest,
+        "dump_digest": evidence["dump_digest"],
+        "image_id": source_value.client_image_id,
+        "database": plan["target_database"],
+        "role": plan["target_role"],
+        "captured_schema_digest": evidence["schema_digest"],
+        "schema_version": 1,
+        "method": "archived-schema-reference-v1",
+        "structure_digest": evidence["schema_structure_digest"],
+        "structure_origin": "capture-v2",
+        "reference_schema_digest": reference_schema_digest or "sha256:" + "d" * 64,
+        "completed_at": 50,
+    }
+    return {
+        "native_request_id": plan["native_request_id"],
+        "source_digest": source_value.source_digest,
+        "archive_digest": archive_digest,
+        "dump_digest": evidence["dump_digest"],
+        "image_id": source_value.client_image_id,
+        "database": plan["target_database"],
+        "role": plan["target_role"],
+        "captured_schema_digest": evidence["schema_digest"],
+        "schema_version": 1,
+        "method": "archived-schema-reference-v1",
+        "observed_schema_digest": actual["schema_digest"],
+        "verified_at": 100,
+        "target_schema_digest": reference["reference_schema_digest"],
+        "reference": reference,
+    }
 
 
 class FakeCapture:
@@ -80,7 +171,7 @@ class FakeCapture:
         manifest = {
             "schema_version": 1, "id": backup_id, "status": "complete",
             "profiles": list(profiles),
-            "artifacts": [{"name": "postgres-capture.tar", "sha256": hashlib.sha256(
+            "artifacts": [{"name": "native-capture.tar", "sha256": hashlib.sha256(
                 artifact_path.read_bytes()).hexdigest(), "size": artifact_path.stat().st_size}],
             "profile_bindings": profile_bindings,
             "provenance": provenance,
@@ -133,9 +224,10 @@ class PostgresRecoveryTests(unittest.TestCase):
             capture.drive.destination = 'gdrive:synthetic-recovery'
             recovery.register(source(), confirm=True)
             recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True)
-            install_owner_only_json(recovery.root / 'restores' / 'receipt.json', {
-                'source_digest': value.source_digest, 'backup_id': 'backup-a',
-                'dump_digest': evidence['dump_digest'], 'plan_digest': 'sha256:' + 'c' * 64})
+            plan = recovery.restore_plan('scaleway-sandbox', 'lenzora-dev', 'restore-a', 'backup-a')
+            install_owner_only_json(
+                recovery.root / 'restores' / (plan['native_request_id'] + '.json'),
+                restore_receipt(plan, evidence))
             readonly = PostgresRecovery(recovery.root, None, None, None)
             with patch('sandbox.recovery.drive.RcloneDrive', return_value=capture.drive) as configured:
                 result = readonly.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
@@ -144,6 +236,64 @@ class PostgresRecoveryTests(unittest.TestCase):
             capture.drive.objects.clear()
             with patch('sandbox.recovery.drive.RcloneDrive', return_value=capture.drive), self.assertRaises(RecoveryError):
                 readonly.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
+
+    def test_readiness_rejects_a_minimal_ok_only_receipt(self):
+        from sandbox.hosting.images.provisioning import install_owner_only_json
+        with tempfile.TemporaryDirectory() as directory:
+            value = PostgresSource.from_mapping(source())
+            archive, evidence = capture_archive(value.source_digest)
+            recovery, capture = self._recovery(Path(directory), FakeTransport(archive))
+            capture.drive.destination = 'gdrive:synthetic-recovery'
+            recovery.register(source(), confirm=True)
+            recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True)
+            plan = recovery.restore_plan('scaleway-sandbox', 'lenzora-dev', 'restore-a', 'backup-a')
+            install_owner_only_json(recovery.root / 'restores' / (plan['native_request_id'] + '.json'), {
+                'ok': True,
+                'source_digest': value.source_digest,
+                'backup_id': 'backup-a',
+                'dump_digest': evidence['dump_digest'],
+                'plan_digest': plan['plan_digest'],
+            })
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
+            self.assertEqual(raised.exception.code, 'restore_verification_failed')
+
+    def test_readiness_rejects_raw_schema_mismatch_without_schema_proof(self):
+        from sandbox.hosting.images.provisioning import install_owner_only_json
+        with tempfile.TemporaryDirectory() as directory:
+            value = PostgresSource.from_mapping(source())
+            archive, evidence = capture_archive(value.source_digest)
+            recovery, capture = self._recovery(Path(directory), FakeTransport(archive))
+            capture.drive.destination = 'gdrive:synthetic-recovery'
+            recovery.register(source(), confirm=True)
+            recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True)
+            plan = recovery.restore_plan('scaleway-sandbox', 'lenzora-dev', 'restore-a', 'backup-a')
+            actual = dict(evidence, schema_digest='sha256:' + 'b' * 64)
+            install_owner_only_json(
+                recovery.root / 'restores' / (plan['native_request_id'] + '.json'),
+                restore_receipt(plan, evidence, observation=actual))
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
+            self.assertEqual(raised.exception.code, 'restore_verification_failed')
+
+    def test_readiness_rejects_schema_proof_with_wrong_archive_binding(self):
+        from sandbox.hosting.images.provisioning import install_owner_only_json
+        with tempfile.TemporaryDirectory() as directory:
+            value = PostgresSource.from_mapping(source())
+            archive, evidence = capture_archive(value.source_digest)
+            recovery, capture = self._recovery(Path(directory), FakeTransport(archive))
+            capture.drive.destination = 'gdrive:synthetic-recovery'
+            recovery.register(source(), confirm=True)
+            recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True)
+            plan = recovery.restore_plan('scaleway-sandbox', 'lenzora-dev', 'restore-a', 'backup-a')
+            proof = raw_schema_proof(value, evidence, evidence, plan, archive)
+            proof['archive_digest'] = 'sha256:' + 'f' * 64
+            install_owner_only_json(
+                recovery.root / 'restores' / (plan['native_request_id'] + '.json'),
+                restore_receipt(plan, evidence, schema_verification=proof))
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
+            self.assertEqual(raised.exception.code, 'restore_verification_failed')
 
     def test_capture_resume_inspects_original_identity_and_refuses_other_states(self):
         for code in ('retained_without_result', 'terminal_available'):
@@ -177,6 +327,23 @@ class PostgresRecoveryTests(unittest.TestCase):
                         b'{"x":' + b'[' * 34 + b'0' + b']' * 34 + b'}'):
             with self.subTest(payload_size=len(payload)), self.assertRaises(RecoveryError):
                 _load_json_bytes(payload)
+
+    def test_capture_rejects_boolean_major_or_table_count_before_publication(self):
+        for changes in (
+            {"major": True},
+            {"table_counts": [{"name": "orders", "count": True}]},
+        ):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source_value = PostgresSource.from_mapping(source())
+                archive, _evidence = capture_archive(
+                    source_value.source_digest, evidence_changes=changes)
+                transport = FakeTransport(archive)
+                recovery, capture = self._recovery(root, transport)
+                recovery.register(source(), confirm=True)
+                with self.assertRaisesRegex(RecoveryError, 'capture observation is invalid'):
+                    recovery.create('scaleway-sandbox', 'lenzora-dev', 'capture-a', 'backup-a', confirm=True)
+                self.assertEqual(capture.publish_calls, [])
 
     def _recovery(self, root: Path, transport: FakeTransport):
         root = Path(os.path.realpath(root))
@@ -272,6 +439,76 @@ class PostgresRecoveryTests(unittest.TestCase):
             self.assertEqual(result["reopen_plan"], reopen_plan)
             self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
             self.assertEqual(transport.calls[-1][1:3], ("inspect-restore", plan["native_request_id"]))
+
+    def test_restore_rejects_raw_schema_mismatch_without_proof_before_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, archive = self._prepared_plan(Path(directory))
+            source_value = PostgresSource.from_mapping(source())
+            _same_archive, evidence = capture_archive(source_value.source_digest)
+            actual = dict(evidence, schema_digest='sha256:' + 'b' * 64)
+            transport.responses['restore'] = json.dumps(
+                restore_receipt(plan, evidence, observation=actual)).encode()
+
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.restore(plan, confirm=True)
+            self.assertEqual(raised.exception.code, 'restore_verification_failed')
+            self.assertFalse((recovery.root / 'restores' / (plan['native_request_id'] + '.json')).exists())
+            self.assertEqual(archive, _same_archive)
+
+    def test_restore_accepts_archived_schema_reference_proof_and_persists_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, archive = self._prepared_plan(
+                Path(directory), schema_version=2)
+            source_value = PostgresSource.from_mapping(source())
+            _same_archive, evidence = capture_archive(source_value.source_digest, schema_version=2)
+            actual = dict(evidence, schema_digest='sha256:' + 'b' * 64)
+            proof = archived_schema_proof(source_value, evidence, actual, plan, archive)
+            transport.responses['restore'] = json.dumps(
+                restore_receipt(plan, evidence, observation=actual,
+                                schema_verification=proof)).encode()
+
+            result = recovery.restore(plan, confirm=True)
+
+            self.assertEqual(result['code'], 'restore_verified')
+            self.assertEqual(result['schema_verification'], proof)
+            self.assertEqual(result['all_match'], False)
+            self.assertTrue((recovery.root / 'restores' / (plan['native_request_id'] + '.json')).exists())
+
+    def test_restore_rejects_native_archive_bytes_that_differ_from_manifest_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            manifest_key = 'sets/backup-a/manifest.json'
+            manifest = json.loads(capture.drive.get(manifest_key))
+            manifest['artifacts'][0]['sha256'] = 'f' * 64
+            capture.drive.objects[manifest_key] = json.dumps(manifest).encode()
+
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.restore(plan, confirm=True)
+            self.assertEqual(raised.exception.code, 'capture_invalid')
+            self.assertFalse((recovery.root / 'restores' / (plan['native_request_id'] + '.json')).exists())
+            self.assertEqual([call[1] for call in transport.calls], ['capture'])
+
+    def test_restore_rejects_wrong_reference_binding_or_digest_before_receipt(self):
+        for field in ('binding', 'digest'):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                recovery, _capture, transport, plan, archive = self._prepared_plan(
+                    Path(directory), schema_version=2)
+                source_value = PostgresSource.from_mapping(source())
+                _same_archive, evidence = capture_archive(source_value.source_digest, schema_version=2)
+                actual = dict(evidence, schema_digest='sha256:' + 'b' * 64)
+                proof = archived_schema_proof(source_value, evidence, actual, plan, archive)
+                if field == 'binding':
+                    proof['reference']['archive_digest'] = 'sha256:' + 'f' * 64
+                else:
+                    proof['target_schema_digest'] = 'sha256:' + 'f' * 64
+                transport.responses['restore'] = json.dumps(
+                    restore_receipt(plan, evidence, observation=actual,
+                                    schema_verification=proof)).encode()
+
+                with self.assertRaises(RecoveryError) as raised:
+                    recovery.restore(plan, confirm=True)
+                self.assertEqual(raised.exception.code, 'restore_verification_failed')
+                self.assertFalse((recovery.root / 'restores' / (plan['native_request_id'] + '.json')).exists())
 
     def test_stopped_inspection_requires_closed_fields_and_bound_reopen_plan(self):
         cases = (
@@ -446,10 +683,10 @@ class PostgresRecoveryTests(unittest.TestCase):
             self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
             self.assertEqual(transport.calls[-1][1:3], ("reopen-restore", plan["native_request_id"]))
 
-    def _prepared_plan(self, root: Path, *, source_mapping=None, backup_id="backup-a"):
+    def _prepared_plan(self, root: Path, *, source_mapping=None, backup_id="backup-a", schema_version=1):
         source_mapping = source_mapping or source()
         source_value = PostgresSource.from_mapping(source_mapping)
-        archive, _evidence = capture_archive(source_value.source_digest)
+        archive, _evidence = capture_archive(source_value.source_digest, schema_version=schema_version)
         transport = FakeTransport(archive)
         recovery, capture = self._recovery(root, transport)
         recovery.register(source_mapping, confirm=True)

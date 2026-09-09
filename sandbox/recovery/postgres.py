@@ -19,6 +19,7 @@ from .errors import RecoveryError
 from .integrity import sha256_file
 from .postgres_contract import recovery_source, digest
 from .restore import verify_manifest
+from .postgres_helper import observation_matches, validate_schema_proof, _validate_capture_evidence
 
 
 def _load_json_bytes(data):
@@ -65,6 +66,47 @@ def _reopen_binding_matches(plan, reopen_plan, source_digest):
         or not re.fullmatch(r'sha256:[a-f0-9]{64}', reopen_plan['plan_digest'])
         or type(reopen_plan.get('generation')) is not int
         or not 0 <= reopen_plan['generation'] < 16)
+
+
+def _native_archive_digest(manifest):
+    artifacts = manifest.get('artifacts')
+    if (type(artifacts) is not list or len(artifacts) != 1 or type(artifacts[0]) is not dict
+            or artifacts[0].get('name') != 'native-capture.tar'
+            or type(artifacts[0].get('sha256')) is not str
+            or not re.fullmatch(r'[a-f0-9]{64}', artifacts[0]['sha256'])):
+        raise RecoveryError('native capture binding is unavailable', 'restore_verification_failed')
+    return 'sha256:' + artifacts[0]['sha256']
+
+
+def _validate_database_receipt(receipt, source, manifest, native_request_id, *, target_volume=None):
+    evidence = manifest.get('provenance', {}).get('observation')
+    target = 'sandbox-recovery-restore-' + native_request_id[:24]
+    database = 'lenzora' if target_volume is not None else source.database
+    role = 'lenzora' if target_volume is not None else source.role
+    try:
+        if (not re.fullmatch(r'[a-f0-9]{64}', native_request_id)
+                or type(receipt) is not dict or receipt.get('ok') is not True
+                or receipt.get('code') != 'restore_verified' or receipt.get('target') != target
+                or receipt.get('volume') != (target_volume or target + '-data')
+                or receipt.get('target_database') != database or receipt.get('target_role') != role
+                or type(evidence) is not dict or evidence.get('source_digest') != source.source_digest
+                or receipt.get('source_database_identity') != evidence.get('database_identity')
+                or receipt.get('dump_digest') != evidence.get('dump_digest')):
+            raise ValueError('restore_verification_failed')
+        actual = receipt.get('observation')
+        _validate_capture_evidence(evidence)
+        if type(actual) is not dict: raise ValueError('restore_verification_failed')
+        _validate_capture_evidence({**actual, 'dump_digest': evidence['dump_digest']})
+        proof = receipt.get('schema_verification')
+        if proof is None:
+            if not all(observation_matches(evidence, actual, renamed_database=target_volume is not None).values()):
+                raise ValueError('restore_verification_failed')
+        else:
+            validate_schema_proof(proof, source.as_mapping(), evidence, actual,
+                _native_archive_digest(manifest), native_request_id, database, role)
+    except (ValueError, KeyError, TypeError):
+        raise RecoveryError('restore evidence does not verify its backup', 'restore_verification_failed') from None
+    return receipt
 
 
 class PostgresRecovery:
@@ -168,6 +210,10 @@ class PostgresRecovery:
             evidence = self._unpack_capture(archive, work, storage=profile == 'lenzora-prod-storage')
             if evidence.get('source_digest') != source.source_digest:
                 raise RecoveryError('capture source changed', 'source_changed')
+            if profile != 'lenzora-prod-storage':
+                try: _validate_capture_evidence(evidence)
+                except (ValueError, KeyError, TypeError):
+                    raise RecoveryError('capture observation is invalid', 'capture_invalid') from None
             manifest = self.capture.publish_files(backup_id, {'native-capture.tar': archive}, profiles=(profile,),
                 provenance={'source_digest': source.source_digest, 'observation': evidence},
                 profile_bindings={profile: {'dependencies': [], 'restore_target': 'isolated-postgresql-volume',
@@ -213,6 +259,9 @@ class PostgresRecovery:
             if (not isinstance(evidence, dict) or evidence.get('source_digest') != source.source_digest
                     or receipt.get('dump_digest', receipt.get('archive_digest')) != evidence.get('dump_digest', evidence.get('archive_digest'))):
                 raise RecoveryError('restore proof no longer binds its backup', 'restore_verification_required')
+            if profile != 'lenzora-prod-storage':
+                _validate_database_receipt(receipt, source, manifest, path.stem,
+                    target_volume=target_volume if profile == 'lenzora-prod-legacy' else None)
             candidates.append((int(evidence.get('captured_at', 0)), receipt, evidence))
         if not candidates: raise RecoveryError('a matching verified restore is required', 'restore_verification_required')
         _, receipt, evidence = max(candidates, key=lambda item: (item[0], item[1]['backup_id']))
@@ -258,10 +307,13 @@ class PostgresRecovery:
             raise RecoveryError('stopped target plan does not match restore', 'reopen_plan_changed')
         receipt_path = self.root / 'restores' / (plan['native_request_id'] + '.json')
         retained = _read_owner_only_json(receipt_path)
+        manifest = verify_manifest(self.capture.drive, plan['backup_id'])
         if retained is not None:
             if reopen: raise RecoveryError('restore is already verified', 'request_invalid')
+            if plan['profile'] != 'lenzora-prod-storage':
+                _validate_database_receipt(retained, source, manifest, plan['native_request_id'],
+                    target_volume=plan['target_volume'])
             return retained
-        manifest = verify_manifest(self.capture.drive, plan['backup_id'])
         with tempfile.TemporaryDirectory(prefix='postgres-restore-', dir=self.root) as temporary:
             work = Path(temporary); ciphertext = work / 'ciphertext'; plaintext = work / 'archive.tar'
             self.capture.drive.get_file(manifest['ciphertext_object'], ciphertext)
@@ -273,6 +325,8 @@ class PostgresRecovery:
                 if len(members) != 1 or members[0].name != 'native-capture.tar' or not members[0].isfile() or members[0].size > 512 * 1024 * 1024:
                     raise RecoveryError('recovery archive is invalid', 'capture_invalid')
                 archive = bundle.extractfile(members[0]).read()
+            if 'sha256:' + hashlib.sha256(archive).hexdigest() != _native_archive_digest(manifest):
+                raise RecoveryError('native capture digest differs', 'capture_invalid')
             operation = 'reopen-restore' if reopen else 'verify-restore' if verify else 'inspect-restore' if inspect else 'restore'
             arguments = {'archive': archive, 'target_volume': plan['target_volume']}
             if reopen: arguments['reopen_plan'] = reopen_plan
@@ -280,6 +334,9 @@ class PostgresRecovery:
             if result.get('ok') is False:
                 code = result.get('code')
                 if code not in {'restore_target_changed', 'restore_target_stopped', 'restore_target_busy',
+                        'schema_evidence_invalid', 'schema_reference_changed', 'schema_reference_cleanup_failed',
+                        'schema_reference_source_unavailable', 'schema_reference_pending', 'schema_reference_unavailable',
+                        'source_schema_changed',
                         'restore_data_invalid', 'reopen_plan_changed', 'reopen_pending', 'reopen_history_invalid',
                         'restore_database_unavailable', 'restore_verification_failed', 'request_invalid',
                         'archive_changed', 'source_changed', 'path_unsafe'}:
@@ -308,6 +365,8 @@ class PostgresRecovery:
             if plan['profile'] != 'lenzora-prod-storage':
                 if result.get('target_database') != plan['target_database'] or result.get('target_role') != plan['target_role']:
                     raise RecoveryError('restored database destination differs', 'restore_verification_failed')
+                _validate_database_receipt(result, source, manifest, plan['native_request_id'],
+                    target_volume=plan['target_volume'])
             result.update(plan_digest=plan['plan_digest'], backup_id=plan['backup_id'], source_digest=source.source_digest,
                 production_transfer=plan['target_volume'] is not None)
             install_owner_only_json(receipt_path, result)

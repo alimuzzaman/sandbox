@@ -57,25 +57,24 @@ class PostgresHelperTests(unittest.TestCase):
     def test_verify_retained_restore_never_imports_and_refuses_mismatches_before_stopping(self):
         for match in (False, True):
             with self.subTest(match=match), tempfile.TemporaryDirectory() as directory:
-                slot = Path(directory); identity = 'a' * 64
-                observed = {'schema_version': 1, 'ok': True, 'all_match': match,
-                    'container_id': 'b' * 64,
-                    'target': 'sandbox-recovery-restore-' + identity[:24], 'volume': 'isolated-volume',
-                    'target_database': 'lenzora', 'target_role': 'postgres',
-                    'source_database_identity': 'db', 'dump_digest': 'sha256:' + 'b' * 64,
-                    'observation': {}}
-                with patch.object(helper, 'inspect_restore', return_value=observed), \
+                identity = 'a' * 64; slot = Path(directory) / identity; slot.mkdir(mode=0o700)
+                archive, evidence = capture_archive()
+                actual = {key: item for key, item in evidence.items() if key != 'dump_digest'}
+                if not match: actual['table_counts'] = [{'name': 'changed', 'count': 1}]
+                with patch.object(helper, 'verification_checkpoint', return_value=(actual, {})), \
+                        patch.object(helper, 'observation', return_value=actual), \
+                        patch.object(helper, 'sql', return_value='0'), \
                         patch.object(helper, 'restore_target', return_value=({'Id': 'b' * 64, 'State': {'Running': True}}, {})), \
                         patch.object(helper, 'run', return_value=b'') as command, \
                         patch.object(helper.sys, 'stdout', SimpleNamespace(buffer=io.BytesIO())):
                     if match:
-                        helper._execute({}, source(), 'verify-restore', identity, slot, b'', b'archive')
+                        helper._execute({}, source(), 'verify-restore', identity, slot, b'', archive)
                         self.assertEqual(json.loads((slot / 'result.json').read_bytes())['code'], 'restore_verified')
                         self.assertEqual(len(command.call_args_list), 2)
                         self.assertTrue(all('pg_restore' not in call.args[0] for call in command.call_args_list))
                     else:
                         with self.assertRaisesRegex(ValueError, 'restore_verification_failed'):
-                            helper._execute({}, source(), 'verify-restore', identity, slot, b'', b'archive')
+                            helper._execute({}, source(), 'verify-restore', identity, slot, b'', archive)
                         command.assert_not_called()
                         self.assertFalse((slot / 'result.json').exists())
 
@@ -159,7 +158,9 @@ class PostgresHelperTests(unittest.TestCase):
                 path.write_bytes(archive)
                 actual = {key: value for key, value in evidence.items() if key != 'dump_digest'}
                 if changed: actual['schema_digest'] = 'sha256:' + 'b' * 64
-                with patch.object(helper, 'run', return_value=b''), \
+                with patch.object(helper, 'run', side_effect=lambda argv, **kw: b'b' * 64 if argv[:2] == ['docker', 'create'] else b''), \
+                        patch.object(helper, 'restore_target', return_value=({'Id': 'b' * 64, 'State': {'Running': True}}, {})), \
+                        patch.object(helper, 'verification_checkpoint', return_value=(actual, {})), \
                         patch.object(helper, 'observation', return_value=actual), \
                         patch.object(helper.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
                     if changed:
@@ -211,10 +212,13 @@ class PostgresHelperTests(unittest.TestCase):
                     return b""
                 if "psql" in argv:
                     return b"1"
+                if argv[:2] == ['docker', 'create']: return b'b' * 64
                 return b""
 
             actual = {**evidence, "database_identity": "target-database-identity"}
             with patch.object(helper, "run", side_effect=invoke), \
+                    patch.object(helper, 'restore_target', return_value=({'Id': 'b' * 64, 'State': {'Running': True}}, {})), \
+                    patch.object(helper, "verification_checkpoint", return_value=(actual, {})), \
                     patch.object(helper, "observation", return_value=actual), \
                     patch.object(helper.subprocess, "run",
                                  return_value=SimpleNamespace(returncode=0)) as restore_process:

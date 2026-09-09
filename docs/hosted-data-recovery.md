@@ -84,8 +84,10 @@ start. An unresolved intent blocks another generation. After a completed reopen,
 a later expired drill needs a fresh inspected plan and explicit confirmation.
 The per-restore history is limited to 16 generations. Reopen records are separate
 from verified restore receipts, and `restore_reopened` does not satisfy readiness.
-Run `inspect-restore` immediately after reopening, then `verify-restore` only
-when every comparison succeeds. No new restore request or reimport is needed.
+Run `inspect-restore` immediately after reopening. Confirm `verify-restore` when
+the raw comparisons match, or when raw schema text is the sole mismatch and the
+structural evidence described below is available. No new restore request or
+reimport into the retained target is needed.
 
 For a schema mismatch, inspection also compares private schema records from the
 registered source and retained target. The source's original digest must still
@@ -99,11 +101,60 @@ an equivalence or acceptance claim. Definitions, SQL literals and rows never lea
 the helper. Private metadata is bounded to 8 MiB
 and 10,000 records per component. Column order within each table remains part of
 the comparison. Diagnostics do not change the failed schema acceptance gate.
-If every comparison matches, `verify-restore --confirm` repeats those checks under
-the original request lock, stops only that isolated target, and retains the verified
-receipt. It never imports again, repairs a mismatch, or replaces the target.
+`verify-restore --confirm` repeats verification under the original request lock,
+stops only the successfully verified isolated target, and retains the receipt.
+It never imports again into that target, repairs its schema, or replaces it.
 Inspection and reopen refusals expose only closed reason codes; raw startup
 errors, configuration values and database rows remain private.
+
+### Schema text after PostgreSQL restore
+
+PostgreSQL may render an equivalent restored CHECK constraint with different AND
+grouping or explicit array casts. The captured raw `schema_digest` remains
+unchanged. Inspection continues to expose raw `matches` and `all_match`; a
+different raw digest is never relabelled as equal.
+
+New database observations use `schema_fingerprint_version=2` and add
+`schema_structure_digest`: all existing ordered column records and constraint
+identities/validation states, with only constraint definitions omitted. Capture
+computes both hashes in its exported snapshot. Unknown fingerprint versions and
+malformed evidence are rejected before restore effects. Version 1 archives still
+support direct raw equality. A version 1 local development drill can additionally
+derive its structural baseline from the exact registered source, only when that
+source's raw schema still equals the captured fingerprint. This exception does
+not apply to external or production sources; use a new capture there.
+
+When schema text is the sole raw mismatch, confirmed restore/verification can
+restore the exact archived dump's schema into a separate, networkless reference
+container using the same pinned PostgreSQL image. It has a read-only root, bounded
+tmpfs, no ports, no persistent volume and no credentials. It imports no table
+rows. This is a native restore of the trusted source archive; schema-only restore
+can still execute source-defined code and is never run against the live source
+or retained target as a parser or optimizer query.
+
+The reference and actual target must match the captured structural baseline and
+the complete existing schema projection under the same comparison context.
+Both equality paths read raw and comparison schema, table counts, migration
+checksum and database identity in one fresh repeatable-read, read-only transaction.
+Verification ignores prior inspect payloads for acceptance and performs no source
+or retained-target DDL. Reference cleanup is followed by another complete target
+checkpoint. Existing target ownership and importer checks surround these reads.
+The receipt proves the accepted snapshot; it does not promise that a privileged
+out-of-band writer cannot change the database after that snapshot. Only the exact
+owned reference is removed. Cleanup failure, an unrecognized existing reference,
+or an interrupted creation without a completed record prevents acceptance; the
+original restore remains retained. A completed owner-only reference record binds
+the request, source, dump/archive, image, destination and schema hashes. It can be
+reused as the expected schema, but never as a substitute for checking the target.
+
+Receipts state `raw-capture-equality` or `archived-schema-reference-v1` in
+`schema_verification`, preserving the original and observed raw hashes. The
+service validates the proof against the encrypted manifest's native archive
+digest before storing it or returning `data_ready`. A raw mismatch without this
+complete proof, or any data/structural mismatch, refuses acceptance. This proves
+the existing column/constraint observation contract and recorded data checks;
+it does not claim coverage of every PostgreSQL catalog object or arbitrary SQL
+equivalence across versions.
 
 Observe an uninstalled descriptor by adding `--source-binding SOURCE.json` to
 `observe`. This lets the operator establish the legacy server major before

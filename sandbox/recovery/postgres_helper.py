@@ -125,6 +125,146 @@ def _schema_digest(value):
     return 'sha256:' + hashlib.sha256(canonical(value)).hexdigest()
 
 
+def _stable_schema(value):
+    value = _schema_projection(value)
+    # Table order is immaterial; ordinal column order within a table is not.
+    return {'constraints': sorted(value['constraints'], key=lambda row: (row['table'], row['name'])),
+        'columns': sorted(value['columns'], key=lambda row: row['table'])}
+
+
+def schema_structure_digest(value):
+    value = _stable_schema(value)
+    return _schema_digest({**value, 'constraints': [
+        {key: item for key, item in row.items() if key != 'definition'}
+        for row in value['constraints']]})
+
+
+_OBSERVATION_FIELDS = {'major', 'database_identity', 'table_counts', 'migration_checksum',
+    'schema_digest', 'constraints_valid'}
+
+
+def _fingerprint_version(value):
+    if type(value) is not dict: raise ValueError('schema_evidence_invalid')
+    version = value.get('schema_fingerprint_version', 1)
+    if (type(version) is not int or version not in {1, 2}
+            or (version == 1 and 'schema_structure_digest' in value)
+            or (version == 2 and not _is_digest(value.get('schema_structure_digest')))):
+        raise ValueError('schema_evidence_invalid')
+    return version
+
+
+def _is_digest(value):
+    return type(value) is str and re.fullmatch(r'sha256:[a-f0-9]{64}', value) is not None
+
+
+def observation_matches(evidence, actual, renamed_database=False):
+    if type(evidence) is not dict or type(actual) is not dict:
+        raise ValueError('schema_evidence_invalid')
+    expected_version, actual_version = _fingerprint_version(evidence), _fingerprint_version(actual)
+    fields = _OBSERVATION_FIELDS - ({'database_identity'} if renamed_database else set())
+    if not _OBSERVATION_FIELDS <= evidence.keys() or not _OBSERVATION_FIELDS <= actual.keys():
+        raise ValueError('schema_evidence_invalid')
+    if expected_version == 2:
+        if actual_version != 2: raise ValueError('schema_evidence_invalid')
+        fields = fields | {'schema_structure_digest'}
+    return {key: actual[key] == evidence[key] for key in sorted(fields)}
+
+
+def _validate_capture_evidence(evidence):
+    allowed = _OBSERVATION_FIELDS | {'schema_fingerprint_version', 'schema_structure_digest',
+        'dump_digest', 'captured_at', 'captured_quiescent', 'source_digest'}
+    if (type(evidence) is not dict or not _OBSERVATION_FIELDS | {'dump_digest'} <= evidence.keys()
+            or not evidence.keys() <= allowed
+            or type(evidence['major']) is not int or not 1 <= evidence['major'] <= 99
+            or type(evidence['constraints_valid']) is not bool
+            or not _is_digest(evidence['schema_digest']) or not _is_digest(evidence['dump_digest'])
+            or any(type(evidence[key]) is not str or not 1 <= len(evidence[key]) <= 256
+                for key in ('database_identity', 'migration_checksum'))
+            or type(evidence['table_counts']) is not list or len(evidence['table_counts']) > 10000):
+        raise ValueError('schema_evidence_invalid')
+    seen = set()
+    for row in evidence['table_counts']:
+        if (type(row) is not dict or set(row) != {'name', 'count'}
+                or type(row['name']) is not str or not 1 <= len(row['name'].encode()) <= 128
+                or type(row['count']) is not int or row['count'] < 0 or row['name'] in seen):
+            raise ValueError('schema_evidence_invalid')
+        seen.add(row['name'])
+    if ('source_digest' in evidence and not _is_digest(evidence['source_digest'])
+            or 'captured_at' in evidence and (type(evidence['captured_at']) is not int or evidence['captured_at'] < 1)
+            or 'captured_quiescent' in evidence and type(evidence['captured_quiescent']) is not bool):
+        raise ValueError('schema_evidence_invalid')
+    _fingerprint_version(evidence)
+    return evidence
+
+
+_REFERENCE_BINDINGS = {'native_request_id', 'source_digest', 'archive_digest', 'dump_digest',
+    'image_id', 'database', 'role', 'captured_schema_digest'}
+_REFERENCE_FIELDS = _REFERENCE_BINDINGS | {'schema_version', 'method', 'structure_digest',
+    'structure_origin', 'reference_schema_digest', 'completed_at'}
+_PROOF_FIELDS = _REFERENCE_BINDINGS | {'schema_version', 'method', 'observed_schema_digest',
+    'verified_at', 'target_schema_digest', 'reference'}
+
+
+def _schema_binding(source, evidence, archive_digest, native_request_id, database, role):
+    return {'native_request_id': native_request_id, 'source_digest': _schema_digest(source),
+        'archive_digest': archive_digest, 'dump_digest': evidence['dump_digest'],
+        'image_id': source['client_image_id'], 'database': database, 'role': role,
+        'captured_schema_digest': evidence['schema_digest']}
+
+
+def _validate_reference(record, binding, source, evidence):
+    if (type(record) is not dict or set(record) != _REFERENCE_FIELDS
+            or type(record['schema_version']) is not int or record['schema_version'] != 1
+            or record['method'] != 'archived-schema-reference-v1'
+            or any(record[key] != binding[key] for key in _REFERENCE_BINDINGS)
+            or not _is_digest(record['structure_digest']) or not _is_digest(record['reference_schema_digest'])
+            or type(record['completed_at']) is not int or record['completed_at'] < 1):
+        raise ValueError('schema_evidence_invalid')
+    if _fingerprint_version(evidence) == 2:
+        if (record['structure_origin'] != 'capture-v2'
+                or record['structure_digest'] != evidence['schema_structure_digest']):
+            raise ValueError('schema_evidence_invalid')
+    elif (record['structure_origin'] != 'legacy-live-capture-match'
+            or source.get('profile') != 'lenzora-dev' or source.get('credential_reference') is not None):
+        raise ValueError('schema_evidence_invalid')
+    return record
+
+
+def validate_schema_proof(proof, source, evidence, actual, archive_digest,
+                          native_request_id, database, role):
+    """Pure admission check shared by native completion and recovery readiness."""
+    _validate_capture_evidence(evidence)
+    if type(actual) is not dict: raise ValueError('schema_evidence_invalid')
+    _validate_capture_evidence({**actual, 'dump_digest': evidence['dump_digest']})
+    binding = _schema_binding(source, evidence, archive_digest, native_request_id, database, role)
+    if (type(proof) is not dict or set(proof) != _PROOF_FIELDS
+            or type(proof['schema_version']) is not int or proof['schema_version'] != 1
+            or any(proof[key] != binding[key] for key in _REFERENCE_BINDINGS)
+            or any(not _is_digest(binding[key]) for key in (
+                'source_digest', 'archive_digest', 'dump_digest', 'image_id', 'captured_schema_digest'))
+            or type(native_request_id) is not str or not re.fullmatch(r'[a-f0-9]{64}', native_request_id)
+            or proof['observed_schema_digest'] != actual.get('schema_digest')
+            or not _is_digest(proof['observed_schema_digest'])
+            or type(proof['verified_at']) is not int or proof['verified_at'] < 1):
+        raise ValueError('schema_evidence_invalid')
+    renamed = database != source['database']
+    matches = observation_matches(evidence, actual, renamed_database=renamed)
+    if proof['method'] == 'raw-capture-equality':
+        if proof['reference'] is not None or proof['target_schema_digest'] is not None or not all(matches.values()):
+            raise ValueError('restore_verification_failed')
+    elif proof['method'] == 'archived-schema-reference-v1':
+        reference = _validate_reference(proof['reference'], binding, source, evidence)
+        if (any(not same for key, same in matches.items() if key != 'schema_digest')
+                or _fingerprint_version(actual) != 2
+                or actual['schema_structure_digest'] != reference['structure_digest']
+                or proof['target_schema_digest'] != reference['reference_schema_digest']
+                or proof['verified_at'] < reference['completed_at']):
+            raise ValueError('restore_verification_failed')
+    else:
+        raise ValueError('schema_evidence_invalid')
+    return proof
+
+
 def _definition_shape(value):
     """Bounded syntax labels only; never emit identifiers or literal values."""
     keywords = {'CHECK', 'AND', 'OR', 'NOT', 'IS', 'NULL', 'TRUE', 'FALSE',
@@ -148,11 +288,13 @@ def _definition_shape(value):
     return {'syntax_labels': shape, 'truncated': len(tokens) > 512}
 
 
-def schema_records(client, database):
+def schema_records(client, database, *, comparison=False):
     # Match observation's session context, including its temporary namespace.
     # Only session-local DDL precedes the read-only metadata query.
     payload = sql(client, database, _TEMP_COUNTS_SQL
-        + 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\nSELECT json_build_object('
+        + 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n'
+        + ('SET LOCAL search_path = pg_catalog, public;\n' if comparison else '')
+        + 'SELECT json_build_object('
         + _SCHEMA_FIELDS_SQL + ');')
     if len(payload.encode()) > MAX_SCHEMA_BYTES:
         raise ValueError('schema_metadata_invalid')
@@ -248,10 +390,82 @@ SELECT CASE WHEN to_regclass('public._prisma_migrations') IS NULL THEN 'absent' 
     checksum = "absent"
     if migrations == "present":
         checksum = sql(client, database, prefix + '''SELECT md5(coalesce(string_agg(migration_name || ':' || checksum || ':' || (finished_at IS NOT NULL)::text || ':' || (rolled_back_at IS NOT NULL)::text, ',' ORDER BY migration_name),'')) FROM public._prisma_migrations;''')
+    schema = _schema_projection(raw)
     return {"major": raw["major"], "database_identity": raw["database_identity"],
         "table_counts": raw["tables"], "migration_checksum": checksum,
-        "schema_digest": _schema_digest(_schema_projection(raw)),
+        "schema_digest": _schema_digest(schema),
+        "schema_fingerprint_version": 2, "schema_structure_digest": schema_structure_digest(schema),
         "constraints_valid": all(row["validated"] for row in raw["constraints"])}
+
+
+def verification_checkpoint(client, database):
+    """Read every acceptance field from one fresh snapshot without target DDL."""
+    query = r"""
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT json_build_array('raw', json_build_object(
+ 'major', current_setting('server_version_num')::int/10000,
+ 'database_identity', md5(current_database()),
+""" + _SCHEMA_FIELDS_SQL + r"""));
+SELECT format('SELECT json_build_array(''count'', json_build_object(''name'', %L, ''count'', count(*))) FROM %I.%I;',
+ tablename, schemaname, tablename)
+ FROM pg_catalog.pg_tables WHERE schemaname='public' ORDER BY tablename
+\gexec
+SELECT CASE WHEN to_regclass('public._prisma_migrations') IS NULL
+ THEN 'SELECT json_build_array(''migrations'', ''absent''::text);'
+ ELSE 'SELECT json_build_array(''migrations'', md5(coalesce(string_agg(migration_name || '':'' || checksum || '':'' || (finished_at IS NOT NULL)::text || '':'' || (rolled_back_at IS NOT NULL)::text, '','' ORDER BY migration_name),''''))) FROM public._prisma_migrations;'
+ END
+\gexec
+SET LOCAL search_path = pg_catalog, public;
+SELECT json_build_array('comparison', json_build_object(
+""" + _SCHEMA_FIELDS_SQL + r"""));
+COMMIT;
+"""
+    payload = sql(client, database, query)
+    if len(payload.encode()) > MAX_SCHEMA_BYTES:
+        raise ValueError('schema_metadata_invalid')
+    blocks = {}; counts = []; names = set()
+    try:
+        for line in payload.splitlines():
+            item = json.loads(line, object_pairs_hook=_closed_pairs)
+            if type(item) is not list or len(item) != 2 or type(item[0]) is not str:
+                raise ValueError('schema_metadata_invalid')
+            tag, value = item
+            if tag == 'count':
+                if (type(value) is not dict or set(value) != {'name', 'count'}
+                        or type(value['name']) is not str or not value['name']
+                        or len(value['name'].encode()) > 128 or value['name'] in names
+                        or type(value['count']) is not int or value['count'] < 0
+                        or value['count'] > 9223372036854775807 or len(counts) >= 10000):
+                    raise ValueError('schema_metadata_invalid')
+                counts.append(value); names.add(value['name'])
+            elif tag in {'raw', 'migrations', 'comparison'} and tag not in blocks:
+                blocks[tag] = value
+            else:
+                raise ValueError('schema_metadata_invalid')
+        if set(blocks) != {'raw', 'migrations', 'comparison'}:
+            raise ValueError('schema_metadata_invalid')
+        raw = blocks['raw']; checksum = blocks['migrations']
+        if (type(raw) is not dict or set(raw) != {'major', 'database_identity', 'constraints', 'columns'}
+                or type(raw['major']) is not int or not 10 <= raw['major'] <= 100
+                or type(raw['database_identity']) is not str
+                or not re.fullmatch(r'[a-f0-9]{32}', raw['database_identity'])
+                or type(checksum) is not str
+                or (checksum != 'absent' and not re.fullmatch(r'[a-f0-9]{32}', checksum))
+                or type(blocks['comparison']) is not dict
+                or set(blocks['comparison']) != {'constraints', 'columns'}):
+            raise ValueError('schema_metadata_invalid')
+        schema = _schema_projection(raw)
+        comparison = _stable_schema(_schema_projection(blocks['comparison']))
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise ValueError('schema_metadata_invalid') from None
+    actual = {'major': raw['major'], 'database_identity': raw['database_identity'],
+        'table_counts': counts, 'migration_checksum': checksum,
+        'schema_digest': _schema_digest(schema), 'schema_fingerprint_version': 2,
+        'schema_structure_digest': schema_structure_digest(schema),
+        'constraints_valid': all(row['validated'] for row in schema['constraints'])}
+    if schema_structure_digest(comparison) != actual['schema_structure_digest']:
+        raise ValueError('schema_metadata_invalid')
+    return actual, comparison
 
 
 def local_client(source):
@@ -334,15 +548,169 @@ def restore_input(archive, work):
             raise ValueError("archive_invalid")
         for member in members:
             private_write(work / member.name, tar.extractfile(member).read())
-    evidence = json.loads((work / 'evidence.json').read_bytes())
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result: raise ValueError('schema_evidence_invalid')
+            result[key] = value
+        return result
+    evidence = _validate_capture_evidence(json.loads(owned_read(work / 'evidence.json', MAX_SCHEMA_BYTES), object_pairs_hook=pairs))
     dump = work / 'database.dump'
     if evidence['dump_digest'] != 'sha256:' + hashlib.sha256(dump.read_bytes()).hexdigest():
         raise ValueError('dump_changed')
     return evidence, dump
 
 
-def restore_target(source, name):
-    volume = name + '-data'
+_REFERENCE_TMPFS = {
+    '/var/lib/postgresql/data': 'rw,noexec,nosuid,nodev,size=536870912,mode=0700',
+    '/var/run/postgresql': 'rw,noexec,nosuid,nodev,size=1048576,mode=0775',
+    '/tmp': 'rw,noexec,nosuid,nodev,size=16777216,mode=1777',
+}
+
+
+def _reference_container(source, name, identity, container_id):
+    rows = json.loads(run(['docker', 'inspect', container_id]))
+    if len(rows) != 1: raise ValueError('schema_reference_changed')
+    row = rows[0]; config = row.get('Config') or {}; host = row.get('HostConfig') or {}
+    mounts = row.get('Mounts') or []
+    if (row.get('Id') != container_id or row.get('Name') != '/' + name
+            or row.get('Image') != source['client_image_id']
+            or config.get('Labels', {}).get('sandbox.recovery.owner') != name
+            or config.get('Labels', {}).get('sandbox.recovery.request') != identity
+            or config.get('Labels', {}).get('sandbox.recovery.kind') != 'schema-reference-v1'
+            or config.get('Entrypoint') != ['sleep'] or config.get('Cmd') != ['600']
+            or host.get('NetworkMode') != 'none' or host.get('PortBindings')
+            or host.get('ReadonlyRootfs') is not True or host.get('Privileged')
+            or host.get('Binds') or host.get('VolumesFrom') or host.get('Devices')
+            or host.get('PidMode') or host.get('IpcMode') not in {'private', ''}
+            or host.get('Memory') != 1073741824 or host.get('PidsLimit') != 128
+            or host.get('Tmpfs') != _REFERENCE_TMPFS
+            # Docker versions may omit tmpfs entries from Mounts; Tmpfs above
+            # remains exact. No persistent or undeclared mount is permitted.
+            or any(m.get('Type') != 'tmpfs' or m.get('Destination') not in _REFERENCE_TMPFS for m in mounts)
+            or row.get('State', {}).get('Paused') or row.get('State', {}).get('Restarting')):
+        raise ValueError('schema_reference_changed')
+    return row
+
+
+def _reference_cleanup(source, name, identity, container_id):
+    row = _reference_container(source, name, identity, container_id)
+    if row['State']['Running']:
+        run(['docker', 'stop', '--time', '30', container_id])
+        row = _reference_container(source, name, identity, container_id)
+    if row['State']['Running']: raise ValueError('schema_reference_cleanup_failed')
+    run(['docker', 'rm', container_id])
+    if run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'id=' + container_id]).strip():
+        raise ValueError('schema_reference_cleanup_failed')
+
+
+def _captured_structure(source, evidence):
+    if _fingerprint_version(evidence) == 2:
+        return evidence['schema_structure_digest'], 'capture-v2'
+    if source['profile'] != 'lenzora-dev' or source.get('credential_reference') is not None:
+        raise ValueError('schema_reference_source_unavailable')
+    inspect_source(source)
+    original = schema_records(local_client(source), source['database'])
+    inspect_source(source)
+    if _schema_digest(original) != evidence['schema_digest']:
+        raise ValueError('source_schema_changed')
+    return schema_structure_digest(original), 'legacy-live-capture-match'
+
+
+def _schema_reference(source, evidence, dump, binding, slot, observed_structure):
+    """Derive an immutable expectation in an independently owned empty cluster."""
+    path = slot / 'schema-reference.json'
+    if path.is_symlink(): raise ValueError('path_unsafe')
+    if path.exists():
+        record = _validate_reference(json.loads(owned_read(path, 16384), object_pairs_hook=_closed_pairs), binding, source, evidence)
+        if observed_structure != record['structure_digest']: raise ValueError('restore_verification_failed')
+        return record
+    intent = slot / 'schema-reference-intent.json'
+    if intent.is_symlink(): raise ValueError('path_unsafe')
+    if intent.exists(): raise ValueError('schema_reference_pending')
+    structure, origin = _captured_structure(source, evidence)
+    if observed_structure != structure: raise ValueError('restore_verification_failed')
+    name = 'sandbox-recovery-schema-' + binding['native_request_id'][:24]
+    if run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'name=^/' + name + '$']).strip():
+        raise ValueError('schema_reference_pending')
+    expected = {**binding, 'schema_version': 1, 'method': 'archived-schema-reference-v1',
+        'structure_digest': structure, 'structure_origin': origin}
+    _durable_reopen_record(intent, expected)
+    argv = ['docker', 'create', '--pull', 'never', '--name', name, '--label', 'sandbox.recovery.owner=' + name,
+        '--label', 'sandbox.recovery.request=' + binding['native_request_id'],
+        '--label', 'sandbox.recovery.kind=schema-reference-v1', '--network', 'none',
+        '--read-only', '--memory', '1073741824', '--pids-limit', '128']
+    for destination, options in _REFERENCE_TMPFS.items():
+        argv.extend(['--tmpfs', destination + ':' + options])
+    argv.extend(['-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_USER=' + binding['role'],
+        '-e', 'POSTGRES_DB=' + binding['database'], '--entrypoint', 'sleep', source['client_image_id'], '600'])
+    container_id = run(argv).decode().strip()
+    if not re.fullmatch(r'[a-f0-9]{64}', container_id): raise ValueError('schema_reference_pending')
+    try:
+        _reference_container(source, name, binding['native_request_id'], container_id)
+        run(['docker', 'start', container_id])
+        run(['docker', 'exec', '-d', container_id, 'docker-entrypoint.sh', 'postgres'])
+        client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + binding['role'], container_id]
+        deadline = time.monotonic() + 90
+        while True:
+            try:
+                sql(client, binding['database'], 'SELECT 1;'); break
+            except ValueError:
+                if time.monotonic() >= deadline: raise ValueError('schema_reference_unavailable') from None
+                time.sleep(1)
+        with dump.open('rb') as handle:
+            result = subprocess.run([*client, 'pg_restore', '--schema-only', '--exit-on-error',
+                '--no-owner', '--no-acl', '--dbname', binding['database']], stdin=handle,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV, timeout=300)
+        if result.returncode: raise ValueError('schema_reference_unavailable')
+        _reference_container(source, name, binding['native_request_id'], container_id)
+        records = _stable_schema(schema_records(client, binding['database'], comparison=True))
+        if schema_structure_digest(records) != structure:
+            raise ValueError('restore_verification_failed')
+        reference_digest = _schema_digest(records)
+    finally:
+        try:
+            _reference_cleanup(source, name, binding['native_request_id'], container_id)
+        except (ValueError, OSError, KeyError, subprocess.TimeoutExpired):
+            raise ValueError('schema_reference_cleanup_failed') from None
+    record = {**expected, 'reference_schema_digest': reference_digest, 'completed_at': int(time.time())}
+    _validate_reference(record, binding, source, evidence)
+    _durable_reopen_record(path, record)
+    return record
+
+
+def verify_observation(source, evidence, actual, client, database, role, archive, dump, slot, *, recheck=None):
+    if recheck is not None: recheck()
+    actual, records = verification_checkpoint(client, database)
+    if recheck is not None: recheck()
+    matches = observation_matches(evidence, actual, renamed_database=database != source['database'])
+    if any(not same for key, same in matches.items() if key != 'schema_digest'):
+        raise ValueError('restore_verification_failed')
+    if slot is None or not re.fullmatch(r'[a-f0-9]{64}', slot.name):
+        # Legacy direct helper callers can only use the original equality path.
+        if all(matches.values()): return actual, None
+        raise ValueError('restore_verification_failed')
+    archive_digest = 'sha256:' + hashlib.sha256(archive.read_bytes()).hexdigest()
+    binding = _schema_binding(source, evidence, archive_digest, slot.name, database, role)
+    reference = None; target_digest = None; method = 'raw-capture-equality'
+    if not matches['schema_digest']:
+        reference = _schema_reference(source, evidence, dump, binding, slot, actual.get('schema_structure_digest'))
+        if recheck is not None: recheck()
+        actual, records = verification_checkpoint(client, database)
+        if recheck is not None: recheck()
+        target_digest = _schema_digest(records)
+        if schema_structure_digest(records) != actual.get('schema_structure_digest'):
+            raise ValueError('restore_verification_failed')
+        method = 'archived-schema-reference-v1'
+    proof = {**binding, 'schema_version': 1, 'method': method,
+        'observed_schema_digest': actual['schema_digest'], 'verified_at': int(time.time()),
+        'target_schema_digest': target_digest, 'reference': reference}
+    return actual, validate_schema_proof(proof, source, evidence, actual, archive_digest,
+        slot.name, database, role)
+
+
+def restore_target(source, name, *, volume=None):
+    volume = volume or name + '-data'
     rows = json.loads(run(['docker', 'inspect', name]))
     if len(rows) != 1: raise ValueError('restore_target_changed')
     row = rows[0]
@@ -382,7 +750,7 @@ def inspect_restore(source, archive, work, name, *, slot=None):
     if importers != '0':
         raise ValueError('restore_target_busy')
     actual = observation(client, source['database'])
-    matches = {key: actual[key] == evidence.get(key) for key in actual}
+    matches = observation_matches(evidence, actual)
     expected_counts = {row['name']: row['count'] for row in evidence['table_counts']}
     actual_counts = {row['name']: row['count'] for row in actual['table_counts']}
     different = sorted(name for name in expected_counts.keys() | actual_counts.keys()
@@ -646,7 +1014,7 @@ def reopen_restore(source, archive, work, name, slot, plan):
     return result
 
 
-def restore(source, archive, work, name, target_volume=None, target_password=b''):
+def restore(source, archive, work, name, target_volume=None, target_password=b'', *, slot=None):
     evidence, dump = restore_input(archive, work)
     password = target_password if target_volume is not None else os.urandom(48).hex().encode()
     if not password or len(password) > 4096 or any(c in password for c in (b'\n', b'\r', b'\0')):
@@ -664,15 +1032,16 @@ def restore(source, archive, work, name, target_volume=None, target_password=b''
     if run(['docker', 'volume', 'ls', '--filter', 'name=^' + volume + '$', '--format', '{{.Name}}']).strip():
         raise ValueError('restore_target_exists')
     run(['docker', 'volume', 'create', '--label', 'sandbox.recovery.owner=' + name, volume])
-    run(['docker', 'create', '--name', name, '--label', 'sandbox.recovery.owner=' + name,
+    container_id = run(['docker', 'create', '--name', name, '--label', 'sandbox.recovery.owner=' + name,
          '--network', 'none', '--mount', 'type=volume,source=' + volume + ',target=/var/lib/postgresql/data',
          '--tmpfs', '/run/recovery:rw,noexec,nosuid,mode=0700',
          '-e', 'POSTGRES_HOST_AUTH_METHOD=scram-sha-256', '-e', 'POSTGRES_USER=' + role,
-         '-e', 'POSTGRES_DB=' + database, '--entrypoint', 'sleep', source['client_image_id'], '3600'])
-    run(['docker', 'start', name])
-    run(['docker', 'exec', '-i', name, 'sh', '-c', 'umask 077; cat > /run/recovery/password'], data=password)
-    run(['docker', 'exec', '-d', name, 'sh', '-c', 'export POSTGRES_PASSWORD_FILE=/run/recovery/password; exec docker-entrypoint.sh postgres'])
-    client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + role, name]
+         '-e', 'POSTGRES_DB=' + database, '--entrypoint', 'sleep', source['client_image_id'], '3600']).decode().strip()
+    if not re.fullmatch(r'[a-f0-9]{64}', container_id): raise ValueError('acceptance_unknown')
+    run(['docker', 'start', container_id])
+    run(['docker', 'exec', '-i', container_id, 'sh', '-c', 'umask 077; cat > /run/recovery/password'], data=password)
+    run(['docker', 'exec', '-d', container_id, 'sh', '-c', 'export POSTGRES_PASSWORD_FILE=/run/recovery/password; exec docker-entrypoint.sh postgres'])
+    client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + role, container_id]
     deadline = time.monotonic() + 90
     while True:
         try:
@@ -685,16 +1054,21 @@ def restore(source, archive, work, name, target_volume=None, target_password=b''
             stdin=handle, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV, timeout=1800)
     if result.returncode: raise ValueError('restore_failed')
     actual = observation(client, database)
-    comparison = set(actual) - ({'database_identity'} if target_volume is not None else set())
     # The schema digest includes each constraint's validation state. Preserve
     # deliberately NOT VALID source constraints without silently validating them.
-    if any(actual[key] != evidence[key] for key in comparison):
-        raise ValueError('restore_verification_failed')
-    run(['docker', 'exec', '--user', 'postgres', name, 'pg_ctl', '-D', '/var/lib/postgresql/data', '-m', 'fast', '-w', 'stop'])
-    run(['docker', 'stop', '--time', '30', name])
+    def recheck():
+        row, _volume = restore_target(source, name, volume=volume)
+        if row['Id'] != container_id or not row['State']['Running']: raise ValueError('restore_target_changed')
+    recheck()
+    actual, schema_proof = verify_observation(source, evidence, actual, client, database, role,
+        archive, dump, slot, recheck=recheck)
+    recheck()
+    run(['docker', 'exec', '--user', 'postgres', container_id, 'pg_ctl', '-D', '/var/lib/postgresql/data', '-m', 'fast', '-w', 'stop'])
+    run(['docker', 'stop', '--time', '30', container_id])
     return {'schema_version': 1, 'ok': True, 'code': 'restore_verified', 'target': name,
         'volume': volume, 'target_database': database, 'target_role': role,
-        'source_database_identity': evidence['database_identity'], 'dump_digest': evidence['dump_digest'], 'observation': actual}
+        'source_database_identity': evidence['database_identity'], 'dump_digest': evidence['dump_digest'],
+        'observation': actual, **({'schema_verification': schema_proof} if schema_proof else {})}
 
 
 def storage_manifest(archive):
@@ -870,15 +1244,27 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
             else:
                 result = inspect_restore(source, archive, work, name, slot=slot)
             if operation == 'verify-restore':
-                if result.get('all_match') is not True: raise ValueError('restore_verification_failed')
-                current, _volume = restore_target(source, name)
-                if current['Id'] != result['container_id'] or not current['State']['Running']:
-                    raise ValueError('restore_target_changed')
+                if result.get('database_available') is not True: raise ValueError('restore_verification_failed')
+                client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + source['role'], result['container_id']]
+                def recheck():
+                    current, _volume = restore_target(source, name)
+                    if current['Id'] != result['container_id'] or not current['State']['Running']:
+                        raise ValueError('restore_target_changed')
+                    if sql(client, source['database'], "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND application_name='pg_restore';") != '0':
+                        raise ValueError('restore_target_busy')
+                    return current
+                recheck()
+                evidence = json.loads(owned_read(work / 'evidence.json', MAX_SCHEMA_BYTES))
+                actual, proof = verify_observation(source, evidence, result['observation'], client,
+                    source['database'], source['role'], archive, work / 'database.dump', slot, recheck=recheck)
+                current = recheck()
                 run(['docker', 'exec', '--user', 'postgres', current['Id'], 'pg_ctl', '-D', '/var/lib/postgresql/data', '-m', 'fast', '-w', 'stop'])
                 run(['docker', 'stop', '--time', '30', current['Id']])
                 result = {key: result[key] for key in ('schema_version', 'ok', 'target', 'volume',
                     'target_database', 'target_role', 'source_database_identity', 'dump_digest', 'observation')}
                 result['code'] = 'restore_verified'
+                result['observation'] = actual
+                result['schema_verification'] = proof
                 private_write(slot / 'result.json', canonical(result))
             sys.stdout.buffer.write(canonical(result))
         return
@@ -913,7 +1299,8 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
                 sys.stdout.buffer.write((slot / 'capture.tar').read_bytes())
             else:
                 private_write(work / 'input.tar', archive_bytes)
-                result = restore(source, work / 'input.tar', work, 'sandbox-recovery-restore-' + identity[:24], request['target_volume'], credential)
+                result = restore(source, work / 'input.tar', work, 'sandbox-recovery-restore-' + identity[:24],
+                    request['target_volume'], credential, slot=slot)
                 private_write(slot / 'result.json', canonical(result))
                 sys.stdout.buffer.write(canonical(result))
         finally:
@@ -932,6 +1319,9 @@ def safe_main():
     except Exception as error:
         code = str(error) if type(error) is ValueError else ''
         if code not in {'restore_target_changed', 'restore_target_stopped', 'restore_target_busy',
+                'schema_evidence_invalid', 'schema_reference_changed', 'schema_reference_cleanup_failed',
+                'schema_reference_source_unavailable', 'schema_reference_pending', 'schema_reference_unavailable',
+                'source_schema_changed',
                 'restore_data_invalid', 'reopen_plan_changed', 'reopen_pending', 'reopen_history_invalid',
                 'restore_database_unavailable', 'restore_verification_failed', 'request_invalid',
                 'archive_changed', 'source_changed', 'path_unsafe'}:

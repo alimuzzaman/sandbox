@@ -1,5 +1,5 @@
 ---
-description: "Create or refine a Terra-drafted PRD and require Sol High validation before specification"
+description: "Create or refine a PRD and require independent readiness validation before specification"
 scripts:
   sh: scripts/bash/create-prd.sh --json
 ---
@@ -11,14 +11,12 @@ before formal specification. This command owns only `prd.md` and
 `.specify/feature.json`; it must not create or modify specification, planning,
 task, implementation, branch, commit, or remote artifacts.
 
-## Preferred models
+## Model routing
 
-- Draft and iteratively refine with `gpt-5.6-terra` at Medium effort.
-- After the draft first passes all normal readiness checks, require exactly one
-  independent read-only review with `gpt-5.6-sol` at High effort.
-- This command cannot switch the active root model. Report what actually ran.
-  If exact Sol High review is unavailable, leave the PRD `NOT READY` and never
-  claim validation occurred.
+Follow the active repository/user model policy for drafting and independent
+read-only review. This command cannot switch the active root model. Record the
+actual model/effort and disclose unavailable requested mappings. Readiness still
+requires an independent review; a model preference is not a substitute for it.
 
 ## Input
 
@@ -41,7 +39,7 @@ Never ask the user to repeat non-empty input.
 4. If the directory already contains `spec.md`, `plan.md`, or `tasks.md`, stop:
    the feature has entered a downstream phase and this command must not backfill it.
 
-## Terra refinement
+## Refinement
 
 Ground discoverable facts before asking about product choices. Run at most five
 focused passes and stop early after two consecutive passes find no material issue:
@@ -56,22 +54,24 @@ For each pass, make compact evidence-backed updates to the PRD. Ask only about
 choices that materially change scope, user outcomes, policy, acceptance, or
 compatibility. Replace obsolete alternatives instead of appending duplicates.
 
-## Final Sol validation
+## Final independent validation
 
 After every normal readiness item passes:
 
-1. Give one Sol High reviewer the complete PRD, relevant evidence, confirmed user
+1. Give one independent reviewer the complete PRD, relevant evidence, confirmed user
    decisions, and the artifact boundary.
 2. Require omissions, contradictions, ambiguous decisions, negative-scenario gaps,
    weak acceptance outcomes, invalid assumptions, implementation leakage, proposed
    edits, and a final `PASS` or `REOPEN` verdict.
 3. Apply supported non-consequential improvements to the same `prd.md`.
 4. If the verdict requires a consequential product decision, set `NOT READY`, ask
-   the user, update the PRD, repeat the necessary Terra checks, then run one new
-   final Sol High review.
+   the user, update the PRD, repeat the necessary refinement checks, then run one new
+   final independent review.
 5. Record only the actual drafting model, validation model/date, and verdict in
    metadata. Do not store reasoning transcripts or raw reviewer output.
 
-Set `**Final Validation**` to `PASS — gpt-5.6-sol High` and `**Readiness**` to
-`READY FOR SPECKIT` only after the latest exact Sol High verdict passes and every
-readiness checkbox is complete. Recommend `speckit.specify`; do not invoke it.
+Record the latest independent `PASS` verdict and actual reviewer model/effort in
+`**Final Validation**`. Set `**Readiness**` to `READY FOR SPECKIT` only when that
+review passes and every readiness checkbox is complete. Continue to
+`speckit.specify` when the user has already authorized the full workflow; otherwise
+report readiness for that next stage.

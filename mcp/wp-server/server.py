@@ -646,6 +646,26 @@ def _durable_job_dependencies():
     return durable_job_dependencies()
 
 
+def _delivery_service_factory():
+    """Compose the shared diagnostic service without loading job writers."""
+    import sys
+    repository_root = str(Path(__file__).resolve().parents[2])
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
+    from sandbox.delivery.context import build_delivery_service
+    return build_delivery_service()
+
+
+def _trace_service_factory():
+    """Compose local trace owners without runtime or job reconciliation."""
+    import sys
+    repository_root = str(Path(__file__).resolve().parents[2])
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
+    from sandbox.delivery.trace_context import build_trace_service
+    return build_trace_service()
+
+
 def _sync_service():
     import sys
     repository_root = str(SANDBOX_ROOT)
@@ -735,6 +755,8 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "reclaim_service_factory": _reclaim_service,
     "node_store_service_factory": _node_store_service,
     "feedback_service_factory": _feedback_service,
+    "delivery_service_factory": _delivery_service_factory,
+    "trace_service_factory": _trace_service_factory,
     "secret_service_factory": _secret_service,
     "hermes_service": _HermesCommandAdapter(),
     **_job_dependencies,

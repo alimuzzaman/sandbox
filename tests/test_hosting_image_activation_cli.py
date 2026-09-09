@@ -21,6 +21,16 @@ def run_sb(*args):
 
 
 class ActivationCliTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="activation-cli-delivery-")
+        self.addCleanup(directory.cleanup)
+        self.delivery_root = Path(directory.name)
+        for module in ("sandbox.commands.hosting", "sandbox.delivery.hosting"):
+            patcher = patch(module + ".RUNTIME_DIR", self.delivery_root / "runtime")
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+
     def test_stage_refuses_missing_boolean_and_unsupported_plan_schemas_neutrally(self):
         import json
         from sandbox.commands.hosting import _cmd_host_stage
@@ -59,7 +69,8 @@ class ActivationCliTests(unittest.TestCase):
                         plan_path.write_text(json.dumps(raw))
                         output = StringIO()
                         with redirect_stdout(output), self.assertRaises(SystemExit):
-                            _cmd_host_image({"project": "widget"}, args)
+                            _cmd_host_image({"project": "widget", "project_root": str(self.delivery_root),
+                "environment": "development"}, args)
                         payload = json.loads(output.getvalue())
                         self.assertEqual(payload["schema_version"], 0)
                         self.assertEqual(payload["code"], "artifact_invalid")
@@ -84,7 +95,8 @@ class ActivationCliTests(unittest.TestCase):
                     output = StringIO()
                     with patch("sandbox.commands.hosting._host_image_machine_bundle") as bundle, \
                             redirect_stdout(output), self.assertRaises(SystemExit):
-                        _cmd_host_image({"project": "widget"}, args)
+                        _cmd_host_image({"project": "widget", "project_root": str(self.delivery_root),
+                "environment": "development"}, args)
                     bundle.assert_not_called()
                     payload = json.loads(output.getvalue())
                     self.assertEqual(payload["schema_version"], 0)
@@ -223,7 +235,8 @@ class ActivationCliTests(unittest.TestCase):
                 patch("sandbox.transports.remote_hosting_activation."
                       "RegisteredRemoteActivationTransport", return_value=runtime) as transport_type, \
                 redirect_stdout(output), self.assertRaises(SystemExit):
-            _cmd_host_image({"project": "widget"}, args)
+            _cmd_host_image({"project": "widget", "project_root": str(self.delivery_root),
+                "environment": "development"}, args)
         payload = __import__("json").loads(output.getvalue())
         self.assertEqual(captured["classification"], "exact_prior")
         self.assertEqual(payload["code"], "recovery_no_effect")
@@ -256,6 +269,7 @@ class ActivationCliTests(unittest.TestCase):
                 called["observation"] = kwargs["observer"]().classification
                 return {"schema_version": 2, "ok": False,
                     "request_id": kwargs["request_id"], "request_digest": kwargs["request_digest"],
+                    "activation_request_id": "activate/v2",
                     "code": "recovery_no_effect", "promoted": False,
                     "starting_generation": 0, "resulting_generation": 0}
 
@@ -280,7 +294,8 @@ class ActivationCliTests(unittest.TestCase):
                 patch("sandbox.transports.remote_hosting_activation."
                       "RegisteredRemoteActivationTransport", return_value=runtime), \
                 redirect_stdout(output), self.assertRaises(SystemExit):
-            _cmd_host_image({"project": "widget"}, args)
+            _cmd_host_image({"project": "widget", "project_root": str(self.delivery_root),
+                "environment": "development"}, args)
         payload = __import__("json").loads(output.getvalue())
         self.assertEqual(called["observation"], "exact_prior")
         self.assertEqual(payload["schema_version"], 2)
@@ -295,8 +310,8 @@ class ActivationCliTests(unittest.TestCase):
         from sandbox.commands.hosting import _cmd_host_image
         from tests.test_hosting_image_activation_v2 import artifacts, grant_for
 
-        plan, proof, snapshot = artifacts()
-        grant = grant_for(plan, proof)
+        plan, proof, snapshot = artifacts(graph=True)
+        grant = grant_for(plan, proof, snapshot=snapshot)
         bundle = {"schema_version": 2, "compose_snapshot": snapshot.as_mapping(),
             "rollback_grant": grant.as_mapping(),
             "rollback_grant_public_key": "ssh-ed25519 AAAA",
@@ -304,19 +319,34 @@ class ActivationCliTests(unittest.TestCase):
                              "revision": 1}}
         captured = {}
 
-        class Repository:
-            def operation_transaction(self, _target): return nullcontext()
-            def lookup_terminal_v2(self, _target, **_selectors): return None
+        from sandbox.hosting.images.activation.repository import ActivationRepository
+        from sandbox.hosting.images.activation.v2_service import ActivationServiceV2
+        from tests.test_hosting_image_activation_v2 import (
+            FakeHostStatePort, FakeTargetMutationPort, FakeStageRepositoryPort,
+            FakeRuntimeV2, FakeEdgeV2, FakeGrantVerifier,
+        )
+        repository = ActivationRepository(host_state_port=FakeHostStatePort(),
+            stage_repository=FakeStageRepositoryPort(),
+            target_mutation_port=FakeTargetMutationPort())
 
         class Service:
-            def __init__(self, **kwargs): captured["service"] = kwargs
+            def __init__(self, **kwargs):
+                captured["service"] = kwargs
+                self.owner = ActivationServiceV2(repository=kwargs["repository"],
+                    runtime_adapter=FakeRuntimeV2(proof), edge_adapter=FakeEdgeV2(),
+                    rollback_grant_verifier=FakeGrantVerifier(), clock=lambda: 100)
             def execute(self, request, **kwargs):
                 captured["request"] = request
                 captured["execute"] = kwargs
-                return {"schema_version": 2, "ok": True, "result_class": "success",
-                        "code": "committed", "request_id": request.request_id}
+                return self.owner.execute(request, **kwargs)
 
+        from tests.test_hosting import _public_acme_manifest
+        (self.delivery_root / "sandbox.hosting.yml").write_text(
+            _public_acme_manifest().replace("project: example-site", "project: lenzora")
+            .replace("compose.yml", "docker-compose.hosted-production.yml"))
+        (self.delivery_root / "docker-compose.hosted-production.yml").write_text("services: {}\n")
         validated = {"project": "lenzora", "environment": "production",
+            "project_root": str(self.delivery_root),
             "compose": {"files": ["docker-compose.hosted-production.yml"]},
             "routes": [], "healthcheck": {"path": "/health"}, "basic_auth": None}
         args = SimpleNamespace(image_action="activate", project_dir="/synthetic",
@@ -344,7 +374,7 @@ class ActivationCliTests(unittest.TestCase):
                     patch("sandbox.commands.hosting.remote.registered_remote_lock",
                           return_value=nullcontext()), \
                     patch("sandbox.commands.hosting.remote.get_remote",
-                          return_value={"name": "synthetic"}), \
+                          return_value={"name": "synthetic", "ssh": "fixture@example.test"}), \
                     patch("sandbox.commands.hosting.remote.resolve_sandbox_home",
                           return_value="/srv/sandbox"), \
                     patch("sandbox.commands.hosting._verify_edge"), \
@@ -352,16 +382,19 @@ class ActivationCliTests(unittest.TestCase):
                           return_value={"records": [], "cloudflare": {
                               "configured": True, "records": []}}), \
                     patch("sandbox.hosting.images.activation.repository.ActivationRepository",
-                          return_value=Repository()), \
+                          return_value=repository), \
                     patch("sandbox.hosting.images.activation.v2_service.ActivationServiceV2",
                           Service), redirect_stdout(output):
                 recovery.return_value.activation_host_state_port.return_value = object()
                 recovery.return_value.target_mutation_port.return_value = object()
                 _cmd_host_image(validated, args)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(payload["delivery"]["delivery_succeeded"], payload)
         self.assertEqual(captured["request"].schema_version, 2)
+        candidate_id = hashlib.sha256(snapshot.snapshot_id.encode()).hexdigest()
         self.assertEqual(captured["execute"]["compose_files"], (
-            "/srv/sandbox/deploy-src/hosts/lenzora/docker-compose.hosted-production.yml",
-            "/srv/sandbox/runtime/hosts/lenzora/production/compose.override.yml"))
+            f"/srv/sandbox/runtime/hosts/lenzora/production/activation-inputs/{candidate_id}/effective.json",))
         self.assertEqual(captured["execute"]["compose_project"], "lenzora-production")
 
     def test_old_opaque_state_is_not_activation_authority(self):

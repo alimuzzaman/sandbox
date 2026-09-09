@@ -115,7 +115,16 @@ class JobSchedulerTests(unittest.TestCase):
             self.assertTrue(scheduler.renew(first["job_id"], deadline_seconds=300))
             future = datetime.now(timezone.utc) + timedelta(seconds=120)
             removed = scheduler.reconcile_stale(now=future)
-            self.assertIn(second["job_id"], removed)
+            self.assertEqual(removed, [])
+            self.assertEqual(
+                {row["job_id"] for row in scheduler.active()},
+                {first["job_id"], second["job_id"]},
+            )
+            repo.transition(second["job_id"], "running")
+            repo.transition(second["job_id"], "succeeded", exit_code=0)
+            removed = scheduler.reconcile_stale(now=future)
+            self.assertEqual(removed, [second["job_id"]])
             self.assertNotIn(first["job_id"], removed)
             self.assertEqual(len(scheduler.active()), 1)
+            self.assertEqual(scheduler.active()[0]["job_id"], first["job_id"])
             repo.close()

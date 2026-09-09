@@ -931,6 +931,71 @@ nor a declared alias. Pruning is opt-in because the inventory is read from the
 whole host, and a route may belong to a checkout that this project's config
 cannot see.
 
+### `delivery` route contract (Feature 054)
+
+An optional project-level `delivery` object declares the public application
+proof required by `deploy --expose` and `preview create`. Route configuration
+and verification are separate: a written route is `configured`, never proof
+that the public application is ready.
+
+```json
+{
+  "delivery": {
+    "schemaVersion": 1,
+    "routes": {
+      "deadlineSeconds": 120,
+      "aliasPolicy": "serve_or_redirect_to_primary",
+      "checks": [
+        {"path": "/health", "statuses": [200], "markers": [
+          {"kind": "header_equals", "field": "X-Application", "expected": "example-app"}
+        ]}
+      ],
+      "releaseIdentity": {
+        "required": true, "path": "/health", "kind": "header",
+        "field": "X-Release", "expectedFrom": "application_commit"
+      },
+      "edgeProof": {"required": false}
+    }
+  }
+}
+```
+
+The closed schema permits one to eight checks, one to four markers per check,
+one to eight allowed status codes per check, and one to 20 unique hostnames.
+Paths are absolute public paths without query, fragment, authority, or
+userinfo. Unknown keys, secret-like values, sensitive marker headers, and
+oversized contracts fail validation. `aliasPolicy` is
+`serve_or_redirect_to_primary` or `serve_only`; HTTP must upgrade to HTTPS.
+
+`deadlineSeconds` defaults to 120 and is limited to 10–300 seconds. The CLI
+overrides the frozen value with `--verify-timeout` on `deploy` or `preview
+create`. Every requested primary and alias is checked for DNS,
+HTTP-to-HTTPS redirect, TLS, path/query preservation, allowed status, and all
+declared markers under one aggregate deadline. A generic 200, route reload, or
+healthy container cannot satisfy the contract.
+
+WordPress without an explicit contract uses the runtime default: `GET
+/wp-json/` returns 200, JSON `/url` equals the primary public origin, and
+`/namespaces` contains `wp/v2`. This is application availability proof, not
+release proof. Generic Compose projects need an explicit marker contract or
+receive `delivery_route_contract_required` before requested exposure effects.
+
+Release identity is optional. If no identity mechanism is declared, the
+result records `release_identity_state=unsupported` and scope
+`application_availability_only`. If it is required, every applicable host
+must match the exact application commit or artifact digest. A Sandbox control
+revision is never an application release identity. A required edge proof is
+owned by the existing edge service and cannot be disabled here.
+
+Covered Feature 054 operations require the controller capabilities
+`delivery_outcomes_v1`, `ordinary_recovery_admission_v1`, and
+`instance_creation_receipt_v1`; covered public route verification also requires
+`delivery_route_verification_v1` before dependent effects. Record the
+application source revision, Sandbox control source/runtime revision, and
+installed controller runtime revision independently; a project config or
+source checkout does not prove that a registered remote has the required
+controller.
+
 ## Multisite
 
 With `multisite: true` (or `"subdirectory"` / `"subdomain"`), provisioning

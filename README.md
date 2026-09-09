@@ -463,6 +463,46 @@ disables a one-shot wait) to suit the agent's output verbosity; `--follow`
 converts a validated zero into its one-second polling wait. The complete sealed
 log remains available for later retrieval.
 
+### Recoverable delivery outcomes
+
+Feature 054 requires ordinary `host apply` to run inside a durable local
+`job-start` child. The recovery receipt must be committed and read back before
+source transfer or other protected effects. A request flag by itself does not
+make a direct apply recoverable; legacy direct callers are fenced with a typed
+refusal. Use the application checkout and the full absolute Sandbox executable
+for both the durable parent and child:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+Inspect the retained job with `job-status`/`job-output`, then use
+`./sb delivery inspect` (or MCP `delivery_inspect`) for the joined outcome.
+The default query is recorded-only; `--observe` adds bounded current
+read-only evidence. `latest_attempt`, `latest_retained_complete_success`, and
+`current_observation` remain separate. See
+[`docs/delivery-outcomes.md`](docs/delivery-outcomes.md) for the closed route
+contract, exact incarnation/URL receipt rules, permanent guard limits, and
+validation status.
+
+The separate `deployment_trace_v1` capability covers the early W11 command
+trace. Inspect it with `--trace-id UUID`, or with `--trace-request-id UUID`
+when the start acknowledgement is uncertain; add `--mutation-id UUID` only
+with a trace ID to resolve one original record. Trace selectors use their own
+query mode and do not combine with legacy remote, target, operation, observe,
+limit, or cursor selectors. Trace start/record and the owner-status/owner-record
+ports are diagnostic writers and readback ports, not job or deployment
+authority. Lost acknowledgements use the original selector and ID; an
+ambiguous read stops, and no new trace, job, workload request, or initializer
+is created. Job evidence reads a bounded private snapshot, including validated
+committed WAL pages, without opening SQLite on owner files or changing shared
+memory. Changed, unsupported, or oversized captures remain partial. The
+capability and producer wiring passed isolated supported CLI/MCP exercises.
+Installed-controller and production verification remain separate gates.
+
 Generic Compose `exec` failures retain stdout and stderr independently, each
 bounded to the 1 MiB process-runner limit; when a stream overflows, the runner
 keeps both edges around an explicit truncation marker. Failures include the child `exit_code`. Human `sb exec`
@@ -811,6 +851,18 @@ and pass `--instance NAME`. Most instance-scoped commands accept
 `--instance <name>`; project-routed `ensure`/`test`/`init` use
 `--project-dir <dir>` (and `--label` where supported). Use
 `sb apply --instance NAME` to reconcile an existing named instance.
+
+`snapshot` exports from the selected instance's already running database. It does
+not regenerate Compose files or start/recreate the web tier. If the existing
+database or generated stack is unavailable, inspect `sb status --instance NAME`
+and start that instance with `sb up --instance NAME` before retrying. `snapshots`
+only lists retained artifacts; it does not prepare or reconcile a stack.
+
+Snapshot replacement keeps the old dump until the new capture is published.
+If the process stops during publication, a `*-previous-*` snapshot can remain
+in `sb snapshots` and is available through the normal restore command. Explicit
+`sb reset --rebaseline` propagates capture failure and also avoids stack
+regeneration; automatic provisioning baselines remain best-effort.
 
 `sandbox test` / `./sb test` dispatches plugin test modes: `auto` resolves to
 `unit` or `integration`; `integration` provisions and runs the external

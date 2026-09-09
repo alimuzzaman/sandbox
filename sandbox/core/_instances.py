@@ -1205,10 +1205,62 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
 
 
 def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
+                    create: bool = False, php_version=None, wp_version=None,
+                    config_label=None, config_file=None, creation_context=None,
+                    expected_incarnation=None) -> dict:
+    """Ensure once; covered same-request calls return retained ownership only."""
+    kwargs = dict(label=label, create=create, php_version=php_version,
+                  wp_version=wp_version, config_label=config_label, config_file=config_file)
+    if creation_context is None:
+        return _ensure_instance_impl(cfg, project_dir, **kwargs)
+    from sandbox.server_config.creation_requests import (
+        finish_creation_fields, lookup_creation_receipt, validate_creation_context,
+    )
+    context = validate_creation_context(creation_context)
+    sc = _core()
+    root = sc.load_project_config(project_dir, label=config_label or label,
+                                  **({} if config_file is None else {'config_file': config_file}))['root']
+    attempt = {'selected': False}
+    try:
+        result = _ensure_instance_impl(cfg, project_dir, **kwargs,
+                                      creation_context=context,
+                                      expected_incarnation=expected_incarnation,
+                                      creation_attempt=attempt)
+    except Exception:
+        if not attempt['selected']:
+            raise
+        # A normal failure may complete the already committed relation. A kill
+        # or interrupted child stays pending; storage failures never mask it.
+        try:
+            with sc.project_lock(root):
+                record = sc.registry_get(root, label=label)
+                proof = lookup_creation_receipt(record, context, expected_incarnation)
+                if proof.get('ok') and proof['creation_receipt']['completion'] == 'pending':
+                    sc.registry_put(root, label=label,
+                        **finish_creation_fields(record, context, succeeded=False))
+        except Exception:
+            pass
+        raise
+    if result.get('lookup_only') or not attempt['selected']:
+        return result
+    with sc.project_lock(root):
+        record = sc.registry_get(root, label=label)
+        proof = lookup_creation_receipt(record, context, expected_incarnation)
+        if not proof.get('ok'):
+            return proof
+        record = sc.registry_put(root, label=label,
+            **finish_creation_fields(record, context, succeeded=result.get('ok') is not False))
+        receipt = lookup_creation_receipt(record, context, expected_incarnation)['creation_receipt']
+    return dict(result, creation_receipt=receipt)
+
+
+def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                     create: bool = False, php_version: str | None = None,
                     wp_version: str | None = None,
                     config_label: str | None = None,
-                    config_file: str | Path | None = None) -> dict:
+                    config_file: str | Path | None = None,
+                    creation_context=None, expected_incarnation=None,
+                    creation_attempt=None) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_install
     """Create-if-missing: boot a per-directory instance for the project at
     `project_dir`, keyed by its canonical root + `label` in the registry.
@@ -1262,6 +1314,29 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     ready_install_state = None
     with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import (
+                validate_resolved_context, reserve_creation_request, scope_key,
+                request_key, lookup_creation_receipt, pending_receipts, replay_creation_result,
+                CreationRequestError,
+            )
+            creation_context = validate_resolved_context(
+                creation_context, pconf, label=label, create_allowed=bool(create),
+                config_label=config_label,
+            )
+            if (pconf.get('wordpressRuntime') or {}).get('mode', 'compose') != 'compose' or pconf.get('server') == 'herd':
+                raise CreationRequestError('unsupported_capability')
+            if expected_incarnation is not None and (existing or {}).get('instance_incarnation_id') != expected_incarnation:
+                raise CreationRequestError('instance_incarnation_changed')
+            guard = reserve_creation_request(scope_key(creation_context), request_key(creation_context), creation_context['operation_id'], creation_context['intent_digest'])
+            if guard['state'] == 'existing':
+                return replay_creation_result(existing, creation_context, expected_incarnation)
+            if existing:
+                if not existing.get('instance_incarnation_id'):
+                    raise CreationRequestError('instance_identity_legacy')
+                receipts = pending_receipts(existing, creation_context, existing['instance'], existing['instance_incarnation_id'], 'reused')
+                existing = sc.registry_put(root, label=label, creation_receipts=receipts)
+                creation_attempt['selected'] = True
         # Probe the Docker engine before the port allocator, local YAML, or
         # pending registry record can mutate state.  A stopped/unreachable
         # engine used to surface only after the first unbounded Compose call,
@@ -1316,9 +1391,10 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # ports before the ready fast path; otherwise ensure can report a
             # healthy HTTP container while the next compose up partially fails and
             # leaves WP's database network unusable.
-            cfg = _resolve_port_conflicts(
-                cfg, instance_names={existing["instance"]}
-                if existing and existing.get("instance") else set())
+            if creation_context is None:
+                cfg = _resolve_port_conflicts(
+                    cfg, instance_names={existing["instance"]}
+                    if existing and existing.get("instance") else set())
             resolved_existing = (
                 resolve_instances(cfg).get(existing.get("instance"))
                 if existing and existing.get("instance") else None
@@ -1401,6 +1477,13 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                  f"(WP={ports['wordpress_port']} server={server}"
                  f"{f' php={php_v}' if php_v else ''}{f' wp={wp_v}' if wp_v else ''})")
 
+            if creation_context is not None and not existing:
+                receipts = pending_receipts(None, creation_context, name, server_config_identity['instance_incarnation_id'], 'created')
+                existing = sc.registry_put(root, label=label, instance=name, status='pending',
+                    wordpress_port=ports['wordpress_port'], db_port=ports['db_port'],
+                    mailpit_port=ports['mailpit_port'], server=server,
+                    creation_receipts=receipts, **server_config_identity)
+                creation_attempt['selected'] = True
             block = _build_instance_block(cfg, name, root, pconf, ports, server)
 
             # Resolve, materialize, and build extension images before writing
@@ -1540,7 +1623,8 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
 
 
 def apply_config(cfg: dict, project_dir: str, label: str | None = None,
-                 config_file: str | Path | None = None) -> dict:
+                 config_file: str | Path | None = None, creation_context=None,
+                 expected_incarnation=None) -> dict:
     """Reconcile a RUNNING instance with its project config — WITHOUT dropping
     the DB or uploads. This is the in-place counterpart to recreate_instance
     (which wipes data). Use it after editing sandbox.config.json (toggling
@@ -1580,6 +1664,15 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
                     f"pass label= to disambiguate.")
             raise sc.ConfigError(
                 f"no instance for {root} yet — run ensure_instance first.")
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import lookup_creation_receipt, CreationRequestError
+            if expected_incarnation is None:
+                raise CreationRequestError('instance_incarnation_required')
+            proof = lookup_creation_receipt(existing, creation_context, expected_incarnation)
+            if not proof.get('ok'):
+                raise CreationRequestError(proof['error']['code'])
+            if proof['creation_receipt']['completion'] != 'succeeded':
+                raise CreationRequestError('creation_request_unknown')
         name = existing["instance"]
         label = existing["label"]
         # Re-load with the RESOLVED label now known, so a per-label
@@ -1588,6 +1681,10 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
         pconf = sc.load_project_config(
             project_dir, label=label, **config_kwargs,
         )
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import validate_resolved_context
+            creation_context = validate_resolved_context(creation_context, pconf,
+                label=label, create_allowed=creation_context['intent_fields']['create_allowed'])
         ports = {
             "wordpress_port": existing["wordpress_port"],
             "db_port": existing["db_port"],
@@ -1611,6 +1708,9 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
         # 1. Rewrite the instance block from the current config, then resolve
         # and build opted-in extension images before persisting it. A failed
         # parent pull/build therefore cannot touch the running stack.
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import reserve_creation_reconcile
+            reserve_creation_reconcile(creation_context)
         block = _build_instance_block(cfg, name, root, pconf, ports, server)
         try:
             _prepared_extensions = prepare_php_extension_runtime(block, server)
@@ -1963,3 +2063,110 @@ def registry_put(root, label="default", **fields) -> dict:
     """Compatibility facade for updating one typed registry record."""
     import sandbox_core as sc
     return sc.registry_put(root, label=label, **fields)
+
+
+def mutate_creation_url(project_dir, *, label, creation_context,
+                        expected_incarnation, instance_id, url):
+    """Write/read one authorized public URL under the exact owner project lock."""
+    from urllib.parse import urlsplit
+    from sandbox.server_config.models import validate_creation_context, creation_digest, validate_url_mutation_result
+    from sandbox.server_config.creation_requests import (
+        now, lookup_creation_receipt, validate_resolved_context, CreationRequestError,
+    )
+    context = validate_creation_context(creation_context)
+    if not isinstance(expected_incarnation, str) or not re.fullmatch(r'inc_[0-9a-f]{32}', expected_incarnation):
+        raise CreationRequestError('instance_incarnation_required')
+    if not isinstance(instance_id, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', instance_id):
+        raise CreationRequestError('creation_context_invalid')
+    if not isinstance(url, str) or len(url.encode()) > 2048 or any(ord(char) < 33 or ord(char) == 127 for char in url):
+        raise CreationRequestError('public_url_invalid')
+    parsed = urlsplit(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise CreationRequestError('public_url_invalid')
+    sc = _core()
+    pconf = sc.load_project_config(project_dir, label=label)
+    context = validate_resolved_context(context, pconf, label=label,
+        create_allowed=context['intent_fields']['create_allowed'])
+    if pconf.get('kind', 'wordpress') != 'wordpress' or pconf.get('server') == 'herd' or (pconf.get('wordpressRuntime') or {}).get('mode', 'compose') != 'compose':
+        raise CreationRequestError('unsupported_capability')
+    root = pconf['root']
+    result = {'operation_id': context['operation_id'], 'request_id': context['request_id'],
+        'target_digest': context['intent_fields']['target_scope_digest'],
+        'expected_incarnation': expected_incarnation, 'observed_incarnation': None,
+        'before_observed_at': None, 'writes': {'home': 'not_applicable', 'siteurl': 'not_applicable'},
+        'readback': {'home': None, 'siteurl': None}, 'finished_at': None,
+        'result_code': 'remote_instance_url_incomplete'}
+    with sc.project_lock(root):
+        def verify():
+            record = sc.registry_get(root, label=label)
+            proof = lookup_creation_receipt(record, context, expected_incarnation)
+            if not proof.get('ok'):
+                raise CreationRequestError(proof['error']['code'])
+            if proof['creation_receipt']['instance_id'] != instance_id:
+                raise CreationRequestError('instance_incarnation_changed')
+            if proof['creation_receipt']['completion'] != 'succeeded':
+                raise CreationRequestError('creation_request_unknown')
+            result['observed_incarnation'] = record['instance_incarnation_id']
+            result['before_observed_at'] = result['before_observed_at'] or now()
+        verify()
+        record = sc.registry_get(root, label=label)
+        retained = record.get('creation_url_results', [])
+        if not isinstance(retained, list) or len(retained) > 40:
+            raise CreationRequestError('creation_receipt_capacity')
+        url_digest = creation_digest(url)
+        for saved in retained:
+            if not isinstance(saved, dict) or len(json.dumps(saved).encode()) > 4096:
+                raise CreationRequestError('creation_request_unavailable')
+            if saved.get('operation_id') != context['operation_id']:
+                continue
+            if (saved.get('request_id') != context['request_id'] or
+                    saved.get('intent_digest') != context['intent_digest'] or
+                    saved.get('expected_incarnation') != expected_incarnation or
+                    saved.get('url_digest') != url_digest):
+                raise CreationRequestError('creation_request_conflict')
+            # Unknown pre-write reservation is a retained result too. Never
+            # replay a write after response loss or a controller interruption.
+            prior_result = validate_url_mutation_result(saved['result'])
+            if any(prior_result[key] != result[key] for key in ('operation_id', 'request_id', 'expected_incarnation', 'target_digest')):
+                raise CreationRequestError('creation_request_conflict')
+            return prior_result
+        if len(retained) >= 40:
+            raise CreationRequestError('creation_receipt_capacity')
+        reserved = {'operation_id': context['operation_id'], 'request_id': context['request_id'],
+                    'intent_digest': context['intent_digest'],
+                    'expected_incarnation': expected_incarnation, 'url_digest': url_digest,
+                    'result': dict(result, writes={'home': 'unknown', 'siteurl': 'unknown'},
+                                   finished_at=now())}
+        retained = [*retained, reserved]
+        sc.registry_put(root, label=label, creation_url_results=retained)
+        try:
+            for field in ('home', 'siteurl'):
+                verify()
+                result['writes'][field] = 'attempted'
+                response = wpcli(['option', 'update', field, url], instance=instance_id,
+                                 check=False, capture=True, timeout=20)
+                result['writes'][field] = 'succeeded' if response.returncode == 0 else 'failed'
+            for field in ('home', 'siteurl'):
+                verify()
+                response = wpcli(['option', 'get', field], instance=instance_id,
+                                 check=False, capture=True, timeout=20)
+                result['readback'][field] = response.returncode == 0 and (response.stdout or '').strip() == url
+            if all(value == 'succeeded' for value in result['writes'].values()) and all(result['readback'].values()):
+                result['result_code'] = 'remote_instance_url_verified'
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            if getattr(exc, 'code', str(exc)) == 'instance_incarnation_changed':
+                result['result_code'] = 'instance_incarnation_changed'
+            for field, value in result['writes'].items():
+                if value == 'attempted':
+                    result['writes'][field] = 'unknown'
+        result['finished_at'] = now()
+        # A failed final commit leaves the prior unknown result intact. It
+        # cannot authorize another attempt; callers retain partial evidence.
+        current = sc.registry_get(root, label=label)
+        if (current or {}).get('instance_incarnation_id') != expected_incarnation:
+            result['result_code'] = 'instance_incarnation_changed'
+            return result
+        result = validate_url_mutation_result(result)
+        reserved = dict(reserved, result=result)
+        sc.registry_put(root, label=label, creation_url_results=[*retained[:-1], reserved])
+    return result

@@ -284,7 +284,10 @@ def _compose_up(
             raise SystemExit(returncode)
         die(message, code=returncode)
 
-    detail = " ".join(output.split())[:500]
+    from sandbox.services.redaction import redact_text
+    detail = " ".join(redact_text(output).split())
+    if len(detail) > 500:
+        detail = detail[:200] + " ... " + detail[-295:]
     suffix = f": {detail}" if detail else ""
     if json_output:
         print(json.dumps({
@@ -1295,8 +1298,9 @@ def cmd_install(cfg, args) -> None:
         _remove_obsolete_builder_authoring_assets(inst)
 
     base = site_url(inst_cfg)  # https://<name>.<tld> when secured, else localhost:<port>
-    ok(f"Admin: {base}/wp-admin"
-       f"  •  Login: {base}/?sandbox_autologin={autologin_token}")
+    # Install also runs inside ensure and durable jobs. Credentials belong only
+    # in the explicitly authorized final ensure result, never progress output.
+    ok(f"Admin: {base}/wp-admin")
 
 
 def wp_is_installed(instance: str) -> bool:
@@ -1740,6 +1744,9 @@ def cmd_smoke(cfg, args) -> None:
     try:
         entry = ensure(); instance = entry['instance']
         check(stage, True)
+        saved = cli('snapshot', 'smoke-before-marker', '--instance', instance, '--db-only')
+        if saved.returncode:
+            raise RuntimeError('fixture_snapshot_failed')
         wp('option', 'update', 'sandbox_smoke_marker', project.name)
         verify(entry, 'fresh')
         stage = 'repeated ensure'

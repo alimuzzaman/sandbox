@@ -284,34 +284,22 @@ class ProvisioningTests(unittest.TestCase):
                         credential_reference_revision="credential-revision-a",
                         secret_sources={})
 
-    def test_image_identity_accepts_partial_resource_evidence_but_recovery_stays_strict(self):
+    def test_authenticated_identity_is_independent_of_optional_resource_telemetry(self):
         from sandbox.commands.hosting import _authenticated_machine_identity
-        from sandbox.resources.host_memory import HostMemoryStatusProjection
         from sandbox.hosting.recovery.service import RecoveryAuthorityError
 
-        status = {
-            "target_identity": "a" * 24,
-            "observed_at": "2026-09-03T00:00:00Z",
-            "evidence_state": "partial",
-        }
-
-        class Service:
-            def status(self, _budget):
-                return {"ok": False, "data": status}
-
-            def projection(self, value):
-                return HostMemoryStatusProjection(
-                    value["target_identity"], value["observed_at"],
-                    value["evidence_state"], None, None, 0, 0,
-                    "absent", "missing", None, "unknown", None,
-                )
-
-        with patch("sandbox.resources.context._build_host_memory_service",
-                   return_value=Service()):
+        with patch("sandbox.resources.context.authenticated_target_identity",
+                   return_value={"target_identity": "a" * 24,
+                                 "evidence_state": "partial"}) as identity, \
+             patch("sandbox.resources.context._build_host_memory_service",
+                   side_effect=AssertionError("optional telemetry service was opened")):
             self.assertEqual(_authenticated_machine_identity(
                 "scaleway-sandbox", allow_partial=True), "a" * 24)
+            self.assertEqual(_authenticated_machine_identity("scaleway-sandbox"), "a" * 24)
+            self.assertEqual(identity.call_count, 2)
+            identity.side_effect = ValueError("recovery_target_identity_unavailable")
             with self.assertRaises(RecoveryAuthorityError):
-                _authenticated_machine_identity("scaleway-sandbox")
+                _authenticated_machine_identity("scaleway-sandbox", allow_partial=True)
 
     def test_missing_authority_refuses_before_target_mutation_port_is_opened(self):
         from sandbox.commands.hosting import _cmd_host_image_provision

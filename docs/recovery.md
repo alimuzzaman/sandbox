@@ -168,9 +168,21 @@ Controller integrations may configure `ScopedMaterializer` and call
 not caller-supplied artifact paths. Its adapter must validate capabilities and resolve
 all selected declarations in `observe`, bind them to the remote machine identity,
 installed revision and source digest, and validate every native dump/archive before
-returning capture files. The hosted adapter derives one deterministic request ID from
-the complete declaration and source binding; its controller must use that ID for a
-durable, replay-safe remote operation. The coordinator checks that every profile
+returning capture files. Capture contract version 2 also requires the admitted backup
+set ID as `backup_operation_id`. The hosted adapter derives its deterministic request
+ID from that operation, the complete declaration and source binding. A new backup
+set therefore performs a new capture even when source topology and revisions are
+unchanged; retrying the same set uses its original request. Controllers without the
+operation-binding capability are refused before capture.
+
+The registered WordPress controller serializes each set/artifact operation and binds
+it to one request. Declaration or source-binding drift under the same operation is
+refused. Its cached archive requires a versioned receipt containing the operation,
+request, source digest, capture times and archive SHA-256. Missing, empty, changed or
+unreceipted archives fail closed. Old request-named archives remain retained and are
+never adopted as a fresh capture for a new set. The receipt is published after the
+archive; an interruption between those writes is an incomplete capture requiring
+inspection, not permission to recapture. The coordinator checks that every profile
 returns nonempty owner-controlled regular files inside its private output directory
 and that the binding still matches after capture. It preserves the original symbolic
 roots in the published manifest. Source-specific coverage and dump-format validation

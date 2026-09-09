@@ -89,8 +89,11 @@ class SettlementCliTests(unittest.TestCase):
         from tests.test_hosting_image_activation_settlement_forward import successor_fixture, signed_request
         _state_value, unsigned, grant, approval = successor_fixture()
         request = signed_request(unsigned, approval)
-        result = {"schema_version": 2, "ok": True, "result_class": "success", "code": "committed"}
+        result = {"schema_version": 2, "ok": True, "result_class": "success", "code": "committed",
+            "request_id": request.request_id, "request_digest": request.request_digest}
         class Repository:
+            def snapshot(self, _target):
+                return _state_value
             def lookup_terminal_v2(self, target, *, request_id, request_digest):
                 self_test.assertEqual((target, request_id, request_digest),
                     (approval.target.target_identity, request.request_id, request.request_digest))
@@ -101,6 +104,9 @@ class SettlementCliTests(unittest.TestCase):
             "stage_ledger": {"authority": "feature-050-stage-ledger-v2", "revision": 1}}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            from tests.test_hosting import _public_acme_manifest
+            (root / "sandbox.hosting.yml").write_text(_public_acme_manifest())
+            (root / "compose.yml").write_text("services: {}\n")
             (root / "plan.json").write_text(json.dumps(request.plan_set.as_mapping()))
             (root / "proof.json").write_text(json.dumps(request.proof_set))
             args = SimpleNamespace(image_action="activate", project_dir=str(root), environment="production",
@@ -109,7 +115,9 @@ class SettlementCliTests(unittest.TestCase):
                 admission_deadline="2999-01-01T00:00:00Z", settlement_forward_approval=approval.approval_digest,
                 settlement_predecessor=approval.predecessor_digest)
             out = StringIO()
-            with patch("sandbox.commands.hosting._host_image_machine_bundle", return_value=bundle), \
+            with patch("sandbox.commands.hosting.RUNTIME_DIR", root / "runtime"), \
+                 patch("sandbox.delivery.hosting.RUNTIME_DIR", root / "runtime"), \
+                 patch("sandbox.commands.hosting._host_image_machine_bundle", return_value=bundle), \
                  patch("sandbox.hosting.images.activation.repository.ActivationRepository", return_value=Repository()), \
                  patch("sandbox.hosting.images.activation.settlement_store.SettlementApprovalStore.read_forward_claim",
                        return_value=approval) as read_claim, \
@@ -118,8 +126,10 @@ class SettlementCliTests(unittest.TestCase):
                  patch("sandbox.commands.hosting._authenticated_machine_identity", side_effect=AssertionError("runtime opened")), \
                  patch("sandbox.commands.hosting.personal_secrets.hosting_binding_key", side_effect=AssertionError("broker opened")), \
                  patch("sandbox.commands.hosting.time.time", return_value=approval.expires_at + 100), redirect_stdout(out):
-                _cmd_host_image({}, args)
-            self.assertEqual(json.loads(out.getvalue()), result)
+                _cmd_host_image({"project_root": str(root), "environment": "production"}, args)
+            self.assertEqual(json.loads(out.getvalue()),
+                dict(result, delivery_error="required_evidence_missing"))
+            self.assertFalse((root / "runtime" / "delivery").exists())
             read_claim.assert_called_once_with(approval.target.as_mapping(), approval.approval_digest)
 
     def test_edge_preflight_checks_provider_and_defers_origin_but_receipt_requires_origin(self):

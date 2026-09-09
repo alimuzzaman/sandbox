@@ -422,6 +422,61 @@ uniquely new default instance. An unavailable or ambiguous inventory fails close
 leaves the remote unchanged or reports cleanup as unverified; Sandbox never guesses which
 pre-existing instance to delete.
 
+### Recoverable delivery and exposure outcomes
+
+Feature 054 adds a durable admission boundary to ordinary hosted apply. Use
+the application checkout as the durable job's `--project-dir`, bind its full
+application `HEAD`, and invoke the full absolute Sandbox executable as the
+child:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+The existing recovery receipt must be committed and read back before source,
+initializer, runtime, route, or generation effects. `host plan` only reports
+`recovery_eligibility`; `requires_submission` is not admission. A direct
+`host apply` with a request flag but no durable receipt, and older direct
+callers, are unsupported and fenced with `recovery_context_required` before
+effects. A valid authenticated target identity can remain usable with partial
+optional telemetry; required resource policy is checked separately.
+
+Inspect the original job with `job-status` and `job-output`, then query the
+joined result with `./sb delivery inspect`. Its default is recorded-only;
+`--observe` adds bounded current read-only evidence. It reports
+`latest_attempt`, `latest_retained_complete_success`, and current observation
+as separate values. A configured route, healthy container, accepted job, or
+receipt-only result does not establish public or production success. The
+application revision, Sandbox control revision, and installed controller
+revision remain separate evidence. Ordinary hosted evidence stays partial when
+the owner has no independently observed aggregate configuration digest, and
+legacy authority never fabricates historical success. See [recoverable delivery outcomes](delivery-outcomes.md)
+for selectors, retention, route proof, creation/incarnation, URL result, and
+permanent guard limits. Feature 054 validation is pending; no source names or
+local checks are a substitute for installed-controller or public acceptance.
+
+Covered deploy/preview ensure calls also require the owner-created
+`instance_creation_receipt_v1` relation bound to the exact project, label,
+request, intent digest, instance, and incarnation before dependent URL or
+exposure effects. A reused instance remains reused, and a lost response or
+failed startup remains unknown/pending. A retained URL result is returned on
+the same request without repeating `home`/`siteurl` writes; an incarnation
+change stops further writes.
+
+The early full-command trace is a separate diagnostic capability. Query it
+from the original application/control project with the same absolute Sandbox
+executable, controller, `SANDBOX_HOME`, and `--project-dir`; use
+`--trace-id`, `--trace-request-id`, or the trace-plus-`--mutation-id` selector
+described in [recoverable delivery outcomes](delivery-outcomes.md). Trace
+queries are recorded-only by default and never create a job, replay a
+deployment, or refresh history. Producer stage reports remain claims until
+native job, activation, runtime, and route owners independently match their
+exact identities. Capability/source and installed-controller verification is
+still pending.
+
 Host apply keeps bounded diagnostics at the SSH boundary. If a remote command times
 out, the CLI reports the timeout and a redacted tail of any partial output instead of
 discarding the captured stream; the remote command is not replayed automatically
@@ -928,12 +983,24 @@ reference. Summary:
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name> [--deploy-timeout <seconds>]` | One-way, on-demand push of local state to the VPS with a bounded Git push budget |
 | `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
+| `./sb delivery inspect --project-dir <dir> --remote <name> (--environment <env> \| --label <label>) [--operation-id <id> \| --request-id <id>] [--observe] [--limit 1..50] [--cursor <token>] [--json]` | Read the executing controller's bounded delivery history; default is recorded-only, while `--observe` adds current read-only evidence |
 | `./sb wp --remote <name> --project-dir <dir> --timeout <seconds> -- <wp args...>` | Run bounded WP-CLI against that project's existing deployed WordPress instance through authenticated control HTTP; request/unit/live runtime digests and stable non-symlink deploy identity must match; host-file staging command families are refused; timeout or output overflow is nonzero unknown; no workspace creation, generic exec, SSH fallback, or automatic retry |
 
 MCP tool:
 `remote_deploy(project_dir: str, remote: str, ensure: bool = True, expose: bool = True, domain: str | None = None, plugin_slug: str | None = None) -> dict`.
 It mirrors `run_tests`/`run_plugin_check`'s calling convention and returns `instance`
 plus `url` when exposure succeeds.
+
+The current `remote_deploy` wrapper has the existing parameters shown above. The
+Feature 054 contract calls for equivalent optional request identity and
+verification-timeout fields in that wrapper; source integration for those MCP
+fields is still pending. Do not treat a documentation example as proof that an
+installed remote controller accepts them.
+
+The Feature 054 MCP diagnostic is `delivery_inspect(project_dir, remote,
+environment=None, label=None, operation_id=None, request_id=None,
+observe=False, limit=10, cursor=None)`. It shares the CLI serializer and
+returns `ok=true` when the query was serviced, not when delivery succeeded.
 
 `remote service status` checks the selected unit's non-secret ownership marker and
 runtime revision, expected bind/port, systemd activity/enablement, user linger, local

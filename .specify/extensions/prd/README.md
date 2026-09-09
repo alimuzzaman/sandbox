@@ -6,17 +6,16 @@ Adds a product-requirements phase before `speckit.specify`.
 specify extension add --dev /path/to/spec-kit/extensions/prd
 ```
 
-Run `speckit.prd.refine` with a product idea. Terra Medium is the preferred
-drafting configuration. A PRD can reach `READY FOR SPECKIT` only after an
-independent Sol High validation passes. The mandatory `before_specify` hook blocks
-unreviewed PRDs and hands a validated PRD's directory to the core specification
-command. Model names are strong task-launch defaults: the command reports a
-fallback when the requested configuration is unavailable and never represents a
-fallback as completed Sol High validation.
+Run `speckit.prd.refine` with a product idea. Follow the active repository/user
+model policy for drafting, specification, planning, and implementation. A PRD can
+reach `READY FOR SPECKIT` only after independent readiness validation passes.
+Record the actual drafting and review configurations; never relabel a fallback.
+The mandatory `before_specify` hook blocks unreviewed PRDs and hands the reviewed
+feature directory to specification. It checks the verdict, not a retired model.
 
 The normal lifecycle remains `refine → specify → clarify → plan → tasks → analyze
-→ implement`. Prefer Sol Medium for specification, Terra High for implementation,
-and Sol Medium for implementation requiring broader cross-cutting judgment.
+→ implement`. Existing user authorization to complete that workflow carries
+through its phase boundaries.
 
 The extension does not merge, publish, create branches, or modify application code.
 

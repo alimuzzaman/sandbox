@@ -1220,18 +1220,29 @@ REMOTE_ENSURE_CLIENT_TIMEOUT_SECONDS = (
 )
 
 
-def ensure_remote_instance(remote: dict, target_path: str, label: str | None = None) -> dict:
+def ensure_remote_instance(remote: dict, target_path: str, label: str | None = None, *,
+                           creation_context=None, expected_incarnation=None) -> dict:
     """Run remote `sb ensure` for the deployed project and parse its JSON
     result. This is the missing second half after code deploy: it creates or
     refreshes the WordPress instance on the VPS itself."""
     sb = remote_sb_path(remote)
     label_arg = f" --label {shlex.quote(label)} --create" if label else ""
+    if creation_context is not None:
+        from sandbox.server_config.models import validate_creation_context
+        creation_context = validate_creation_context(creation_context)
+        selected_label = label or 'default'
+        if creation_context['label'] != selected_label:
+            raise ValueError('creation_request_conflict')
+        label_arg = ' --label ' + shlex.quote(selected_label)
+        if creation_context['intent_fields']['create_allowed']:
+            label_arg += ' --create'
     # This command already runs on the selected VPS.  A remote-first project
     # config must not make this nested ensure resolve its named remote again:
     # the VPS owns only its co-located runtime registry.
     ensure = (
         f"{shlex.quote(sb)} ensure --local --project-dir {shlex.quote(target_path)}"
         f"{label_arg} --json"
+        + _creation_transport_args(creation_context, expected_incarnation)
     )
     # Bound the command on the VPS, not just the local SSH client. `exec`
     # keeps the timeout supervisor in the session's foreground process group;
@@ -1244,10 +1255,29 @@ def ensure_remote_instance(remote: dict, target_path: str, label: str | None = N
     try:
         res = ssh_run(remote, cmd, timeout=REMOTE_ENSURE_CLIENT_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
+        if creation_context is not None:
+            return {'ok': False, 'schema_version': 1, 'error': {'code': 'creation_request_unknown'}}
         raise RuntimeError(
             f"remote instance ensure timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
         ) from exc
     data = _last_json(res.stdout or "")
+    if creation_context is not None:
+        if len((res.stdout or '').encode()) > 65536 or not isinstance(data, dict):
+            return {'ok': False, 'schema_version': 1, 'error': {'code': 'creation_request_unknown'}}
+        if data.get('ok') is False:
+            return data
+        if res.returncode:
+            return {'ok': False, 'schema_version': 1, 'error': {'code': 'creation_request_unknown'}}
+        from sandbox.server_config.models import validate_creation_receipt
+        try:
+            receipt = validate_creation_receipt(data.get('creation_receipt'))
+            if any(receipt[key] != creation_context[key] for key in ('operation_id', 'request_id', 'job_id', 'intent_digest', 'project_identity', 'project_root_digest', 'label')):
+                raise ValueError('creation_request_conflict')
+            if expected_incarnation is not None and receipt['instance_incarnation_id'] != expected_incarnation:
+                raise ValueError('instance_incarnation_changed')
+        except (ValueError, TypeError, KeyError):
+            return {'ok': False, 'schema_version': 1, 'error': {'code': 'creation_request_unknown'}}
+        return data
     if res.returncode == 124:
         raise RuntimeError(
             f"remote instance ensure timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
@@ -1261,7 +1291,8 @@ def ensure_remote_instance(remote: dict, target_path: str, label: str | None = N
 
 
 def reconcile_remote_instance(remote: dict, target_path: str,
-                              label: str | None = None) -> dict:
+                              label: str | None = None, *, creation_context=None,
+                              expected_incarnation=None) -> dict:
     """Apply the deployed WordPress config before post-deploy activation.
 
     ``ensure`` deliberately fast-returns for a reachable ready instance. A
@@ -1269,11 +1300,19 @@ def reconcile_remote_instance(remote: dict, target_path: str,
     mounts, so the remote deploy flow must run the existing non-destructive
     apply operation before expecting the deployed plugin to be visible.
     """
+    if creation_context is not None:
+        if expected_incarnation is None:
+            raise ValueError('instance_incarnation_required')
+        proof = read_remote_creation_receipt(remote, target_path, label,
+            creation_context=creation_context, expected_incarnation=expected_incarnation)
+        if not proof.get('ok'):
+            return proof
     sb = remote_sb_path(remote)
     label_arg = f" --label {shlex.quote(label)}" if label else ""
     apply = (
         f"{shlex.quote(sb)} apply --project-dir {shlex.quote(target_path)}"
         f"{label_arg} --json"
+        + _creation_transport_args(creation_context, expected_incarnation)
     )
     cmd = (
         "exec timeout --signal=TERM "
@@ -1582,18 +1621,159 @@ def delete_remote_instance_for_label(remote: dict, target_path: str, label: str)
     return True
 
 
-def set_remote_instance_url(remote: dict, target_path: str, url: str) -> None:
-    """Set WordPress home/siteurl for the remote project."""
+def _creation_transport_args(context, expected_incarnation=None):
+    if context is None:
+        if expected_incarnation is not None:
+            raise ValueError('creation_context_required')
+        return ''
+    from sandbox.server_config.models import validate_creation_context
+    context = validate_creation_context(context)
+    suffix = ' --creation-context-json ' + shlex.quote(json.dumps(context, separators=(',', ':')))
+    if expected_incarnation is not None:
+        if not re.fullmatch(r'inc_[0-9a-f]{32}', expected_incarnation):
+            raise ValueError('creation_context_invalid')
+        suffix += ' --expected-incarnation ' + shlex.quote(expected_incarnation)
+    return suffix
+
+
+def _remote_creation_query(remote, target_path, label, mode, *, context=None, expected_incarnation=None, prepare=None, kind=None, runtime_mode="compose"):
+    command = shlex.join([remote_sb_path(remote), 'ensure', '--local', '--project-dir', target_path,
+                          '--label', label or 'default', '--json', mode])
+    if kind is not None:
+        if kind not in {'wordpress', 'compose'} or runtime_mode != 'compose':
+            raise ValueError('unsupported_capability')
+        command += ' --creation-kind ' + shlex.quote(kind) + ' --creation-runtime-mode compose'
+    if prepare is not None:
+        command += ' ' + shlex.quote(json.dumps(prepare, separators=(',', ':')))
+    command += _creation_transport_args(context, expected_incarnation)
+    try:
+        result = ssh_run(remote, command, timeout=30)
+        raw = result.stdout or ''
+        if len(raw.encode()) > 16384:
+            raise ValueError('creation_transport_invalid')
+        value = _last_json(raw)
+        if not isinstance(value, dict) or value.get('schema_version') != 1:
+            raise ValueError('creation_capability_unsupported')
+        if result.returncode and value.get('ok'):
+            raise ValueError('creation_transport_invalid')
+        return value
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        return {'ok': False, 'schema_version': 1, 'error': {'code': 'creation_request_unknown'}}
+
+
+def remote_creation_capability(remote, target_path, label=None, *, kind=None, runtime_mode='compose'):
+    return _remote_creation_query(remote, target_path, label, '--creation-capability', kind=kind, runtime_mode=runtime_mode)
+
+
+def prepare_creation_context(remote, target_path, label=None, *, operation_id, request_id,
+                             job_id=None, delivery_intent_digest, target_scope_digest,
+                             create_allowed=False):
+    from sandbox.server_config.models import validate_creation_context
+    result = _remote_creation_query(remote, target_path, label, '--creation-prepare-json',
+        prepare={'delivery_intent_digest': delivery_intent_digest,
+                 'target_scope_digest': target_scope_digest, 'create_allowed': create_allowed})
+    if not result.get('ok'):
+        return result
+    fields = result['intent_fields']
+    context = {'schema_version': 1, 'operation_id': operation_id, 'request_id': request_id,
+        'job_id': job_id, 'intent_digest': result['intent_digest'], 'intent_fields': fields,
+        **{key: fields[key] for key in ('project_identity', 'project_root_digest', 'label')}}
+    return {'ok': True, 'schema_version': 1, 'creation_context': validate_creation_context(context)}
+
+
+def read_remote_creation_receipt(remote, target_path, label=None, *, creation_context,
+                                 expected_incarnation=None):
+    from sandbox.server_config.models import validate_creation_context, validate_creation_receipt
+    context = validate_creation_context(creation_context)
+    result = _remote_creation_query(remote, target_path, label, '--creation-receipt',
+        context=context, expected_incarnation=expected_incarnation)
+    if result.get('ok'):
+        receipt = validate_creation_receipt(result.get('creation_receipt'))
+        if any(receipt[key] != context[key] for key in ('operation_id', 'request_id', 'job_id', 'intent_digest', 'project_identity', 'project_root_digest', 'label')):
+            raise ValueError('creation_request_conflict')
+        if expected_incarnation is not None and receipt['instance_incarnation_id'] != expected_incarnation:
+            raise ValueError('instance_incarnation_changed')
+        return {'ok': True, 'schema_version': 1, 'creation_receipt': receipt,
+                'instance': receipt['instance_id'], 'instance_incarnation_id': receipt['instance_incarnation_id'],
+                'lookup_only': True}
+    return result
+
+
+def set_remote_instance_url(remote: dict, target_path: str, instance_name: str,
+                            url: str, *, label=None, creation_context=None,
+                            expected_incarnation=None):
+    if creation_context is None:
+        return _set_remote_instance_url_legacy(remote, target_path, instance_name, url)
+    from sandbox.server_config.models import validate_creation_context, validate_url_mutation_result
+    from sandbox.server_config.creation_requests import now
+    context = validate_creation_context(creation_context)
+    if expected_incarnation is None:
+        raise ValueError('instance_incarnation_required')
+    payload = json.dumps({'instance_id': instance_name, 'url': url}, separators=(',', ':'))
+    if len(payload.encode()) > 4096:
+        raise ValueError('public_url_invalid')
+    result = {'operation_id': context['operation_id'], 'request_id': context['request_id'],
+        'target_digest': context['intent_fields']['target_scope_digest'],
+        'expected_incarnation': expected_incarnation, 'observed_incarnation': None,
+        'before_observed_at': None, 'writes': {'home': 'unknown', 'siteurl': 'unknown'},
+        'readback': {'home': None, 'siteurl': None}, 'finished_at': None,
+        'result_code': 'remote_instance_url_incomplete'}
+    command = shlex.join([remote_sb_path(remote), 'ensure', '--local', '--project-dir', target_path,
+        '--label', label or 'default', '--json', '--creation-url-json', payload])
+    command += _creation_transport_args(context, expected_incarnation)
+    command = 'exec timeout --signal=TERM --kill-after=5s 120s ' + command
+    try:
+        response = ssh_run(remote, command, timeout=130)
+        raw = response.stdout or ''
+        value = _last_json(raw) if len(raw.encode()) <= 16384 else None
+        if not isinstance(value, dict) or set(value) != set(result):
+            raise ValueError('creation_transport_invalid')
+        if any(value[key] != result[key] for key in ('operation_id', 'request_id', 'target_digest', 'expected_incarnation')):
+            raise ValueError('creation_request_conflict')
+        if value['observed_incarnation'] not in {None, expected_incarnation}:
+            raise ValueError('instance_incarnation_changed')
+        if not isinstance(value['writes'], dict) or set(value['writes']) != {'home', 'siteurl'} or any(state not in {'attempted', 'succeeded', 'failed', 'unknown', 'not_applicable'} for state in value['writes'].values()):
+            raise ValueError('creation_transport_invalid')
+        if not isinstance(value['readback'], dict) or set(value['readback']) != {'home', 'siteurl'} or any(type(state) not in {bool, type(None)} for state in value['readback'].values()):
+            raise ValueError('creation_transport_invalid')
+        if value['result_code'] not in {'remote_instance_url_verified', 'remote_instance_url_incomplete', 'instance_incarnation_changed'}:
+            raise ValueError('creation_transport_invalid')
+        if value['result_code'] == 'remote_instance_url_verified' and (response.returncode or value['observed_incarnation'] != expected_incarnation or not all(state == 'succeeded' for state in value['writes'].values()) or not all(value['readback'].values())):
+            raise ValueError('creation_transport_invalid')
+        return validate_url_mutation_result(value)
+    except (ValueError, TypeError, KeyError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        if str(exc) == 'instance_incarnation_changed':
+            result['result_code'] = 'instance_incarnation_changed'
+    result['finished_at'] = now()
+    return result
+
+
+def _set_remote_instance_url_legacy(remote: dict, target_path: str,
+                            instance_name: str, url: str) -> None:
+    """Update and read back options on the exact ensured project instance."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,30}", instance_name or ""):
+        raise ValueError("invalid remote Sandbox instance name")
+    rows = list_remote_instances(remote, target_path)
+    matches = [row for row in rows if isinstance(row, dict)
+               and row.get("name") == instance_name]
+    if len(matches) != 1:
+        raise RuntimeError("remote URL target is not uniquely registered to this project")
     sb = remote_sb_path(remote)
+    wp = shlex.join([sb, "--instance", instance_name, "wp", "--local",
+                     "--project-dir", target_path])
+    # Clear ambient label routing as well as explicitly selecting the instance.
+    # Readback uses the same selector; a partial write never reports completion.
     cmd = (
-        f"cd {shlex.quote(target_path)} && "
-        f"{shlex.quote(sb)} wp option update home {shlex.quote(url)} && "
-        f"{shlex.quote(sb)} wp option update siteurl {shlex.quote(url)}"
+        f"unset SANDBOX_INSTANCE SANDBOX_LABEL; cd {shlex.quote(target_path)} && "
+        f"{wp} option update home {shlex.quote(url)} && "
+        f"{wp} option update siteurl {shlex.quote(url)} && "
+        f"test \"$({wp} option get home)\" = {shlex.quote(url)} && "
+        f"test \"$({wp} option get siteurl)\" = {shlex.quote(url)}"
     )
     res = ssh_run(remote, cmd, timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
-            f"could not set remote instance URL: "
+            f"remote_instance_url_incomplete: inspect the exact target before retrying: "
             f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
@@ -1634,7 +1814,7 @@ def _source_tree_commit(project_root, source_root, commit: str) -> tuple[str, Pa
     source = Path(source_root).resolve()
     result = subprocess.run(
         ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
-        env=git_environment(), capture_output=True, text=True, check=False,
+        env=git_environment(overrides={"GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}), capture_output=True, text=True, check=False, timeout=120,
     )
     checkout = (result.stdout or "").strip()
     if result.returncode != 0 or not checkout:
@@ -1649,7 +1829,7 @@ def _source_tree_commit(project_root, source_root, commit: str) -> tuple[str, Pa
     prefix = PurePosixPath(*relative.parts).as_posix()
     split = subprocess.run(
         ["git", "subtree", "split", f"--prefix={prefix}", commit],
-        cwd=str(checkout_path), env=git_environment(), capture_output=True, text=True, check=False,
+        cwd=str(checkout_path), env=git_environment(overrides={"GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}), capture_output=True, text=True, check=False, timeout=120,
     )
     split_sha = next(
         (line.strip().lower() for line in reversed((split.stdout or "").splitlines())

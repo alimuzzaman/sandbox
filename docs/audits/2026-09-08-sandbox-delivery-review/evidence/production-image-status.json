@@ -1,0 +1,20 @@
+{
+  "active": {
+    "effect_entered": true,
+    "operation": "activate",
+    "phase": "uncertain",
+    "request_digest": "sha256:cf0d265271d38e13f0d14b5d30ad0e9b8ca20c00448b9f2930180341d05c4ed3",
+    "request_id": "lenzora-prod-fa945494a20852a46697fc1f105efe4233895c44-activate",
+    "schema_version": 2,
+    "transaction_digest": "sha256:dcc9f85b3d8a155f6589290acb96d8382aff1b79e6ab006f88d7e7d4d61247b9"
+  },
+  "code": "observed",
+  "current_generation_digest": null,
+  "generation": 0,
+  "ok": true,
+  "previous_generation_digest": null,
+  "retained_recovery_count": 2,
+  "retained_result_count": 5,
+  "schema_version": 1,
+  "state_schema_version": 1
+}

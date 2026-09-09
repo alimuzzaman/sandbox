@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
+from sandbox.jobs.process import ProcessIdentity
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.scheduler import WorkspaceBusy
 from sandbox.jobs.storage import JobStorage
@@ -15,6 +16,9 @@ from sandbox.jobs.supervisor import run_descriptor
 from sandbox.sync.models import SynchronizationRelationship
 from sandbox.sync.projection import SyncJobGateway
 from sandbox.sync.repository import SyncRepository
+
+
+BOOT = "11111111-2222-3333-4444-555555555555"
 
 
 class JobServiceTests(unittest.TestCase):
@@ -555,11 +559,11 @@ class JobServiceTests(unittest.TestCase):
                 queue_reason="sync_generation_pending",
             )
             jobs.claim_pending_sync_launch(
-                row["job_id"], owner_boot_id="dead-boot",
+                row["job_id"], owner_boot_id=BOOT,
                 owner_pid=99999999, owner_start_identity="dead-start",
             )
             jobs.commit_pending_sync_launch(
-                row["job_id"], owner_boot_id="dead-boot",
+                row["job_id"], owner_boot_id=BOOT,
                 owner_pid=99999999, owner_start_identity="dead-start",
             )
             gateway = MagicMock()
@@ -568,15 +572,17 @@ class JobServiceTests(unittest.TestCase):
                 jobs, JobStorage(temp, free_disk_reserve=0), None,
                 launcher=lambda _path: None, sync_gateway=gateway,
             )
-            fresh = service.reconcile_startup()
-            self.assertEqual(fresh["interrupted"], [])
-            self.assertEqual(jobs.get(row["job_id"])["lifecycle"], "queued")
-            future = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
-            jobs.connection.execute(
-                "UPDATE jobs SET updated_at=? WHERE job_id=?",
-                (future, row["job_id"]),
-            )
-            stale = service.reconcile_startup()
+            with patch("sandbox.application.job_service.capture_process_identity", return_value=None), \
+                    patch("sandbox.application.job_service.process_absence_proven", return_value=True):
+                fresh = service.reconcile_startup()
+                self.assertEqual(fresh["interrupted"], [])
+                self.assertEqual(jobs.get(row["job_id"])["lifecycle"], "queued")
+                future = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+                jobs.connection.execute(
+                    "UPDATE jobs SET updated_at=? WHERE job_id=?",
+                    (future, row["job_id"]),
+                )
+                stale = service.reconcile_startup()
             self.assertEqual(stale["interrupted"], [row["job_id"]])
             self.assertEqual(jobs.get(row["job_id"])["lifecycle"], "interrupted")
             jobs.close()
@@ -798,14 +804,16 @@ class JobServiceTests(unittest.TestCase):
             row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
                 ("echo", "ok"), 60, SourceIdentity("source")))
             repository.transition(row["job_id"], "running")
-            repository.put_process_identity(row["job_id"], host_boot_id="boot", supervisor_pid=99999999,
+            repository.put_process_identity(row["job_id"], host_boot_id=BOOT, supervisor_pid=99999999,
                 supervisor_start_identity="start", supervisor_nonce_hash="nonce")
-            result = service.reconcile_startup()
+            with patch("sandbox.application.job_service.capture_process_identity", return_value=None), \
+                    patch("sandbox.application.job_service.process_absence_proven", return_value=True):
+                result = service.reconcile_startup()
             self.assertEqual(result["interrupted"], [row["job_id"]])
             self.assertEqual(repository.get(row["job_id"])["lifecycle"], "interrupted")
             repository.close()
 
-    def test_reconcile_marks_running_job_without_supervisor_identity_interrupted(self):
+    def test_reconcile_keeps_running_job_without_supervisor_identity_unresolved(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")
             service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
@@ -814,11 +822,12 @@ class JobServiceTests(unittest.TestCase):
                 ("echo", "ok"), 60, SourceIdentity("source")))
             repository.transition(row["job_id"], "running")
             result = service.reconcile_startup()
-            self.assertEqual(result["interrupted"], [row["job_id"]])
-            self.assertEqual(repository.get(row["job_id"])["termination_reason"], "missing_supervisor_identity")
+            self.assertEqual(result["interrupted"], [])
+            self.assertEqual(repository.get(row["job_id"])["lifecycle"], "running")
+            self.assertIsNone(repository.get(row["job_id"])["termination_reason"])
             repository.close()
 
-    def test_reconcile_marks_missing_child_identity_interrupted(self):
+    def test_reconcile_marks_child_start_identity_mismatch_interrupted(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")
             service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
@@ -826,15 +835,20 @@ class JobServiceTests(unittest.TestCase):
             row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
                 ("echo", "ok"), 60, SourceIdentity("source")))
             repository.transition(row["job_id"], "running")
-            repository.put_process_identity(row["job_id"], host_boot_id="boot", supervisor_pid=99999999,
+            repository.put_process_identity(row["job_id"], host_boot_id=BOOT, supervisor_pid=99999999,
                 supervisor_start_identity="start", supervisor_nonce_hash="nonce", child_pid=99999998,
                 child_pgid=99999998, child_start_identity="child-start")
-            result = service.reconcile_startup()
+            with patch("sandbox.application.job_service.capture_process_identity", side_effect=[
+                    ProcessIdentity(BOOT, 99999999, "start", "ignored"),
+                    ProcessIdentity(BOOT, 99999998, "different-child-start", "ignored"),
+            ]):
+                result = service.reconcile_startup()
             self.assertEqual(result["interrupted"], [row["job_id"]])
-            self.assertEqual(repository.get(row["job_id"])["termination_reason"], "supervisor_lost")
+            self.assertEqual(repository.get(row["job_id"])["termination_reason"],
+                             "child_process_identity_mismatch")
             repository.close()
 
-    def test_read_reconciliation_interrupts_stale_supervisor_heartbeat(self):
+    def test_read_reconciliation_preserves_stale_heartbeat_without_owner_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")
             service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
@@ -845,8 +859,8 @@ class JobServiceTests(unittest.TestCase):
             old = (datetime.now(timezone.utc) - timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
             repository.put_heartbeat(row["job_id"], supervisor_at=old, health_evidence={})
             result = service.get(row["job_id"])
-            self.assertEqual(result["lifecycle"], "interrupted")
-            self.assertEqual(result["termination_reason"], "supervisor_heartbeat_stale")
+            self.assertEqual(result["lifecycle"], "running")
+            self.assertIsNone(result["termination_reason"])
             repository.close()
 
     def test_retention_sweep_removes_terminal_outputs_and_marks_cleanup(self):

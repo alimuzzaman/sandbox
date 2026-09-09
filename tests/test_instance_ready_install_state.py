@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import tempfile
 import sys
 import types
 import unittest
@@ -60,7 +61,21 @@ class _State:
         }
 
 
-class TestWpCoreInstallState(unittest.TestCase):
+class _IsolatedInstanceTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        for patcher in (
+            mock.patch.object(_instances, "docker_daemon_preflight", return_value={"ok": True}),
+            mock.patch.object(_instances, "RUNTIME_DIR", Path(temporary.name)),
+            mock.patch.object(_instances, "_wait_reachable", return_value=True),
+            mock.patch.object(_instances, "site_url", return_value="https://fixture.tst"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+
+class TestWpCoreInstallState(_IsolatedInstanceTest):
     def test_down_records_stopped_only_after_success(self):
         for fails in (False, True):
             with self.subTest(fails=fails):
@@ -118,7 +133,7 @@ class TestWpCoreInstallState(unittest.TestCase):
             )
 
 
-class TestReadyEnsureInstallState(unittest.TestCase):
+class TestReadyEnsureInstallState(_IsolatedInstanceTest):
     def test_refresh_heals_clean_url_companions_when_base_url_is_current(self):
         state = mock.Mock()
         existing = {
@@ -179,7 +194,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
                 _instances, "wpcli", return_value=_Result(0),
             ))
             stack.enter_context(mock.patch.object(
-                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kwargs: cfg,
             ))
             stack.enter_context(mock.patch.object(
                 _instances, "resolve_instances", return_value={"fixture": dict(existing)},
@@ -196,6 +211,54 @@ class TestReadyEnsureInstallState(unittest.TestCase):
         warn.assert_called_once()
         self.assertEqual(warn.call_args.args[2]["wpVersion"], "6.8.2")
         state.registry_put.assert_not_called()
+
+    def test_installed_reused_site_cannot_return_ready_after_final_route_failure(self):
+        state = _State()
+        with contextlib.ExitStack() as stack:
+            for patcher in self._ready_patches(state):
+                stack.enter_context(patcher)
+            for name, value in {
+                "wpcli": _Result(0), "resolve_instances": {"fixture": state.registry_get("/project")},
+                "_warn_version_drift": None, "_auto_heal_wp_url": False, "_wait_reachable": False,
+            }.items():
+                stack.enter_context(mock.patch.object(_instances, name, return_value=value))
+            stack.enter_context(mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kw: cfg))
+            refresh = stack.enter_context(mock.patch.object(_instances, "_refresh_registered_url"))
+            with self.assertRaisesRegex(RuntimeError, "instance_route_unavailable"):
+                _instances.ensure_instance({}, "/project")
+            refresh.assert_not_called()
+        state.registry_put.assert_not_called()
+
+    def test_proxy_change_cannot_split_repair_proof_and_returned_url(self):
+        state = _State()
+        existing = state.registry_get("/project")
+        options = {"home": existing["url"], "siteurl": existing["url"]}
+        state.registry_put.side_effect = lambda *args, **kwargs: kwargs
+
+        def wp(args, **kwargs):
+            if args[:2] == ["option", "get"]:
+                return _Result(0, options[args[2]])
+            if args[:2] == ["option", "update"]:
+                options[args[2]] = args[3]
+            return _Result(0)
+
+        with contextlib.ExitStack() as stack:
+            for patcher in self._ready_patches(state):
+                stack.enter_context(patcher)
+            for name, value in {"resolve_instances": {"fixture": existing}, "load_config": {},
+                                "_local_yaml": {}, "_warn_version_drift": None,
+                                "_write_ssl_muplugin": None}.items():
+                stack.enter_context(mock.patch.object(_instances, name, return_value=value))
+            stack.enter_context(mock.patch.object(_instances, "wpcli", side_effect=wp))
+            stack.enter_context(mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kw: cfg))
+            select = stack.enter_context(mock.patch.object(_instances, "site_url", side_effect=[
+                "https://fixture.tst", "http://localhost:8088"]))
+            proof = stack.enter_context(mock.patch.object(_instances, "_wait_reachable", return_value=True))
+            result = _instances.ensure_instance({}, "/project")
+        self.assertEqual(select.call_count, 1)
+        self.assertEqual(result["url"], "https://fixture.tst")
+        self.assertEqual(set(options.values()), {result["url"]})
+        self.assertEqual(proof.call_args.kwargs["canonical_url"], result["url"])
 
     def test_ready_localhost_retries_only_its_clean_url_route(self):
         state = _State()
@@ -216,7 +279,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
                 _instances, "wpcli", return_value=_Result(0),
             ))
             stack.enter_context(mock.patch.object(
-                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kwargs: cfg,
             ))
             stack.enter_context(mock.patch.object(
                 _instances, "resolve_instances", return_value={"fixture": dict(existing)},
@@ -242,7 +305,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
         self.assertEqual(result["url"], "https://fixture.tst")
         secure.assert_called_once_with({}, "fixture")
         load.assert_called_once_with()
-        heal.assert_called_once_with("fixture")
+        heal.assert_called_once_with("fixture", expected_url="https://fixture.tst")
         self.assertEqual(refresh.call_args.args[-1], {"secured": True})
 
     def test_unreachable_ready_uses_existing_recovery_without_install_probe(self):
@@ -277,7 +340,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
                 side_effect=AssertionError("unreachable endpoint must not probe"),
             ))
             stack.enter_context(mock.patch.object(
-                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kwargs: cfg,
             ))
             stack.enter_context(mock.patch.object(
                 _instances, "resolve_instances", return_value={
@@ -377,7 +440,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
                 side_effect=[_Result(1), _Result(0, stdout="1\n")],
             ))
             stack.enter_context(mock.patch.object(
-                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kwargs: cfg,
             ))
             stack.enter_context(mock.patch.object(
                 _instances, "resolve_instances", return_value={
@@ -438,7 +501,7 @@ class TestReadyEnsureInstallState(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(_instances, "_core", return_value=state))
             stack.enter_context(mock.patch.object(
-                _instances, "_resolve_port_conflicts", side_effect=lambda cfg: cfg,
+                _instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kwargs: cfg,
             ))
             stack.enter_context(mock.patch.object(
                 _instances, "resolve_instances",
@@ -477,6 +540,36 @@ class TestReadyEnsureInstallState(unittest.TestCase):
         self.assertEqual(statuses, ["pending"])
         self.assertNotIn("ready", statuses)
         self.assertEqual(plugin_calls[0]["error_factory"], _project_core.ConfigError)
+
+    def test_failed_backend_or_final_route_keeps_only_pending_identity(self):
+        class FreshState(_State):
+            ConfigError = _project_core.ConfigError
+            registry_get = staticmethod(lambda *args, **kwargs: None)
+            registry_all = staticmethod(lambda: {})
+
+        for backend, final in ((False, True), (True, False)):
+            with self.subTest(backend=backend, final=final):
+                state = FreshState()
+                replacements = {
+                    "_core": state, "resolve_instances": {"fixture": {"server": "apache", "multisite": False}},
+                    "_derive_instance_name": "fixture", "_pick_instance_ports": {
+                        "wordpress_port": 8252, "db_port": 3382, "mailpit_port": 8253},
+                    "_build_instance_block": {}, "prepare_php_extension_runtime": None,
+                    "_local_yaml": {}, "_write_local_yaml": None, "write_compose_files": None,
+                    "load_config": {}, "_proxy_sudoers_installed": False,
+                    "_wait_http": backend, "_wait_reachable": final,
+                    "_wire_project_plugins": None, "_wire_project_themes": None,
+                    "site_url": "https://fixture.tst",
+                }
+                with contextlib.ExitStack() as stack:
+                    for name, value in replacements.items():
+                        stack.enter_context(mock.patch.object(_instances, name, return_value=value))
+                    stack.enter_context(mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=lambda cfg, **kw: cfg))
+                    stack.enter_context(mock.patch.object(_lifecycle, "cmd_up"))
+                    stack.enter_context(mock.patch.object(_lifecycle, "cmd_install"))
+                    with self.assertRaises(_project_core.ConfigError):
+                        _instances.ensure_instance({}, "/project")
+                self.assertEqual([call.kwargs.get("status") for call in state.registry_put.call_args_list], ["pending"])
 
 
 if __name__ == "__main__":

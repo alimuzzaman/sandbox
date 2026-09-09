@@ -20,116 +20,46 @@ from tests.subprocess_support import run_test_process
 
 class HostRecoveryCliContractTests(unittest.TestCase):
     def test_oversized_edge_or_operation_mints_no_recovery_authority(self):
-        context = {
-            "job_id": "a" * 32, "request_id": "apply-1",
-            "project_identity": "project-id",
-            "project_root_digest": "sha256:" + "1" * 64,
-            "source_identity": "source-id", "source_commit": "b" * 40,
-            "source_dirty_digest": None,
-        }
-        base_intent = {
-            "records": [],
-            "routes": [{"hostname": "example.test", "mode": "proxy"}],
-            "certificate_hostnames": ["example.test"],
-            "proxied": False, "healthcheck_path": "/health",
-            "basic_auth": {"enabled": False, "username": None},
-        }
-        oversized_edge = {**base_intent,
-            "routes": [{"hostname": f"r{index}.example.test", "mode": "proxy"}
-                       for index in range(65)],
-            "certificate_hostnames": [f"r{index}.example.test" for index in range(65)],
-        }
-        large_validated = {
-            "project": "project", "environment": "development",
-            "compose": {"files": ["compose.yml"], "service": "web",
-                        "background_services": [],
-                        "init_services": ["i" + str(index) + "x" * 100
-                                          for index in range(2000)]},
-            "deploy": {}, "routes": base_intent["routes"],
-            "healthcheck": {"path": "/health"}, "cloudflare": {},
-            "basic_auth": None, "secrets": {},
-        }
-        for edge_intent, validated in (
-                (oversized_edge, {**large_validated, "compose": {
-                    **large_validated["compose"], "init_services": []}}),
-                (base_intent, large_validated)):
-            state = {"version": 1, "hosts": {}}
-            saved = []
-            with self.subTest(routes=len(edge_intent["routes"])), \
-                 patch.object(hosting_command, "_durable_host_context",
-                              return_value=context), \
-                 patch.object(hosting_command.personal_secrets,
-                              "prospective_hosting_binding_reference",
-                              return_value={
-                                  "metadata_id": "sha256:" + "f" * 64,
-                                  "key_version": "v1", "revision": 1}), \
-                 patch.object(hosting_command.personal_secrets,
-                              "write_hosting_binding_metadata",
-                              side_effect=AssertionError("authority metadata minted")):
-                result = hosting_command._accept_hosting_operation(
-                    state, "remote/project/development", validated=validated,
-                    entry={"ssh": "alim@example.test"}, remote_name="remote",
-                    home="/srv", source_state_identity="source-id",
-                    source_clean=True, source_commit="b" * 40,
-                    source_branch="main", config_digest="sha256:" + "2" * 64,
-                    secret_values={}, save_state=lambda value: saved.append(value),
-                    binding_key=b"k" * 32, key_version="v1",
-                    machine_identity="machine-1", edge_intent=edge_intent,
-                    broker_locked=True)
-            self.assertIsNone(result)
-            self.assertEqual(saved, [])
-            self.assertNotIn("hosting_operation",
-                             state["hosts"].get("remote/project/development", {}))
+        from tests.test_hosting import _HostingOwnerFixture
+        fixture = _HostingOwnerFixture(self, binding_key=False)
+        base = hosting_command._desired_edge_intent(fixture.validated, fixture.entry)
+        oversized_edge = {**base,
+            "routes": [{"hostname": f"r{index}.example.test", "mode": "proxy"} for index in range(65)],
+            "certificate_hostnames": [f"r{index}.example.test" for index in range(65)]}
+        large = {**fixture.validated, "compose": {**fixture.validated["compose"],
+            "init_services": ["i" + str(index) + "x" * 100 for index in range(2000)]}}
+        for edge, validated, code in ((oversized_edge, fixture.validated, "recovery_edge_intent_invalid"),
+                                     (base, large, "recovery_receipt_unavailable")):
+            with self.subTest(code=code), self.assertRaisesRegex(hosting_command.hosting.HostingError, code):
+                hosting_command._accept_hosting_operation(fixture.state, fixture.key,
+                    validated=validated, entry=fixture.entry, remote_name=fixture.remote_name,
+                    home="/srv/sandbox", source_state_identity="sha256:" + "e" * 64,
+                    source_clean=True, source_commit=fixture.commit, source_branch="main",
+                    config_digest="sha256:" + "2" * 64, secret_values={},
+                    save_state=lambda value: self.fail("authority state written"),
+                    binding_key=b"k" * 32, key_version="v1", machine_identity="a" * 24,
+                    edge_intent=edge, broker_locked=True)
+            self.assertEqual(fixture.state, {"version": 1, "hosts": {}})
+            self.assertFalse((fixture.home / "runtime" / "hosting").exists())
+            self.assertFalse(fixture.repository.state_path.exists())
 
     def test_oversized_operation_creates_no_binding_key_or_authority_directory(self):
-        context = {
-            "job_id": "a" * 32, "request_id": "apply-1",
-            "project_identity": "project-id",
-            "project_root_digest": "sha256:" + "1" * 64,
-            "source_identity": "source-id", "source_commit": "b" * 40,
-            "source_dirty_digest": None,
-        }
-        validated = {
-            "project": "project", "environment": "development",
-            "compose": {"files": ["compose.yml"], "service": "web",
-                        "background_services": [],
-                        "init_services": ["init-" + str(index) + "x" * 100
-                                          for index in range(2000)]},
-            "deploy": {}, "routes": [{"hostname": "example.test", "mode": "proxy"}],
-            "healthcheck": {"path": "/health"}, "cloudflare": {},
-            "basic_auth": None, "secrets": {},
-        }
-        edge_intent = {
-            "records": [],
-            "routes": [{"hostname": "example.test", "mode": "proxy"}],
-            "certificate_hostnames": ["example.test"],
-            "proxied": False, "healthcheck_path": "/health",
-            "basic_auth": {"enabled": False, "username": None},
-        }
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            runtime = root / "runtime"
-            secret = root / "secrets"
-            secret.write_text("# synthetic\n")
-            secret.chmod(0o600)
-            state = {"version": 1, "hosts": {}}
-            with patch.object(hosting_command, "_durable_host_context",
-                              return_value=context), \
-                 patch("sandbox.core._paths.RUNTIME_DIR", runtime), \
-                 patch.object(hosting_command.personal_secrets, "secret_file",
-                              return_value=secret):
-                result = hosting_command._accept_hosting_operation(
-                    state, "remote/project/development", validated=validated,
-                    entry={"ssh": "alim@example.test"}, remote_name="remote",
-                    home="/srv", source_state_identity="source-id",
-                    source_clean=True, source_commit="b" * 40,
-                    source_branch="main", config_digest="sha256:" + "2" * 64,
-                    secret_values={}, save_state=lambda _value: self.fail("state written"),
-                    machine_identity="machine-1", edge_intent=edge_intent,
-                    broker_locked=True)
-            self.assertIsNone(result)
-            self.assertFalse(runtime.exists())
-            self.assertEqual(state, {"version": 1, "hosts": {}})
+        from tests.test_hosting import _HostingOwnerFixture
+        fixture = _HostingOwnerFixture(self, binding_key=False)
+        validated = {**fixture.validated, "compose": {**fixture.validated["compose"],
+            "init_services": ["init-" + str(index) + "x" * 100 for index in range(2000)]}}
+        edge = hosting_command._desired_edge_intent(fixture.validated, fixture.entry)
+        with self.assertRaisesRegex(hosting_command.hosting.HostingError, "recovery_receipt_unavailable"):
+            hosting_command._accept_hosting_operation(fixture.state, fixture.key,
+                validated=validated, entry=fixture.entry, remote_name=fixture.remote_name,
+                home="/srv/sandbox", source_state_identity="sha256:" + "e" * 64,
+                source_clean=True, source_commit=fixture.commit, source_branch="main",
+                config_digest="sha256:" + "2" * 64, secret_values={},
+                save_state=lambda value: self.fail("state written"), machine_identity="a" * 24,
+                edge_intent=edge, broker_locked=True)
+        self.assertFalse((fixture.home / "runtime" / "hosting").exists())
+        self.assertFalse(fixture.repository.state_path.exists())
+        self.assertEqual(fixture.state, {"version": 1, "hosts": {}})
 
     def test_registered_host_identity_binds_real_endpoints_without_token(self):
         entry = {

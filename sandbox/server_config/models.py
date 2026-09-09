@@ -1028,3 +1028,229 @@ __all__ = [
     "ServerConfigFragment", "ServerType", "TerminalOutcome",
     "TransactionPhase", "ValidationEvidence",
 ]
+
+# Closed creation ownership values. These contain no runtime configuration or URLs.
+_CREATION_CONTEXT_KEYS = frozenset({'schema_version', 'operation_id', 'request_id', 'job_id', 'intent_digest', 'intent_fields', 'project_identity', 'project_root_digest', 'label'})
+_CREATION_INTENT_KEYS = frozenset({'schema_version', 'delivery_intent_digest', 'target_scope_digest', 'project_identity', 'project_root_digest', 'label', 'instance_config_digest', 'create_allowed'})
+_CREATION_RECEIPT_KEYS = frozenset({'schema_version', 'operation_id', 'request_id', 'job_id', 'intent_digest', 'project_identity', 'project_root_digest', 'label', 'instance_id', 'instance_incarnation_id', 'relation', 'owner_commit_at', 'completion', 'completed_at', 'result_code'})
+
+
+def creation_digest(value: Any) -> str:
+    return 'sha256:' + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def _creation_text(value, *, nullable=False):
+    if nullable and value is None:
+        return
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', value):
+        raise ValueError('creation_context_invalid')
+
+
+def _creation_request_text(value):
+    """Keep the original owner's bounded, opaque request namespace."""
+    if value is None:
+        return
+    from sandbox.services.redaction import redact_text
+    if (not isinstance(value, str)
+            or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}', value) is None
+            or redact_text(value) != value):
+        raise ValueError('creation_context_invalid')
+
+
+def _creation_timestamp(value, *, nullable=False):
+    if nullable and value is None:
+        return
+    if (not isinstance(value, str) or len(value) > 40
+            or re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)', value) is None):
+        raise ValueError('creation_timestamp_invalid')
+    try:
+        datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        raise ValueError('creation_timestamp_invalid') from None
+
+
+def validate_creation_context(value) -> dict:
+    if not isinstance(value, dict) or set(value) - _CREATION_CONTEXT_KEYS or not (_CREATION_CONTEXT_KEYS - {'job_id'}) <= set(value):
+        raise ValueError('creation_context_invalid')
+    value = dict(value, job_id=value.get('job_id'))
+    fields = value['intent_fields']
+    if type(value['schema_version']) is not int or value['schema_version'] != 1 or not isinstance(fields, dict) or set(fields) != _CREATION_INTENT_KEYS or type(fields['schema_version']) is not int or fields['schema_version'] != 1 or type(fields['create_allowed']) is not bool:
+        raise ValueError('creation_context_invalid')
+    for key in ('operation_id', 'project_identity', 'label'):
+        _creation_text(value[key])
+    _creation_request_text(value['request_id'])
+    _creation_text(value['job_id'], nullable=True)
+    for key in ('intent_digest', 'project_root_digest'):
+        if not isinstance(value[key], str) or not _DIGEST.fullmatch(value[key]):
+            raise ValueError('creation_context_invalid')
+    for key in ('delivery_intent_digest', 'target_scope_digest', 'instance_config_digest'):
+        if not isinstance(fields[key], str) or not _DIGEST.fullmatch(fields[key]):
+            raise ValueError('creation_context_invalid')
+    if any(fields[key] != value[key] for key in ('project_identity', 'project_root_digest', 'label')) or creation_digest(fields) != value['intent_digest']:
+        raise ValueError('creation_request_conflict')
+    if len(json.dumps(value).encode()) > 8192:
+        raise ValueError('creation_context_invalid')
+    return json.loads(json.dumps(value))
+
+
+def creation_intent_fields(pconf, *, project_identity, target_scope_digest, delivery_intent_digest, label='default', create_allowed=False, config_label=None):
+    # Hash only the closed declarative configuration subset; never secret maps,
+    # environment values, plugin URLs, credentials or arbitrary extension data.
+    from pathlib import Path
+    safe = {key: pconf.get(key) for key in ('kind', 'server', 'phpVersion', 'wpVersion', 'service', 'internal_port', 'http_port', 'startup_timeout_seconds', 'recreate_on_ensure', 'multisite')}
+    runtime = pconf.get('wordpressRuntime')
+    if isinstance(runtime, Mapping):
+        safe['wordpressRuntime'] = {key: runtime.get(key) for key in ('mode', 'adapter', 'explicit')}
+    from urllib.parse import urlsplit, urlunsplit
+    from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
+    safe['instanceLifecycle'] = normalize_instance_lifecycle(pconf.get('instanceLifecycle'))
+    from sandbox.config.php_extensions import normalize_php_extensions
+    from sandbox.php_extensions.models import PhpExtensionsConfig
+    extensions = pconf.get('phpExtensions')
+    if extensions is not None:
+        normalized = normalize_php_extensions(
+            extensions.to_dict() if isinstance(extensions, PhpExtensionsConfig) else extensions)
+        safe['phpExtensions'] = normalized.to_dict()
+    else:
+        safe['phpExtensions'] = None
+
+    # These runtime constants have fixed, nonsecret scalar semantics. Never
+    # hash arbitrary config values or a WP_DEBUG_LOG pathname.
+    constants = pconf.get('config') or {}
+    if not isinstance(constants, Mapping):
+        raise ValueError('creation_config_unsupported')
+    bool_constants = {'WP_DEBUG', 'WP_DEBUG_DISPLAY', 'WP_DEBUG_LOG', 'SCRIPT_DEBUG',
+                      'SAVEQUERIES', 'DISALLOW_FILE_EDIT', 'DISALLOW_FILE_MODS', 'WP_CACHE'}
+    safe_constants = {}
+    for name in bool_constants:
+        if name in constants:
+            if type(constants[name]) is not bool:
+                raise ValueError('creation_config_unsupported')
+            safe_constants[name] = constants[name]
+    for name, minimum in (('WP_POST_REVISIONS', -1), ('AUTOSAVE_INTERVAL', 1),
+                          ('EMPTY_TRASH_DAYS', 0)):
+        if name not in constants:
+            continue
+        value = constants[name]
+        if name == 'WP_POST_REVISIONS' and type(value) is bool:
+            safe_constants[name] = value
+            continue
+        if type(value) is not int or not minimum <= value <= 2147483647:
+            raise ValueError('creation_config_unsupported')
+        safe_constants[name] = value
+    safe['wordpress_constants'] = safe_constants
+
+    from sandbox.config.domains import normalize_hostname, normalize_tld
+    for name in ('domain', 'hostname'):
+        if name in pconf:
+            safe[name] = None if pconf[name] is None else normalize_hostname(pconf[name])
+    if 'tld' in pconf:
+        safe['tld'] = None if pconf['tld'] is None else normalize_tld(pconf['tld'])
+    domains = pconf.get('domains')
+    if domains is not None:
+        if not isinstance(domains, Mapping):
+            raise ValueError('creation_config_unsupported')
+        policy = {}
+        for name in ('enabled', 'wildcard'):
+            if name in domains:
+                if type(domains[name]) is not bool:
+                    raise ValueError('creation_config_unsupported')
+                policy[name] = domains[name]
+        for name, normalize in (('hostname', normalize_hostname), ('tld', normalize_tld)):
+            if name in domains:
+                policy[name] = None if domains[name] is None else normalize(domains[name])
+        for name in ('strategy', 'ingress'):
+            if name in domains:
+                value = domains[name]
+                if value is not None and (not isinstance(value, str) or re.fullmatch(r'[a-z][a-z0-9-]{0,62}', value) is None):
+                    raise ValueError('creation_config_unsupported')
+                policy[name] = value
+        safe['domains'] = policy
+    if 'aliases' in pconf and pconf['aliases'] is not None:
+        aliases = [pconf['aliases']] if isinstance(pconf['aliases'], str) else pconf['aliases']
+        if not isinstance(aliases, (list, tuple)) or len(aliases) > 20:
+            raise ValueError('creation_config_unsupported')
+        safe['aliases'] = list(dict.fromkeys(normalize_hostname(value) for value in aliases
+                                            if not isinstance(value, str) or value.strip()))
+    for key in ('resources', 'node_store', 'slug', 'wpDebug', 'wpCron', 'locale'):
+        if key in pconf:
+            safe[key] = pconf[key]
+    def public_locator(raw):
+        if not isinstance(raw, str):
+            return None
+        parsed = urlsplit(raw)
+        if parsed.scheme in {'http', 'https'}:
+            return urlunsplit((parsed.scheme, parsed.hostname or '', parsed.path, '', ''))
+        if '://' in raw:
+            return None
+        return parsed.path if raw.startswith('/') else raw
+    safe['compose_file'] = public_locator(pconf.get('compose_file'))
+    safe['health_path'] = public_locator(pconf.get('health_path'))
+    plugins = pconf.get('plugins_resolved')
+    if isinstance(plugins, Mapping):
+        safe['plugins'] = {}
+        for slug, entry in plugins.items():
+            if not isinstance(entry, Mapping):
+                continue
+            source = entry.get('source')
+            source = ({'kind': source.get('kind'), 'value': public_locator(source.get('value'))}
+                      if isinstance(source, Mapping) else public_locator(source))
+            safe['plugins'][slug] = {'source': source, 'active': entry.get('active'),
+                                    'on_demand': entry.get('on_demand')}
+    if pconf.get('kind') == 'compose':
+        safe['startup_timeout_seconds'] = float(pconf.get('startup_timeout_seconds', 120.0))
+        safe['recreate_on_ensure'] = pconf.get('recreate_on_ensure', False)
+    safe['config_label'] = config_label if config_label is not None else label
+    return {'schema_version': 1, 'delivery_intent_digest': delivery_intent_digest,
+            'target_scope_digest': target_scope_digest, 'project_identity': project_identity,
+            'project_root_digest': creation_digest(str(Path(pconf['root']).resolve())),
+            'label': label, 'instance_config_digest': creation_digest(safe), 'create_allowed': create_allowed}
+
+
+def validate_creation_receipt(value) -> dict:
+    if not isinstance(value, dict) or set(value) != _CREATION_RECEIPT_KEYS or type(value.get('schema_version')) is not int or value['schema_version'] != 1:
+        raise ValueError('creation_receipt_invalid')
+    for key in ('operation_id', 'job_id', 'project_identity', 'label', 'instance_id', 'result_code'):
+        _creation_text(value[key], nullable=key in {'job_id', 'result_code'})
+    _creation_request_text(value['request_id'])
+    for key in ('intent_digest', 'project_root_digest'):
+        if not isinstance(value[key], str) or not _DIGEST.fullmatch(value[key]):
+            raise ValueError('creation_receipt_invalid')
+    _require_incarnation(value['instance_incarnation_id'])
+    if not isinstance(value['relation'], str) or not isinstance(value['completion'], str) or value['relation'] not in {'created', 'reused', 'unknown'} or value['completion'] not in {'pending', 'succeeded', 'failed', 'unknown'}:
+        raise ValueError('creation_receipt_invalid')
+    for key in ('owner_commit_at', 'completed_at'):
+        _creation_timestamp(value[key], nullable=key == 'completed_at')
+    if (value['completion'] in {'succeeded', 'failed'}) != (value['completed_at'] is not None):
+        raise ValueError('creation_receipt_invalid')
+    if len(json.dumps(value).encode()) > 4096:
+        raise ValueError('creation_receipt_invalid')
+    return dict(value)
+
+
+def validate_url_mutation_result(value) -> dict:
+    keys = {'operation_id', 'request_id', 'target_digest', 'expected_incarnation',
+            'observed_incarnation', 'before_observed_at', 'writes', 'readback',
+            'finished_at', 'result_code'}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValueError('creation_url_result_invalid')
+    _creation_text(value['operation_id'])
+    _creation_request_text(value['request_id'])
+    if not isinstance(value['target_digest'], str) or not _DIGEST.fullmatch(value['target_digest']):
+        raise ValueError('creation_url_result_invalid')
+    _require_incarnation(value['expected_incarnation'])
+    if value['observed_incarnation'] is not None:
+        _require_incarnation(value['observed_incarnation'])
+    for key in ('before_observed_at', 'finished_at'):
+        _creation_timestamp(value[key], nullable=True)
+    if not isinstance(value['writes'], dict) or set(value['writes']) != {'home', 'siteurl'} or any(not isinstance(state, str) or state not in {'attempted', 'succeeded', 'failed', 'unknown', 'not_applicable'} for state in value['writes'].values()):
+        raise ValueError('creation_url_result_invalid')
+    if not isinstance(value['readback'], dict) or set(value['readback']) != {'home', 'siteurl'} or any(type(state) not in {bool, type(None)} for state in value['readback'].values()):
+        raise ValueError('creation_url_result_invalid')
+    if not isinstance(value['result_code'], str) or value['result_code'] not in {'remote_instance_url_verified', 'remote_instance_url_incomplete', 'instance_incarnation_changed'}:
+        raise ValueError('creation_url_result_invalid')
+    if value['result_code'] == 'remote_instance_url_verified' and (value['observed_incarnation'] != value['expected_incarnation'] or not all(state == 'succeeded' for state in value['writes'].values()) or not all(value['readback'].values()) or value['finished_at'] is None):
+        raise ValueError('creation_url_result_invalid')
+    if len(json.dumps(value).encode()) > 4096:
+        raise ValueError('creation_url_result_invalid')
+    return json.loads(json.dumps(value))

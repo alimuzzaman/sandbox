@@ -271,7 +271,7 @@ def configure_list_parser(parser) -> None:
     parser.add_argument("--active-only", action="store_true")
     parser.add_argument("--lifecycle", help=argparse.SUPPRESS)
     parser.add_argument("--kind", help=argparse.SUPPRESS)
-    parser.add_argument("--cursor-job-id", help=argparse.SUPPRESS)
+    parser.add_argument("--cursor-job-id", help="Continue after page.next_cursor from job-list")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
@@ -561,6 +561,8 @@ def cmd_job_list(_cfg, args) -> None:
     category = getattr(args, "kind", None)
     cursor_job_id = getattr(args, "cursor_job_id", None)
     limit = getattr(args, "limit", 50)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError("job list limit must be between 1 and 200")
     dependencies = durable_job_dependencies()
     project_identity = explicit_identity
     if project_identity is None and project_dir:
@@ -610,23 +612,37 @@ def cmd_job_list(_cfg, args) -> None:
         if active_only:
             query["active_only"] = True
         result = dependencies["job_service"].list(query)
-    # The application service returns a list while remote control returns a
-    # bounded JobPage object. Normalize both at this adapter boundary so the
-    # public envelope remains exactly {ok, jobs} for every caller.
+    # Repository rows remain internal. Public list responses carry compact
+    # summaries and a cursor, with full details available through job-status.
+    has_more = None
     if isinstance(result, dict):
         if result.get("ok") is False:
             _die(str(result.get("error") or result.get("code") or "job list failed"))
+        page = result.get("page")
+        if isinstance(page, dict) and page.get("schema_version") == 2:
+            has_more = page.get("has_more")
+            if has_more is not None and type(has_more) is not bool:
+                _die("job list returned invalid completeness metadata")
         result = result.get("jobs")
     if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
         _die("job list returned an invalid page")
     if active_only:
         result = [item for item in result if item.get("lifecycle") in {
             "accepted", "queued", "running", "cancelling"}]
+    if not remote_name:
+        has_more = False
+        if len(result) == limit:
+            following = {**query, "limit": 1, "cursor_job_id": result[-1]["job_id"]}
+            has_more = bool(dependencies["job_service"].list(following))
+    from sandbox.jobs.listing import job_page
+    envelope = job_page(result, limit=limit, has_more=has_more)
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, "jobs": result}, sort_keys=True))
+        print(json.dumps(envelope, sort_keys=True))
     else:
-        for item in result:
+        for item in envelope["jobs"]:
             print(f"{item['job_id']} {item['lifecycle']} {item['workspace_label']}")
+        if envelope["page"]["next_cursor"]:
+            print("Next: --cursor-job-id " + envelope["page"]["next_cursor"])
 
 
 def cmd_job_cancel(_cfg, args) -> None:

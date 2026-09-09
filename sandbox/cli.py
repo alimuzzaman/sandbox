@@ -415,6 +415,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="With --project-dir: reconcile a project instance in place "
              "(no data loss). Without: alias for setup — re-apply sandbox.yml")
     ap.add_argument("--no-pick", action="store_true")
+    ap.add_argument("--creation-context-json", default=None,
+        help="closed nonsecret creation context bound to the original request")
+    ap.add_argument("--expected-incarnation", default=None,
+        help="refuse if the selected instance incarnation differs")
     ap.add_argument("--project-dir", dest="project_dir", default=None,
         help="reconcile this project's running instance with its current "
              "config (constants/plugins/themes/multisite) without dropping the DB")
@@ -866,6 +870,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         default=None, metavar="SECONDS",
         help="bounded remote-home preflight and Git push timeout for this deploy "
              "(1-3600 seconds; default 120)")
+    deploy_p.add_argument("--request-id", default=None,
+        help="stable delivery request identity; retained reuse never starts a new attempt")
+    deploy_p.add_argument("--verify-timeout", type=int, choices=range(10, 301),
+        metavar="10..300", default=None, help="aggregate public verification deadline in seconds")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
@@ -984,6 +992,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--base-domain", default="sandbox.asb.bd", help="Cloudflare-managed preview domain suffix")
     preview_p.add_argument("--ttl-hours", type=int, default=24, help="expiry for a created preview (default: 24)")
     preview_p.add_argument("--confirm", action="store_true", help="allow remote, DNS, and container mutation")
+    preview_p.add_argument("--request-id", default=None,
+        help="stable creation delivery request identity")
+    preview_p.add_argument("--verify-timeout", type=int, choices=range(10, 301),
+        metavar="10..300", default=None, help="aggregate public verification deadline in seconds")
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
@@ -1071,6 +1083,23 @@ Per-project (each plugin carries its own sandbox.config.json):
     ensure_target.add_argument("--local", action="store_true", help="force local execution")
     ensure_target.add_argument("--remote", help="ensure on a provisioned remote")
     en.add_argument("--workspace", dest="workspace", help="remote reusable workspace label")
+    en.add_argument("--creation-context-json", default=None,
+        help="closed nonsecret creation context bound to the original request")
+    en.add_argument("--expected-incarnation", default=None,
+        help="refuse if the selected instance incarnation differs")
+    creation_mode = en.add_mutually_exclusive_group()
+    creation_mode.add_argument("--creation-capability", action="store_true",
+        help="read controller creation capability without creating an instance")
+    creation_mode.add_argument("--creation-receipt", action="store_true",
+        help="read the original creation receipt without replaying ensure")
+    creation_mode.add_argument("--creation-prepare-json", default=None,
+        help="prepare bounded nonsecret creation intent without effects")
+    creation_mode.add_argument("--creation-url-json", default=None,
+        help="mutate home/siteurl under the original creation context and exact incarnation")
+    en.add_argument("--creation-kind", choices=("wordpress", "compose"), default=None,
+        help="runtime kind for a controller-only creation capability query")
+    en.add_argument("--creation-runtime-mode", choices=("compose",), default=None,
+        help="runtime mode for a controller-only creation capability query")
 
     ins = sub.add_parser("instance",
         help="Suspend/resume or delete a sandbox instance")
@@ -1361,6 +1390,67 @@ Per-project (each plugin carries its own sandbox.config.json):
             2,
         )
 
+    # Pure diagnostic transports return before all legacy compatibility writers
+    # and instance selection; a missing local runtime/config is not an error.
+    if args.cmd == "delivery":
+        if _explicit_global_option(raw_argv, "--instance"):
+            die("delivery uses project-scoped trace or operation selectors; --instance is unsupported", 2)
+        from sandbox.commands.delivery import configure, cmd_delivery
+        from sandbox.delivery.context import build_delivery_service
+        from sandbox.delivery.trace_context import build_trace_service
+        configure(delivery_service_factory=build_delivery_service, trace_service_factory=build_trace_service)
+        cmd_delivery({}, args)
+        return
+
+    covered_creation = args.cmd in {"ensure", "apply"} and getattr(args, "creation_context_json", None) is not None
+    if covered_creation:
+        from sandbox.server_config.models import validate_creation_context
+        try:
+            raw_context = args.creation_context_json
+            if len(raw_context.encode("utf-8")) > 8192:
+                raise ValueError("creation_context_invalid")
+            validate_creation_context(json.loads(raw_context))
+        except (ValueError, TypeError, UnicodeError):
+            if getattr(args, "json", False):
+                print(json.dumps({"schema_version": 1, "ok": False, "error": {"code": "creation_context_invalid"}}))
+                raise SystemExit(2)
+            die("creation_context_invalid", 2)
+    if args.cmd == "ensure":
+        query_requested = bool(getattr(args, "creation_capability", False) or getattr(args, "creation_receipt", False) or getattr(args, "creation_prepare_json", None) is not None)
+        if (getattr(args, "creation_kind", None) is not None or getattr(args, "creation_runtime_mode", None) is not None) and not getattr(args, "creation_capability", False):
+            die("--creation-kind and --creation-runtime-mode require --creation-capability", 2)
+        if getattr(args, "creation_url_json", None) is not None:
+            if not covered_creation or not getattr(args, "expected_incarnation", None):
+                die("--creation-url-json requires --creation-context-json and --expected-incarnation", 2)
+            if getattr(args, "remote", None) or getattr(args, "workspace", None):
+                die("creation URL mutation runs on the executing controller; use its supported transport", 2)
+            try:
+                raw_url_mutation = args.creation_url_json
+                if len(raw_url_mutation.encode("utf-8")) > 4096:
+                    raise ValueError("creation_url_invalid")
+                url_mutation = json.loads(raw_url_mutation)
+                if type(url_mutation) is not dict or set(url_mutation) != {"instance_id", "url"}:
+                    raise ValueError("creation_url_invalid")
+            except (ValueError, TypeError, UnicodeError):
+                if getattr(args, "json", False):
+                    print(json.dumps({"schema_version": 1, "ok": False, "error": {"code": "creation_url_invalid"}}))
+                    raise SystemExit(2)
+                die("creation_url_invalid", 2)
+            # This is a mutation transport, not a query. The owner takes its
+            # project lock and checks the exact receipt/incarnation before each
+            # URL write and readback; the CLI must not run ensure first.
+            from sandbox.commands.instances_cmd import cmd_creation_url
+            cmd_creation_url({}, args)
+            return
+        if query_requested:
+            if getattr(args, "remote", None) or getattr(args, "workspace", None):
+                die("creation queries run on the executing controller; use its supported transport", 2)
+            if getattr(args, "creation_capability", False) and covered_creation:
+                die("--creation-capability cannot combine --creation-context-json", 2)
+            from sandbox.commands.instances_cmd import cmd_creation_query
+            cmd_creation_query({}, args)
+            return
+
     # Spec 009 upgrade path: before a normal command can touch the legacy
     # fallback, move it once when the selected base is genuinely empty.  The
     # helper re-execs this exact command after staging the data; explicit
@@ -1372,7 +1462,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     archive_plugin_check = (
         args.cmd == "plugin-check" and bool(getattr(args, "archive", None))
     )
-    predispatch_skip = archive_plugin_check or (
+    predispatch_skip = covered_creation or archive_plugin_check or (
         args.cmd == "wp" and bool(getattr(args, "remote", None))
     ) or bool(
         command_spec is not None
@@ -1487,6 +1577,8 @@ Per-project (each plugin carries its own sandbox.config.json):
             args.project_dir = implied
             info(f"apply: reconciling the project at {implied} ({source}). "
                  "Run `./sb setup` for the whole sandbox instead.")
+    if args.cmd == "apply" and covered_creation and not getattr(args, "project_dir", None):
+        die("creation context requires a resolved project; use --project-dir", 2)
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
     # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):

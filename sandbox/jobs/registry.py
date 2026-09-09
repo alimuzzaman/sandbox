@@ -13,6 +13,7 @@ from typing import Any, Iterator
 
 from sandbox.services.redaction import require_safe_argv
 
+from ._trace_snapshot import SnapshotBudget, SnapshotMissing, read_connection
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
@@ -38,6 +39,188 @@ class JobNotFound(JobRepositoryError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def read_delivery_job_evidence(path: str | Path, job_id: str) -> dict:
+    """Read one retained job through a closed, payload-free owner projection.
+
+    Project root is an internal binding, never a public display reference.
+    No repository constructor, reconciliation or lifecycle writer is invoked.
+    """
+    result = {"schema_version": 1, "state": "missing", "reason": "job_missing",
+              "job": None, "process": None, "submitted": None}
+    try:
+        validate_job_id(job_id)
+    except ValueError:
+        return {**result, "state": "partial", "reason": "job_identity_invalid"}
+    budget = SnapshotBudget()
+    job_fields = ("job_id", "request_id", "request_digest", "project_root", "project_identity",
+                  "target_kind", "remote_name", "workspace_id", "lifecycle", "source_identity",
+                  "source_commit", "source_dirty_digest", "accepted_at", "started_at", "finished_at")
+    process_fields = ("host_boot_id", "child_pid", "child_pgid", "child_start_identity", "recorded_at")
+    connection = None
+    try:
+        connection = read_connection(path, budget=budget)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        schema = connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        budget.check()
+        if schema is None or schema[0] != "7":
+            return {**result, "state": "unsupported", "reason": "job_schema_unsupported"}
+        # CASE prevents oversized persisted strings from entering the projection.
+        def selection(fields):
+            return ",".join(f'CASE WHEN "{field}" IS NULL OR length("{field}") <= 4096 THEN "{field}" ELSE \'__delivery_invalid__\' END AS "{field}"'
+                            for field in fields)
+        job = connection.execute(f"SELECT {selection(job_fields)} FROM jobs WHERE job_id=? LIMIT 1", (job_id,)).fetchone()
+        budget.check()
+        if job is None:
+            return result
+        process = connection.execute(f"SELECT {selection(process_fields)} FROM process_identities WHERE job_id=? LIMIT 1", (job_id,)).fetchone()
+        budget.check()
+        paths = {"version": "$.version", "request_id": "$.request_id",
+                 "project_root": "$.project_root", "project_identity": "$.project_identity",
+                 "source_identity": "$.source.identity", "source_commit": "$.source.commit",
+                 "source_dirty_digest": "$.source.dirty_digest", "target_kind": "$.target_kind",
+                 "remote_name": "$.remote_name"}
+        expressions = []
+        for field, pointer in paths.items():
+            expression = f"json_extract(submission_json, '{pointer}')"
+            expressions.append(f'CASE WHEN {expression} IS NULL OR length({expression}) <= 4096 THEN {expression} ELSE \'__delivery_invalid__\' END AS "{field}"')
+        submitted = connection.execute(
+            f"SELECT {','.join(expressions)} FROM jobs WHERE job_id=? AND json_valid(submission_json) AND length(submission_json)<=65536 AND json_type(submission_json, '$.version')='integer' LIMIT 1",
+            (job_id,)).fetchone()
+        budget.check()
+        for row in (job, process, submitted):
+            if row is not None and any(isinstance(value, str) and (
+                    value == "__delivery_invalid__" or "\x00" in value or len(value.encode()) > 4096)
+                    for value in row):
+                return {**result, "state": "partial", "reason": "job_evidence_invalid"}
+        budget.check()
+        return {**result, "state": "known" if process else "partial",
+                "reason": None if process else "child_identity_missing", "job": dict(job),
+                "process": dict(process) if process else None,
+                "submitted": dict(submitted) if submitted else None}
+    except SnapshotMissing:
+        return result
+    except (sqlite3.Error, OSError, ValueError):
+        return {**result, "state": "partial", "reason": "job_evidence_unavailable"}
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def read_trace_job_evidence(path, job_id, *, role, request_id, control_root_digest,
+                            control_source_commit, submission_digest=None, budget):
+    """Validate a fixed worker submission privately; return no argv, env or paths."""
+    import hashlib
+    def digest(value):
+        payload = json.dumps(value, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode()
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
+    empty = {"schema_version": 1, "state": "partial", "reason": "job_binding_missing",
+             "job": None, "submission": None}
+    validate_job_id(job_id)
+    if (role not in {'prepare_job', 'activation_job'} or
+            not isinstance(request_id, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,255}', request_id) is None or
+            not isinstance(control_root_digest, str) or re.fullmatch(r'sha256:[0-9a-f]{64}', control_root_digest) is None or
+            not isinstance(control_source_commit, str) or re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', control_source_commit) is None):
+        return {**empty, 'reason': 'job_binding_invalid'}
+    budget.check()
+    connection = None
+    try:
+        connection = read_connection(path, budget=budget)
+        connection.row_factory = sqlite3.Row
+        connection.set_progress_handler(lambda: int(budget.expired), 1000)
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        version = connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        if version is None or version[0] != str(SCHEMA_VERSION):
+            return {**empty, "reason": "job_schema_unsupported"}
+        fields = ("job_id", "request_id", "project_root", "project_identity", "source_commit", "source_identity", "source_dirty_digest",
+                  "target_kind", "remote_name", "lifecycle", "exit_code", "accepted_at",
+                  "started_at", "finished_at", "output_completeness")
+        selection = ','.join('CASE WHEN length(CAST("%s" AS BLOB))<=4096 OR "%s" IS NULL '
+                             'THEN "%s" ELSE NULL END AS "%s"' % (f, f, f, f) for f in fields)
+        row = connection.execute('SELECT ' + selection +
+            ',CASE WHEN length(CAST(submission_json AS BLOB))<=65536 THEN submission_json ELSE NULL END AS submission_json '
+            ',CASE WHEN length(CAST(command_json AS BLOB))<=65536 THEN command_json ELSE NULL END AS command_json '
+            'FROM jobs WHERE job_id=? LIMIT 1', (job_id,)).fetchone()
+        budget.check()
+        if row is None:
+            return {**empty, "state": "missing", "reason": "job_missing"}
+        if row['submission_json'] is None or row['command_json'] is None:
+            return empty
+        snapshot = json.loads(row['submission_json'])
+        command = json.loads(row['command_json'])
+        budget.check()
+        phase = {"prepare_job": "prepare", "activation_job": "activate"}.get(role)
+        root = row['project_root']
+        if not isinstance(root, str) or not Path(root).is_absolute():
+            return empty
+        root_digest = "sha256:" + hashlib.sha256(root.encode()).hexdigest()
+        source = snapshot.get('source', {}) if isinstance(snapshot, dict) else {}
+        argv = snapshot.get('argv') if isinstance(snapshot, dict) else None
+        # The final private state directory is retained as part of command_digest.
+        # It must be an absolute directory; it is never read by this query.
+        valid_command = (phase is not None and isinstance(argv, list) and len(argv) == 5
+            and all(isinstance(arg, str) and 0 < len(arg.encode()) <= 4096 and chr(0) not in arg for arg in argv)
+            and Path(argv[0]).is_absolute() and Path(argv[0]).name in {'node', 'node.exe'}
+            and argv[1] == str(Path(root) / 'node_modules/tsx/dist/cli.mjs')
+            and argv[2] == str(Path(root) / 'scripts/hosted-deployment/worker.ts')
+            and argv[3] == phase and Path(argv[4]).is_absolute() and argv == command)
+        if (not valid_command or snapshot.get('version') != 1 or
+                request_id != row['request_id'] or snapshot.get('request_id') != request_id or
+                not request_id.endswith('-' + phase) or root_digest != control_root_digest or
+                snapshot.get('project_root') != root or
+                snapshot.get('project_identity') != row['project_identity'] or
+                row['source_commit'] != control_source_commit or source.get('commit') != control_source_commit or
+                source.get('identity') != row['source_identity'] or row['source_identity'] is None or
+                source.get('dirty_digest') is not None or row['source_dirty_digest'] is not None or row['target_kind'] != 'local' or
+                snapshot.get('target_kind') != 'local' or row['remote_name'] is not None or
+                snapshot.get('remote_name') is not None):
+            return {**empty, "state": "conflicting", "reason": "job_binding_mismatch"}
+        command_digest = digest(argv)
+        binding = {'domain': 'lenzora-hosted-job-submission-v1', 'role': role,
+                   'request_id': request_id, 'control_root_digest': root_digest,
+                   'control_source_commit': control_source_commit, 'command_digest': command_digest}
+        computed = digest(binding)
+        if submission_digest is not None and submission_digest != computed:
+            return {**empty, "state": "conflicting", "reason": "job_binding_mismatch"}
+        for field in ('job_id', 'request_id', 'project_identity', 'source_identity'):
+            value = row[field]
+            if (not isinstance(value, str) or
+                    re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}', value) is None):
+                return {**empty, 'reason': 'job_evidence_invalid'}
+        for field in ('accepted_at', 'started_at', 'finished_at'):
+            value = row[field]
+            if value is not None and (not isinstance(value, str) or len(value) > 64 or
+                    re.fullmatch(r'[0-9TZ:+.\-]+', value) is None):
+                return {**empty, 'reason': 'job_evidence_invalid'}
+        if row['output_completeness'] not in {'active', 'complete', 'partial', 'missing', 'write_failed', 'storage_pressure', 'unknown'}:
+            return {**empty, 'reason': 'job_evidence_invalid'}
+        lifecycle, exit_code = row['lifecycle'], row['exit_code']
+        if (lifecycle not in {item.value for item in Lifecycle} or
+                (lifecycle == 'succeeded' and exit_code != 0) or
+                (lifecycle == 'failed' and exit_code in (None, 0)) or
+                (lifecycle in {'accepted', 'queued', 'running', 'cancelling'} and exit_code is not None)):
+            return {**empty, "reason": "job_terminal_invalid"}
+        job = {field: row[field] for field in fields if field not in {'project_root', 'remote_name', 'target_kind'}}
+        job['project_root_digest'] = root_digest
+        budget.check()
+        return {**empty, 'state': 'known', 'reason': None, 'job': job,
+                'submission': {'role': role, 'request_id': request_id,
+                    'control_root_digest': root_digest, 'control_source_commit': control_source_commit,
+                    'command_digest': command_digest, 'submission_digest': computed}}
+    except SnapshotMissing:
+        budget.check()
+        return {**empty, "state": "missing", "reason": "job_missing"}
+    except (sqlite3.Error, ValueError, TypeError, OSError):
+        budget.check()
+        return {**empty, "reason": "job_evidence_unavailable"}
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def read_resource_index(path: str | Path) -> dict[str, list[dict[str, Any]]]:

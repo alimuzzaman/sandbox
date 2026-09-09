@@ -97,4 +97,8 @@ class DurableRuntimeAcceptanceTests(unittest.TestCase):
         with patch("sandbox.commands.jobs_runtime.durable_job_dependencies",
                    return_value={"job_service": service}), redirect_stdout(output):
             cmd_job_list(None, args)
-        self.assertEqual(json.loads(output.getvalue()), {"ok": True, "jobs": rows})
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["jobs"], rows)
+        self.assertEqual(result["page"]["schema_version"], 2)
+        self.assertFalse(result["page"]["has_more"])

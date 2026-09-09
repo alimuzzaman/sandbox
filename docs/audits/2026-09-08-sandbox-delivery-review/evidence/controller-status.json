@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "name": "scaleway-sandbox",
+  "status": "observed",
+  "data": {
+    "installed": true,
+    "enabled": true,
+    "active": true,
+    "linger": true,
+    "ownership": "proven",
+    "service_name": "sandbox-mcp-remote.service",
+    "pid_present": true,
+    "pid_ownership": "proven",
+    "listener_expected": true,
+    "authenticated": true,
+    "listener_state": "expected",
+    "auth_state": "ok",
+    "legacy_pidfile": "absent",
+    "local_runtime_revision": "b1c44aad3fde1cf9f42d05a6",
+    "installed_runtime_revision": "e0949074e80c469bcff36c12",
+    "runtime_revision_state": "mismatch",
+    "bind": "127.0.0.1",
+    "port": 9174
+  },
+  "error": null
+}

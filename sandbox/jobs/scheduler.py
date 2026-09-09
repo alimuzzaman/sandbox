@@ -147,12 +147,13 @@ class JobScheduler:
         }
 
     def _reap_stale_locked(self, connection, *, now: datetime) -> list[str]:
-        timestamp = now.isoformat()
+        # Expiration cannot prove that an active process stopped using its
+        # workspace. Job ownership reconciliation establishes terminal state;
+        # until then keep both workspace and capacity leases, even when stale.
         rows = connection.execute(
             "SELECT l.job_id FROM workspace_leases l LEFT JOIN jobs j ON j.job_id=l.job_id "
-            "WHERE l.expires_at<=? OR j.job_id IS NULL OR j.lifecycle IN "
+            "WHERE j.job_id IS NULL OR j.lifecycle IN "
             "('succeeded','failed','timed_out','cancelled','interrupted')",
-            (timestamp,),
         ).fetchall()
         ids = [row[0] for row in rows]
         for job_id in ids:
@@ -185,7 +186,7 @@ class JobScheduler:
         return True
 
     def reconcile_stale(self, *, now: datetime | None = None) -> list[str]:
-        """Release expired leases and terminal-job leases atomically."""
+        """Release terminal or missing-job leases, never unresolved active work."""
         now = now or datetime.now(timezone.utc)
         with self.repository.transaction(immediate=True) as connection:
             return self._reap_stale_locked(connection, now=now)

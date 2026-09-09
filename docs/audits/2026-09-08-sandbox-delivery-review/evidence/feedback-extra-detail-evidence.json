@@ -1,0 +1,6043 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-08T17:45:51.122257Z",
+  "source": "./sb feedback --json detail per remaining high/critical and specified medium IDs",
+  "review_target": "fd7d650f8bfbb1760d931e2484cc01fa0badf546",
+  "snapshot_generated_at": "2026-09-08T16:56:09.302196Z",
+  "trust": "untrusted_data",
+  "selection": {
+    "high_critical_total": 278,
+    "prior_detail_ids": 166,
+    "remaining_high_critical": 112,
+    "specified_medium": 3,
+    "unique_selected": 115
+  },
+  "detail_reads": {
+    "attempted": 115,
+    "succeeded": 115,
+    "failed": 0,
+    "failure_codes": {}
+  },
+  "initial_filter_missed_direct_counts": {
+    "ensure/preflight": 19,
+    "host apply": 10,
+    "login/progress exposure": 7
+  },
+  "initial_filter_missed_direct_ids": {
+    "ensure/preflight": [
+      "24e6756299d9f7e39e28d87125338f2b",
+      "a41d34059b1f2ea195aced060704afd5",
+      "ea85cb298e201b4ba63e1ae71c9149df",
+      "a3f3f976128ca1542b0adbfe7536cdca",
+      "cf1788f351001bf3fabdf3e2185daace",
+      "f591d52ba4ba7d741824c1fce7397731",
+      "2413b7090bad3cc8f02ccf99b4247c0e",
+      "f37bd9aee69a896880eeb78c38c0d668",
+      "c7be223a1e5f188aa88524fbbb3fe098",
+      "6cb71d7e0f95307d343ed6d8285357a7",
+      "ccd9e5e28f09f91f51cd36b5e7645900",
+      "b69b39a5a25a10e244b7918e36e169ab",
+      "834d2253f4455e6fd21eb0faffad76ea",
+      "c5a41bf90e8b801fe99b9f6abe7298e9",
+      "e8ab77173bf1be69b65f7d1e65b42d49",
+      "8bc9ca1c7fb7e293934bc6fcaa3e6506",
+      "955b20457245aab5573cda8fd9951eec",
+      "ee3a1f3864e28125881d0651d9a53c1a",
+      "e11914b581d92c102eea700ba9456a2e"
+    ],
+    "host apply": [
+      "aff2834ebd645210a94963efacea4911",
+      "bc666ad8a12ed084febd3aa7f8ac32fc",
+      "483f8e2df3ac38c7e289fbddf8ed5755",
+      "5d67860ce4e2c9352b70319b62634050",
+      "fd48198f00b9c48fccaac8cee6bdf84a",
+      "e25a8491a48f74accf72d1b96f6421e4",
+      "388324ebc557a5eb27571b62ef26689c",
+      "319480dd089a1225a40ad8a602838165",
+      "3ef73e91af2e0fcc11c1c111591e9784",
+      "02987b45f3796f5dee74d5328302a887"
+    ],
+    "login/progress exposure": [
+      "ea85cb298e201b4ba63e1ae71c9149df",
+      "9ab07ba2f63b5c393e2318932d9accdc",
+      "f591d52ba4ba7d741824c1fce7397731",
+      "e8ab77173bf1be69b65f7d1e65b42d49",
+      "19fe2251d017bb8bbbf0dd6b5d609d26",
+      "8f93049f0203d1b76e345b3447567079",
+      "9ff08b134474af5bfc4e85cfad35ab9b"
+    ]
+  },
+  "overlap_counts": {
+    "F01": 51,
+    "F02": 18,
+    "F03": 4,
+    "F04": 4,
+    "F05": 14,
+    "F06": 46,
+    "F07": 5,
+    "F08": 6,
+    "F09": 8,
+    "F10": 29,
+    "F11": 18,
+    "F12": 10,
+    "F13": 3,
+    "F14": 2
+  },
+  "high_risk_lead_count": 101,
+  "codes_observed": {
+    "absent": 2,
+    "ambiguous": 1,
+    "failed": 42,
+    "foreign": 5,
+    "invalid job lifecycle transition": 1,
+    "partial": 17,
+    "pending": 4,
+    "ready": 15,
+    "remote_job_transport_error": 1,
+    "stopped": 6,
+    "succeeded": 5,
+    "supervisor_launch_failed": 2,
+    "unavailable": 20,
+    "unknown": 5
+  },
+  "revisions_observed": [
+    "228cf4c",
+    "37cb0806e27fa088ec6a768c9d3f9df6380f0082",
+    "6c0d6a073790266138ff3bda9ffb91d2d2ad9d4c",
+    "92939816c3f3439b69dbbbf99b4fc14015ba2f80b8e704d76f7d986e928f9d96",
+    "a8a972f10eed86dc496ba79f33e770b1e125aa89",
+    "e4425ccca677d80194968dec",
+    "f2deed0"
+  ],
+  "job_or_request_ids_observed": [],
+  "records": [
+    {
+      "feedback_id": "864f5436b6e662977c488328da3574ff",
+      "created_at": "2026-09-08T16:45:01.451871Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F03"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Initializer identity refusal remains opaque after hash normalization",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "foreign"
+      ],
+      "detail_observed": true,
+      "detail_chars": 468,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "aff2834ebd645210a94963efacea4911",
+      "created_at": "2026-09-08T15:22:21.314970Z",
+      "category": "usability",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F03"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Hosting initializer failure needs direct bounded initializer diagnostics",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "stopped"
+      ],
+      "detail_observed": true,
+      "detail_chars": 297,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "bc666ad8a12ed084febd3aa7f8ac32fc",
+      "created_at": "2026-09-08T08:04:51.156867Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "deployment/activation",
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F03",
+        "F05"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Host apply stopped on foreign initializer evidence after runtime replacement",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "route_or_exposure",
+        "runtime_or_live"
+      ],
+      "codes": [
+        "foreign",
+        "pending",
+        "ready",
+        "stopped"
+      ],
+      "detail_observed": true,
+      "detail_chars": 380,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "d5ff87fa40df14ba6a87778e268a0f9b",
+      "created_at": "2026-09-08T07:46:31.556512Z",
+      "category": "usability",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Settlement quiescence refusal lacks supported diagnosis and containment path",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 696,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result"
+      ]
+    },
+    {
+      "feedback_id": "e686909d857b0d989b9a7c87529a55fe",
+      "created_at": "2026-09-06T16:57:14.480501Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "invalid",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Instance advertises .tst URL while WordPress siteurl/home stay on localhost:PORT — every REST call 403s",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "route_or_exposure",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 1860,
+      "closure": {
+        "reviewed_at": "2026-09-06T17:01:23.792455Z",
+        "reviewer": "claude-agent",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 0,
+        "has_evidence": false,
+        "result_markers": [
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=0 markers=runtime_or_live,test_or_check reviewer=claude-agent",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "24e6756299d9f7e39e28d87125338f2b",
+      "created_at": "2026-09-06T09:52:36.982409Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "clean URLs/proxy/routing",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F11",
+        "F13"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "sb ensure docker preflight fails deterministically whenever its stdout is a pipe, not a TTY",
+      "source_refs": [
+        "sandbox/core/_docker.py:662",
+        "scripts/lib/sandbox.js"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "succeeded"
+      ],
+      "detail_observed": true,
+      "detail_chars": 1951,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "a41d34059b1f2ea195aced060704afd5",
+      "created_at": "2026-09-02T19:10:01.100989Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Remote CI workflow_dispatch event mismatch runs changed taxonomy step",
+      "source_refs": [],
+      "revisions": [
+        "6c0d6a073790266138ff3bda9ffb91d2d2ad9d4c"
+      ],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "revision_or_commit",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 451,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "initial_family_miss_direct_signal"
+      ]
+    },
+    {
+      "feedback_id": "4bfd212e08eff9147baf516a50456f19",
+      "created_at": "2026-09-02T18:40:49.614414Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote CI nested command lost label-prefix value",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 453,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result"
+      ]
+    },
+    {
+      "feedback_id": "1b24cb92013ca8c1f5fa8fb846c0653c",
+      "created_at": "2026-08-31T05:36:59.040181Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F02"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "sb preview create leaves siteurl/home at localhost:PORT, so the public preview URL redirects to an unreachable host, and the project's path-mapped plugin is not active",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 1341,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "ea85cb298e201b4ba63e1ae71c9149df",
+      "created_at": "2026-08-31T04:43:32.729520Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "unreviewed",
+      "families": [
+        "clean URLs/proxy/routing",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F10",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight",
+        "login/progress exposure"
+      ],
+      "claim": "Local ensure --json emits an unredacted autologin URL in progress output",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 389,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "afa841a15051b98b11e59156bc117690",
+      "created_at": "2026-08-30T22:58:05.875054Z",
+      "category": "usability",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Credential scanner blocks reviewed educational WordPress draft manifest",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 422,
+      "closure": {
+        "reviewed_at": "2026-08-30T23:02:02.497154Z",
+        "reviewer": "codex-goal-reconcile",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=test_or_check reviewer=codex-goal-reconcile",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status"
+      ]
+    },
+    {
+      "feedback_id": "9ab07ba2f63b5c393e2318932d9accdc",
+      "created_at": "2026-08-30T22:54:22.934546Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "login/progress exposure"
+      ],
+      "claim": "Hosted autologin URL cannot reach Amar Sonar WordPress behind Astro front door",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 301,
+      "closure": {
+        "reviewed_at": "2026-08-30T23:02:03.870383Z",
+        "reviewer": "codex-goal-reconcile",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live reviewer=codex-goal-reconcile",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "52622c4577419a51f02d728f886b40f0",
+      "created_at": "2026-08-30T12:10:03.436760Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F06",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Terminal workspace cleanup remains falsely protected",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "source_reference"
+      ],
+      "codes": [
+        "failed",
+        "supervisor_launch_failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 648,
+      "closure": {
+        "reviewed_at": "2026-08-30T17:58:19.845584Z",
+        "reviewer": "codex-feedback-review-11",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=job_or_output,revision_or_commit,runtime_or_live,test_or_check reviewer=codex-feedback-review-11",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "a3f3f976128ca1542b0adbfe7536cdca",
+      "created_at": "2026-08-30T07:53:44.328434Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Remote ensure hides its structured failure behind a warning",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "route_or_exposure",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 510,
+      "closure": {
+        "reviewed_at": "2026-08-30T17:58:27.883257Z",
+        "reviewer": "codex-feedback-review-11",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,verification_or_fix reviewer=codex-feedback-review-11",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "cf1788f351001bf3fabdf3e2185daace",
+      "created_at": "2026-08-30T07:51:19.008666Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "invalid",
+      "families": [
+        "clean URLs/proxy/routing",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F04"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Unpinned WordPress bootstrap passes archive URL as a version",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 518,
+      "closure": {
+        "reviewed_at": "2026-08-30T07:53:44.335951Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "bab948b85ef2912a1bb2e54abc15afa7",
+      "created_at": "2026-08-29T14:15:46.177381Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "up --json omits typed stale-network failure",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output"
+      ],
+      "codes": [
+        "stopped"
+      ],
+      "detail_observed": true,
+      "detail_chars": 511,
+      "closure": {
+        "reviewed_at": "2026-08-30T06:13:26.925966Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "282cd7f7afba66f30a1c6ddd3bfe5cd3",
+      "created_at": "2026-08-29T11:38:59.466109Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "recovery/reopen"
+      ],
+      "overlaps": [
+        "F05",
+        "F06",
+        "F10",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Spec 033 sync once cannot reconcile remote acceptance",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "runtime_or_live"
+      ],
+      "codes": [
+        "pending",
+        "unavailable",
+        "unknown"
+      ],
+      "detail_observed": true,
+      "detail_chars": 457,
+      "closure": {
+        "reviewed_at": "2026-08-30T06:32:43.316267Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "2672614f144034f658044583f173cdad",
+      "created_at": "2026-08-28T15:40:49.546600Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F06",
+        "F08",
+        "F09",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote CI parent interrupted while child remained running and remote cancellation failed",
+      "source_refs": [],
+      "revisions": [
+        "37cb0806e27fa088ec6a768c9d3f9df6380f0082"
+      ],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 561,
+      "closure": {
+        "reviewed_at": "2026-08-30T17:58:32.048380Z",
+        "reviewer": "codex-feedback-review-11",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex-feedback-review-11",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "e1ad5110271d47cf5496072a4193ef64",
+      "created_at": "2026-08-27T09:24:11.810550Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02",
+        "F10",
+        "F12",
+        "F13"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "remote up: 300s runtime-source upload bound is unreachable on a slow-uplink VPS, so the remote runtime can never be refreshed",
+      "source_refs": [
+        "sandbox/commands/remote.py"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "unknown"
+      ],
+      "detail_observed": true,
+      "detail_chars": 1473,
+      "closure": {
+        "reviewed_at": "2026-08-28T04:52:34.582588Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "483f8e2df3ac38c7e289fbddf8ed5755",
+      "created_at": "2026-08-26T06:04:48.324341Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Lenzora development apply blocked by hosted migration history drift",
+      "source_refs": [],
+      "revisions": [
+        "a8a972f10eed86dc496ba79f33e770b1e125aa89"
+      ],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 608,
+      "closure": {
+        "reviewed_at": "2026-08-26T06:28:19.241165Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "509c46e8e7f2119141e3922f7ceff607",
+      "created_at": "2026-08-26T01:43:39.783245Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote workspace cleanup inventory is blocked by runtime revision mismatch",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 369,
+      "closure": {
+        "reviewed_at": "2026-08-26T01:48:10.521392Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "reproduction_or_probe",
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=reproduction_or_probe,revision_or_commit,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "4ecf436c6dadfaf25efbdb04bddffa31",
+      "created_at": "2026-08-26T00:05:21.591928Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "duplicate",
+      "families": [
+        "clean URLs/proxy/routing"
+      ],
+      "overlaps": [
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Current xspeed-pr188 status remains unreachable with web plane unavailable",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "route_or_exposure",
+        "runtime_or_live"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 290,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:09:47.815901Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "verification_or_fix"
+        ],
+        "duplicate_of": "74b4203d8e54a68aced7d0f164bcc652"
+      },
+      "closure_claim": "reviewed evidence=1 markers=verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": "duplicate_of=74b4203d8e54a68aced7d0f164bcc652",
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "ec48a43e60e5fd126f2fa846b460d8ff",
+      "created_at": "2026-08-25T22:48:12.041355Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote resources plan exceeds CLI wait without returning evidence",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 453,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:27:29.964764Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "50af0f82c1ba54de479d4f672f1ef1d9",
+      "created_at": "2026-08-25T22:30:49.750171Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Resource cleanup plan accepts orphaned workspace volumes but cleanup fails for every candidate",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "failed",
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 579,
+      "closure": {
+        "reviewed_at": "2026-08-25T22:52:06.211467Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 4,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=4 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "5d67860ce4e2c9352b70319b62634050",
+      "created_at": "2026-08-25T21:52:44.066335Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Remote cleanup plan rejected by client fallback target identity",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 340,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:52:49.524631Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "reproduction_or_probe",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=reproduction_or_probe,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "b433aa33c7fb802797628630044b494a",
+      "created_at": "2026-08-25T21:39:32.272339Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "not_applicable",
+      "families": [],
+      "overlaps": [
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote workspace reap dry-run stalls without a bounded result",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 331,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:53:22.155061Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "a88920a9e7a99fa1396b8b162f714d45",
+      "created_at": "2026-08-25T21:38:29.838618Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "not_applicable",
+      "families": [],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote tier cleanup plan stalls without a bounded result",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 398,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:52:56.469984Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "71c12b23c43db92dcaacc9d1d1cb71ab",
+      "created_at": "2026-08-25T20:27:48.612172Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote workspace cleanup returns indeterminate after a completed safe reap",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 667,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:25:03.392387Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "6d89bec0395e060774bb4134080be298",
+      "created_at": "2026-08-25T20:04:46.431122Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote deep resource scan cannot measure host capacity for container cleanup",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 375,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:56:04.197537Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "49ea2ef5f18112ea22e5f9ce07686b23",
+      "created_at": "2026-08-25T19:44:46.717325Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Main-branch remote Sandbox runtime migration blocked by SSH banner timeout",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 313,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:26:31.071949Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "fd48198f00b9c48fccaac8cee6bdf84a",
+      "created_at": "2026-08-25T19:36:25.894873Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F02",
+        "F14"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Lenzora development host apply blocked by repeated SSH banner timeout",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 229,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:26:32.045365Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "f591d52ba4ba7d741824c1fce7397731",
+      "created_at": "2026-08-25T06:57:07.082793Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F08",
+        "F11",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight",
+        "login/progress exposure"
+      ],
+      "claim": "sb ensure: a themes/plugins zip URL is misread as a local path, so the ready fast path refuses forever",
+      "source_refs": [
+        "docs/sandbox-config-reference.md:290",
+        "plugins/themes",
+        "sandbox/core/_instances.py:918-931"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "ready",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 1572,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:25.473866Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "444b55cbd7ed702a8c143313d4b0dfb8",
+      "created_at": "2026-08-25T05:48:55.765000Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F04",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Lifecycle apply unexpectedly upgrades WordPress core",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 275,
+      "closure": {
+        "reviewed_at": "2026-08-25T17:13:51.100190Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "7f014ae695c13eecc58607646a25d062",
+      "created_at": "2026-08-25T05:47:35.980453Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "In-place apply recreates containers then fails on unresolved declared plugin",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "partial",
+        "unknown"
+      ],
+      "detail_observed": true,
+      "detail_chars": 339,
+      "closure": {
+        "reviewed_at": "2026-08-25T17:56:38.001473Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "861028b8a2315b6f9a82506b8cb47a94",
+      "created_at": "2026-08-24T18:03:51.878474Z",
+      "category": "usability",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "local resource scan cannot attribute container CPU or RAM",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [
+        "partial",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 551,
+      "closure": {
+        "reviewed_at": "2026-08-25T19:28:53.539973Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "reproduction_or_probe",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,reproduction_or_probe,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "2413b7090bad3cc8f02ccf99b4247c0e",
+      "created_at": "2026-08-24T17:23:03.019316Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F08",
+        "F09"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "sb ensure/apply deadlock: apply uses --no-deps so db never starts",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "ready",
+        "stopped",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 986,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:28.107989Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "ef5fb478856eeb845b5b1ec177c260f8",
+      "created_at": "2026-08-24T14:06:55.006098Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F09"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "wp post list --search returned unrelated IDs and enabled unsafe cleanup",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 412,
+      "closure": {
+        "reviewed_at": "2026-08-25T19:25:18.040063Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "dd6bbbed8a6706da0e9b070e6cde7b6e",
+      "created_at": "2026-08-23T17:59:31.022143Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote workspace inventory blocked by runtime revision mismatch",
+      "source_refs": [
+        "runtime/deployment"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "revision_or_commit",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 563,
+      "closure": {
+        "reviewed_at": "2026-08-26T07:10:55.804705Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "f37bd9aee69a896880eeb78c38c0d668",
+      "created_at": "2026-08-23T14:56:15.819351Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Disposable exact-head WordPress apply rejects extension plan digest",
+      "source_refs": [],
+      "revisions": [
+        "92939816c3f3439b69dbbbf99b4fc14015ba2f80b8e704d76f7d986e928f9d96"
+      ],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 387,
+      "closure": {
+        "reviewed_at": "2026-08-25T17:58:45.416588Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "c7be223a1e5f188aa88524fbbb3fe098",
+      "created_at": "2026-08-23T14:56:01.797459Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Disposable exact-head WordPress ensure reports mount-state unavailable before first instance",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 322,
+      "closure": {
+        "reviewed_at": "2026-08-25T17:58:40.715680Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal"
+      ]
+    },
+    {
+      "feedback_id": "2861828e0252f5187c93bd11a1c521f2",
+      "created_at": "2026-08-23T13:00:09.400651Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport",
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote workspace inspection blocked by runtime revision mismatch",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 531,
+      "closure": {
+        "reviewed_at": "2026-08-26T07:10:55.841789Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "82a729ce37e1476c574327bc37c47a6e",
+      "created_at": "2026-08-23T11:52:42.395912Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Host-local deep collector capped directory walk at 120 seconds despite larger detached budget",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [
+        "partial",
+        "stopped"
+      ],
+      "detail_observed": true,
+      "detail_chars": 459,
+      "closure": {
+        "reviewed_at": "2026-08-25T19:29:25.786127Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "e5f1e6468abd63f375058b002020964a",
+      "created_at": "2026-08-23T11:42:00.561344Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F09",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Detached resource scan submission rejected by remote policy wire validation",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 434,
+      "closure": {
+        "reviewed_at": "2026-08-25T22:18:52.261156Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "6cb71d7e0f95307d343ed6d8285357a7",
+      "created_at": "2026-08-23T08:52:07.681739Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F09"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "sb ensure site bootstrap times out on WordPress core version check",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 572,
+      "closure": {
+        "reviewed_at": "2026-08-25T20:35:57.349388Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 4,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=4 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "e25a8491a48f74accf72d1b96f6421e4",
+      "created_at": "2026-08-22T18:07:19.088875Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F14"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Lenzora host apply returned generic remote command failure",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 267,
+      "closure": {
+        "reviewed_at": "2026-08-25T18:46:58.653631Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "fe5c3e02c95f5df8a1abfbda61ce9aff",
+      "created_at": "2026-08-22T18:04:20.965541Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote normalization retry hit acceptance transaction expiry",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 367,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:22:31.831876Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status"
+      ]
+    },
+    {
+      "feedback_id": "2aa8e4725bfddb72c64b78b4b13c2391",
+      "created_at": "2026-08-22T12:48:13.766126Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Sandbox launcher intermittently falls through into Python body",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "source_reference"
+      ],
+      "codes": [
+        "succeeded"
+      ],
+      "detail_observed": true,
+      "detail_chars": 414,
+      "closure": {
+        "reviewed_at": "2026-08-25T14:27:16.015352Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "db34582b727bfea7d94ba446b681b9cc",
+      "created_at": "2026-08-22T10:45:49.391588Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Ox Alpha returned empty content for Lenzora implementation session",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 316,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:23:40.010278Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status"
+      ]
+    },
+    {
+      "feedback_id": "120ce07b624da3c31e6c78f492adc04e",
+      "created_at": "2026-08-22T08:54:23.865315Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "clean URLs/proxy/routing",
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F04",
+        "F10",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Hermes dashboard cannot resume saved TUI sessions",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "route_or_exposure",
+        "test_or_check"
+      ],
+      "codes": [
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 354,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:23:39.013132Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "7ef8c643198daefd31eaa66d7438562a",
+      "created_at": "2026-08-22T05:50:49.604024Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Hermes public dashboard exposure blocked by obsolete cloudflared",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 413,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:52:12.535383Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "2f6f1ecd91a543023a79414afdf8f939",
+      "created_at": "2026-08-22T05:28:33.660789Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Hermes setup fails on fresh v0.18.2 profile creation",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "absent",
+        "failed",
+        "pending"
+      ],
+      "detail_observed": true,
+      "detail_chars": 463,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:45:18.126100Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "5978c11e472eae799b5855fdab356e72",
+      "created_at": "2026-08-20T21:17:11.845851Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "clean URLs/proxy/routing",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F10",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote high-memory build was host-killed below its container cap",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "route_or_exposure",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 506,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:44:20.639652Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "4f4075f4b5b4fa35039263677ded6d1d",
+      "created_at": "2026-08-20T18:20:45.793125Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F06",
+        "F07",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote test submission rejects required non-secret test fixtures as credential-like",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 474,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:06:31.178559Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "a941c144b268fcb1f090deb46b75255d",
+      "created_at": "2026-08-20T10:41:22.824788Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Local E2E fixture became unreachable during Playwright",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "route_or_exposure",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 396,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:20:27.994897Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "reproduction_or_probe",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,reproduction_or_probe,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "fc79f41e549131be5d4d4edac49c4ad9",
+      "created_at": "2026-08-17T15:17:58.849575Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F02"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "workspace list/status/destroy all fail with workspace_index_incomplete on remote and host",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 1038,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:44:30.697459Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "ccd9e5e28f09f91f51cd36b5e7645900",
+      "created_at": "2026-08-16T09:21:01.365444Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "sb ensure against a remote target returns no instance record (no url)",
+      "source_refs": [
+        "sandbox/commands/lifecycle.py"
+      ],
+      "revisions": [
+        "f2deed0"
+      ],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "route_or_exposure",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 736,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:17:01.080707Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "01df389c5d1019fc1f82d52ea8072950",
+      "created_at": "2026-08-16T08:22:12.873875Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F02",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "resources status on remote: deep/scope-cache return measurement_unavailable, thorough times out most categories",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [
+        "partial",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 907,
+      "closure": {
+        "reviewed_at": "2026-08-25T23:06:41.490155Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=job_or_output,revision_or_commit,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "54c1c9aed2fdf2bd620eee33eeb61b73",
+      "created_at": "2026-08-16T07:24:15.751000Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Legacy write_secret() rewrites the whole personal secret file, destroying comments the broker preserves",
+      "source_refs": [
+        "sandbox/commands/hosting.py:123",
+        "sandbox/core/_cloudflare.py:32"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 1051,
+      "closure": {
+        "reviewed_at": "2026-08-25T14:26:18.427855Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "b69b39a5a25a10e244b7918e36e169ab",
+      "created_at": "2026-08-16T06:16:38.256573Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F02",
+        "F06",
+        "F10",
+        "F13"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "sb test silently runs REMOTE for a local project, and the working-tree push exceeds sb's own 120s timeout",
+      "source_refs": [
+        "runtime/s/cm-",
+        "scripts/lib/sandbox.js"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 2039,
+      "closure": {
+        "reviewed_at": "2026-08-25T18:44:10.518778Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "834d2253f4455e6fd21eb0faffad76ea",
+      "created_at": "2026-08-16T05:51:31.271702Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F02",
+        "F04",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "sb ensure targets a remote that sb remote list already reports unreachable, then dies with a raw traceback after 120s",
+      "source_refs": [
+        "sandbox/commands/instances_cmd.py:104"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 1590,
+      "closure": {
+        "reviewed_at": "2026-08-26T07:21:33.734121Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live,test_or_check,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "b5ea143234f3d24d20f2ba78ea4435bb",
+      "created_at": "2026-08-15T06:25:30.377285Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation",
+        "recovery/reopen"
+      ],
+      "overlaps": [
+        "F01",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote resource status cannot measure host capacity",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "partial",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 345,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:57:43.718374Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "reproduction_or_probe",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=reproduction_or_probe,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "6f0b87cd91d110adcdd8e94c1037458d",
+      "created_at": "2026-08-15T06:16:07.165763Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote detached exec fails with supervisor_launch_failed",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "supervisor_launch_failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 469,
+      "closure": {
+        "reviewed_at": "2026-08-26T02:11:53.358124Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "5021b7b9e9d71c82c3e9eacb026ca963",
+      "created_at": "2026-08-15T04:45:35.073392Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "clean URLs/proxy/routing"
+      ],
+      "overlaps": [
+        "F06",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Agent worktree setup switched the shared root branch",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "revision_or_commit",
+        "route_or_exposure",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 742,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:00:03.352305Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "3b3782464e982ed9387e8e2a81d12c53",
+      "created_at": "2026-08-14T09:33:10.891288Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote network-capacity monitor unavailable",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "succeeded",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 237,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:59:29.587466Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "c5a41bf90e8b801fe99b9f6abe7298e9",
+      "created_at": "2026-08-14T07:54:07.894535Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F08"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Herd ensure acceptance unknown and registry surfaces disagree",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [
+        "ambiguous",
+        "pending",
+        "ready",
+        "unknown"
+      ],
+      "detail_observed": true,
+      "detail_chars": 471,
+      "closure": {
+        "reviewed_at": "2026-08-25T19:35:08.885528Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "e8ab77173bf1be69b65f7d1e65b42d49",
+      "created_at": "2026-08-14T07:26:13.339931Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "clean URLs/proxy/routing",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight",
+        "login/progress exposure"
+      ],
+      "claim": "ensure JSON exposes credential-bearing login URL",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "route_or_exposure",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 461,
+      "closure": {
+        "reviewed_at": "2026-08-25T14:26:16.835180Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "822262fe39df0c080ec49b562307d7bf",
+      "created_at": "2026-08-13T21:24:11.224368Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "resolved",
+      "families": [],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote workspace index remains incomplete",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 145,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:31.698928Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "3222e29592d229d03be37a60b9a43bf1",
+      "created_at": "2026-08-13T21:22:06.928361Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote resource status currently unavailable",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 189,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:57:43.724462Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "c5548021faf772c2bc0bae19a8b94864",
+      "created_at": "2026-08-13T15:31:00.156677Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote network capacity remains unmeasurable",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "succeeded",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 299,
+      "closure": {
+        "reviewed_at": "2026-08-26T13:39:16.449438Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "reproduction_or_probe",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=reproduction_or_probe,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "641481fd3eb621604ab8caf7adeb01e8",
+      "created_at": "2026-08-13T15:16:25.614980Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F12"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote resource measurement unavailable after CLI 0.2.2 update",
+      "source_refs": [],
+      "revisions": [
+        "e4425ccca677d80194968dec"
+      ],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 308,
+      "closure": {
+        "reviewed_at": "2026-08-25T21:57:43.724695Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "reproduction_or_probe"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=reproduction_or_probe reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "d176d75f2af85574e78aadbc5018fefa",
+      "created_at": "2026-08-13T14:53:43.762057Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "resolved",
+      "families": [],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote resource status timeout leaks traceback",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "partial",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 323,
+      "closure": {
+        "reviewed_at": "2026-08-25T14:48:32.694844Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "0dc659545d6568afe931b2cfe93669f8",
+      "created_at": "2026-08-13T14:42:49.929490Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "resolved",
+      "families": [],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Sandbox feature branch push rejected by GitHub SSH",
+      "source_refs": [],
+      "revisions": [
+        "228cf4c"
+      ],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "revision_or_commit",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 270,
+      "closure": {
+        "reviewed_at": "2026-08-26T02:35:34.314967Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "reproduction_or_probe",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=reproduction_or_probe,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "3321034abad0e4834919d73f8531f3d8",
+      "created_at": "2026-08-13T14:09:58.567999Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "duplicate",
+      "families": [],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "T120 evaluator report attachment relocated to user feedback storage",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 372,
+      "closure": {
+        "reviewed_at": "2026-08-26T02:35:33.216633Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [],
+        "duplicate_of": "9bb7aea1a679db7233e18f8fbf31c841"
+      },
+      "closure_claim": "reviewed evidence=1 markers=none reviewer=codex",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": "duplicate_of=9bb7aea1a679db7233e18f8fbf31c841",
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "no_explicit_closure_result"
+      ]
+    },
+    {
+      "feedback_id": "84585e00f7126c3d37e11d6168091163",
+      "created_at": "2026-08-13T14:09:01.902853Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote resource status classifies 32 networks as unattributed",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "foreign",
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 373,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:59:32.025740Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "dc88af801eb6ddafe66aaea5c7d4f0c0",
+      "created_at": "2026-08-13T13:28:16.733091Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Terminal output_bytes disagrees with complete retained output",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 370,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:34:21.137894Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "9bb7aea1a679db7233e18f8fbf31c841",
+      "created_at": "2026-08-13T13:24:36.875659Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport",
+        "recovery/reopen"
+      ],
+      "overlaps": [
+        "F05",
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "T120 evaluator full log and remote benchmark workflow gaps",
+      "source_refs": [
+        "docs/feedback/2026-08-13-lenzora-t120-terra-evaluator-full-log.md."
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 824,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:23:58.894253Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "19fe2251d017bb8bbbf0dd6b5d609d26",
+      "created_at": "2026-08-13T13:09:31.022450Z",
+      "category": "bug",
+      "severity": "critical",
+      "status": "verified",
+      "families": [
+        "clean URLs/proxy/routing"
+      ],
+      "overlaps": [
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "login/progress exposure"
+      ],
+      "claim": "Status JSON disclosed an autologin credential",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "route_or_exposure",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 283,
+      "closure": {
+        "reviewed_at": "2026-08-25T14:26:15.226208Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 4,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=4 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "critical",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "8371d7f7589feaff75cd7d4ee17424ca",
+      "created_at": "2026-08-13T13:09:23.148032Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [],
+      "overlaps": [
+        "F06",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Explicit local instance selector was routed to configured remote",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 262,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:38.069997Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "6e3ff886a6ccb6a37708abf705721189",
+      "created_at": "2026-08-13T12:42:17.952932Z",
+      "category": "usability",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Sandbox cannot safely clean clearly temporary remote workspace stacks while the workspace index is incomplete",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 462,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:34.290554Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "388324ebc557a5eb27571b62ef26689c",
+      "created_at": "2026-08-13T12:27:07.878839Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F02"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Repeated learning host apply SSH timeout",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 239,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:57:46.211955Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "b340f98a0df25f2c7817d7cac2bd652b",
+      "created_at": "2026-08-13T12:27:04.647916Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Registered remote reachability disagrees with brokered SSH",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 343,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:40.742003Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "reproduction_or_probe",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=reproduction_or_probe,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "319480dd089a1225a40ad8a602838165",
+      "created_at": "2026-08-13T12:26:28.334839Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F02"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Learning host apply blocked by remote SSH timeout",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 323,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:57:45.156655Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "cd84b75dcfc5da657b6b5a95d35e54fb",
+      "created_at": "2026-08-13T12:22:11.646201Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F05",
+        "F10",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote Docker pool transaction exceeded client timeout and failure envelope exposed encoded command detail",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 332,
+      "closure": {
+        "reviewed_at": "2026-08-25T14:48:34.124432Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "b9815b2565193466965db85343ad26c2",
+      "created_at": "2026-08-13T12:14:52.372031Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F03",
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Repeated silent remote status probes block direct-host acceptance observation",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 397,
+      "closure": {
+        "reviewed_at": "2026-08-26T09:43:58.136408Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "reproduction_or_probe",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,reproduction_or_probe,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "8bc9ca1c7fb7e293934bc6fcaa3e6506",
+      "created_at": "2026-08-13T12:05:44.547479Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Remote workspace list rejects stale missing project directory",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 311,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:35.542846Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal"
+      ]
+    },
+    {
+      "feedback_id": "968d8f7a4416f26099ca49bff0b61b0b",
+      "created_at": "2026-08-13T11:54:00.689068Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "duplicate",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote T120 bootstrap blocked by exhausted Docker subnet pools",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 398,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:01:05.224105Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": "498b193cc569470ec87feba685af3dea"
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": "duplicate_of=498b193cc569470ec87feba685af3dea",
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "3ef73e91af2e0fcc11c1c111591e9784",
+      "created_at": "2026-08-13T11:42:26.716319Z",
+      "category": "bug",
+      "severity": "critical",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Apply recreates ownership failure after explicit repair",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 445,
+      "closure": {
+        "reviewed_at": "2026-08-25T14:32:45.040725Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "critical",
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "02987b45f3796f5dee74d5328302a887",
+      "created_at": "2026-08-13T11:41:25.489527Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "host apply"
+      ],
+      "claim": "Remote apply partially recreates runtime then fails on plugin permissions",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 432,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:44:24.356612Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "955b20457245aab5573cda8fd9951eec",
+      "created_at": "2026-08-13T11:32:41.499109Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "Remote status ignores explicit instance selector",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 337,
+      "closure": {
+        "reviewed_at": "2026-08-25T12:31:44.886304Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 4,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=4 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal"
+      ]
+    },
+    {
+      "feedback_id": "8f93049f0203d1b76e345b3447567079",
+      "created_at": "2026-08-13T09:34:20.169467Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "clean URLs/proxy/routing",
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02",
+        "F07",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "login/progress exposure"
+      ],
+      "claim": "Preview label selector also ignored",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "route_or_exposure",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 417,
+      "closure": {
+        "reviewed_at": "2026-08-25T19:30:09.772021Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live",
+          "test_or_check",
+          "verification_or_fix"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live,test_or_check,verification_or_fix reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "9ff08b134474af5bfc4e85cfad35ab9b",
+      "created_at": "2026-08-13T09:33:39.005420Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "duplicate",
+      "families": [
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02",
+        "F07",
+        "F11"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "login/progress exposure"
+      ],
+      "claim": "Preview root remains unresolvable with original config",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 383,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:02:01.274122Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": "20c0829c9145fb5a0ead2849d13e258b"
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": "duplicate_of=20c0829c9145fb5a0ead2849d13e258b",
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "dcb1070b7240de1233c7c509a6d54c49",
+      "created_at": "2026-08-13T09:30:22.645836Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote network pressure remains high at 31 active managed networks",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "foreign",
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 338,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:56:33.582614Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 2,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "11a08aafc269d5e0a602313acfbec231",
+      "created_at": "2026-08-13T09:28:26.280589Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "All documented remote instance selectors are ignored",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 430,
+      "closure": {
+        "reviewed_at": "2026-08-25T16:55:39.403247Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 2,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=2 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "20c0829c9145fb5a0ead2849d13e258b",
+      "created_at": "2026-08-13T09:28:01.850823Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02",
+        "F06",
+        "F08"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote preview project mapping breaks after exact source sync",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference"
+      ],
+      "codes": [
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 429,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:24:17.975937Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "67ef77d6ad3d7acaaae60db41e0a5558",
+      "created_at": "2026-08-13T09:22:49.121923Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F02",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "VPS status ignores explicit instance selector",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 357,
+      "closure": {
+        "reviewed_at": "2026-08-25T13:50:36.947511Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "c841bc711c53936d6a6ce94cfe7200e7",
+      "created_at": "2026-08-13T09:14:03.781264Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote control updated; network pressure remains high",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "foreign"
+      ],
+      "detail_observed": true,
+      "detail_chars": 295,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:56:34.805690Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=none reviewer=codex",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "90e893e45556e215e5963d34738c3e89",
+      "created_at": "2026-08-13T09:11:32.432066Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Global instance selector also ignored for remote status",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 398,
+      "closure": {
+        "reviewed_at": "2026-08-25T12:31:47.064170Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 4,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=4 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "a48f3f90e30a211b6fbd438890d40f93",
+      "created_at": "2026-08-13T09:10:58.992278Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [],
+      "overlaps": [
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote status ignores subcommand instance selector",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 388,
+      "closure": {
+        "reviewed_at": "2026-08-25T12:31:50.002546Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 4,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=4 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "fc1bc64c301c8dfe80b2c966e8149f20",
+      "created_at": "2026-08-13T08:43:07.802886Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F05",
+        "F06",
+        "F07"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "OrbStack stop interrupted Sandbox E2E and teardown",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "unavailable"
+      ],
+      "detail_observed": true,
+      "detail_chars": 449,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:23:28.501777Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "ee3a1f3864e28125881d0651d9a53c1a",
+      "created_at": "2026-08-13T08:32:08.722278Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F06",
+        "F07",
+        "F09"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "ensure tried to replace a WordPress 7.1-RC3 instance with latest stable",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live"
+      ],
+      "codes": [
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 534,
+      "closure": {
+        "reviewed_at": "2026-08-25T18:34:20.185845Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 3,
+        "has_evidence": true,
+        "result_markers": [
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=3 markers=revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "eddb34e41036f7cf38f01ad0a1fc64fc",
+      "created_at": "2026-08-13T08:03:04.052749Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Repeated T105 r7 status poll returned no payload",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 183,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:42:44.872733Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "05605f7f730e2340d2787b05445da98d",
+      "created_at": "2026-08-13T08:02:17.709079Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "T105 r7 status poll completed without a payload",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 209,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:42:44.885722Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": []
+    },
+    {
+      "feedback_id": "0a5987c9daee5c691b28ed6573c1c68e",
+      "created_at": "2026-08-13T08:01:30.834840Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "verified",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "T105 r7 retained output long-poll failed",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed"
+      ],
+      "detail_observed": true,
+      "detail_chars": 268,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:40:54.582310Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit",
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit,runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "600d2def1a44dde2e811a79e01b9aa25",
+      "created_at": "2026-08-13T08:01:10.007847Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote network pressure remains high at 31 active managed networks",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 331,
+      "closure": {
+        "reviewed_at": "2026-08-26T00:56:35.949307Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 2,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "cc5a5f85457d80cacac085e2ec88a6af",
+      "created_at": "2026-08-13T07:00:03.275271Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "deployment/activation",
+        "recovery/reopen",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F05"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Sandbox CLI crashes on duplicate --project-identity parser option",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 384,
+      "closure": {
+        "reviewed_at": "2026-08-25T18:39:12.945007Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "job_or_output",
+          "revision_or_commit"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=job_or_output,revision_or_commit reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "e11914b581d92c102eea700ba9456a2e",
+      "created_at": "2026-08-13T05:45:25.143602Z",
+      "category": "usability",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [
+        "ensure/preflight"
+      ],
+      "claim": "sandbox.config.<label>.json is root-only and silently no-ops when absent",
+      "source_refs": [
+        "sandbox/config/compose.py:52",
+        "sandbox/config/wordpress.py:38-41"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "absent",
+        "failed",
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 1766,
+      "closure": {
+        "reviewed_at": "2026-08-25T00:00:00Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "initial_family_miss_direct_signal",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "a813480b2b761798b839cd4682c0649b",
+      "created_at": "2026-08-13T02:27:37.336371Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote network pressure remains at 31 active managed networks",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 535,
+      "closure": {
+        "reviewed_at": "2026-08-25T00:00:00Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=none reviewer=codex",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 2,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "bf05eeb9362ba7e408b9315669698b60",
+      "created_at": "2026-08-12T20:27:31.423216Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote network pressure remains at 31 active managed networks",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "partial"
+      ],
+      "detail_observed": true,
+      "detail_chars": 556,
+      "closure": {
+        "reviewed_at": "2026-08-25T00:00:00Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=none reviewer=codex",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 2,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "0fac3b07416044a28041c2a358cf2084",
+      "created_at": "2026-08-12T14:26:39.388861Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "blocked",
+      "families": [
+        "deployment/activation",
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote network pressure increased to 31 active managed networks",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "revision_or_commit",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "partial",
+        "succeeded"
+      ],
+      "detail_observed": true,
+      "detail_chars": 612,
+      "closure": {
+        "reviewed_at": "2026-08-25T00:00:00Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=none reviewer=codex",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "6481185910b63348f5c38308439049ca",
+      "created_at": "2026-08-12T09:50:43.300909Z",
+      "category": "bug",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F02",
+        "F08"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "A pre-subcommand --label is silently clobbered for six subcommands, targeting the wrong instance",
+      "source_refs": [
+        "sandbox/cli.py:750-761"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 919,
+      "closure": {
+        "reviewed_at": "2026-08-25T00:00:00Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "0e2d74b605ea48799f470d76d62058e4",
+      "created_at": "2026-08-12T09:46:56.417083Z",
+      "category": "usability",
+      "severity": "high",
+      "status": "resolved",
+      "families": [
+        "clean URLs/proxy/routing",
+        "deployment/activation",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F06"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "sb wp interleaves its own progress with command output, producing always-true test assertions",
+      "source_refs": [
+        "scripts/sandbox-pool.js:82-89",
+        "tests/e2e/utils/wp-cli.js:67-105"
+      ],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "route_or_exposure",
+        "source_reference",
+        "test_or_check"
+      ],
+      "codes": [],
+      "detail_observed": true,
+      "detail_chars": 878,
+      "closure": {
+        "reviewed_at": "2026-08-25T00:00:00Z",
+        "reviewer": "codex",
+        "confidence": "medium",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live"
+        ],
+        "duplicate_of": null
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "78aaf5836d63078b060336a9e306b7f5",
+      "created_at": "2026-08-12T08:25:04.190375Z",
+      "category": "incident",
+      "severity": "high",
+      "status": "duplicate",
+      "families": [
+        "deployment/activation"
+      ],
+      "overlaps": [
+        "F01"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote fast-test harness blocked by Docker network pool exhaustion",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "stopped"
+      ],
+      "detail_observed": true,
+      "detail_chars": 324,
+      "closure": {
+        "reviewed_at": "2026-08-26T03:01:05.153017Z",
+        "reviewer": "codex",
+        "confidence": "high",
+        "has_reason": true,
+        "evidence_count": 1,
+        "has_evidence": true,
+        "result_markers": [
+          "runtime_or_live",
+          "test_or_check"
+        ],
+        "duplicate_of": "498b193cc569470ec87feba685af3dea"
+      },
+      "closure_claim": "reviewed evidence=1 markers=runtime_or_live,test_or_check reviewer=codex",
+      "closure_backed_by_explicit_result": true,
+      "duplicate": "duplicate_of=498b193cc569470ec87feba685af3dea",
+      "same_summary_count": 1,
+      "high_risk_lead": true,
+      "high_risk_reasons": [
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "5a30b5cda8378a014d0ae9b15cdf826d",
+      "created_at": "2026-09-08T14:03:28.798938Z",
+      "category": "bug",
+      "severity": "medium",
+      "status": "unreviewed",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F09"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Force cancellation fails when durable job is already cancelling",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "test_or_check"
+      ],
+      "codes": [
+        "invalid job lifecycle transition",
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 400,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "aaa61571984fb074981f7608e6423aeb",
+      "created_at": "2026-09-08T15:04:25.263775Z",
+      "category": "bug",
+      "severity": "medium",
+      "status": "unreviewed",
+      "families": [
+        "jobs/remote transport"
+      ],
+      "overlaps": [
+        "F01",
+        "F09"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Force cancel rejects a job already cancelling",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "test_or_check"
+      ],
+      "codes": [
+        "ready"
+      ],
+      "detail_observed": true,
+      "detail_chars": 303,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    },
+    {
+      "feedback_id": "6647c8aaf2ddb69b736e29548b30db02",
+      "created_at": "2026-09-08T16:48:51.885407Z",
+      "category": "bug",
+      "severity": "medium",
+      "status": "unreviewed",
+      "families": [
+        "jobs/remote transport",
+        "startup/local creation"
+      ],
+      "overlaps": [
+        "F01",
+        "F06",
+        "F10"
+      ],
+      "initial_filter_missed": true,
+      "direct_missed_signals": [],
+      "claim": "Remote job inventory loses the failure cause after successful transport",
+      "source_refs": [],
+      "revisions": [],
+      "job_or_request_ids": [],
+      "evidence_kinds": [
+        "job_or_output",
+        "reproduction_or_probe",
+        "revision_or_commit",
+        "runtime_or_live",
+        "test_or_check"
+      ],
+      "codes": [
+        "failed",
+        "remote_job_transport_error",
+        "unknown"
+      ],
+      "detail_observed": true,
+      "detail_chars": 587,
+      "closure": null,
+      "closure_claim": "no closure record",
+      "closure_backed_by_explicit_result": false,
+      "duplicate": null,
+      "same_summary_count": 1,
+      "high_risk_lead": false,
+      "high_risk_reasons": [
+        "unresolved_status",
+        "no_explicit_closure_result",
+        "high_impact_overlap"
+      ]
+    }
+  ]
+}

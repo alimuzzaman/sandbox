@@ -1,0 +1,812 @@
+{
+  "schema_version": 1,
+  "source": "sb feedback list --limit 100 --json",
+  "coverage": {
+    "count": 100,
+    "has_more": true,
+    "invalid_record_count": 0,
+    "invalid_review_count": 0
+  },
+  "records": [
+    {
+      "feedback_id": "0f0960d8c6ce36083fb195fb4a9fb3de",
+      "created_at": "2026-09-08T16:36:01.541913Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Hosted deployment initializer compares incompatible Compose identity formats",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "35ee84bb6ae44f5b7e2e590f3b45ea72",
+      "created_at": "2026-09-08T16:23:28.394294Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "Restore diagnosis required repeated controller updates for missing safe evidence",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "3cb16fb26f9d2af535427966838af750",
+      "created_at": "2026-09-08T16:21:43.814558Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Public restore syntax diagnostic was redacted by reserved credential field name",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "8e73e0097028218b3216103c86596b9b",
+      "created_at": "2026-09-08T15:47:57.198041Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Real WordPress lifecycle smoke exposes stopped registry and intermittent clean route failure",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "08771395ef4d93355a5c53d9dfe3f893",
+      "created_at": "2026-09-08T15:34:54.681781Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Production status and apply logs cannot establish the last successful Lenzora deployment",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "4ae99c62c095ceb966f053c297343e1a",
+      "created_at": "2026-09-08T15:29:38.569445Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Fresh production recreate refused wp-permissions initializer as foreign evidence",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "aff2834ebd645210a94963efacea4911",
+      "created_at": "2026-09-08T15:22:21.314970Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "Hosting initializer failure needs direct bounded initializer diagnostics",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "aaa61571984fb074981f7608e6423aeb",
+      "created_at": "2026-09-08T15:04:25.263775Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Force cancel rejects a job already cancelling",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "fc83e174536cdb77b0c44dd26a8bbe91",
+      "created_at": "2026-09-08T14:57:21.721226Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Remote canary source payload rejected by credential heuristic",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "90fe2ab216c519e7dc32553e37a7249a",
+      "created_at": "2026-09-08T14:23:27.741367Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Machine policy provisioning has no read-only plan mode",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "7575ea72023e56c7292aa2766c637069",
+      "created_at": "2026-09-08T14:23:14.682247Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Retained restore inspection hides the actionable refusal",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "5a30b5cda8378a014d0ae9b15cdf826d",
+      "created_at": "2026-09-08T14:03:28.798938Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Force cancellation fails when durable job is already cancelling",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "8a059d21ba3fb87f30db13ea6a7a8c78",
+      "created_at": "2026-09-08T13:34:14.773020Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Remote status reports unavailable ownership without an error cause",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "eb6dd7dc7f7a37286a9572355663d3f5",
+      "created_at": "2026-09-08T13:13:29.259210Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Retained restore reports schema mismatch without bounded difference evidence",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "2bd67b6433688d3f048cfe3679026554",
+      "created_at": "2026-09-08T12:56:26.524632Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Retained isolated restore needs bounded comparison diagnostics",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "a4ac387e0546683b1dd00be503984770",
+      "created_at": "2026-09-08T12:45:10.999106Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Containment plan hides bounded native refusal reason",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "7b31748b82bca4b54ec50dff345c4912",
+      "created_at": "2026-09-08T12:26:22.479270Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "PostgreSQL capture uncertainty lacks retained-request status inspection",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "ac65783d2338e688dbf4b5934cb7524f",
+      "created_at": "2026-09-08T12:01:11.017177Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "PostgreSQL observation rejects helper response with generic failure",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "4a2913a8631a4c24668ddc5a6af52629",
+      "created_at": "2026-09-08T11:48:34.574251Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Recovery source bootstrap lacks observable exact container and image bindings",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "6c8b5ebfab40731d9b245eacbcfbdfbe",
+      "created_at": "2026-09-08T09:40:42.369510Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "Registered PostgreSQL recovery profile lacks a concrete capture and isolated restore adapter",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "9e54f17b84ce55403746d20b34dec14d",
+      "created_at": "2026-09-08T09:14:24.973391Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Manual recovery lacks server-first capture and script submission",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "316580243fef678be8909fc0f8de86d2",
+      "created_at": "2026-09-08T08:11:45.110821Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "No bounded CLI surface for hosted initializer identity diagnostics",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "bc666ad8a12ed084febd3aa7f8ac32fc",
+      "created_at": "2026-09-08T08:04:51.156867Z",
+      "category": "incident",
+      "severity": "high",
+      "summary": "Host apply stopped on foreign initializer evidence after runtime replacement",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "c6d992d9004675513351e7a59dfaf335",
+      "created_at": "2026-09-08T08:00:22.445805Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "remote ssh help omits confirmation requirement from command guidance",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "d5ff87fa40df14ba6a87778e268a0f9b",
+      "created_at": "2026-09-08T07:46:31.556512Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "Settlement quiescence refusal lacks supported diagnosis and containment path",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "031174c713c91bafd5b85efe1caf0741",
+      "created_at": "2026-09-08T07:03:34.738181Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Lenzora recovery profiles cannot currently provide deploy-time backup evidence",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "22e36b6ba2a73c0255187d89f70faf48",
+      "created_at": "2026-09-08T06:34:51.858908Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Settlement observation hides runtime revision mismatch",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "66035a8ff701c7010103f76ab117d838",
+      "created_at": "2026-09-08T04:55:06.432492Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Hosted recovery may reuse stale content across backup sets",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "372b578caf0b653ccf63cbc1271448f4",
+      "created_at": "2026-09-08T04:53:14.332785Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "ASB recovery capture hides stale controller diagnosis",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "4d413785f6471c09424195af3ca1755e",
+      "created_at": "2026-09-08T04:29:55.523812Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "Image recovery lacks read-only active transaction status",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "bd564b6faf2910c66eb22603ae904905",
+      "created_at": "2026-09-07T17:31:50.617015Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Synthetic secret-access canary job rejected as credential-like argv",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "2f216b379292f591aa6e3a387603891a",
+      "created_at": "2026-09-07T17:22:50.744057Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Workspace inventory blocked by installed runtime skew during production diagnosis",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "1f0321b04881029b992f0ae7dafe83cc",
+      "created_at": "2026-09-07T13:25:15.020216Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "host apply final Compose convergence leaves dependent services in created state after 300s timeout",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "cddfb9952cbc6ea6a05cf9f3a6e1fce1",
+      "created_at": "2026-09-07T10:56:09.988548Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Durable job local selector differs between start and inspection",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "db837c70f3163c0290b7daa32fcd41d5",
+      "created_at": "2026-09-07T10:05:15.040933Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Local exec missing-instance message should point to job-start for host jobs",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "ae5d9f9f931491295cb69a91e4517a60",
+      "created_at": "2026-09-07T09:28:33.244222Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "sb test prints only a job id and exits 0 while the run is still queued/running — looks like a pass",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "095166c84da7315f57e393d778b5a3ae",
+      "created_at": "2026-09-07T09:16:28.976204Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Durable local job accepted an unavailable executable",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "97271dadcd38de4cbff70032c1cf6c5a",
+      "created_at": "2026-09-07T09:15:43.829159Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Local durable job follow-up selectors differ from submission",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "171fd36929aa7c319b848232afbba857",
+      "created_at": "2026-09-07T07:33:02.088370Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Image activation signs stale runtime environment without manifest or source revision refresh",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "bc5f47704c2f81de3b09a8429c7e5bf4",
+      "created_at": "2026-09-07T07:17:04.875716Z",
+      "category": "incident",
+      "severity": "high",
+      "summary": "Production effect_unknown persists after verified profile resolver fix",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "cbf25bd81d275d1502af3076b0bd609d",
+      "created_at": "2026-09-07T06:16:54.431113Z",
+      "category": "incident",
+      "severity": "high",
+      "summary": "Production activation exact 821 returns effect_unknown",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "1135f1bd5461c35c9998bea370a59bf3",
+      "created_at": "2026-09-07T06:06:27.704530Z",
+      "category": "incident",
+      "severity": "high",
+      "summary": "Development exact revision healthy but edge purge provider_auth refused",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "7dc12e973591c4f46d1fe0be41ca4d46",
+      "created_at": "2026-09-07T05:45:36.005571Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "New signed Lenzora production image activation refuses artifact_invalid",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "29031eb6f69e28ef4aea7ec5fdad2b3c",
+      "created_at": "2026-09-07T05:37:53.222731Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Ordinary host apply silently loses recovery authority on partial resource status",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "3126f1d654a039c32481c0522d831870",
+      "created_at": "2026-09-07T05:34:57.731493Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Fresh pinned host apply cannot enter observation recovery",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "8386ab5531affc472d76af201fd2ef4c",
+      "created_at": "2026-09-07T05:33:52.603694Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Lenzora changed-target deployment expires readiness while workers start",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "15adee167062b5ee1080b4672af2d911",
+      "created_at": "2026-09-07T05:26:41.302933Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Stage status needs retained verified plan before reading request state",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "c9973ebd759ea7d258fb6cddc57be2b2",
+      "created_at": "2026-09-07T05:17:15.839043Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Remote status discovery requires service action",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "cbb01af7d11578bc2c46a257c2961d3f",
+      "created_at": "2026-09-06T21:09:46.632262Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Image provisioning hides controller revision mismatch as artifact_invalid",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "b7ae36b87191b02dcb7a430b8f838116",
+      "created_at": "2026-09-06T21:00:08.486187Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Initial image edge bootstrap rejects effect-free recovery history",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "7e92e6dab495530838200ed9347e9338",
+      "created_at": "2026-09-06T17:01:48.056115Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Unsecured .tst instance leaves siteurl surgery to every consumer; descriptor keeps advertising the unusable URL",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "e686909d857b0d989b9a7c87529a55fe",
+      "created_at": "2026-09-06T16:57:14.480501Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Instance advertises .tst URL while WordPress siteurl/home stay on localhost:PORT — every REST call 403s",
+      "status": "invalid"
+    },
+    {
+      "feedback_id": "0062bddad85e9b8091b4baa569793274",
+      "created_at": "2026-09-06T16:10:13.170896Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Production activation bundle refuses after successful immutable image staging",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "5e8d5502513f42ebdbaf5b2525834e42",
+      "created_at": "2026-09-06T15:17:43.134927Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Production image staging returns observation_invalid after clean terminal cleanup",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "e7575aae5dbea57bd5451b4a8a6bd200",
+      "created_at": "2026-09-06T15:12:44.966112Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Hosted apply timeout leaves init service diagnostics unavailable",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "cca6a8fee00fffdead827cba0e49ef38",
+      "created_at": "2026-09-06T14:14:02.092623Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Deleted hosted development site cannot bootstrap no-build image",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "3bb47f37f9a1bad8fe538612b89daeb8",
+      "created_at": "2026-09-06T14:09:47.537302Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Production image staging returns observation_invalid after clean terminal cleanup",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "4bde915ebfb4882e63ad9306765c0fda",
+      "created_at": "2026-09-06T14:09:11.593896Z",
+      "category": "incident",
+      "severity": "high",
+      "summary": "Production image stage retry terminates with observation_invalid",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "e417233b162b9d71011019cbd27b1032",
+      "created_at": "2026-09-06T13:49:16.892429Z",
+      "category": "idea",
+      "severity": "medium",
+      "summary": "Add Cloudflare edge-cache controls for generic Compose hosts",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "a9b98c6e953140f6cc5ab4fe7c229c67",
+      "created_at": "2026-09-06T13:32:10.090679Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Cleanup job rejected by credential heuristic",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "ee077584bca6d048c61ae23b7796084b",
+      "created_at": "2026-09-06T12:59:04.926047Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Workspace inventory blocked by installed remote revision mismatch",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "77009a4046d67f972083cb1725601246",
+      "created_at": "2026-09-06T12:57:35.984616Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Remote job-cancel reports unknown despite remote exit zero",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "83dd053a1399c4c762b71b3114943500",
+      "created_at": "2026-09-06T12:56:51.516935Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "Selective host teardown lacks a supported preserve-project plan",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "192679602e758ba1a1cb59c50248fadc",
+      "created_at": "2026-09-06T10:53:13.427897Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "Production image staging blocked by capacity with no verified cache reclaim path",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "026f17d7be0be8d1ceb5db9fb9d0c5ee",
+      "created_at": "2026-09-06T10:31:13.647133Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Hosted image stage-bundle refusal masks runtime revision mismatch",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "24e6756299d9f7e39e28d87125338f2b",
+      "created_at": "2026-09-06T09:52:36.982409Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "sb ensure docker preflight fails deterministically whenever its stdout is a pipe, not a TTY",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "81d085d28ce5e5e84924787493084de1",
+      "created_at": "2026-09-06T09:37:51.544140Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "sb test without --local fails at job submission: supervisor_launch_failed (remote_job_transport_error)",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "05d584291d84a9772d1240523aa60dc7",
+      "created_at": "2026-09-06T09:33:08.160928Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "sb ensure aborts on a 5s docker info preflight with no retry, misreporting a running daemon as stopped",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "d7bae9124e5e49ac2cd6b0886e0522b6",
+      "created_at": "2026-09-06T09:17:13.358869Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Legacy Hermes Drive backup scans stale registry instances",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "00efae8d734cef3b5a5aab10bced0192",
+      "created_at": "2026-09-05T10:01:13.584844Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "HSSB remote CI preflight blocks artifact paths and misclassifies validation steps",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "6704dc49fbf1d94c5578a7857e34010e",
+      "created_at": "2026-09-05T05:12:10.710373Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "ensure JSON leaks local login credential before plugin activation failure",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "9ba6b04eb9a4ce74b23ef926dfdd3deb",
+      "created_at": "2026-09-05T05:09:52.597707Z",
+      "category": "usability",
+      "severity": "low",
+      "summary": "Disposable local test project under tmp rejected without roots hint in guide",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "1057af13a2afe8caa2dd825ef6f44b89",
+      "created_at": "2026-09-03T01:32:08.774480Z",
+      "category": "incident",
+      "severity": "high",
+      "summary": "Production OCI stage-bundle provisioning refused with helper_failed",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "7c8c5c67acb515b5022b0e8022c23bb1",
+      "created_at": "2026-09-03T01:10:20.501761Z",
+      "category": "idea",
+      "severity": "low",
+      "summary": "placeholder",
+      "status": "invalid"
+    },
+    {
+      "feedback_id": "9d2a3e7b7b953af955609750dcf61ac8",
+      "created_at": "2026-09-03T01:10:14.250444Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Remote job cleanup cannot retire owned workspace archive",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "4a73fa1723f29ff4c9d8b93227599d1c",
+      "created_at": "2026-09-03T00:41:57.698825Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Lenzora production wrapper loses first protected OCI provisioning refusal",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "a41d34059b1f2ea195aced060704afd5",
+      "created_at": "2026-09-02T19:10:01.100989Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Remote CI workflow_dispatch event mismatch runs changed taxonomy step",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "4bfd212e08eff9147baf516a50456f19",
+      "created_at": "2026-09-02T18:40:49.614414Z",
+      "category": "incident",
+      "severity": "high",
+      "summary": "Remote CI nested command lost label-prefix value",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "60b58eea1c85b3578c50bd031ea491a4",
+      "created_at": "2026-09-02T11:27:17.358573Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "remote deploy cleanup loses ensure failure cause",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "5ea5623e364eaa397c438a7ece0450ee",
+      "created_at": "2026-09-02T11:24:02.213480Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "deploy label is ignored for remote WordPress ensure",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "6cc6f10ce7cd1d1f3e6da51294caca6c",
+      "created_at": "2026-09-02T06:00:53.111997Z",
+      "category": "bug",
+      "severity": "critical",
+      "summary": "activation gateway 404s every request carrying a query string (forward_auth keeps the query)",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "5d2eeb28978a94da766057468b6f6744",
+      "created_at": "2026-09-02T05:37:11.584327Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "ensure/up cannot self-recover a stale_container_network; two manual commands needed",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "92f705d5dc0e379b88baf747307954cb",
+      "created_at": "2026-09-01T18:43:26.084440Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "More wake-state evidence for 424b45e2: after a Mac sleep the instance stalls entirely for ~2 min (TCP accepted, no HTTP answer), then recovers unaided",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "424b45e21f38c26a5fca83d4ff9f906f",
+      "created_at": "2026-09-01T15:21:01.993874Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "Follow-up to d10b637f: the .tst query-string 404 is intermittent and tied to instance wake state",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "d10b637f22211ec447c5ece88e57e506",
+      "created_at": "2026-09-01T13:01:43.560296Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Local .tst https vhost returns 404 for any URL with a query string (BaseHTTP upstream via Caddy)",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "1c9ada41ebb3bc632470c383fb63e93d",
+      "created_at": "2026-09-01T12:06:54.006903Z",
+      "category": "idea",
+      "severity": "medium",
+      "summary": "Per-repo sandbox.config.json outside the repo, shared by all git worktrees",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "5702de9708b784c2ff402606515abd81",
+      "created_at": "2026-09-01T10:28:17.139861Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "ensure refuses a stopped instance; up then refuses stale network — two manual hops to boot",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "c07029871fadf960acfbceb83d2d3260",
+      "created_at": "2026-09-01T06:09:53.203734Z",
+      "category": "usability",
+      "severity": "high",
+      "summary": "Production apply stopped after clean exact-SHA plan with generic readiness error",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "2b98ef8ff6bd3aa71d13f75ade6d6d9b",
+      "created_at": "2026-08-31T11:47:18.889117Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Follow-up 1b5c9e9e: remote deploy failure is not multisite-specific; stale network state survives instance cleanup and --label is ignored",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "1b5c9e9e54b37db9021499aa080a7e68",
+      "created_at": "2026-08-31T11:42:49.329002Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Remote deploy --ensure fails for multisite:\"subdirectory\" projects: DOMAIN_CURRENT_SITE does not match the installed site",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "3e03b27c679c40295d1b28765a859e22",
+      "created_at": "2026-08-31T06:44:01.500396Z",
+      "category": "idea",
+      "severity": "medium",
+      "summary": "Extend the one-time login-url primitive from sb host to deploy/preview dev instances so agents never need raw credentials",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "f99d2d92fc2964a4865b172921e84688",
+      "created_at": "2026-08-31T05:50:59.195400Z",
+      "category": "usability",
+      "severity": "medium",
+      "summary": "sb deploy reports success for a composer-based PHP plugin whose vendor/ was not staged, producing a site where the plugin cannot load",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "d43c8341fec98bde99ba153e016471ea",
+      "created_at": "2026-08-31T05:50:45.466673Z",
+      "category": "other",
+      "severity": "low",
+      "summary": "CORRECTION to report e9a44097bc60f1654761980130770f62: the xspeed activation failure was my invocation, not a Sandbox defect",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "0df918a754a862fb10667b3b0d3f6855",
+      "created_at": "2026-08-31T05:43:02.666995Z",
+      "category": "idea",
+      "severity": "medium",
+      "summary": "No capability installs plugin-emitted server config, so server-level cache paths cannot be tested",
+      "status": "verified"
+    },
+    {
+      "feedback_id": "b572b3d55192b8bc9e7c70dec0722d9f",
+      "created_at": "2026-08-31T05:41:33.289687Z",
+      "category": "incident",
+      "severity": "critical",
+      "summary": "sb preview create wrote its domain into a DIFFERENT existing instance's siteurl/home, breaking that instance's admin",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "1b24cb92013ca8c1f5fa8fb846c0653c",
+      "created_at": "2026-08-31T05:36:59.040181Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "sb preview create leaves siteurl/home at localhost:PORT, so the public preview URL redirects to an unreachable host, and the project's path-mapped plugin is not active",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "e354cbc7b4e8f64af3d4f6bca20f5fc6",
+      "created_at": "2026-08-31T05:33:58.543715Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "sb preview create returns ok with an HTTPS URL that can never handshake when the base domain is a third-level name",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "e9a44097bc60f1654761980130770f62",
+      "created_at": "2026-08-31T05:28:01.613105Z",
+      "category": "bug",
+      "severity": "medium",
+      "summary": "sb exec --remote --workspace on a WordPress project provisions a second full instance, then fails activating a path-mapped plugin",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "af7cf95d81966d8f6bde8c29610e84b4",
+      "created_at": "2026-08-31T05:27:48.402070Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "sb wp has no --remote in 0.2.2, but the sandbox-cli skill documents it as the post-deploy path",
+      "status": "unreviewed"
+    },
+    {
+      "feedback_id": "ea85cb298e201b4ba63e1ae71c9149df",
+      "created_at": "2026-08-31T04:43:32.729520Z",
+      "category": "bug",
+      "severity": "high",
+      "summary": "Local ensure --json emits an unredacted autologin URL in progress output",
+      "status": "unreviewed"
+    }
+  ]
+}

@@ -25,7 +25,8 @@ from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
 from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
                                   signal_owned_process_group, verify_owned_process_identity,
-                                  verify_process_identity)
+                                  verify_process_identity, is_boot_session_identity,
+                                  process_absence_proven)
 from sandbox.jobs.scheduler import WorkspaceBusy
 from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
@@ -490,6 +491,11 @@ class JobService:
                 # the process group exits, rather than a concurrent status read
                 # relabeling it as an unrelated interruption.
                 reason = interruption_reasons.get(health.value) if snapshot["lifecycle"] == Lifecycle.RUNNING.value else None
+                if health == Health.SUPERVISOR_UNRESPONSIVE and evidence.get("supervisor_identity_valid") is not False:
+                    # A stale heartbeat diagnoses liveness; it is not proof
+                    # of ownership loss. Use the classifier's same observation;
+                    # an unavailable second probe cannot invalidate that proof.
+                    reason = None
                 if reason is not None:
                     try:
                         self.repository.transition(job_id, Lifecycle.INTERRUPTED,
@@ -806,7 +812,9 @@ class JobService:
         A process that survives a supervisor restart is not automatically healthy:
         without a matching durable ownership record it is unsafe to claim success or
         send signals to it.  The best available output remains retained and the job
-        is explicitly interrupted for later inspection.
+        is explicitly interrupted for later inspection only when loss is proved.
+        Legacy or unavailable boot identity remains unresolved, without rewriting
+        its owner record or releasing its workspace.
         """
         interrupted = []
         if self.sync_gateway is not None:
@@ -830,9 +838,15 @@ class JobService:
                     "sync_generation_launch_committed",
                 }
             ):
+                if not is_boot_session_identity(row.get('launch_owner_boot_id')):
+                    continue
                 owner_pid = row.get("launch_owner_pid")
                 observed_owner = capture_process_identity(
                     int(owner_pid)) if owner_pid else None
+                if ((observed_owner is None and not process_absence_proven(owner_pid))
+                        or (observed_owner is not None and
+                            not is_boot_session_identity(observed_owner.host_boot_id))):
+                    continue
                 if (
                     observed_owner is not None
                     and observed_owner.host_boot_id == row.get("launch_owner_boot_id")
@@ -864,6 +878,10 @@ class JobService:
             if row["lifecycle"] not in {Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value}:
                 continue
             process = self.repository.snapshot(row["job_id"]).get("process") or {}
+            if not is_boot_session_identity(process.get('host_boot_id')):
+                # Another installed client may have created this active row.
+                # Changing the observer's identity format is not supervisor loss.
+                continue
             supervisor_pid = process.get("supervisor_pid")
             if not supervisor_pid or not process.get("supervisor_start_identity"):
                 try:
@@ -879,6 +897,9 @@ class JobService:
                     pass
                 continue
             observed = capture_process_identity(int(supervisor_pid))
+            if ((observed is None and not process_absence_proven(int(supervisor_pid)))
+                    or (observed is not None and not is_boot_session_identity(observed.host_boot_id))):
+                continue
             if observed is not None:
                 observed = ProcessIdentity(observed.host_boot_id, observed.pid,
                     observed.start_identity, process["supervisor_nonce_hash"], observed.process_group_id)
@@ -1005,10 +1026,36 @@ class JobService:
         # racing from ``failed`` back to ``cancelling`` after signal delivery.
         if not verify_owned_process_identity(identity):
             raise RuntimeError("process_identity_mismatch")
-        self.repository.transition(job_id, Lifecycle.CANCELLING)
+        if snapshot["lifecycle"] != Lifecycle.CANCELLING.value:
+            try:
+                self.repository.transition(job_id, Lifecycle.CANCELLING)
+            except ValueError:
+                # A second canceller or the supervisor can win this transition.
+                current = self.repository.snapshot(job_id)
+                if current["lifecycle"] in {item.value for item in (
+                        Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                        Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+                    return current
+                if current["lifecycle"] != Lifecycle.CANCELLING.value:
+                    raise
+        current = self.repository.snapshot(job_id)
+        if current["lifecycle"] != Lifecycle.CANCELLING.value:
+            return current
+        identity_fields = ("host_boot_id", "child_pid", "child_pgid",
+                           "child_start_identity", "supervisor_nonce_hash")
+        if any((current.get("process") or {}).get(key) != process.get(key)
+               for key in identity_fields):
+            raise RuntimeError("process_identity_mismatch")
         # A child can still exit in the short interval after verification.  The
         # supervisor sees the persisted intent and finalizes it as cancelled.
-        signal_owned_process_group(identity, 9 if force else 15)
+        try:
+            delivered = signal_owned_process_group(identity, 9 if force else 15)
+        except ProcessLookupError:
+            # The supervisor still owns terminal classification after a natural
+            # exit. Persisted cancelling state is not a claim that a signal ran.
+            delivered = False
+        if not delivered:
+            return self.repository.snapshot(job_id) | {"signal_delivery": "process_unavailable"}
         return self.repository.snapshot(job_id)
 
     def list_artifacts(self, job_id: str):

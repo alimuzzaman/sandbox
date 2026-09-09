@@ -1,4 +1,5 @@
 import os
+import json
 import stat
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from sandbox.runtimes.base import RuntimeDependencies, OperationRequest
 from sandbox.services.process import BoundedProcessRunner
 from sandbox.services.process import ProcessResult
 from sandbox.runtimes.compose import ComposeAdapter, _bounded_exec_output
+from tests.subprocess_support import synthetic_environment
 
 
 class _Process:
@@ -19,6 +21,10 @@ class _Process:
         self.calls.append((tuple(argv), cwd, timeout))
         if "config" in argv:
             return ProcessResult(tuple(argv), 0, "web\n", "")
+        if "ps" in argv:
+            return ProcessResult(tuple(argv), 0, json.dumps({
+                "Service": "web", "State": "running", "Health": "",
+            }), "")
         return ProcessResult(tuple(argv), 0, "started\n", "")
 
 
@@ -64,6 +70,20 @@ class _Registry:
 
 
 class TestGenericComposeAdapter(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        artifacts = Path(temporary.name)
+
+        def artifact_dir(_adapter, runtime_id):
+            path = artifacts / runtime_id
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        patcher = patch.object(ComposeAdapter, "_artifact_dir", artifact_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_adapter(self, root):
         descriptor = {
             "root": str(root), "kind": "compose", "compose_file": str(root / "compose.yaml"),
@@ -90,7 +110,33 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertEqual(second.data["instance"], first.data["instance"])
             self.assertEqual(first.data["http_port"], 49152)
             self.assertTrue(any("--file" in call[0] and "sandbox.override.yaml" in " ".join(call[0]) for call in process.calls))
-            self.assertEqual(http.urls, [("http://127.0.0.1:49152/healthz", 2)])
+            self.assertEqual(http.urls, [("http://127.0.0.1:49152/healthz", 2)] * 2)
+
+    def test_status_matches_observed_compose_rows_arrays_and_empty_stop(self):
+        cases = [
+            ("", True, "stopped"), ("[]", True, "stopped"),
+            ("started\n", False, "error"), ('{"Service":"web"}', False, "error"),
+            (json.dumps({"Service": "web", "State": "exited"}), True, "stopped"),
+            (json.dumps([{ "Service": "web", "State": "running", "Health": ""}]), True, "ready"),
+            (json.dumps({"Service": "web", "State": "running", "Health": "starting"}), True, "unhealthy"),
+            ("\n".join([json.dumps({"Service": "web", "State": "running"})] * 2), False, "error"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            for raw, ok, status in cases:
+                with self.subTest(raw=raw):
+                    adapter, process, http, _ = self.make_adapter(root)
+                    process.run = lambda argv, **kwargs: ProcessResult(tuple(argv), 0, raw, "")
+                    result = adapter.invoke(OperationRequest(str(root), "status"))
+                    self.assertEqual((result.ok, result.data["status"]), (ok, status))
+                    self.assertEqual(len(http.urls), 1 if status == "ready" else 0)
+
+            adapter, process, http, _ = self.make_adapter(root)
+            process.run = lambda argv, **kwargs: ProcessResult(tuple(argv), 0, json.dumps({
+                "Service": "web", "State": "running", "Health": "healthy"}), "")
+            http.probe = lambda *args, **kwargs: False
+            self.assertEqual(adapter.invoke(OperationRequest(str(root), "status")).data["status"], "unhealthy")
 
     def test_exec_requires_argument_list_and_never_accepts_shell_text(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -219,16 +265,18 @@ class TestGenericComposeAdapter(unittest.TestCase):
                 "display_name": root.name, "label": "default", "framework": "node",
             }
             registry = _Registry(root, descriptor)
+            class SyntheticRunner(BoundedProcessRunner):
+                def run(self, argv, **kwargs):
+                    kwargs["env"] = synthetic_environment({"PATH": f"{root}{os.pathsep}{os.defpath}"})
+                    return super().run(argv, **kwargs)
+
             deps = RuntimeDependencies(
-                process=BoundedProcessRunner(secret_values=(secret,)), http=_Http(), ports=_Ports(),
+                process=SyntheticRunner(secret_values=(secret,)), http=_Http(), ports=_Ports(),
                 paths=object(), proxy=object(), registry=registry,
             )
             adapter = ComposeAdapter(deps, registry)
-            with patch.dict(os.environ, {
-                    "PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}",
-            }, clear=False):
-                result = adapter.invoke(OperationRequest(
-                    str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+            result = adapter.invoke(OperationRequest(
+                str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
             self.assertFalse(result.ok)
             self.assertEqual(result.data["exit_code"], 23)
             for stream, head, tail in (

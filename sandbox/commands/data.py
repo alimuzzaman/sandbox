@@ -19,7 +19,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sandbox.core import *  # noqa: F401,F403
 
-from sandbox.registry import register
+from sandbox.registry import CommandSpec, register, register_specs
 from sandbox.application.context import preflight_instance_capability
 
 
@@ -68,7 +68,10 @@ def cmd_snapshot(cfg, args) -> None:
     if target.exists() and not bool(getattr(args, "force", False)):
         die(f"snapshot '{name}' exists — pass --force to overwrite")
     db_only = bool(getattr(args, "db_only", False))
-    _capture_snapshot(inst, snap_root, name, db_only=db_only)
+    try:
+        _capture_snapshot(inst, snap_root, name, db_only=db_only)
+    except (OSError, RuntimeError) as exc:
+        die(str(exc))
     ok(f"Snapshot '{name}' saved ({'db-only' if db_only else 'full'}).")
 
 
@@ -97,11 +100,12 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
     On any failure the partial target dir is removed and the error re-raised, so a
     failed capture never leaves a half-written snapshot (e.g. an empty dir with no
     db.sql that later reads as a 0 KB snapshot)."""
+    _require_snapshot_database(inst)
     target = snap_root / name
     # Capture into a sibling first.  In particular, `--db-only --force` must
     # not retain uploads.tgz from the full snapshot it replaces; staging also
     # keeps the old snapshot usable if export fails.
-    staging_name = f".{name}.tmp-{uuid.uuid4().hex}"
+    staging_name = f".{name[:160]}.tmp-{uuid.uuid4().hex}"
     staging = snap_root / staging_name
     staging_db = staging / "db.sql"
     try:
@@ -110,9 +114,11 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
         # Stream stdout directly into a 0600 host file. The wpcli service keeps
         # its normal UID and no snapshot directory is bind-mounted into it.
         with _open_snapshot_dump(staging_db) as dump:
-            compose("run", "--rm", "-T", "wpcli", "db", "export", "-", "--quiet",
+            # A capture must not converge dependencies. In particular, Compose
+            # must not recreate the web service from a changed generated file.
+            compose("run", "--rm", "--no-deps", "-T", "wpcli", "db", "export", "-", "--quiet",
                     "--add-drop-table",
-                    instance=inst, stdout=dump)
+                    instance=inst, stdout=dump, timeout=300)
         if not staging_db.exists() or staging_db.stat().st_size == 0:
             raise RuntimeError(f"db export produced no db.sql for snapshot '{name}'")
         mode = "db-only"
@@ -125,9 +131,31 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
                 mode = "full"
         active = _active_project_name(inst) or ""
         (staging / "META").write_text(f"project={active}\ninstance={inst}\nmode={mode}\n")
+        previous = None
         if target.exists():
-            shutil.rmtree(target)
-        staging.replace(target)
+            # Preserve a supported restore point until publication succeeds.
+            # A process interruption may leave this visible retained snapshot;
+            # it must never lose the old dump in a delete-then-rename window.
+            previous = snap_root / f"{_slug_snapshot_name(name)[:160]}-previous-{uuid.uuid4().hex}"
+            target.rename(previous)
+        try:
+            staging.replace(target)
+        except BaseException:
+            if previous is not None and not target.exists():
+                previous.rename(target)
+            raise
+        if previous is not None:
+            retired = snap_root / f".retired-{previous.name}"
+            try:
+                # Hide the retired artifact before removing any of its files.
+                # Interrupted cleanup must not advertise a partial full backup.
+                previous.rename(retired)
+                shutil.rmtree(retired)
+            except OSError:
+                # Publication succeeded. Cleanup cannot turn that known result
+                # into a failed capture. A failed rename retains the complete
+                # previous restore point; a failed removal leaves hidden debris.
+                info("Snapshot published; prior artifact cleanup is incomplete.")
     except (Exception, SystemExit):
         # Remove the whole sibling even when compose exits via SystemExit, so a
         # failed capture never leaves a half-written dump behind.
@@ -135,7 +163,37 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
         raise
 
 
-def capture_install_baseline(inst: str, force: bool = False) -> None:
+def _require_snapshot_database(inst: str) -> None:
+    """Observe the selected database before creating a snapshot artifact."""
+    message = (
+        f"snapshot_runtime_unavailable: database for instance '{inst}' is not "
+        "observably running; no snapshot was created and the stack was not "
+        f"reconciled. Inspect `sb status --instance {inst}` and start the existing "
+        f"stack with `sb up --instance {inst}` before retrying."
+    )
+    if not compose_file(inst).is_file():
+        raise RuntimeError(message)
+    try:
+        result = compose("ps", "--all", "--format", "json", "db",
+                         instance=inst, check=False, capture=True, timeout=10)
+        raw = result.stdout or ""
+        if (result.returncode != 0 or getattr(result, "stdout_truncated", False) is True
+                or len(raw.encode("utf-8")) > 65536):
+            raise ValueError("database observation unavailable")
+        try:
+            decoded = json.loads(raw)
+            rows = decoded if isinstance(decoded, list) else [decoded]
+        except ValueError:
+            rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        if (len(rows) != 1 or not isinstance(rows[0], dict)
+                or rows[0].get("Service") != "db" or rows[0].get("State") != "running"
+                or rows[0].get("Health") in {"starting", "unhealthy"}):
+            raise ValueError("database is not ready")
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
+        raise RuntimeError(message) from None
+
+
+def capture_install_baseline(inst: str, force: bool = False, *, strict: bool = False) -> None:
     """Capture the reserved db-only @install baseline (spec 008), representing the
     post-provision state (after plugins/themes are wired). Captured ONCE — a no-op
     if a baseline already exists unless `force` (so `up`/`ensure` never overwrite a
@@ -153,6 +211,8 @@ def capture_install_baseline(inst: str, force: bool = False) -> None:
             return
         _capture_snapshot(inst, snap_root, _BASELINE_DIR, db_only=True)
     except (Exception, SystemExit) as e:
+        if strict:
+            raise
         info(f"⚠ @install baseline capture failed for '{inst}' (reset won't have a "
              f"baseline until the next up): {e}")
 
@@ -299,7 +359,10 @@ def cmd_reset(cfg, args) -> None:
     snap_root = snapshots_dir(inst)
     baseline = snap_root / _BASELINE_DIR
     if getattr(args, "rebaseline", False):
-        capture_install_baseline(inst, force=True)
+        try:
+            capture_install_baseline(inst, force=True, strict=True)
+        except (OSError, RuntimeError) as exc:
+            die(str(exc))
         ok("Re-captured the @install baseline from the current DB.")
         return
     if not (baseline / "db.sql").exists():
@@ -311,20 +374,28 @@ def cmd_reset(cfg, args) -> None:
     _restore_snapshot(inst, snap_root, _BASELINE_DIR)
     ok("Reset to the post-install baseline (uploads untouched).")
 
+def _snapshot_has_dump(directory: Path) -> bool:
+    try:
+        dump = (directory / "db.sql").lstat()
+        return stat.S_ISREG(dump.st_mode) and dump.st_size > 0
+    except OSError:
+        return False
+
+
 def cmd_snapshots(cfg, args) -> None:
     inst = args.resolved_instance
     snap_root = snapshots_dir(inst)
     # The protected baseline is displayed separately: it is informative for
     # reset readiness, but it is not a normal snapshot name/action target.
-    user_snaps = ([p for p in snap_root.iterdir() if p.is_dir() and not p.name.startswith("_")]
+    user_snaps = ([p for p in snap_root.iterdir() if p.is_dir() and _valid_snapshot_name(p.name) and _snapshot_has_dump(p)]
                   if snap_root.exists() else [])
     baseline = snap_root / _BASELINE_DIR
-    if not user_snaps and not (baseline / "db.sql").exists():
+    if not user_snaps and not _snapshot_has_dump(baseline):
         info(f"No snapshots yet for instance '{inst}'. "
              f"Save one: ./sb snapshot <name> --instance {inst}")
         return
     print()
-    if (baseline / "db.sql").exists():
+    if _snapshot_has_dump(baseline):
         m = baseline / "META"
         meta = m.read_text().strip().replace("\n", " ") if m.exists() else ""
         size = sum(f.stat().st_size for f in baseline.rglob("*") if f.is_file())
@@ -332,7 +403,8 @@ def cmd_snapshots(cfg, args) -> None:
     for entry in sorted(snap_root.iterdir()):
         # The reserved internal baseline was emitted above; it cannot be
         # restored/deleted as a named snapshot.
-        if not entry.is_dir() or entry.name.startswith("_"):
+        if (not entry.is_dir() or not _valid_snapshot_name(entry.name)
+                or not _snapshot_has_dump(entry)):
             continue
         m = entry / "META"
         meta = m.read_text().strip().replace("\n", " ") if m.exists() else ""
@@ -362,9 +434,21 @@ def cmd_clean(cfg, args) -> None:
     ok(f"Stopped and wiped DB volume for instance '{inst}'")
 
 register({
-    'snapshot': cmd_snapshot,
     'restore': cmd_restore,
-    'snapshots': cmd_snapshots,
-    'reset': cmd_reset,
     'clean': cmd_clean,
 })
+
+# Capture and inventory consume an existing instance. They must not regenerate
+# all managed Compose files, migrate state or refresh legacy environment files
+# merely because the caller selected an instance from another checkout.
+register_specs((
+    CommandSpec(name="reset", handler=cmd_reset, owner=__name__,
+                scope="instance", required_capability="wordpress.reset",
+                legacy_id="reset", predispatch_policy=lambda args: bool(getattr(args, "rebaseline", False))),
+    CommandSpec(name="snapshot", handler=cmd_snapshot, owner=__name__,
+                scope="instance", required_capability="wordpress.snapshot",
+                legacy_id="snapshot", predispatch_policy=lambda _args: True),
+    CommandSpec(name="snapshots", handler=cmd_snapshots, owner=__name__,
+                scope="instance", legacy_id="snapshots",
+                predispatch_policy=lambda _args: True),
+))

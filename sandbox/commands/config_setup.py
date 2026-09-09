@@ -419,7 +419,10 @@ def cmd_apply_config(cfg, args) -> None:
             project_root=pd,
             operation="apply",
             label=label or "default",
-            arguments={"config_file": getattr(args, "config_file", None)},
+            arguments={"config_file": getattr(args, "config_file", None),
+                       "creation_context": (json.loads(args.creation_context_json)
+                           if getattr(args, "creation_context_json", None) else None),
+                       "expected_incarnation": getattr(args, "expected_incarnation", None)},
         ))
     except sc.ConfigError as e:
         die(str(e))

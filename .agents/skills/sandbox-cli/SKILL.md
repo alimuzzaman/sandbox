@@ -228,6 +228,129 @@ sb resources swap-history --remote scaleway-sandbox --since 2026-09-04T00:00:00Z
 
 ## Durable remote-first jobs
 
+### Recoverable delivery admission and diagnosis
+
+Feature 054 requires ordinary `host apply` to run inside a durable local
+`job-start` child. Use the application checkout as `--project-dir`, bind its
+full application `HEAD`, and invoke the full absolute Sandbox executable in
+the child command:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+The recovery receipt is committed and read back before source transfer,
+initializer/runtime/route effects, or generation advance. A request flag alone
+does not establish recovery context; direct legacy apply is fenced with
+`recovery_context_required`. Keep the job ID, inspect `job-status` and bounded
+`job-output`, then query the joined result with:
+
+```sh
+sb delivery inspect --project-dir DIR --remote NAME \
+  --environment ENV --request-id ORIGINAL --json
+```
+
+The default delivery query is `recorded_only`. Add `--observe` only for
+bounded current read-only evidence; it never refreshes terminal history or
+creates a retry. `latest_attempt`,
+`latest_retained_complete_success`, and `current_observation` are separate.
+The CLI query and MCP `delivery_inspect` share the same selectors, bounds, and
+meaning. Query `ok=true` means the query was serviced, not that delivery
+succeeded.
+
+The application revision, Sandbox source/control revision, and installed
+controller runtime revision are separate evidence. Identity-only target proof
+can remain valid with partial optional telemetry, while required resource
+policy remains independent. A route write, healthy service, accepted job, or
+receipt-only result is not deployment or production proof. Feature 054 source
+and runtime acceptance remain pending.
+
+For exposed deploy/preview, carry the frozen creation context and exact
+`instance_incarnation_id` through ensure. Reused or unproved instances never
+gain cleanup ownership. The pure `ensure --creation-capability`,
+`--creation-prepare-json`, and `--creation-receipt` modes do not run ensure or
+mutate state. The covered `--creation-url-json` mode rechecks the incarnation
+before each `home`/`siteurl` write and readback; a partial result is retained,
+and replay returns that result without repeating writes.
+
+Public verification uses the closed `delivery.routes` contract. Its deadline
+defaults to 120 seconds and accepts 10–300 seconds; `deploy` and `preview
+create` expose the same range through `--verify-timeout`. WordPress defaults to
+the `/wp-json/` URL and namespace markers. Generic Compose needs an explicit
+application marker contract. Optional release identity keeps the result scoped
+to application availability; required identity and required edge proof must
+pass for full delivery success.
+
+### Deployment trace v1
+
+The early W11 full-command trace is a separate diagnostic capability. The
+canonical field and transition definitions are in
+`specs/054-recoverable-delivery-outcomes/contracts/deployment-trace.md`; keep
+this skill at the operational level. Use the same absolute Sandbox executable,
+controller, `SANDBOX_HOME`, and original W11 control checkout for every trace
+call:
+
+```sh
+sb delivery trace-capabilities --json
+sb delivery trace-start --project-dir /absolute/w11 \
+  --trace-request-id TRACE_REQUEST_UUID --input-json TRACE_START_JSON --json
+sb delivery trace-record --project-dir /absolute/w11 \
+  --trace-id TRACE_UUID --mutation-id MUTATION_UUID \
+  --expected-sequence N --input-json TRACE_RECORD_JSON --json
+sb delivery inspect --project-dir /absolute/w11 \
+  --trace-request-id TRACE_REQUEST_UUID --json
+sb delivery inspect --project-dir /absolute/w11 \
+  --trace-id TRACE_UUID --mutation-id MUTATION_UUID --json
+sb delivery trace-owner-status --project-dir /absolute/w11 \
+  --producer lenzora-hosted-v1 --parent-request-id PARENT_REQUEST_ID --json
+sb delivery trace-owner-record --project-dir /absolute/w11 \
+  --producer lenzora-hosted-v1 --parent-request-id PARENT_REQUEST_ID \
+  --publication-id PUBLICATION_UUID --expected-sequence N \
+  --input-json OWNER_RECORD_JSON --json
+```
+
+Trace selectors are a separate query grammar. Do not combine them with legacy
+remote, environment/label, operation/request, observe, limit, or cursor
+selectors. MCP `delivery_inspect` and the trace writer tools use the same
+selectors, bounds, and meaning. `trace-start` and `trace-record` publish
+bounded diagnostic evidence; `trace-owner-status` reads a publication receipt,
+and `trace-owner-record` publishes parent-keyed role evidence. Owner-status is
+not `job-status`, and owner-record does not create a parent without the first
+validated projection.
+
+Each phase job's `submission_digest` is a producer-recorded candidate. The
+native job owner independently recomputes it from the retained role request,
+control identity, and exact command digest; private argv and environment never
+enter the trace. A matching candidate digest alone is not proof. The trace adds
+no new `job-status` output: use existing `job-status` for lifecycle state and
+trace owner-status for publication receipts.
+
+The producer keeps preflight, the main command, and joined deployment distinct.
+A successful preflight means command success with deployment not started and
+creates no workload child. The main command keeps its own result; a missing
+wrapper acknowledgement stays unknown even when a child has a separate
+terminal owner result. The joined result is a bounded Sandbox read of retained
+producer projections plus native job, activation, delivery, and recovery
+owners. Producer reports are claims until native owners match exact identity.
+
+If a start, record, or publication acknowledgement is lost, inspect using the
+original request, trace, mutation, or publication ID. Replay the identical
+payload and ID only after a conclusive missing read. An ambiguous read stops;
+never mint a new trace, publication, job, workload request, or initializer.
+Trace writes have a ten-second call bound and trace input is capped at 32 KiB.
+Queries are read-only, have one cooperative five-second budget, and serialize
+at most 256 KiB. The trace document is capped at 128 KiB; the store retains at
+most 128 protected traces, 512 unprotected terminal traces globally, 64 per
+scope, and 30-day terminal detail. The SQLite busy bound is 2 seconds, the
+database cap is 128 MiB with up to 128 MiB rollback space. Permanent deny-only
+guards are capped at 4,096 per controller and are never reset or evicted.
+Optional detail may be elided with explicit coverage; missing or partial
+evidence never becomes deployment success. Feature 054 capability/source and
+installed-controller verification remain pending.
+
 ### Failed hosting apply recovery
 
 Use recovery when the first safe step must be observation. Do not substitute ordinary

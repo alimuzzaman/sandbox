@@ -1,0 +1,18 @@
+{
+  "observed_at": "2026-09-08T17:01:43.311618+00:00",
+  "operation": "job-list",
+  "remote": "scaleway-sandbox",
+  "limit": 100,
+  "cli_exit_code": 1,
+  "pages": [
+    {
+      "bytes": 1181179,
+      "limit_bytes": 1048576,
+      "lines": 1,
+      "valid_json": true,
+      "ok": true,
+      "record_count": 100,
+      "accepted_by_parser": false
+    }
+  ]
+}

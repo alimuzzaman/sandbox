@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from .delivery import delivery_config_provider
 from .domains import normalize_domain_policy
 from .instance_lifecycle import normalize_instance_lifecycle
 from .hosting_images import (
@@ -32,6 +33,7 @@ COMMON_CONFIG_PROVIDERS = (
     ("secrets", normalize_secret_config, "sandbox.config.secrets", 40),
     ("hostingImages", project_image_intent_provider,
      "sandbox.config.hosting_images", 50),
+    ("delivery", delivery_config_provider, "sandbox.config.delivery", 55),
 )
 
 
@@ -76,7 +78,7 @@ def apply_common_config(result: dict) -> dict:
         # default must be materialized into every newly resolved descriptor so
         # normal ensure/apply is the explicit adoption point. Persisted legacy
         # registry rows are not rewritten merely by loading the catalog.
-        if key == "phpExtensions" and key not in resolved:
+        if key in {"phpExtensions", "delivery"} and key not in resolved:
             continue
         if key == "hostingImages":
             raw_images = resolved.get("_hosting_images_raw")

@@ -12,7 +12,65 @@ from unittest import mock
 from contextlib import redirect_stdout
 
 
+class TestSnapshotDatabaseObservation(unittest.TestCase):
+    def test_stopped_database_preserves_existing_snapshot_without_export(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            compose_path = root / "compose.yml"
+            compose_path.write_text("services: {}")
+            snapshots = root / "snapshots"
+            target = snapshots / "fixture"
+            target.mkdir(parents=True)
+            (target / "db.sql").write_bytes(b"retained dump")
+            for raw in ('[]', '{"Service":"db","State":"exited"}',
+                        '{"Service":"db","State":"running","Health":"unhealthy"}',
+                        'invalid observation'):
+                with self.subTest(raw=raw), \
+                        mock.patch.object(data, "compose_file", return_value=compose_path), \
+                        mock.patch.object(data, "compose", return_value=SimpleNamespace(
+                            returncode=0, stdout=raw)) as compose:
+                    with self.assertRaisesRegex(RuntimeError, "snapshot_runtime_unavailable"):
+                        data._capture_snapshot("selected", snapshots, "fixture", db_only=True)
+                    self.assertEqual((target / "db.sql").read_bytes(), b"retained dump")
+                    self.assertEqual(list(snapshots.iterdir()), [target])
+                    compose.assert_called_once_with(
+                        "ps", "--all", "--format", "json", "db", instance="selected",
+                        check=False, capture=True, timeout=10)
+
+    def test_running_selected_database_exports_without_converging_dependencies(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            compose_path = root / "compose.yml"
+            compose_path.write_text("services: {}")
+
+            def observe_or_export(*args, **kwargs):
+                self.assertEqual(kwargs["instance"], "selected")
+                if args[0] == "ps":
+                    return SimpleNamespace(returncode=0, stdout=
+                        '[{"Service":"db","State":"running","Health":"healthy"}]')
+                self.assertEqual(args[:5], ("run", "--rm", "--no-deps", "-T", "wpcli"))
+                kwargs["stdout"].write(b"captured dump")
+
+            with mock.patch.object(data, "compose_file", return_value=compose_path), \
+                    mock.patch.object(data, "compose", side_effect=observe_or_export) as compose, \
+                    mock.patch.object(data, "_active_project_name", return_value="project"):
+                data._capture_snapshot("selected", root / "snapshots", "fixture", db_only=True)
+            self.assertEqual(compose.call_count, 2)
+            self.assertEqual((root / "snapshots/fixture/db.sql").read_bytes(), b"captured dump")
+
+
 class TestSnapshotCapture(unittest.TestCase):
+    def setUp(self):
+        # These cases exercise artifact publication and streaming; observation
+        # is covered separately with the real capture guard below.
+        patcher = mock.patch("sandbox.commands.data._require_snapshot_database")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_explicit_stdout_sink_bypasses_web_streaming(self):
         from sandbox.core import _ui
 
@@ -83,7 +141,7 @@ class TestSnapshotCapture(unittest.TestCase):
             self.assertIn("mode=db-only", (target / "META").read_text())
             archive.assert_not_called()
             export_args = compose.call_args.args
-            self.assertEqual(export_args[:2], ("run", "--rm"))
+            self.assertEqual(export_args[:4], ("run", "--rm", "--no-deps", "-T"))
             self.assertNotIn("--user", export_args,
                              "export must retain the generated wpcli service UID")
             self.assertNotIn("-v", export_args)

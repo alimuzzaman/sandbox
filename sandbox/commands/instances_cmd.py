@@ -393,7 +393,8 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
         # URL nor token is copied into this public document.
         payload.pop("login_url_redacted", None)
         revealed = ""
-        if (reveal_login and isinstance(document, Mapping)):
+        if (reveal_login and not os.environ.get("SANDBOX_DURABLE_JOB_ID")
+                and isinstance(document, Mapping)):
             revealed = _autologin_url_to_reveal(document)
             if revealed:
                 payload["login_url"] = revealed
@@ -489,6 +490,40 @@ def cmd_focus(cfg, args) -> None:
     _write_abilities_context(inst)
     ok(f"Focused plugin: {args.slug}")
 
+def _creation_context_argument(args):
+    from sandbox.server_config.models import validate_creation_context
+    value = getattr(args, 'creation_context_json', None)
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value.encode()) > 8192:
+        raise ValueError('creation_context_invalid')
+    return validate_creation_context(json.loads(value))
+
+
+def cmd_creation_query(cfg, args):
+    """Predispatch pure ensure capability/preparation/receipt modes."""
+    from sandbox.application.context import creation_query
+    try:
+        raw = getattr(args, 'creation_prepare_json', None)
+        if raw is not None and (not isinstance(raw, str) or len(raw.encode()) > 4096):
+            raise ValueError('creation_context_invalid')
+        context = _creation_context_argument(args)
+        if getattr(args, 'creation_receipt', False) and context is None:
+            raise ValueError('creation_context_required')
+        result = creation_query(getattr(args, 'project_dir', None) or os.getcwd(),
+            label=getattr(args, 'label', None) or 'default', context=context,
+            expected_incarnation=getattr(args, 'expected_incarnation', None),
+            prepare=json.loads(raw) if raw is not None else None,
+            config_file=getattr(args, 'config_file', None),
+            capability_kind=getattr(args, 'creation_kind', None),
+            capability_runtime_mode=getattr(args, 'creation_runtime_mode', None) or 'compose')
+    except (ValueError, OSError) as exc:
+        result = {'ok': False, 'schema_version': 1, 'error': {'code': getattr(exc, 'code', 'creation_context_invalid')}}
+    print(json.dumps(result, sort_keys=True))
+    if not result.get('ok'):
+        raise SystemExit(1)
+
+
 def cmd_ensure(cfg, args) -> None:
     """`./sb ensure [--project-dir DIR]` — boot the instance for a project
     directory (create-if-missing) and print its URL. The MCP server's
@@ -521,9 +556,11 @@ def cmd_ensure(cfg, args) -> None:
             project_root=pd,
             operation="ensure",
             label=label or "default",
-            arguments={"create": create, "config_file": getattr(args, "config_file", None)},
+            arguments={"create": create, "config_file": getattr(args, "config_file", None),
+                       "creation_context": _creation_context_argument(args),
+                       "expected_incarnation": getattr(args, "expected_incarnation", None)},
         ))
-    except sc.ConfigError as e:
+    except (sc.ConfigError, ValueError) as e:
         message = str(e)
         if getattr(args, "json", False):
             _print_ensure_json({
@@ -542,6 +579,13 @@ def cmd_ensure(cfg, args) -> None:
             raise SystemExit(1)
         die(redact_text(result.message))
     entry = dict(result.data)
+    if entry.get('lookup_only'):
+        if getattr(args, 'json', False):
+            _print_ensure_json(entry)
+        else:
+            receipt = entry['creation_receipt']
+            print(f"instance '{receipt['instance_id']}': {receipt['relation']}; original ensure {receipt['completion']} (retained receipt; no replay)")
+        return
     if not isinstance(entry, dict) or "instance" not in entry:
         # A runtime that refuses returns its own typed result, not an instance
         # record; crashing on the missing key hid the actual reason from the
@@ -1097,3 +1141,28 @@ register_specs((CommandSpec(
     help=("Initialize a project descriptor; explicit generic --type is "
           "review-only (run sb ensure next)"),
 ),))
+
+
+def cmd_creation_url(cfg, args):
+    """Covered URL writer; invoked before unrelated compatibility writers."""
+    from sandbox.core._instances import mutate_creation_url
+    try:
+        raw = getattr(args, 'creation_url_json', None)
+        if not isinstance(raw, str) or len(raw.encode()) > 4096:
+            raise ValueError('creation_context_invalid')
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or set(payload) != {'instance_id', 'url'}:
+            raise ValueError('creation_context_invalid')
+        context = _creation_context_argument(args)
+        if context is None:
+            raise ValueError('creation_context_required')
+        result = mutate_creation_url(getattr(args, 'project_dir', None) or os.getcwd(),
+            label=getattr(args, 'label', None) or 'default', creation_context=context,
+            expected_incarnation=getattr(args, 'expected_incarnation', None), **payload)
+        print(json.dumps(result, sort_keys=True))
+        if result['result_code'] != 'remote_instance_url_verified':
+            raise SystemExit(1)
+    except (ValueError, OSError) as exc:
+        print(json.dumps({'ok': False, 'schema_version': 1,
+                          'error': {'code': getattr(exc, 'code', 'creation_context_invalid')}}))
+        raise SystemExit(1)

@@ -251,17 +251,31 @@ def job_list(project_dir: str | None = None, *, limit: int = 50,
         jobs = result.get("jobs") if isinstance(result, dict) else None
         if not isinstance(jobs, list) or any(not isinstance(item, dict) for item in jobs):
             raise ValueError("job list returned an invalid page")
-        page = jobs[:limit]
-        has_more = len(jobs) > limit
+        metadata = result.get("page") or {}
+        if not isinstance(metadata, dict):
+            raise ValueError("job list returned invalid completeness metadata")
+        if len(jobs) > limit:
+            has_more = True
+        elif remote and metadata.get("schema_version") == 2:
+            has_more = metadata.get("has_more")
+        elif not remote and len(jobs) == 200:
+            has_more = bool(_job_service.list({
+                **query, "limit": 1, "cursor_job_id": jobs[-1]["job_id"],
+            }))
+        else:
+            has_more = None if remote else False
+        from sandbox.jobs.listing import job_page
+        envelope = job_page(jobs, limit=limit, has_more=has_more)
         next_cursor = None
-        if has_more and page:
+        if envelope["page"]["next_cursor"]:
             payload = json.dumps(
-                {"job_id": page[-1].get("job_id")},
+                {"job_id": envelope["page"]["next_cursor"]},
                 sort_keys=True, separators=(",", ":"),
             ).encode()
             next_cursor = base64.urlsafe_b64encode(payload).decode().rstrip("=")
-        return {"ok": True, "jobs": page, "next_cursor": next_cursor,
-                "has_more": has_more}
+        return {"ok": True, "jobs": envelope["jobs"], "next_cursor": next_cursor,
+                "has_more": envelope["page"]["has_more"],
+                "page": {**envelope["page"], "next_cursor": next_cursor}}
     except Exception as exc:
         return {"ok": False, "code": "invalid_query", "error": str(exc)}
 

@@ -905,13 +905,20 @@ def runtime_service(cfg):
             request.project_root,
             label=request.label,
             create=bool(request.arguments.get("create", False)),
+            php_version=request.arguments.get("php_version"),
+            wp_version=request.arguments.get("wp_version"),
+            config_label=request.arguments.get("config_label"),
             config_file=request.arguments.get("config_file"),
+            creation_context=request.arguments.get("creation_context"),
+            expected_incarnation=request.arguments.get("expected_incarnation"),
         )
 
     def apply(request: OperationRequest):
         return core.apply_config(
             cfg, request.project_root, label=request.label,
             config_file=request.arguments.get("config_file"),
+            creation_context=request.arguments.get("creation_context"),
+            expected_incarnation=request.arguments.get("expected_incarnation"),
         )
 
     def status(request: OperationRequest):
@@ -1016,7 +1023,7 @@ def runtime_service(cfg):
     )
     adapters.for_kind("wordpress").adapter.capabilities = frozenset({
             *adapters.for_kind("wordpress").adapter.capabilities,
-            "compose.exec",
+            "compose.exec", "instance_creation_receipt_v1",
             "wordpress.cli", "wordpress.exec", "wordpress.rest",
             "wordpress.snapshot", "wordpress.restore", "wordpress.reset",
             "wordpress.database", "wordpress.files", "wordpress.mail",
@@ -1512,3 +1519,46 @@ def sync_service_dependencies():
     """Compose opt-in sync service without initializing runtime."""
     from sandbox.application.sync_service import build_sync_service
     return build_sync_service()
+
+
+def creation_query(project_dir, *, label='default', context=None,
+                   expected_incarnation=None, prepare=None, config_file=None,
+                   capability_kind=None, capability_runtime_mode="compose"):
+    """Pure owner projection; no runtime service, ensure, or state bootstrap."""
+    import sandbox_core as sc
+    from sandbox.server_config.models import creation_intent_fields, creation_digest
+    from sandbox.server_config.creation_requests import lookup_creation_receipt
+    from sandbox.config.facade import project_identity
+    if capability_kind is not None:
+        # Controller support for the caller's already-selected source runtime.
+        # This is not proof of a target descriptor; ensure rechecks that input.
+        if context is not None or prepare is not None or capability_kind not in {'wordpress', 'compose'} or capability_runtime_mode != 'compose':
+            raise ValueError('unsupported_capability')
+        return {'ok': True, 'schema_version': 1,
+                'capabilities': ['instance_creation_receipt_v1'],
+                'kind': capability_kind, 'scope': 'controller_support'}
+    pconf = sc.load_project_config(project_dir, label=label, config_file=config_file)
+    kind = pconf.get('kind', 'wordpress')
+    runtime = pconf.get('wordpressRuntime') or {}
+    supported = kind in {'wordpress', 'compose'} and runtime.get('mode', 'compose') == 'compose' and pconf.get('server') != 'herd'
+    if not supported:
+        return {'ok': False, 'schema_version': 1, 'error': {'code': 'unsupported_capability'}}
+    if prepare is not None:
+        if not isinstance(prepare, dict) or set(prepare) - {'delivery_intent_digest', 'target_scope_digest', 'create_allowed', 'config_label'} or type(prepare.get('create_allowed')) is not bool:
+            raise ValueError('creation_context_invalid')
+        fields = creation_intent_fields(pconf, project_identity=project_identity(pconf, label=label)['identity'], target_scope_digest=prepare['target_scope_digest'], delivery_intent_digest=prepare['delivery_intent_digest'], label=label, create_allowed=prepare['create_allowed'], config_label=prepare.get('config_label'))
+        return {'ok': True, 'schema_version': 1, 'intent_fields': fields, 'intent_digest': creation_digest(fields)}
+    if context is None:
+        return {'ok': True, 'schema_version': 1, 'capabilities': ['instance_creation_receipt_v1'], 'kind': kind}
+    from sandbox.server_config.models import validate_creation_context
+    context = validate_creation_context(context)
+    if context['project_identity'] != project_identity(pconf, label=label)['identity'] or context['project_root_digest'] != creation_digest(str(Path(pconf['root']).resolve())) or context['label'] != label:
+        raise ValueError('creation_request_conflict')
+    from sandbox.project_registry.json import JsonRegistryRepository
+    from sandbox.core._paths import RUNTIME_DIR
+    records = JsonRegistryRepository(Path(RUNTIME_DIR) / 'registry.json').read_only_all()
+    selected = [record for record in records.values()
+                if record.get('root') == str(Path(pconf['root']).resolve()) and record.get('label') == label]
+    if len(selected) > 1:
+        raise ValueError('creation_request_conflict')
+    return lookup_creation_receipt(selected[0] if selected else None, context, expected_incarnation)

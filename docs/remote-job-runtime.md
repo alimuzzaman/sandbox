@@ -8,6 +8,22 @@ child pipes.
 
 ## Normal operation
 
+`job-list --json` returns bounded summaries, not stored command, submission,
+environment, result, or output payloads. Use `job-status JOB` and `job-output JOB`
+for those detail surfaces. Each CLI/MCP page is capped at 512 KiB and carries
+`page.schema_version: 2`, `row_format: summary-v1`, `has_more`, `next_cursor`, and
+`completeness`. CLI continuation is `--cursor-job-id <page.next_cursor>`; MCP keeps
+its opaque `cursor`/`next_cursor` fields. A byte-limited page never consumes the
+first omitted row. An older controller's missing completeness metadata remains
+unknown. A response above the existing 1 MiB transport limit fails with a safe
+`response_too_large` diagnostic; use a smaller limit until that controller is
+updated through the supported lifecycle.
+
+Cancellation can be repeated while a job is cancelling. `job-cancel JOB --force`
+revalidates the original process identity and escalates to its owned group.
+A concurrent terminal transition returns its observed result without signaling a
+replacement process. A cancelling result still needs a terminal status observation.
+
 The examples use the repository launcher (`./sb`). From another checkout, use
 the installed `sb` command; the command surface and selectors are the same.
 
@@ -27,6 +43,76 @@ development, and isolated labels for matrix cells:
 `job-output --stream` is for retained `combined`, `stdout`, and `stderr` logs.
 Resource samples are a separate bounded control-plane document retrieved with
 `job-metrics`; use `job-status` for the live health summary.
+
+## Ordinary hosted apply admission
+
+Process observation uses a real boot-session identity. An active record written
+by an older client with a hostname-based identity remains unresolved when read
+by this version: a format mismatch cannot prove supervisor loss, release its
+workspace, authorize a signal, or create recovery authority. Missing/denied
+identity telemetry is also distinct from a proved absent PID. Terminal records
+are never rewritten to repair an earlier incorrect reconciliation.
+
+Status health is `unknown` when process ownership cannot be observed or its
+boot format is unsupported. A stale heartbeat from a still-owned supervisor
+does not make the job terminal. Status uses the classifier's explicit
+`supervisor_identity_valid` observation; an unavailable later probe cannot turn
+a stale heartbeat into proved ownership loss. Expired workspace/capacity leases remain held
+for nonterminal jobs; expiry alone cannot admit overlapping work. Terminal or
+missing-job leases can still be reaped by the lease owner.
+
+When validating a changed controller, use a separate `SANDBOX_HOME` for all
+job commands. Job service startup reconciles its whole ledger. Older clients
+must not share a ledger with newly running jobs that use an identity format
+they cannot interpret; complete those jobs or isolate the controllers first.
+
+Feature 054 makes a durable recovery context mandatory for ordinary
+`host apply`. The retained job must bind the application checkout, its full
+source commit, the original request ID, and the live child identity. Sandbox
+commits and reads back the existing recovery receipt before source transfer,
+initializer/runtime/route effects, or a generation advance. A delivery journal
+row is diagnostic history; it cannot replace that receipt.
+
+Use the application checkout as the job project and call the full absolute
+Sandbox executable in the child command:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+The application commit (`FULLHEAD`), Sandbox source/control revision, and
+installed controller runtime revision are separate facts. Do not start a job
+from the control checkout merely to obtain a job ID. A direct apply with only a
+request flag, or a legacy direct caller without a durable receipt, is fenced
+with `recovery_context_required` before effects.
+
+After submission, retain the original job ID and read terminal status and
+bounded output. If the response is lost or admission is interrupted, inspect
+the original request with `./sb delivery inspect`; do not submit a new request
+identity. A separately authorized continuation uses the existing `host
+recover` command and a distinct recovery request. Identity-only target proof
+may report partial optional telemetry, but required resource policy remains a
+separate gate.
+
+The W11 deployment trace uses the same executing Sandbox executable, controller,
+`SANDBOX_HOME`, and original control `--project-dir` for capability, start,
+record, owner-status, owner-record, and inspect. `--trace-request-id` resolves
+an invocation before its trace ID is known; `--trace-id` selects the retained
+trace, and `--mutation-id` is allowed only with that trace ID. Trace writers
+use immutable original IDs and monotonic readback; lost or ambiguous
+acknowledgements never justify a new job or workload request. Preflight command
+success, the main command result, and query-time joined deployment evidence are
+separate values. Candidate trace source and installed-controller capability
+remain pending verification.
+
+Phase-job `submission_digest` values are producer-recorded candidates that the
+native job owner independently recomputes from retained role and command
+identity; private argv and environment are excluded. The trace adds no new
+`job-status` surface: existing `job-status` reports lifecycle, while
+trace-owner-status reports publication receipts.
 
 If local `job-status` returns `job_not_found`, it has not inferred a remote.
 Run `./sb remote list`, then repeat the same observation with the explicit

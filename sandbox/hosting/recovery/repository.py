@@ -55,6 +55,189 @@ class RecoveryRepository:
             raise ValueError("invalid managed-host state format")
         return value
 
+    def read_trace_activation_nested(self, target_key: str | None, *, budget,
+                                     request_id=None, remote=None, environment=None) -> dict | None:
+        """Bounded read of owner-validated activation state; no migration or locks."""
+        from sandbox.hosting.images.activation.repository import decode_activation_state
+        budget.check()
+        if not self.state_path.exists() and not self.state_path.is_symlink():
+            return None
+        self._ensure_state_parent(create=False)
+        descriptor = self._open_owned_file(self.state_path, create=False,
+                                           label="managed-host state")
+        maximum = 8 * 1024 * 1024
+        with os.fdopen(descriptor, "rb") as handle:
+            if os.fstat(handle.fileno()).st_size > maximum:
+                raise ValueError("owner_record_oversized")
+            chunks = []
+            size = 0
+            while size <= maximum:
+                budget.check()
+                chunk = handle.read(min(65536, maximum + 1 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            if size > maximum:
+                raise ValueError("owner_record_oversized")
+        budget.check()
+        state = json.loads(b"".join(chunks))
+        budget.check()
+        if (type(state) is not dict or type(state.get("version")) is not int
+                or state["version"] not in {1, 2} or type(state.get("hosts")) is not dict):
+            raise ValueError("owner_record_invalid")
+        if target_key is None:
+            # A diagnostic lookup may recover the original native key from
+            # retained state. It never resolves today's project manifest.
+            if not all(isinstance(v, str) and v for v in (request_id, remote, environment)):
+                return None
+            if len(state['hosts']) > 640:
+                raise ValueError('owner_record_oversized')
+            matches = []
+            for key, candidate in state['hosts'].items():
+                budget.check()
+                if (not isinstance(key, str) or len(key.split('/')) != 3
+                        or key.split('/')[0] != remote or key.split('/')[2] != environment):
+                    continue
+                if not isinstance(candidate, dict):
+                    raise ValueError('owner_record_invalid')
+                raw = candidate.get('image_activation')
+                if raw is None:
+                    continue
+                checked = decode_activation_state(raw)
+                active = checked['active']
+                if (request_id in checked['results'] or request_id in checked['tombstones']
+                        or (active is not None and active['request_id'] == request_id)):
+                    matches.append(checked)
+            budget.check()
+            if len(matches) > 1:
+                raise ValueError('owner_binding_conflict')
+            return matches[0] if matches else None
+        record = state["hosts"].get(target_key)
+        if record is None:
+            return None
+        if type(record) is not dict:
+            raise ValueError("owner_record_invalid")
+        nested = record.get("image_activation")
+        result = None if nested is None else decode_activation_state(nested)
+        budget.check()
+        return result
+
+    def read_activation_nested(self, target_key: str) -> dict | None:
+        """Pure owner read; no activation transaction or mutation locks."""
+        from sandbox.hosting.images.activation.repository import decode_activation_state
+        record = self.load()["hosts"].get(target_key)
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            raise ValueError("recovery_receipt_invalid")
+        nested = record.get("image_activation")
+        return None if nested is None else decode_activation_state(nested)
+
+    def read_delivery_projection(self, target_key: str, request_id: str | None = None) -> dict:
+        """Read bounded nonsecret ordinary authority without changing owner state."""
+        from .models import canonical_digest
+        empty = {"schema_version": 1, "state": "missing", "reason": "authority_missing",
+                 "generation": None, "admission": None, "active_owner": None,
+                 "uncertainty": None, "recovery_results": []}
+        state = self.load()
+        record = state["hosts"].get(target_key)
+        if record is None:
+            return empty
+        # target validates only this transient owner snapshot; it never persists.
+        record = self.target(state, target_key)
+        result = {**empty, "generation": record["generation"],
+                  "active_owner": record.get("active_operation"),
+                  "uncertainty": record.get("recovery_uncertainty")}
+        result["recovery_results"] = [{key: item[key] for key in (
+            "schema_version", "ok", "request_id", "request_digest", "original", "target",
+            "generation", "result_family", "result_class", "action", "effect_scope",
+            "evidence", "completed_at")}
+            for item in record.get("recovery_attempts", [])
+            if request_id is None or (item.get("original") or {}).get("request_id") == request_id
+            or item.get("request_id") == request_id][-16:]
+        operation = record.get("hosting_operation")
+        if operation is None:
+            return result
+        if (not isinstance(operation, dict) or operation.get("schema_version") != 1
+                or operation.get("accepted_before_effects") is not True):
+            return {**result, "state": "unsupported", "reason": "legacy_authority"}
+        if request_id is not None and operation.get("request_id") != request_id:
+            return result
+        if (len(json.dumps(operation, ensure_ascii=True).encode()) > MAX_RECEIPT_BYTES
+                or operation.get("digest") != canonical_digest({
+                    key: value for key, value in operation.items() if key != "digest"})):
+            raise ValueError("recovery_receipt_invalid")
+        source, evidence, target = (operation.get(name) for name in ("source", "evidence", "target"))
+        if not all(isinstance(value, dict) for value in (source, evidence, target)):
+            raise ValueError("recovery_receipt_invalid")
+        for field in ("job_id", "request_id", "project_identity"):
+            if not self._valid_id(operation.get(field)):
+                raise ValueError("recovery_receipt_invalid")
+        if 'invocation_root_digest' in operation and not self._valid_digest(operation['invocation_root_digest']):
+            raise ValueError('recovery_receipt_invalid')
+        for field in ("digest", "project_root_digest"):
+            if not self._valid_digest(operation.get(field)):
+                raise ValueError("recovery_receipt_invalid")
+        for field in ("remote", "project", "environment"):
+            if not self._valid_id(target.get(field)):
+                raise ValueError("recovery_receipt_invalid")
+        if (type(operation.get("starting_generation")) is not int or operation["starting_generation"] < 0
+                or type(operation.get("accepted_at")) is not int or operation["accepted_at"] <= 0
+                or source.get("clean") is not True
+                or not isinstance(source.get("commit"), str)
+                or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source["commit"]) is None
+                or not self._valid_digest(source.get("identity"))):
+            raise ValueError("recovery_receipt_invalid")
+        safe_evidence = {}
+        for field in ("host_identity", "runtime_identity", "source_identity", "config_digest",
+                      "manifest_digest", "edge_intent_digest", "phase_receipt_digest"):
+            value = evidence.get(field)
+            if (field != "phase_receipt_digest" or value is not None) and not self._valid_digest(value):
+                raise ValueError("recovery_receipt_invalid")
+            safe_evidence[field] = value
+        from .models import validate_edge_intent, validate_source_artifact
+        artifact = None
+        try:
+            if 'artifact' in source:
+                artifact = validate_source_artifact(source['artifact'], source['commit'])
+            edge = validate_edge_intent(evidence.get("edge_intent"))
+        except (TypeError, ValueError):
+            raise ValueError("recovery_receipt_invalid") from None
+        if (canonical_digest(edge) != safe_evidence["edge_intent_digest"]
+                or ((evidence.get('source_revision') is not None
+                     and evidence.get('source_revision') != artifact['revision'])
+                    if artifact is not None else evidence.get("source_revision") != source["commit"])
+                or evidence.get("source_clean") is not True
+                or source.get("state_identity") != safe_evidence["source_identity"]
+                or any(not evidence.get(key) for key in (
+                    "secret_binding_metadata_id", "secret_binding_revision", "secret_binding_key_version"))):
+            raise ValueError("recovery_receipt_invalid")
+        identity = evidence.get("machine_identity")
+        if not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{24}", identity) is None:
+            raise ValueError("recovery_receipt_invalid")
+        safe_evidence["machine_identity"] = identity
+        admission = {field: operation[field] for field in (
+            "job_id", "request_id", "project_identity", "project_root_digest",
+            "starting_generation", "accepted_at", "accepted_before_effects", "digest")}
+        admission.update(source_schema=2 if artifact is not None else 1, target={key: target[key] for key in (
+            "remote", "project", "environment")}, source={key: source[key] for key in (
+            "clean", "commit", "identity")}, evidence=safe_evidence,
+            authority_reference={"kind": "hosting_operation", "digest": operation["digest"]})
+        if artifact is not None:
+            admission['source']['artifact'] = artifact
+        if 'invocation_root_digest' in operation:
+            admission['invocation_root_digest'] = operation['invocation_root_digest']
+        return {**result, "state": "known", "reason": None, "admission": admission}
+
+    def read_committed_admission(self, target_key: str, expected_digest: str,
+                                 request_id: str | None = None) -> dict:
+        """Read back exact committed authority; absence never clears a fence."""
+        result = self.read_delivery_projection(target_key, request_id)
+        if result["admission"] is None or result["admission"]["digest"] != expected_digest:
+            raise ValueError("recovery_receipt_unavailable")
+        return result
+
     @contextmanager
     def target_lock(self, target_key: str, *, timeout_seconds: float = 30):
         with self.effect_lock(target_key, timeout_seconds=timeout_seconds):

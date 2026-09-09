@@ -1,4 +1,5 @@
 import base64
+import copy
 import io
 import json
 import unittest
@@ -83,8 +84,47 @@ class PrivateContainmentTests(unittest.TestCase):
                 ('Restarting', True, 'container_state_invalid'), ('Pid', -1, 'container_state_invalid')):
             with self.subTest(field=field):
                 docker = DockerFixture(); docker.rows[0]['State'][field] = value
-                self.assertEqual(self._run_main(frame(), docker), {'ok': False, 'code': code})
+                result = self._run_main(frame(), docker)
+                self.assertEqual(result, {'ok': False, 'code': code, 'diagnostic': {
+                    'schema_version': 1, 'reason': code, 'subject': 'owned_container',
+                    'sample': 'first', 'container_id': '1' * 64}})
                 self.assertFalse(any(call[1] in {'update', 'stop'} for call in docker.calls))
+
+    def test_snapshot_change_identifies_only_the_owned_container(self):
+        docker = DockerFixture()
+        before = copy.deepcopy(docker.rows)
+        inspections = 0
+        def changing(argv, **kwargs):
+            nonlocal inspections
+            if argv[:2] == ['docker', 'inspect']:
+                inspections += 1
+                if inspections == 2:
+                    docker.rows[0]['Image'] = 'sha256:' + 'f' * 64
+            return docker(argv, **kwargs)
+        result = self._run_main(frame(), changing)
+        self.assertEqual(result, {'ok': False, 'code': 'evidence_changed', 'diagnostic': {
+            'schema_version': 1, 'reason': 'container_binding_changed',
+            'subject': 'owned_container', 'sample': 'comparison', 'container_id': '1' * 64}})
+        self.assertEqual(inspections, 2)
+        self.assertFalse(any(call[1] in {'update', 'stop'} for call in docker.calls))
+        self.assertEqual(docker.rows[0]['Mounts'], before[0]['Mounts'])
+        for private in ('lenzora_data', '/var/lib', 'sha256:', 'pid', 'cgroup'):
+            self.assertNotIn(private, json.dumps(result))
+
+    def test_foreign_container_failure_never_discloses_its_id(self):
+        docker = DockerFixture()
+        docker.rows[0]['Config']['Labels']['com.docker.compose.project'] = 'foreign'
+        docker.rows[0]['State']['Paused'] = True
+        result = self._run_main(frame(), docker)
+        self.assertEqual(result, {'ok': False, 'code': 'evidence_changed'})
+        self.assertNotIn('1' * 64, json.dumps(result))
+
+    def test_typed_state_refusal_does_not_change_apply_envelope(self):
+        docker = DockerFixture()
+        docker.rows[0]['State']['Paused'] = True
+        self.assertEqual(self._run_main(frame('apply'), docker),
+                         {'ok': False, 'code': 'container_paused'})
+        self.assertFalse(any(call[1] in {'update', 'stop'} for call in docker.calls))
 
     def test_exact_restart_wait_is_planned_and_stopped_without_a_fake_process_binding(self):
         docker = DockerFixture()

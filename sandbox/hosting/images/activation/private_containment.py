@@ -7,33 +7,44 @@ import re
 import time
 from pathlib import Path
 
+if "settlement_refusal" not in globals():
+    from sandbox.hosting.images.activation.settlement_diagnostics import settlement_refusal, settlement_diagnostic
+
+
 _ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 
 
-def _process_binding(pid, container_id):
+def _process_binding(pid, container_id, *, sample="first"):
     root = Path('/proc') / str(pid)
     try:
         cgroup = (root / 'cgroup').read_bytes()
         value = (root / 'stat').read_bytes()
     except FileNotFoundError:
         # The inspected process can exit while Docker enters restart backoff.
-        raise ValueError('evidence_changed') from None
-    if container_id.encode() not in cgroup: raise ValueError('process_owner_unavailable')
+        raise settlement_refusal('evidence_changed', 'container_process_disappeared',
+            'owned_container', sample, container_id) from None
+    if container_id.encode() not in cgroup:
+        raise settlement_refusal('process_owner_unavailable', 'container_process_owner_unavailable',
+            'owned_container', sample, container_id)
     tail = value[value.rfind(b')') + 2:].split()
-    if len(tail) < 20: raise ValueError('process_owner_unavailable')
+    if len(tail) < 20:
+        raise settlement_refusal('process_owner_unavailable', 'container_process_owner_unavailable',
+            'owned_container', sample, container_id)
     return {'pid': pid, 'started': int(tail[19]), 'cgroup_digest': hashlib.sha256(cgroup).hexdigest()}
 
 
-def snapshot(frame, command):
+def snapshot(frame, command, *, sample="first"):
     project = frame['compose_project']; target = frame['target']
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,127}', project): raise ValueError('evidence_changed')
     daemon = command(['docker', 'info', '--format', '{{.ID}}'], max_output_bytes=4096).decode().strip()
-    if daemon != target['daemon_identity']: raise ValueError('evidence_changed')
+    if daemon != target['daemon_identity']:
+        raise settlement_refusal('evidence_changed', 'daemon_identity_changed', 'daemon', sample)
     ids = sorted(command(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'label=com.docker.compose.project=' + project], max_output_bytes=16384).decode().split())
     if len(ids) > 128 or len(set(ids)) != len(ids) or any(not re.fullmatch(r'[a-f0-9]{64}', value) for value in ids):
         raise ValueError('evidence_changed')
     rows = json.loads(command(['docker', 'inspect', *ids], max_output_bytes=8 * 1024 * 1024)) if ids else []
-    if sorted(row.get('Id', '') for row in rows) != ids: raise ValueError('evidence_changed')
+    if sorted(row.get('Id', '') for row in rows) != ids:
+        raise settlement_refusal('evidence_changed', 'container_set_changed', 'container_set', sample)
     key = base64.b64decode(frame['binding_key'], validate=True)
     if len(key) != 32: raise ValueError('evidence_changed')
     result = []
@@ -42,19 +53,20 @@ def snapshot(frame, command):
             raise ValueError('evidence_changed')
         state = row['State']; pid = state.get('Pid')
         paused, restarting, running = (state.get(field) for field in ('Paused', 'Restarting', 'Running'))
-        if paused is True: raise ValueError('container_paused')
+        if paused is True:
+            raise settlement_refusal('container_paused', 'container_paused', 'owned_container', sample, row['Id'])
         if (any(type(value) is not bool for value in (paused, restarting, running))
                 or type(pid) is not int or pid < 0 or state.get('Dead', False) is not False):
-            raise ValueError('container_state_invalid')
+            raise settlement_refusal('container_state_invalid', 'container_state_invalid', 'owned_container', sample, row['Id'])
         if restarting:
             # Docker's restart manager has no current process during backoff.
             # Running stays true so the approved operation still issues stop.
             if not running or pid != 0 or state.get('Status') != 'restarting':
-                raise ValueError('container_state_invalid')
+                raise settlement_refusal('container_state_invalid', 'container_state_invalid', 'owned_container', sample, row['Id'])
         elif (running != (pid > 0)
                 or state.get('Status') not in ({'running'} if running else {'created', 'exited'})):
-            raise ValueError('container_state_invalid')
-        process = _process_binding(pid, row['Id']) if pid else None
+            raise settlement_refusal('container_state_invalid', 'container_state_invalid', 'owned_container', sample, row['Id'])
+        process = _process_binding(pid, row['Id'], sample=sample) if pid else None
         policy = row.get('HostConfig', {}).get('RestartPolicy')
         if not isinstance(policy, dict) or policy.get('Name') not in {'', 'no', 'always', 'unless-stopped', 'on-failure'}:
             raise ValueError('evidence_changed')
@@ -68,6 +80,7 @@ def snapshot(frame, command):
 
 def main():
     import sys
+    frame = None
     try:
         payload = sys.stdin.buffer.read(65537)
         if len(payload) > 65536: raise ValueError('evidence_changed')
@@ -95,10 +108,20 @@ def main():
                 raise ValueError('acceptance_unknown')
             result = {'ok': True, 'code': 'contained', 'containers': after}
         else:
-            if snapshot(frame, command) != before: raise ValueError('evidence_changed')
+            after = snapshot(frame, command, sample='second')
+            if [row['container_id'] for row in after] != [row['container_id'] for row in before]:
+                raise settlement_refusal('evidence_changed', 'container_set_changed', 'container_set', 'comparison')
+            for previous, current in zip(before, after):
+                if previous != current:
+                    raise settlement_refusal('evidence_changed', 'container_binding_changed',
+                        'owned_container', 'comparison', previous['container_id'])
             result = {'ok': True, 'code': 'planned', 'containers': before}
     except Exception as exc:
         result = {'ok': False, 'code': str(exc) if str(exc) in {
             'process_owner_unavailable', 'container_paused', 'container_restarting',
             'container_state_invalid', 'evidence_changed'} else 'acceptance_unknown'}
+        if type(frame) is dict and frame.get('operation') == 'plan':
+            diagnostic = settlement_diagnostic(getattr(exc, 'diagnostic', None), result['code'])
+            if diagnostic is not None:
+                result['diagnostic'] = diagnostic
     sys.stdout.write(json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n')

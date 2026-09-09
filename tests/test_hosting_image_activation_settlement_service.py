@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from sandbox.hosting.images.activation.repository import ActivationRepository
 from sandbox.hosting.images.activation.settlement_models import SettlementApproval, SettlementObservation
 from sandbox.hosting.images.activation.settlement_service import SettlementService
+from sandbox.hosting.images.activation.settlement_service import SettlementError
 from tests.test_hosting_image_activation_settlement_models import ssh_signature
 from tests.test_hosting_image_activation_settlement_repository import _state, _plan
 from tests.test_hosting_image_activation_v2 import (
@@ -46,6 +47,26 @@ class Observer:
 
 
 class SettlementServiceTests(unittest.TestCase):
+    def test_refusal_detail_survives_observe_without_state_or_authority_changes(self):
+        detail = {'schema_version': 1, 'reason': 'helper_activity_present',
+                  'subject': 'helper_activity', 'sample': 'first'}
+        def refuse(**kwargs):
+            raise SettlementError('not_quiescent', detail)
+        self.observer.observe = refuse
+        before = copy.deepcopy(self.host.state)
+        with self.assertRaises(SettlementError) as caught:
+            self.service._observe(self.host.state['active'], 0)
+        self.assertEqual(caught.exception.code, 'not_quiescent')
+        self.assertEqual(caught.exception.diagnostic, detail)
+        self.assertEqual(self.host.state, before)
+        self.assertEqual(self.store.reads, 0)
+        self.assertEqual(self.stage.custody.released, 0)
+        result = self.service.apply(self.plan, approval_digest=self.approval.approval_digest)
+        self.assertEqual(result['code'], 'not_quiescent')
+        self.assertNotIn('diagnostic', result)
+        self.assertEqual(self.host.state, before)
+        self.assertEqual(self.stage.custody.released, 0)
+
     def setUp(self):
         self.plan = _plan()
         self.approval = SettlementApproval.create(authority_id="settlement/operator",

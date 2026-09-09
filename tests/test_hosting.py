@@ -979,15 +979,21 @@ class TestHostingManifest(unittest.TestCase):
                 "import json,os,sys\n"
                 "args=sys.argv[1:]\n"
                 "if args and args[0]=='compose':\n"
-                " if 'config' in args: print('hash-1')\n"
-                " elif 'images' in args: print('img-1')\n"
+                " if 'config' in args and '--format' in args: print(json.dumps({'services': {'setup': {'environment': {'SYNTHETIC': '$$literal'}}}}))\n"
+                " elif 'config' in args:\n"
+                "  if '-' not in args or '--no-interpolate' in args: print('setup ' + 'c' * 64)\n"
+                "  else:\n"
+                "   resolved=json.load(sys.stdin)\n"
+                "   assert resolved['services']['setup']['environment']['SYNTHETIC']=='$$literal'\n"
+                "   print(os.environ.get('HASH_OUTPUT', 'setup ' + 'a' * 64))\n"
+                " elif 'images' in args: print(os.environ.get('IMAGE_OUTPUT', 'b' * 64))\n"
                 " elif 'ps' in args: print('' if os.environ.get('NO_CONTAINER') else 'container-1')\n"
                 " else: raise SystemExit(2)\n"
                 "elif args and args[0]=='inspect':\n"
-                f" print(json.dumps({{'Created': {created!r}, 'Image': 'img-1', "
+                f" print(json.dumps({{'Created': {created!r}, 'Image': 'sha256:' + 'b' * 64, "
                 "'Config': {'Labels': {'com.docker.compose.project': 'example', "
                 "'com.docker.compose.service': 'setup', "
-                "'com.docker.compose.config-hash': 'hash-1'}}, "
+                "'com.docker.compose.config-hash': 'a' * 64}}, "
                 "'State': {'Status': 'exited', 'ExitCode': 0}}))\n"
                 "else: raise SystemExit(2)\n"
             )
@@ -1014,6 +1020,32 @@ class TestHostingManifest(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout), {
                 "schema_version": 1, "status": "succeeded",
             })
+
+            # Real Compose emits a service-prefixed hash and a bare image ID.
+            # Accept equivalent full identities, never wrong services or digests.
+            cases = [
+                ({"HASH_OUTPUT": "a" * 64}, "succeeded"),
+                ({"IMAGE_OUTPUT": "sha256:" + "b" * 64}, "succeeded"),
+                ({"HASH_OUTPUT": "other " + "a" * 64}, "foreign"),
+                ({"HASH_OUTPUT": "setup " + "c" * 64}, "foreign"),
+                ({"HASH_OUTPUT": "setup " + "a" * 64 + " extra"}, "foreign"),
+                ({"HASH_OUTPUT": "setup " + "a" * 64 + "\nother " + "a" * 64}, "foreign"),
+                ({"IMAGE_OUTPUT": "c" * 64}, "foreign"),
+                ({"IMAGE_OUTPUT": "b" * 12}, "foreign"),
+                ({"IMAGE_OUTPUT": "sha512:" + "b" * 64}, "foreign"),
+                ({"IMAGE_OUTPUT": "b" * 64 + "\n" + "b" * 64}, "foreign"),
+            ]
+            for overrides, expected in cases:
+                with self.subTest(overrides=overrides):
+                    variant = run_test_process(
+                        argv, capture_output=True, text=True, check=False,
+                        env={
+                            "PATH": str(root) + os.pathsep + os.defpath,
+                            **overrides,
+                        },
+                    )
+                    self.assertEqual(variant.returncode, 0, variant.stderr)
+                    self.assertEqual(json.loads(variant.stdout)["status"], expected)
 
             stale = hosting_cmd._initializer_status_command(
                 prefix, "setup", not_before=time.time() + 5,

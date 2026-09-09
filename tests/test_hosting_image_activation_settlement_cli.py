@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from sandbox.hosting.images.activation.repository import ActivationRepository
 from sandbox.hosting.images.activation.settlement_cli import run_settlement
+from sandbox.hosting.images.activation.settlement_service import SettlementError
 from sandbox.hosting.images.activation.settlement_models import SettlementApproval
 from tests.test_hosting_image_activation_settlement_models import ssh_signature
 from tests.test_hosting_image_activation_settlement_repository import _plan, _state
@@ -18,6 +19,32 @@ from tests.test_hosting_image_activation_v2 import FakeHostStatePort, FakeStageR
 
 
 class SettlementCliTests(unittest.TestCase):
+    def test_only_read_only_refusals_include_validated_details(self):
+        plan = _plan()
+        host = FakeHostStatePort(); host.state = _state()
+        repository = ActivationRepository(host_state_port=host,
+            stage_repository=FakeStageRepositoryPort(), target_mutation_port=FakeTargetMutationPort())
+        detail = {'schema_version': 1, 'reason': 'daemon_identity_changed',
+                  'subject': 'daemon', 'sample': 'first'}
+        def refuse(**kwargs):
+            raise SettlementError('evidence_changed', detail)
+        observer = SimpleNamespace(observe=refuse, containment=refuse)
+        before = copy.deepcopy(host.state)
+        for phase in ('observe', 'containment-plan'):
+            args = SimpleNamespace(settlement_phase=phase, request_id=plan.request_id,
+                expected_generation=0, activation_transaction=plan.transaction_digest)
+            result = run_settlement(args, target=plan.target.target_identity,
+                repository=repository, approval_store=None, observer=observer)
+            self.assertEqual(result, {'schema_version': 1, 'ok': False, 'code': 'evidence_changed',
+                'operation': 'settle', 'phase': phase, 'diagnostic': detail})
+            self.assertEqual(host.state, before)
+        args.settlement_phase = 'containment-apply'
+        result = run_settlement(args, target=plan.target.target_identity,
+            repository=repository, approval_store=None, observer=observer)
+        self.assertEqual(result, {'schema_version': 1, 'ok': False, 'code': 'authority_missing',
+            'operation': 'settle', 'phase': 'containment-apply'})
+        self.assertEqual(host.state, before)
+
     def test_plan_apply_and_replay_use_exact_selectors_and_separate_confirmation(self):
         plan = _plan()
         approval = SettlementApproval.create(authority_id="operator", authority_revision="1",

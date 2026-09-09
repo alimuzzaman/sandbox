@@ -7,7 +7,7 @@ import json
 import subprocess
 import uuid
 
-from sandbox.hosting.images.activation import private_settlement
+from sandbox.hosting.images.activation import private_settlement, settlement_diagnostics
 from sandbox.hosting.images.activation.private_graph import graph_command_port
 from tests.subprocess_support import run_test_process
 
@@ -37,7 +37,8 @@ def main():
             "generation": 0, "binding_key": base64.b64encode(b"k" * 32).decode()}
         # The fixed helper needs metadata visibility across /proc and Docker's
         # volume directories; only its closed output is captured.
-        program = inspect.getsource(private_settlement) + "\n" + inspect.getsource(graph_command_port) + "\nmain()\n"
+        program = (inspect.getsource(settlement_diagnostics) + "\n" + inspect.getsource(private_settlement)
+                   + "\n" + inspect.getsource(graph_command_port) + "\nmain()\n")
         def observe():
             result = run_test_process(["sudo", "-n", "python3", "-c", program],
                 input=json.dumps(frame).encode(), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -65,7 +66,9 @@ except Exception as error:
         assert first["observation"]["container_identities"] == [identity]
         assert len(first["observation"]["preserved_identities"]) == 2
         command(["docker", "start", identity])
-        assert observe() == {"ok": False, "code": "not_quiescent"}
+        assert observe() == {"ok": False, "code": "not_quiescent", "diagnostic": {
+            "schema_version": 1, "reason": "container_not_stopped", "subject": "owned_container",
+            "sample": "first", "container_id": identity}}
         command(["docker", "stop", "--time", "2", identity])
         assert observe().get("ok") is True
         print(json.dumps({"ok": True, "code": "settlement_observer_canary_passed"}))

@@ -11,6 +11,10 @@ import stat
 import time
 
 
+if "settlement_refusal" not in globals():
+    from sandbox.hosting.images.activation.settlement_diagnostics import settlement_refusal, settlement_diagnostic
+
+
 _ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -37,7 +41,7 @@ def _process(pid):
             "command": _bytes(root / "cmdline", 1024 * 1024)}
 
 
-def _process_epoch(project, identities, *, deadline, data_markers=()):
+def _process_epoch(project, identities, *, deadline, data_markers=(), sample="first"):
     excluded = set()
     pid = os.getpid()
     for _ in range(64):
@@ -68,7 +72,7 @@ def _process_epoch(project, identities, *, deadline, data_markers=()):
             daemon.append(row)
         if command and (any(part in command for part in needles)
                         or any(part in command for part in _HELPER_MARKERS)):
-            raise ValueError("not_quiescent")
+            raise settlement_refusal("not_quiescent", "helper_activity_present", "helper_activity", sample)
     if len(daemon) != 1:
         raise ValueError("observation_unavailable")
     boot = _bytes("/proc/sys/kernel/random/boot_id", 64).strip().decode("ascii")
@@ -144,11 +148,11 @@ def inventory(frame, command, *, deadline):
         body = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         return "sha256:" + hmac.new(key, b"sandbox-settlement-" + label.encode() + b"\0" + body,
                                      hashlib.sha256).hexdigest()
-    def daemon():
+    def daemon(sample="first"):
         template = '{"ID":{{json .ID}},"Driver":{{json .Driver}},"DriverStatus":{{json .DriverStatus}}}'
         value = json.loads(command(["docker", "info", "--format", template], max_output_bytes=16384))
         if type(value) is not dict or value.get("ID") != target["daemon_identity"]:
-            raise ValueError("evidence_changed")
+            raise settlement_refusal("evidence_changed", "daemon_identity_changed", "daemon", sample)
         if (type(value.get("Driver")) is not str or re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", value["Driver"]) is None
                 or type(value.get("DriverStatus")) is not list or len(value["DriverStatus"]) > 32
                 or any(type(row) is not list or len(row) != 2 or any(
@@ -186,11 +190,25 @@ def inventory(frame, command, *, deadline):
         return observed
     for row in sorted(rows, key=lambda value: value["Id"]):
         state = row["State"]
-        if (row.get("Config", {}).get("Labels", {}).get("com.docker.compose.project") != project
-                or state.get("Status") not in {"created", "exited"}
+        if row.get("Config", {}).get("Labels", {}).get("com.docker.compose.project") != project:
+            raise ValueError("not_quiescent")
+        if (state.get("Status") not in {"created", "exited"}
                 or state.get("Running") is not False or state.get("Restarting") is not False
-                or state.get("Paused") is not False or type(state.get("Pid")) is not int or state["Pid"] != 0
-                or row.get("HostConfig", {}).get("RestartPolicy", {}).get("Name") not in {"", "no"}):
+                or state.get("Paused") is not False or type(state.get("Pid")) is not int or state["Pid"] != 0):
+            # Preserve refusal for malformed/contradictory state without
+            # presenting it as proof that a container is running.
+            pid = state.get("Pid")
+            flags = tuple(state.get(key) for key in ("Running", "Restarting", "Paused"))
+            coherent = (all(type(flag) is bool for flag in flags) and type(pid) is int and (
+                flags == (True, False, False) and pid > 0 and state.get("Status") == "running"
+                or flags == (True, False, True) and pid > 0 and state.get("Status") == "paused"
+                or flags == (True, True, False) and pid == 0 and state.get("Status") == "restarting"))
+            if coherent:
+                raise settlement_refusal("not_quiescent", "container_not_stopped", "owned_container", "first", row["Id"])
+            raise ValueError("not_quiescent")
+        if row.get("HostConfig", {}).get("RestartPolicy", {}).get("Name") not in {"", "no"}:
+            if row.get("HostConfig", {}).get("RestartPolicy", {}).get("Name") in {"always", "unless-stopped", "on-failure"}:
+                raise settlement_refusal("not_quiescent", "container_restart_enabled", "owned_container", "first", row["Id"])
             raise ValueError("not_quiescent")
         mounts = row.get("Mounts")
         if type(mounts) is not list or len(mounts) > 128:
@@ -229,15 +247,17 @@ def inventory(frame, command, *, deadline):
         for consumer in consumers:
             for mount in consumer.get("Mounts", []):
                 if mount.get("Type") == "volume" and mount.get("Name") in volume_names:
-                    raise ValueError("not_quiescent")
+                    raise settlement_refusal("not_quiescent", "retained_data_consumer_running", "data_consumer", "first")
                 if mount.get("Type") == "bind":
                     source = mount.get("Source")
                     if type(source) is not str or not Path(source).is_absolute():
                         raise ValueError("observation_unavailable")
                     if any(os.path.commonpath((source, path)) in {source, path} for path in bind_paths):
-                        raise ValueError("not_quiescent")
-    if container_ids() != identities or _process_epoch(project, identities, deadline=deadline,
-            data_markers=tuple(sorted(volume_names | bind_paths))) != epoch:
+                        raise settlement_refusal("not_quiescent", "retained_data_consumer_running", "data_consumer", "first")
+    if container_ids() != identities:
+        raise settlement_refusal("evidence_changed", "container_set_changed", "container_set", "comparison")
+    if _process_epoch(project, identities, deadline=deadline,
+            data_markers=tuple(sorted(volume_names | bind_paths)), sample="second") != epoch:
         raise ValueError("evidence_changed")
     final_rows = json.loads(command(["docker", "inspect", *identities], max_output_bytes=8 * 1024 * 1024)) if identities else []
     final_volumes = json.loads(command(["docker", "volume", "inspect", *sorted(volume_names)],
@@ -245,7 +265,7 @@ def inventory(frame, command, *, deadline):
     final_running = sorted(command(["docker", "ps", "-q", "--no-trunc"], max_output_bytes=131072).decode().split())
     if (final_rows != rows or final_volumes != volumes or project_volumes() != labelled_volumes
             or final_running != running or any(_path_identity(path) != identity
-                for path, identity in path_identities.items()) or daemon() != storage):
+                for path, identity in path_identities.items()) or daemon("second") != storage):
         raise ValueError("evidence_changed")
     return {"target": target, "transaction_digest": frame["transaction_digest"],
         "generation": frame["generation"], "runtime_epoch": target["daemon_identity"],
@@ -266,4 +286,7 @@ def main():
         code = str(exc)
         result = {"ok": False, "code": code if code in {
             "not_quiescent", "evidence_changed"} else "observation_unavailable"}
+        diagnostic = settlement_diagnostic(getattr(exc, "diagnostic", None), result["code"])
+        if diagnostic is not None:
+            result["diagnostic"] = diagnostic
     sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")

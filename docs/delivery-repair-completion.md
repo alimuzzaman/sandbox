@@ -56,6 +56,31 @@ uncertain activation identity and signed artifact. A reviewed, fully gated,
 clean Sandbox revision must be installed through the supported lifecycle before
 continuation; local fixtures do not authorize a new activation identity or build.
 
+## Installed runtime and production checkpoint
+
+The supported service migration completed successfully from the reviewed clean
+Sandbox candidate `bf26e579bb9c1b761b66bf651c3901e499b6ddb6`. Independent service
+status confirms local and installed runtime `6daeb17dadbeaca2574c78b9` match,
+with the service active, authenticated and ownership proven. This closes the
+runtime-version prerequisite; it is not application deployment proof.
+
+The original Lenzora production activation remains uncertain at generation zero
+with `effect_entered=true`. Its read-only settlement observation reports
+`not_quiescent` / `helper_activity_present`. The first exact containment plan
+covered 17 container IDs, 14 running and three stopped, preserving all volumes.
+Its apply refused `evidence_changed`; the subsequent inventory retained the same
+IDs, running states and restart policies. A newly requested plan itself then
+refused `container_binding_changed` during its two-sample comparison, so no
+second apply was issued. No container stop or restart-policy change was observed.
+
+This is a controller evidence fence, not permission to bypass identity checks or
+claim a separate mutator was identified. Production runtime, health and public
+route evidence remain unavailable or unknown. No new activation identity or
+image build was created. Further recovery needs a stable owned-container
+observation or a separately reviewed repair for the demonstrated limitation.
+Sanitized feedback is `24a93c6607de088bb74e247acf92d4c6`; the exact supported
+command evidence is retained in `tmp/054-delivery-acceptance/live-prod-final/`.
+
 ## Execution and ownership
 
 Finish implementation before exercising real features. After those runs, write

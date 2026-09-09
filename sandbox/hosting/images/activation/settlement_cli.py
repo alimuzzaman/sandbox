@@ -9,6 +9,7 @@ import time
 from .models import _digest, _integer, _text
 from .settlement_forward import ForwardSettlementApproval, required_predecessor
 from .settlement_models import SettlementApproval, SettlementDataAssessment, SettlementPlan
+from .settlement_diagnostics import settlement_diagnostic
 from .settlement_service import SettlementError, SettlementService, _code
 
 
@@ -139,5 +140,10 @@ def run_settlement(args, *, target, repository, approval_store, observer, clock=
                         "approval": approval.as_mapping()}
         return service.apply(plan, approval_digest=getattr(args, "settlement_approval", None))
     except Exception as exc:
-        return {"schema_version": 1, "ok": False, "code": _code(exc, "artifact_invalid"),
-                "operation": "settle", "phase": phase}
+        result = {"schema_version": 1, "ok": False, "code": _code(exc, "artifact_invalid"),
+                  "operation": "settle", "phase": phase}
+        if phase in {"observe", "containment-plan"}:
+            diagnostic = settlement_diagnostic(getattr(exc, "diagnostic", None), result["code"])
+            if diagnostic is not None:
+                result["diagnostic"] = diagnostic
+        return result

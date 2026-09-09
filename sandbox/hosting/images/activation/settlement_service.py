@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from .settlement_diagnostics import settlement_diagnostic
 from .models import _digest, _integer, _text
 from .settlement_models import SettlementDataAssessment, SettlementObservation, SettlementPlan
 
@@ -18,8 +19,9 @@ SETTLEMENT_CODES = frozenset({
 
 
 class SettlementError(ValueError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, diagnostic=None):
         self.code = code if code in SETTLEMENT_CODES else "artifact_invalid"
+        self.diagnostic = settlement_diagnostic(diagnostic, self.code)
         super().__init__(self.code)
 
 
@@ -57,7 +59,8 @@ class SettlementService:
             value = self.observer.observe(transaction=active, generation=generation)
             return value if type(value) is SettlementObservation else SettlementObservation.from_mapping(value)
         except Exception as exc:
-            raise SettlementError(_code(exc, "observation_unavailable")) from None
+            raise SettlementError(_code(exc, "observation_unavailable"),
+                getattr(exc, "diagnostic", None)) from None
 
     def plan(self, *, target: str, request_id: str, transaction_digest: str,
              expected_generation: int, data_assessment) -> SettlementPlan:

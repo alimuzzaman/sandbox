@@ -1,12 +1,16 @@
 import base64
 import copy
 import json
+import subprocess
+import sys
 import time
 import unittest
 from unittest.mock import patch
 
 from sandbox.hosting.images.activation.private_settlement import inventory
 from sandbox.hosting.images.activation.settlement_observer import SettlementObserver
+from sandbox.hosting.images.activation.settlement_service import SettlementError
+from tests.subprocess_support import run_test_process
 from tests.test_hosting_image_activation_settlement_repository import _state, _plan
 
 
@@ -44,6 +48,97 @@ class Commands:
 
 
 class SettlementObserverTests(unittest.TestCase):
+    def test_adapter_preserves_only_closed_matching_refusal_detail(self):
+        detail = {'schema_version': 1, 'reason': 'container_process_disappeared',
+                  'subject': 'owned_container', 'sample': 'second', 'container_id': CID}
+        responses = [
+            ({'ok': False, 'code': 'evidence_changed', 'diagnostic': detail}, detail),
+            ({'ok': False, 'code': 'evidence_changed'}, None),
+            ({'ok': False, 'code': 'evidence_changed', 'diagnostic': {**detail, 'subject': 'target'}}, None),
+            ({'ok': False, 'code': 'evidence_changed', 'diagnostic': {**detail, 'private': '/synthetic/SECRET'}}, None),
+            ({'ok': False, 'code': 'evidence_changed', 'diagnostic': detail, 'stderr': 'SECRET=unsafe'}, None),
+            ({'ok': False, 'code': 'container_paused', 'diagnostic': detail}, None),
+        ]
+        identity = {key: TARGET[key] for key in ('machine_identity', 'target_identity')}
+        for response, expected in responses:
+            with self.subTest(response=response):
+                observer = SettlementObserver(runner=lambda **kw: response,
+                    identity_observer=lambda: identity, binding_key=KEY)
+                with self.assertRaises(SettlementError) as caught:
+                    observer.containment(transaction=_state()['active'], generation=0)
+                self.assertEqual(caught.exception.code, response['code'])
+                self.assertEqual(caught.exception.diagnostic, expected)
+                self.assertNotIn('SECRET', str(caught.exception))
+
+    def test_generated_helpers_run_without_importing_sandbox_and_redact_invalid_input(self):
+        programs = []
+        identity = {key: TARGET[key] for key in ('machine_identity', 'target_identity')}
+        def runner(**kwargs):
+            programs.append(kwargs['program'])
+            return {'ok': False, 'code': 'evidence_changed'}
+        observer = SettlementObserver(runner=runner, identity_observer=lambda: identity, binding_key=KEY)
+        for method in (observer.observe, observer.containment):
+            with self.assertRaises(SettlementError):
+                method(transaction=_state()['active'], generation=0)
+        for program in programs:
+            # Isolated Python removes the checkout from sys.path. Invalid input
+            # refuses before host observation, so this subprocess needs no Docker.
+            result = run_test_process([sys.executable, '-I', '-c', program],
+                input=b'{"SECRET":"/synthetic/private"}', stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=10, check=False)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, b'')
+            body = json.loads(result.stdout)
+            self.assertFalse(body['ok'])
+            self.assertNotIn('diagnostic', body)
+            self.assertNotIn(b'SECRET', result.stdout)
+            self.assertNotIn(b'/synthetic', result.stdout)
+
+    def test_nonquiescent_detail_uses_owned_id_but_never_foreign_consumer_id(self):
+        for case, reason in (('running', 'container_not_stopped'),
+                             ('restart', 'container_restart_enabled'),
+                             ('foreign', 'retained_data_consumer_running')):
+            command = Commands()
+            if case == 'running': command.container['State'].update(Running=True, Status='running', Pid=123)
+            if case == 'restart': command.container['HostConfig']['RestartPolicy']['Name'] = 'always'
+            if case == 'foreign': command.foreign = {'Id': 'f' * 64, 'Mounts': copy.deepcopy(command.container['Mounts'])}
+            with self.assertRaises(ValueError) as caught:
+                self.invoke(command)
+            self.assertEqual(str(caught.exception), 'not_quiescent')
+            detail = caught.exception.diagnostic
+            self.assertEqual(detail['reason'], reason)
+            if case == 'foreign':
+                self.assertNotIn('container_id', detail)
+            else:
+                self.assertEqual(detail['container_id'], CID)
+                self.assertFalse(any(argv == ['docker', 'ps', '-q', '--no-trunc'] for argv in command.calls))
+            for private in ('f' * 64, '/synthetic', 'app_data', 'SECRET'):
+                self.assertNotIn(private, json.dumps(detail))
+
+    def test_foreign_project_row_cannot_supply_public_container_id(self):
+        command = Commands()
+        command.container['Config']['Labels']['com.docker.compose.project'] = 'foreign'
+        with self.assertRaises(ValueError) as caught:
+            self.invoke(command)
+        self.assertEqual(str(caught.exception), 'not_quiescent')
+        self.assertIsNone(getattr(caught.exception, 'diagnostic', None))
+
+    def test_malformed_state_is_not_misdiagnosed_as_running_or_restart_enabled(self):
+        for field, value in (('Running', True), ('Pid', -1), ('Paused', True),
+                             ('Restarting', 1), ('Status', 'unknown')):
+            command = Commands()
+            command.container['State'][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError) as caught:
+                self.invoke(command)
+            self.assertEqual(str(caught.exception), 'not_quiescent')
+            self.assertIsNone(getattr(caught.exception, 'diagnostic', None))
+        command = Commands()
+        command.container['HostConfig']['RestartPolicy']['Name'] = 'unknown'
+        with self.assertRaises(ValueError) as caught:
+            self.invoke(command)
+        self.assertEqual(str(caught.exception), 'not_quiescent')
+        self.assertIsNone(getattr(caught.exception, 'diagnostic', None))
+
     def test_containment_preserves_only_closed_native_refusals(self):
         transaction = _state()['active']
         target = transaction['recovery_context']['target']

@@ -464,17 +464,22 @@ class TestProxyTransportHealth(unittest.TestCase):
             self.assertFalse(domains_core._proxy_transport_serving({}))
 
     def test_proxy_transport_failure_detail_preserves_listener_recovery_evidence(self):
-        with mock.patch.object(domains_core, "resolve_instances", return_value={
-                "demo": {"domain": "demo.tst", "tld": "tst"},
-            }), mock.patch.object(domains_core, "_generic_proxy_entries",
-                                  return_value=[]), \
-             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
-                               return_value=False), \
+        health = {
+            "ok": False, "state": "degraded", "mutated": False,
+            "reason": {"code": "sandbox_caddy_route_unreachable",
+                       "message": "Sandbox Caddy route probe failed for demo.tst."},
+            "container_running": True, "config_readable": True,
+            "routes": ({"hostname": "demo.tst", "secure": False,
+                        "configured": True, "serving": False},),
+            "scope": "managed",
+        }
+        with mock.patch.object(domains_core, "sandbox_caddy_health",
+                               side_effect=AssertionError("preobserved health must not re-probe")), \
              mock.patch.object(domains_core, "_published_listener_check", return_value={
                  "label": "proxy published on 127.0.0.77:80 but nginx owns 80",
                  "hint": "free the port or select an adopted ingress",
              }):
-            detail = domains_core._proxy_transport_failure_detail({})
+            detail = domains_core._proxy_transport_failure_detail({}, health=health)
         self.assertIn("demo.tst", detail)
         self.assertIn("nginx owns 80", detail)
         self.assertIn("select an adopted ingress", detail)

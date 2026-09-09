@@ -199,7 +199,7 @@ class TestMcpComposition(unittest.TestCase):
                 "secrets": ("secret_service_factory",),
                 "sync": ("sync_service",),
                 "owned_storage": (),
-                "delivery": ("delivery_service_factory",),
+                "delivery": ("delivery_service_factory", "trace_service_factory"),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs

@@ -501,7 +501,8 @@ class TestProxyTransportHealth(unittest.TestCase):
     def test_no_declared_route_does_not_block_proxy_start(self):
         with mock.patch.object(domains_core, "resolve_instances", return_value={}), \
              mock.patch.object(domains_core, "_generic_proxy_entries",
-                               return_value=[]):
+                               return_value=[]), \
+             mock.patch.object(domains_core, "_proxy_container_running", return_value=False):
             self.assertTrue(domains_core._proxy_transport_serving({}))
 
     def test_explicit_route_health_ignores_unrelated_stale_routes(self):

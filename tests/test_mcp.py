@@ -304,6 +304,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             capture_output=True, text=True, timeout=90,
             env=synthetic_environment({
                 "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
+                "SANDBOX_PROJECT_ROOTS": str(ROOT),
                 "PYTHONPATH": str(ROOT),
             }),
         )
@@ -316,6 +317,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             capture_output=True, text=True, timeout=90,
             env=synthetic_environment({
                 "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
+                "SANDBOX_PROJECT_ROOTS": str(ROOT),
             }))
         self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
         schema_line = next(line for line in r.stdout.splitlines() if line.startswith("SCHEMA "))
@@ -399,8 +401,14 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("owned_storage_status", "project_identity,remote"),
             ("owned_storage_preview", "project_identity,remote"),
             ("owned_storage_reclaim", "object_id,preview_id,project_identity,remote,request_id"),
+            ("delivery_inspect", "project_dir"),
+            ("delivery_trace_capabilities", ""),
+            ("delivery_trace_start", "input,project_dir,trace_request_id"),
+            ("delivery_trace_record", "expected_sequence,input,mutation_id,project_dir,trace_id"),
+            ("delivery_trace_owner_status", "parent_request_id,producer,project_dir"),
+            ("delivery_trace_owner_record", "expected_sequence,input,parent_request_id,producer,project_dir,publication_id"),
         )
-        self.assertEqual(len(actual), 138)
+        self.assertEqual(len(actual), 144)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         for name, _required, response in actual:
             if name.startswith("owned_storage_"):
@@ -415,6 +423,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             capture_output=True, text=True, timeout=90,
             env=synthetic_environment({
                 "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
+                "SANDBOX_PROJECT_ROOTS": str(ROOT),
             }))
         self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
         out = dict(

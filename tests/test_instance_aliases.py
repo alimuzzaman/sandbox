@@ -234,7 +234,9 @@ class TestAliasCertificateSans(unittest.TestCase):
         instances = {"demo": {"domain": "demo.tst", "tld": "tst",
                               "wordpress_port": 8123,
                               "aliases": ["cdn.tst"]}}
-        with mock.patch.object(domains_core, "_ensure_url_proxy",
+        with mock.patch.object(domains_core, "_ca_trusted_macos", return_value=True), \
+             mock.patch.object(domains_core, "_adoption_selected", return_value=False), \
+             mock.patch.object(domains_core, "_ensure_url_proxy",
                                return_value=(True, None)), \
              mock.patch.object(domains_core, "_valid_domain",
                                side_effect=lambda d: d), \

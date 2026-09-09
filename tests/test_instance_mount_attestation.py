@@ -45,6 +45,12 @@ def _inspect_run(mounts_by_service, *, unavailable=False, malformed=False,
 
 
 class TestSourceMountAttestation(unittest.TestCase):
+    def setUp(self):
+        # These cases own mount attestation; engine refusal has separate tests.
+        probe = mock.patch.object(_instances, "docker_daemon_preflight", return_value={"ok": True})
+        probe.start()
+        self.addCleanup(probe.stop)
+
     def _mounts(self, sources):
         # Reverse order and include a non-source bind to prove the source set is
         # canonical and order-independent without treating generated state as a source bind.

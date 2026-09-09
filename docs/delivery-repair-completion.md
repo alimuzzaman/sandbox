@@ -4,6 +4,58 @@ Goal: complete the remaining packages in the [repair plan](audits/2026-09-08-san
 The first batch is committed at `eec81ed00463679a010d077938e7f68305d1a2c2`;
 its [implementation record](delivery-repair-implementation.md) retains the results.
 
+## Current merged candidate — 9 September 2026
+
+Sandbox candidate `0b9f7a3` combines the delivery/trace package `d21df4f`,
+settlement diagnostics and activation preparation with the existing PostgreSQL
+verifier work. Lenzora entrypoint/trace package `5a80ea8c9` is merged locally into
+its pushed `latest` at `b1d4ea732`. Existing unrelated latest work is preserved.
+The first combined Sandbox gate `8abeec459e7c766ee030f445e893020f` ran 5,875
+tests and failed with seven failures, five errors and 13 skips. The observed
+causes were stale MCP inventory/dependency expectations, missing explicit
+project-root and engine/CA fixtures, a host-dependent proxy probe, and the long
+isolated home path breaking the real GPG fixture. Production code was unchanged.
+The corrected eight-module gate `0c4498baf611847beadc4bf842bf6225` passed all
+223 tests in 27.642 seconds, including the real GPG round trip with a short
+isolated home. Full replacement job `9c43dc92746beb7b3f21c291c54b18dd` passed: 5,875 tests
+in 384.309 seconds, 13 skipped, exit zero and complete output. All source/test
+hashes matched the submitted candidate after the run. The installed runtime
+update and production continuation remain separate next steps. Earlier
+failed gate and preflight records below are historical and remain retained.
+
+The final actual trace exercises passed on isolated CLI/MCP and owner fixtures:
+start/record lost-ack replay, immutable parent/revision binding, complete failure
+and pending-authority output, bounded events/retention/omissions, and interrupted
+main with completed child jobs. Literal W11 preflight produced one JSON result
+for success, refusal and unavailable trace service. Synthetic native proof is
+kept separate from real remote runtime/edge proof.
+
+Three observed source defects were corrected before regression tests: unsafe
+hosting event text, mutable trace parent/source binding, and SQLite read-only
+connections writing WAL shared-memory read marks. The private snapshot rerun
+`ed2fd4e7f1395158cec6fe9482f0a520` passed 13 cases without changing paused-owner
+DB/WAL/SHM bytes; 150 concurrent reads returned 124 coherent results and 26
+explicit partial results, with no mixed snapshots. Shared deadline exhaustion
+remains a partial outcome; the locked-owner exercise took 5.0413 seconds against
+a five-second budget. Other platform and near-cap runtime proof remains open.
+
+The independent correctness reviews found no remaining blocker. Product review
+found omitted-event counts missing from human output; the corrected literal CLI
+showed 192 omissions and preserved owner bytes, then its regression passed.
+Focused trace/model/store tests, snapshot-reader tests and deployment contracts
+passed. W11's seven source gates passed, including 110 deployment contract tests;
+the combined Lenzora revision also passed all six static checks and 110
+contracts. Two default five-second test timeouts in the first combined run
+passed on the unchanged source with a bounded 30-second limit (job
+`b74ac7898ffdd6a656de107a2546b600`). The installed Cosign accepts its hidden
+deprecated flags: preflight now probes parser acceptance and retains the original
+signature verification contract. Actual retained bundle checks passed.
+
+Production continuation is separately authorized. It retains the original
+uncertain activation identity and signed artifact. A reviewed, fully gated,
+clean Sandbox revision must be installed through the supported lifecycle before
+continuation; local fixtures do not authorize a new activation identity or build.
+
 ## Execution and ownership
 
 Finish implementation before exercising real features. After those runs, write

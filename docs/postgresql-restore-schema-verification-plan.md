@@ -1,7 +1,12 @@
 # PostgreSQL restore schema verification correction
 
-Status: planned on 2026-09-08 against `fd7d650f8bfbb1760d931e2484cc01fa0badf546`.
-Implementation and live acceptance are not complete.
+Status: implemented on 2026-09-09 in `4bd622d`, which added
+`schema_fingerprint_version: 2`, the `schema_structure_digest`, the networkless
+reference restore, and the `archived-schema-reference-v1` verification method,
+together with unit tests and the real-Docker integration canary
+`tests/integration/recovery_schema_reference_canary.py`. Live acceptance is
+still pending: the Lenzora development restore drill has not been re-run under
+the shipped verifier. The contract sections below remain normative.
 
 ## Problem and required outcome
 

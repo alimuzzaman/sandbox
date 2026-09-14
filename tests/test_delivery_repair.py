@@ -146,3 +146,78 @@ class InstanceReadinessRegressions(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not uniquely registered"):
                 _remote.set_remote_instance_url({}, "/remote/project", "preview", "https://preview.test")
             run.assert_not_called()
+
+
+class RetireInterruptedDeliveryTests(unittest.TestCase):
+    """An owner that never reported back must not fence its target forever."""
+
+    def setUp(self):
+        from sandbox.delivery.models import request_scope
+        from sandbox.delivery.repository import DeliveryRepository
+        from tests.test_delivery_models import make_operation, make_target
+
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name) / 'home'
+        self.repository = DeliveryRepository(self.home)
+        self.target = make_target()
+        self.scope = request_scope(self.target)
+        self.operation = make_operation('abandoned-apply')
+        self.operation['job_id'] = 'f' * 32
+        self.repository.reserve_request(
+            self.scope, self.operation['request_id'], self.operation['operation_id'],
+            self.operation['intent_digest'], operation=self.operation)
+        self.validated = {'project_root': '/fixture/project', 'environment': 'qa'}
+
+    def retire(self, *, original='abandoned-apply', job=None):
+        from sandbox.delivery import hosting as delivery_hosting
+
+        with patch.object(delivery_hosting, 'RUNTIME_DIR', self.home / 'runtime'), \
+                patch.object(delivery_hosting, 'target_for_project',
+                             Mock(return_value=self.target)):
+            return delivery_hosting.retire_interrupted_operation(
+                self.validated, 'fixture-remote', original,
+                job_lookup=Mock(return_value=job if job is not None else
+                                {'job_id': 'f' * 32, 'lifecycle': 'failed'}))
+
+    def assert_code(self, code, function, *args, **kwargs):
+        from sandbox.delivery.models import DeliveryError
+
+        with self.assertRaises(DeliveryError) as error:
+            function(*args, **kwargs)
+        self.assertEqual(error.exception.code, code)
+
+    def test_retiring_closes_the_record_without_inventing_evidence(self):
+        summary = self.retire()
+
+        self.assertEqual(summary['execution_state'], 'interrupted')
+        self.assertEqual(summary['delivery_state'], 'failed')
+        self.assertFalse(summary['delivery_succeeded'])
+        self.assertEqual(summary['evidence_completeness'], 'missing')
+        self.assertIsNotNone(summary['terminal_snapshot_digest'])
+
+        stored = self.repository.lookup_request(self.scope, 'abandoned-apply')['operation']
+        self.assertEqual(stored['pinned_reason']['code'], 'effect_unknown')
+        self.assertIn('Retired without evidence', stored['pinned_reason']['message'])
+        # Nothing may claim an effect the owner never observed.
+        self.assertTrue(all(effect['state'] != 'succeeded' for effect in stored['effects']))
+
+    def test_retired_record_satisfies_the_predecessor_snapshot_guard(self):
+        from sandbox.delivery.models import TERMINAL
+
+        self.retire()
+        stored = self.repository.lookup_request(self.scope, 'abandoned-apply')['operation']
+
+        self.assertIn(stored['execution_state'], TERMINAL)
+        self.assertIsNotNone(stored['terminal_snapshot_digest'])
+
+    def test_a_running_owner_keeps_authority_over_its_own_attempt(self):
+        self.assert_code('authority_pending', self.retire,
+                         job={'job_id': 'f' * 32, 'lifecycle': 'running'})
+
+    def test_a_settled_record_is_never_rewritten(self):
+        self.retire()
+        self.assert_code('delivery_terminal_conflict', self.retire)
+
+    def test_an_unknown_request_changes_nothing(self):
+        self.assert_code('required_evidence_missing', self.retire, original='absent')

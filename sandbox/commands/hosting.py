@@ -2504,6 +2504,41 @@ def _recovery_observer(validated: dict, entry: dict, remote_name: str,
     }
 
 
+def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
+    """Close an abandoned delivery attempt so the target can be applied again.
+
+    This writes no runtime effect and observes nothing. It only records that a
+    human closed an attempt whose owner never reported back, which is the one
+    case `host recover` cannot resolve: recovery needs a complete runtime
+    observation, and an interrupted owner leaves none.
+    """
+    from sandbox.delivery.hosting import retire_interrupted_operation
+    from sandbox.delivery.models import DeliveryError
+
+    original = getattr(args, "original_request_id", None)
+    if not isinstance(original, str) or not original.strip():
+        die("host retire-delivery requires --original-request-id; no record was changed")
+    if not getattr(args, "confirm", False):
+        die("host retire-delivery is protected; review `./sb delivery inspect` "
+            "then pass --confirm")
+    try:
+        summary = retire_interrupted_operation(
+            validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup)
+    except DeliveryError as exc:
+        payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
+                   "original_request_id": original.strip()}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+            raise SystemExit(1)
+        die(exc.code + "; inspect the retained delivery record before retrying")
+    payload = {"ok": True, "operation": "retire-delivery", "retired": summary}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        return
+    print(f"retired {summary['request_id']} as {summary['execution_state']} "
+          f"(evidence {summary['evidence_completeness']})")
+
+
 def _cmd_host_recover(validated: dict, entry: dict, remote_name: str, args) -> None:
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities()
@@ -5682,13 +5717,16 @@ def cmd_host(cfg, args) -> None:
         if missing:
             die("host image requires explicit " + ", ".join(missing) +
                 "; no manifest or state was opened")
-    if args.action == "recover":
+    if args.action in {"recover", "retire-delivery"}:
         missing = []
         if not isinstance(getattr(args, "project_dir", None), str) or not args.project_dir.strip():
             missing.append("--project-dir")
         if not isinstance(getattr(args, "environment", None), str) or not args.environment.strip():
             missing.append("--environment")
         if missing:
+            if args.action == "retire-delivery":
+                die("host retire-delivery requires explicit " + " and ".join(missing) +
+                    "; no delivery record was opened")
             if getattr(args, "json", False):
                 _recovery_selector_refusal(args, missing)
             die("host recover requires explicit " + " and ".join(missing) +
@@ -5750,7 +5788,7 @@ def cmd_host(cfg, args) -> None:
         _emit({"ok": True, **validated}, args.json)
         return
     if not args.remote:
-        die("--remote is required for host plan, status, diagnose, apply, recover, logs, sync, and login-url")
+        die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, logs, sync, and login-url")
     branch = None
     if args.action == "apply":
         if not args.confirm:
@@ -5769,6 +5807,9 @@ def cmd_host(cfg, args) -> None:
     if not entry:
         die(f"no remote named '{args.remote}'")
     state = hosting.load_host_state()
+    if args.action == "retire-delivery":
+        _cmd_host_retire_delivery(validated, args.remote, args)
+        return
     if args.action == "recover":
         _cmd_host_recover(validated, entry, args.remote, args)
         return

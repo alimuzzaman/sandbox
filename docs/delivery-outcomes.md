@@ -92,6 +92,26 @@ request link:
 
 Diagnosis never grants retry, initializer, deployment, or cleanup authority.
 
+### Retiring an attempt that left no evidence
+
+`host recover` needs a complete runtime observation. An owner that exits
+before recording anything leaves none, so recovery refuses with
+`partial_evidence` while ordinary apply refuses with
+`required_evidence_missing`, and the target stays fenced. That is the one
+case an operator must close by hand:
+
+```sh
+./sb host retire-delivery --project-dir DIR --environment ENV --remote NAME \
+  --original-request-id APPLY_REQUEST --confirm --json
+```
+
+The command observes nothing and changes no runtime effect. It records the
+attempt as `interrupted`, leaves `evidence_completeness` at whatever was
+actually retained, and pins the reason that a human closed it. It refuses when
+the owning job is still running, when the record is already terminal, and when
+the request is unknown. Use it only after `./sb delivery inspect` shows the
+attempt has no `terminal_snapshot_digest` and its job has stopped.
+
 ## Deployment trace v1
 
 The deployment trace is a separate diagnostic owner for one full command. It

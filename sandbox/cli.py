@@ -878,7 +878,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="print the result as JSON (for the MCP server)")
 
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
         choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")

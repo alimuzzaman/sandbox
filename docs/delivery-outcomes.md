@@ -480,6 +480,44 @@ receipts return `creation_request_unknown`. Both retain the receipt and perform 
 new runtime work. A read-only receipt lookup can still succeed as a query while
 reporting a failed or pending creation outcome.
 
+## Why a refused apply was refused
+
+A failed `host apply` reports `hosting_delivery_failed`, and the envelope now
+carries the cause alongside the verdict:
+
+```json
+{"code": "hosting_delivery_failed",
+ "message": "unproven_staged_revision: existing runtime identity/topology is not fully proven; refusing Compose or initializer replay",
+ "detail": {"code": "unproven_staged_revision",
+            "requested_revision": "...", "staged_revision": "...",
+            "recorded_revision": "...", "observed_runtime_revision": null,
+            "runtime_state": "unverified",
+            "config_digest_changed": false,
+            "source_state_identity_changed": false,
+            "source_state_clean": true,
+            "exact_runtime_proven": false}}
+```
+
+`message` is present on every failure and is redacted, because a subprocess
+error can quote a remote command line. `detail` appears only when the failure
+carries structured inputs; today that is the runtime replay refusal, whose
+codes are:
+
+- `unproven_staged_revision` — a predecessor staged this exact revision and
+  exited without proving it ran. Retrying the same revision cannot clear it,
+  because the refusal is caused by the record the predecessor left. Retire the
+  predecessor first (see the retire section above), or apply a revision whose
+  config digest differs.
+- `unknown_source_state_identity` — nothing records what the source tree looked
+  like, so no replay can be proven regardless of the runtime.
+- `unproven_recorded_revision` — the revision is already recorded, and exact
+  runtime identity could not be observed.
+
+`exact_runtime_proven: false` with `observed_runtime_revision: null` means the
+controller could not read the running revision at all; that is an observation
+failure, not a drift finding. When the observation itself raised, the redacted
+text is kept as `evidence_error` inside `detail`.
+
 ## Diagnosis guidance compatibility
 
 `next_action_reason` explains failure at the retained stage or the absence of an

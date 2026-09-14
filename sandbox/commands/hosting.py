@@ -2160,6 +2160,59 @@ def _runtime_apply_decision(*, previous: dict, requested_revision: str,
     return "full_recreate"
 
 
+class HostRuntimeApplyRefused(RuntimeError):
+    """A refused replay that carries the inputs behind the refusal."""
+
+    def __init__(self, detail: dict):
+        self.detail = detail
+        super().__init__(
+            f"{detail['code']}: existing runtime identity/topology is not fully "
+            "proven; refusing Compose or initializer replay"
+        )
+
+
+def _runtime_apply_refusal_reason(*, previous: dict, requested_revision: str,
+                                  config_digest: str, source_state_identity: str,
+                                  source_state_clean: bool,
+                                  exact_runtime_proven: bool) -> dict:
+    """Name the unmet condition behind a runtime apply refusal.
+
+    `_runtime_apply_decision` returns only the verdict, so an operator sees a
+    refusal with nothing to act on: the same revision, the same config and an
+    unprovable runtime all produce one indistinguishable message. Every field
+    here is a revision, a digest, or a state name the operator already supplied
+    or can read from `host status`, so naming them costs no confidentiality.
+    """
+    recorded = previous.get("recorded_revision") or previous.get("commit")
+    staged = previous.get("staged_revision")
+    runtime_state = (previous.get("runtime") or {}).get("state")
+    staged_identity = staged == requested_revision and runtime_state in {
+        "pending", "unverified",
+    }
+    if previous.get("source_state_identity") is None and staged_identity:
+        # Nothing records what the source tree looked like, so a replay could
+        # not be proven even if the runtime were observable.
+        code = "unknown_source_state_identity"
+    elif staged_identity:
+        # The predecessor staged this revision and never proved it ran.
+        code = "unproven_staged_revision"
+    else:
+        code = "unproven_recorded_revision"
+    return {
+        "code": code,
+        "requested_revision": requested_revision,
+        "recorded_revision": recorded,
+        "staged_revision": staged,
+        "observed_runtime_revision": previous.get("observed_runtime_revision"),
+        "runtime_state": runtime_state,
+        "config_digest_changed": previous.get("config_digest") != config_digest,
+        "source_state_identity_changed": (
+            previous.get("source_state_identity") != source_state_identity),
+        "source_state_clean": source_state_clean,
+        "exact_runtime_proven": exact_runtime_proven,
+    }
+
+
 def _source_replay_must_refuse(previous: dict, requested_revision: str,
                                config_digest: str, source_state_identity: str,
                                source_state_clean: bool) -> bool:
@@ -3367,11 +3420,20 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     state, key, classified, runtime_state="unverified",
                     save_state=durable_save,
                 )
-            detail = f": {evidence_error}" if evidence_error is not None else ""
-            raise RuntimeError(
-                "existing runtime identity/topology is not fully proven; refusing "
-                f"Compose or initializer replay{detail}"
+            reason = _runtime_apply_refusal_reason(
+                previous=previous_entry,
+                requested_revision=sha,
+                config_digest=config_digest,
+                source_state_identity=source_state_identity,
+                source_state_clean=source_state_clean,
+                exact_runtime_proven=exact_runtime_proven,
             )
+            if evidence_error is not None:
+                # The observation attempt is often the real story. Keep it, but
+                # redacted: it can carry a remote command line.
+                reason["evidence_error"] = remote.redact_text(
+                    str(evidence_error))[:500]
+            raise HostRuntimeApplyRefused(reason)
         if decision == "edge_only":
             if not _reconcile_exact_runtime_state(
                     validated, remote_name, state, sha, config_digest,
@@ -5991,10 +6053,19 @@ def cmd_host(cfg, args) -> None:
                    'admission_state': 'committed' if admitted else 'unknown' if attempt is not None else 'not_admitted',
                    'operation_id': attempt.operation['operation_id'] if attempt else None,
                    'delivery': summary, 'effects': attempt.operation['effects'] if attempt else []}
+        # Without these the operator gets a verdict and no cause: the envelope
+        # named the delivery as failed but discarded the one sentence that says
+        # why. The text is redacted because a subprocess error can quote a
+        # remote command line.
+        payload['message'] = remote.redact_text(str(exc))[:500]
+        detail = getattr(exc, 'detail', None)
+        if isinstance(detail, dict):
+            payload['detail'] = detail
         if args.json:
             print(json.dumps(payload, sort_keys=True))
             raise SystemExit(1)
-        die(payload['code'] + '; inspect the original delivery and recovery evidence')
+        die(payload['code'] + ': ' + payload['message'] +
+            '; inspect the original delivery and recovery evidence')
     evidence = {
         "ok": True,
         "project": validated["project"],

@@ -54,6 +54,52 @@ def capture_recovery_result(validated, remote_name, original_request_id, result)
                           uncertain=result.get('result_class') in {'uncertain', 'ambiguous'})
 
 
+def retire_interrupted_operation(validated, remote_name, original_request_id, *, job_lookup):
+    """Close an abandoned attempt that can never produce its own evidence.
+
+    An owner that exits without recording a terminal outcome leaves the target
+    fenced: ordinary apply refuses while the predecessor has no terminal
+    snapshot, and observation recovery cannot retire it because the evidence it
+    needs was never written. This closes that loop for an operator without
+    inventing anything. The attempt becomes `interrupted`, its evidence stays
+    exactly as incomplete as it really is, and the pinned reason records that a
+    human retired it rather than an owner completing it.
+    """
+    import copy
+    target = target_for_project(validated.get('manifest_root') or validated['project_root'], remote_name,
+                                environment=validated['environment'])
+    repository = DeliveryRepository(RUNTIME_DIR.parent)
+    scope = request_scope(target)
+    operation = repository.lookup_request(scope, original_request_id)['operation']
+    if operation is None:
+        raise DeliveryError('required_evidence_missing')
+    if operation['execution_state'] in TERMINAL or operation['terminal_snapshot_digest'] is not None:
+        # Already closed. Retiring it again would rewrite a settled outcome.
+        raise DeliveryError('delivery_terminal_conflict')
+    job_id = operation.get('job_id')
+    if job_id is not None:
+        try:
+            job = job_lookup(job_id)
+        except Exception:
+            raise DeliveryError('required_evidence_missing') from None
+        # A live owner is still the authority over its own attempt.
+        if isinstance(job, dict) and job.get('lifecycle') in {'running', 'queued'}:
+            raise DeliveryError('authority_pending')
+    candidate = copy.deepcopy(operation)
+    at = now()
+    candidate = append_event(candidate, {
+        'at': at, 'phase': 'unknown',
+        'reason': {'code': 'effect_unknown',
+                   'message': 'An operator retired this attempt; its effects were never observed.'}})
+    candidate.update(execution_state='interrupted', finished_at=at, updated_at=at,
+                     phase='unknown', failure_stage=candidate.get('failure_stage'))
+    candidate['pinned_reason'] = {
+        'code': 'effect_unknown',
+        'message': 'Retired without evidence: the original owner exited before recording an outcome.'}
+    candidate.update(evaluate_operation(candidate))
+    return operation_summary(repository.write_operation(candidate))
+
+
 class RetainedDelivery(DeliveryError):
     def __init__(self, status, operation_id, operation=None):
         self.status, self.operation_id, self.operation = status, operation_id, operation

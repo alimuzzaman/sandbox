@@ -3682,3 +3682,74 @@ class TestHostingSecrets(unittest.TestCase):
         target = hosting_cmd._ensure_host_source({"ssh": "ubuntu@example.test"}, "/srv/sandbox", "alimuzzaman-me")
         self.assertEqual(target, "/srv/sandbox/deploy-src/hosts/alimuzzaman-me")
         self.assertIn("deploy-src/hosts/alimuzzaman-me", mocked.call_args.args[1])
+
+
+class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
+    """A refusal must name the input that caused it, not just the verdict."""
+
+    def _reason(self, previous, **overrides):
+        arguments = {
+            "previous": previous,
+            "requested_revision": "a" * 40,
+            "config_digest": "digest-1",
+            "source_state_identity": _clean_source_identity(),
+            "source_state_clean": True,
+            "exact_runtime_proven": False,
+        }
+        arguments.update(overrides)
+        return hosting_cmd._runtime_apply_refusal_reason(**arguments)
+
+    def test_staged_predecessor_that_never_proved_itself_is_named(self):
+        previous = {
+            "config_digest": "digest-1", "staged_revision": "a" * 40,
+            "runtime": {"state": "unverified"},
+            "source_state_identity": _clean_source_identity(),
+        }
+        reason = self._reason(previous)
+        self.assertEqual(reason["code"], "unproven_staged_revision")
+        self.assertEqual(reason["staged_revision"], "a" * 40)
+        self.assertEqual(reason["runtime_state"], "unverified")
+        self.assertFalse(reason["config_digest_changed"])
+        self.assertFalse(reason["source_state_identity_changed"])
+        self.assertFalse(reason["exact_runtime_proven"])
+
+    def test_missing_source_state_identity_is_distinguished(self):
+        previous = {
+            "config_digest": "digest-1", "staged_revision": "a" * 40,
+            "runtime": {"state": "pending"}, "source_state_identity": None,
+        }
+        self.assertEqual(self._reason(previous)["code"],
+                         "unknown_source_state_identity")
+
+    def test_recorded_revision_refusal_is_distinguished(self):
+        previous = {
+            "config_digest": "digest-1", "recorded_revision": "a" * 40,
+            "observed_runtime_revision": "a" * 40, "runtime": {"state": "ready"},
+            "source_state_identity": _clean_source_identity(),
+        }
+        reason = self._reason(previous)
+        self.assertEqual(reason["code"], "unproven_recorded_revision")
+        self.assertEqual(reason["observed_runtime_revision"], "a" * 40)
+
+    def test_refusal_reason_carries_no_credential_bearing_field(self):
+        previous = {
+            "config_digest": "digest-1", "staged_revision": "a" * 40,
+            "runtime": {"state": "unverified"},
+            "source_state_identity": _clean_source_identity(),
+            "basic_auth": {"password_secret": "SECRET_KEY"},
+            "ssh": "ubuntu@example.test",
+        }
+        reason = self._reason(previous)
+        self.assertEqual(set(reason), {
+            "code", "requested_revision", "recorded_revision", "staged_revision",
+            "observed_runtime_revision", "runtime_state", "config_digest_changed",
+            "source_state_identity_changed", "source_state_clean",
+            "exact_runtime_proven",
+        })
+
+    def test_exception_carries_the_reason_and_states_the_code(self):
+        reason = {"code": "unproven_staged_revision"}
+        error = hosting_cmd.HostRuntimeApplyRefused(reason)
+        self.assertIs(error.detail, reason)
+        self.assertIn("unproven_staged_revision", str(error))
+        self.assertIsInstance(error, RuntimeError)

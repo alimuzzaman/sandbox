@@ -378,7 +378,17 @@ sb host retire-delivery --project-dir DIR --environment ENV --remote NAME \
 ```
 
 It observes nothing, records the attempt as `interrupted` with its real evidence
-completeness, and refuses while the owning job still runs. Receipt-only success is not deployment or public production
+completeness, and refuses while the owning job still runs.
+
+Retiring the delivery record does not reset the target's staged runtime state. A
+failed apply that staged its revision leaves `staged_revision` set with
+`runtime.state` at `pending` or `unverified`, and every later apply of that same
+revision is refused as an unprovable replay. A failed `host apply` reports the
+cause in `message`, and a replay refusal adds a `detail` block naming the
+`code` (`unproven_staged_revision`, `unknown_source_state_identity`, or
+`unproven_recorded_revision`) with the revisions and digest comparisons behind
+it. Read that block before retrying: retrying the same revision cannot clear a
+refusal that the previous attempt's own record caused. Receipt-only success is not deployment or public production
 proof. Continue the sole pending edge only with a separate identity, the successful
 observation/evidence IDs, unchanged generation, authorizing governance, and `--confirm`.
 Feature 047 does not yet publish that governance projection, so public continuation

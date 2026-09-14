@@ -365,7 +365,30 @@ sb host recover --project-dir DIR --environment ENV --remote NAME \
 
 Only a current-contract terminal failed apply with a pre-effect receipt can reconcile.
 Legacy, dirty, changed, partial, stale, torn, or mutation-requiring evidence refuses
-before protected effects. Receipt-only success is not deployment or public production
+before protected effects.
+
+When the owner exited before recording anything, recovery cannot observe its way out:
+it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.
+Close that attempt explicitly, then apply again.
+
+```sh
+sb delivery inspect --project-dir DIR --environment ENV --remote NAME --json
+sb host retire-delivery --project-dir DIR --environment ENV --remote NAME \
+  --original-request-id APPLY_REQUEST --confirm --json
+```
+
+It observes nothing, records the attempt as `interrupted` with its real evidence
+completeness, and refuses while the owning job still runs.
+
+Retiring the delivery record does not reset the target's staged runtime state. A
+failed apply that staged its revision leaves `staged_revision` set with
+`runtime.state` at `pending` or `unverified`, and every later apply of that same
+revision is refused as an unprovable replay. A failed `host apply` reports the
+cause in `message`, and a replay refusal adds a `detail` block naming the
+`code` (`unproven_staged_revision`, `unknown_source_state_identity`, or
+`unproven_recorded_revision`) with the revisions and digest comparisons behind
+it. Read that block before retrying: retrying the same revision cannot clear a
+refusal that the previous attempt's own record caused. Receipt-only success is not deployment or public production
 proof. Continue the sole pending edge only with a separate identity, the successful
 observation/evidence IDs, unchanged generation, authorizing governance, and `--confirm`.
 Feature 047 does not yet publish that governance projection, so public continuation

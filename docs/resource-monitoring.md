@@ -218,6 +218,18 @@ when it is 10% or more. Category outcomes that are not complete carry
 `measured_bytes`, `measured_count`, and `unmeasured_count`, so a partial
 category reports what it did measure rather than looking like an empty one.
 
+The engine inventory (containers, volumes, networks, images, build cache) runs
+before the directory walk and gets its own bounded phase: 10% of the probe
+budget, never less than the 15s default budget and never more than the budget
+itself. Each `docker` call inside that phase keeps its per-call bound scaled by
+the same factor, so a bigger `--budget` actually buys a slower engine more time
+instead of leaving the bounds pinned at their 15s-budget values. At the default
+budget the bounds are unchanged. This matters on a host with many images:
+`docker image inspect` over a batch of 32 takes over 5s there, so at the old
+fixed 5s bound `docker_images` timed out no matter how large `--budget` was.
+A category that still exhausts its share reports `timed_out` rather than
+silently returning zero.
+
 Elevated measurement commands are bounded with `timeout` inside `sudo`: an
 unprivileged probe cannot signal a root child, and killing only the direct
 `sudo` process leaves the real worker holding the pipe and overruns the budget.

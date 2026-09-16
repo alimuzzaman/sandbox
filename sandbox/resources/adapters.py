@@ -564,11 +564,27 @@ class LocalResourceAdapter:
         except json.JSONDecodeError:
             return None, "unavailable"
 
-    def _docker_inventory(self, deadline: float, cancellation=None) -> tuple[dict, tuple[dict, ...]]:
+    #: Overall probe budget the per-call engine bounds below were tuned against.
+    ENGINE_BASE_BUDGET_SECONDS = 15.0
+    #: Share of a larger probe budget the engine inventory may spend, so the
+    #: directory walk keeps at least the documented 90%.
+    ENGINE_BUDGET_SHARE = 0.10
+
+    @classmethod
+    def _engine_budget(cls, budget_seconds: float) -> float:
+        """Bound the engine inventory phase within the overall probe budget."""
+        budget = float(budget_seconds)
+        return min(budget, max(
+            cls.ENGINE_BASE_BUDGET_SECONDS, budget * cls.ENGINE_BUDGET_SHARE,
+        ))
+
+    def _docker_inventory(
+        self, deadline: float, cancellation=None, *, scale: float = 1.0,
+    ) -> tuple[dict, tuple[dict, ...]]:
         outcomes = []
 
         def remaining(limit: float) -> float:
-            return min(deadline - time.monotonic(), limit)
+            return min(deadline - time.monotonic(), limit * scale)
 
         def inspect_batches(prefix, identifiers, *, batch_size=32):
             """Inspect bounded batches and retain successful batches on failure."""
@@ -1353,8 +1369,11 @@ class LocalResourceAdapter:
         protected_paths, protected_projects, job_records = self._ownership_index()
         if progress:
             progress("docker")
+        engine_budget = self._engine_budget(budget_seconds)
         inventory, docker_outcomes = self._docker_inventory(
-            deadline, request.cancellation,
+            min(deadline, time.monotonic() + engine_budget),
+            request.cancellation,
+            scale=max(1.0, engine_budget / self.ENGINE_BASE_BUDGET_SECONDS),
         )
 
         def terminal_snapshot(resources, outcomes, reason):

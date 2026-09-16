@@ -188,6 +188,54 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertIsNone(worktree.size_bytes)
         self.assertEqual(worktree.reclaimable_bytes, 0)
 
+    def test_engine_inventory_bounds_scale_with_the_probe_budget(self):
+        """A larger probe budget must widen the engine per-call bounds."""
+        runner = FakeRunner({
+            ("docker", "image", "ls", "-q"): response("sha256:one\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        adapter.observe(thorough=True, budget_seconds=1800)
+        image_ls = next(
+            timeout for command, timeout in runner.calls
+            if command == ("docker", "image", "ls", "-q")
+        )
+        image_inspect = next(
+            timeout for command, timeout in runner.calls
+            if command[:3] == ("docker", "image", "inspect")
+        )
+        # 10% of 1800s is 180s, i.e. 12x the 15s base the bounds were tuned for.
+        self.assertAlmostEqual(image_ls, 36.0, delta=1.0)
+        self.assertAlmostEqual(image_inspect, 60.0, delta=1.0)
+
+    def test_engine_inventory_bounds_are_unchanged_at_the_default_budget(self):
+        """The default budget keeps the original bounds, so nothing regresses."""
+        runner = FakeRunner({
+            ("docker", "image", "ls", "-q"): response("sha256:one\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        adapter.observe(thorough=True, budget_seconds=15)
+        image_ls = next(
+            timeout for command, timeout in runner.calls
+            if command == ("docker", "image", "ls", "-q")
+        )
+        image_inspect = next(
+            timeout for command, timeout in runner.calls
+            if command[:3] == ("docker", "image", "inspect")
+        )
+        self.assertAlmostEqual(image_ls, 3.0, delta=0.5)
+        self.assertAlmostEqual(image_inspect, 5.0, delta=0.5)
+
+    def test_engine_budget_never_starves_the_directory_walk(self):
+        """The engine phase is capped at its share of a generous budget."""
+        self.assertEqual(LocalResourceAdapter._engine_budget(15), 15.0)
+        self.assertEqual(LocalResourceAdapter._engine_budget(30), 15.0)
+        self.assertEqual(LocalResourceAdapter._engine_budget(1800), 180.0)
+        self.assertEqual(LocalResourceAdapter._engine_budget(5), 5.0)
+
     def test_deep_observation_attaches_bounded_partial_attribution(self):
         mount = str(self.home)
         runner = FakeRunner({

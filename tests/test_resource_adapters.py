@@ -188,6 +188,57 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertIsNone(worktree.size_bytes)
         self.assertEqual(worktree.reclaimable_bytes, 0)
 
+    def test_vanished_container_does_not_discard_its_inspect_batch(self):
+        """docker inspect exits 1 for a removed id but still returns the rest."""
+        container = {
+            "Id": "container-alive",
+            "Name": "/alive",
+            "SizeRw": 2048,
+            "State": {"Running": True},
+            "Config": {"Labels": {
+                "com.docker.compose.project": "sandbox-fixture",
+                "com.docker.compose.project.working_dir": "/srv/sandbox/fixture",
+            }},
+            "Mounts": [],
+        }
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response("container-alive\ncontainer-gone\n"),
+            ("docker", "inspect", "--size"): response(
+                json.dumps([container]), returncode=1,
+                stderr="error: no such object: container-gone",
+            ),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        snapshot = adapter.observe(thorough=True, budget_seconds=15)
+        outcome = next(
+            item for item in snapshot.category_outcomes
+            if item["category"] == "docker_containers"
+        )
+        self.assertEqual(outcome["status"], "partial")
+        self.assertTrue(any(
+            item.kind == "container" for item in snapshot.resources
+        ))
+
+    def test_unparseable_docker_output_is_still_unavailable(self):
+        """A non-zero exit with no usable payload must not look partial."""
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response("container-alive\n"),
+            ("docker", "inspect", "--size"): response(
+                "not json", returncode=1, stderr="daemon unreachable",
+            ),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        snapshot = adapter.observe(thorough=True, budget_seconds=15)
+        outcome = next(
+            item for item in snapshot.category_outcomes
+            if item["category"] == "docker_containers"
+        )
+        self.assertEqual(outcome["status"], "unavailable")
+
     def test_engine_inventory_bounds_scale_with_the_probe_budget(self):
         """A larger probe budget must widen the engine per-call bounds."""
         runner = FakeRunner({

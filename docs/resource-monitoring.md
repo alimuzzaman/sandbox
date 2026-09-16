@@ -230,6 +230,13 @@ fixed 5s bound `docker_images` timed out no matter how large `--budget` was.
 A category that still exhausts its share reports `timed_out` rather than
 silently returning zero.
 
+`docker inspect` exits non-zero when any single identifier has disappeared, yet
+it still emits the objects it did resolve. The engine inventory keeps that
+payload and reports the category as `partial`, because a container removed
+between `docker ps -aq` and the inspect call must not discard the rest of its
+batch, and the remaining batches are still inspected. A non-zero exit with no
+usable payload stays `unavailable`.
+
 Elevated measurement commands are bounded with `timeout` inside `sudo`: an
 unprivileged probe cannot signal a root child, and killing only the direct
 `sudo` process leaves the real worker holding the pipe and overruns the budget.

@@ -557,12 +557,18 @@ class LocalResourceAdapter:
         result = self._run(("docker", *argv), timeout, cancellation)
         if result.returncode == 124:
             return None, "timed_out"
-        if result.returncode != 0:
-            return None, "unavailable"
         try:
-            return json.loads(result.stdout or "[]"), "complete"
+            payload = json.loads(result.stdout or "[]")
         except json.JSONDecodeError:
             return None, "unavailable"
+        if result.returncode == 0:
+            return payload, "complete"
+        # `docker inspect` exits non-zero when any single identifier is gone,
+        # but still emits the objects it did resolve. A container removed
+        # between `ps -aq` and this call must not discard its whole batch.
+        if payload:
+            return payload, "partial"
+        return None, "unavailable"
 
     #: Overall probe budget the per-call engine bounds below were tuned against.
     ENGINE_BASE_BUDGET_SECONDS = 15.0
@@ -604,7 +610,9 @@ class LocalResourceAdapter:
                 states.append(state)
                 if isinstance(payload, list):
                     collected.extend(payload)
-                if state != "complete":
+                # A partial batch lost only the identifiers that vanished, so
+                # the remaining batches are still worth inspecting.
+                if state not in ("complete", "partial"):
                     break
             if states and all(item == "complete" for item in states):
                 return collected, "complete"

@@ -237,6 +237,17 @@ between `docker ps -aq` and the inspect call must not discard the rest of its
 batch, and the remaining batches are still inspected. A non-zero exit with no
 usable payload stays `unavailable`.
 
+Engine inventory reads request structural redaction from the bounded process
+runner. Text redaction rewrites a secret-shaped `NAME=VALUE` without regard for
+the quoting around it, so inside JSON it consumes the closing quote and leaves
+the document unparseable. Container inspect output is the case that hits this,
+because only it embeds process environment variables. The runner therefore
+parses the payload first, redacts every string inside the parsed structure, and
+re-serializes it, so the document stays well formed while each string still
+passes through the same redaction. A payload that is not usable JSON, or one
+that would exceed the output bound once re-serialized, falls back to text
+redaction; `json_output` never widens what a caller can see.
+
 Elevated measurement commands are bounded with `timeout` inside `sudo`: an
 unprivileged probe cannot signal a root child, and killing only the direct
 `sudo` process leaves the real worker holding the pipe and overruns the budget.

@@ -81,6 +81,53 @@ class TestBoundedProcessRunner(unittest.TestCase):
         self.assertNotIn(secret, result.stdout)
         self.assertLessEqual(len(result.stdout), 20)
 
+    def test_json_output_survives_redaction_that_would_break_its_quoting(self):
+        """Text redaction eats the closing quote; structural redaction must not."""
+        payload = json.dumps([{"Config": {"Env": [
+            "FIXTURE_ACTIVE_SECRET=",
+            "FIXTURE_TOKEN=sentinel-value",
+            "FIXTURE_PLAIN=keep-me",
+        ]}}])
+        runner = BoundedProcessRunner()
+        script = "import sys; sys.stdout.write(sys.argv[1])"
+        text = runner.run(
+            [sys.executable, "-c", script, payload], timeout=5,
+        )
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(text.stdout)
+
+        structured = runner.run(
+            [sys.executable, "-c", script, payload], timeout=5, json_output=True,
+        )
+        parsed = json.loads(structured.stdout)
+        env = parsed[0]["Config"]["Env"]
+        self.assertIn("FIXTURE_TOKEN=[REDACTED]", env)
+        self.assertIn("FIXTURE_PLAIN=keep-me", env)
+        self.assertNotIn("sentinel-value", structured.stdout)
+
+    def test_json_output_still_redacts_exact_secret_values(self):
+        """Structural redaction must not weaken exact-value redaction."""
+        secret = "json-secret-sentinel"
+        runner = BoundedProcessRunner(secret_values=(secret,))
+        payload = json.dumps({"note": f"value is {secret} here"})
+        result = runner.run(
+            [sys.executable, "-c", "import sys; sys.stdout.write(sys.argv[1])", payload],
+            timeout=5, json_output=True,
+        )
+        self.assertNotIn(secret, result.stdout)
+        self.assertEqual(json.loads(result.stdout)["note"], "value is [REDACTED] here")
+
+    def test_json_output_falls_back_to_text_redaction_for_non_json(self):
+        """A non-JSON payload must not escape redaction by claiming json_output."""
+        runner = BoundedProcessRunner()
+        result = runner.run(
+            [sys.executable, "-c",
+             "import sys; sys.stdout.write('FIXTURE_TOKEN=sentinel-value not json')"],
+            timeout=5, json_output=True,
+        )
+        self.assertNotIn("sentinel-value", result.stdout)
+        self.assertIn("[REDACTED]", result.stdout)
+
     def test_shell_string_is_rejected(self):
         with self.assertRaises(ValueError):
             BoundedProcessRunner().run("echo unsafe")

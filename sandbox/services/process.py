@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import math
 import signal
 import threading
@@ -103,7 +104,8 @@ class ProcessResult:
 class ProcessRunner(Protocol):
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
-            timeout: float | None = None, cancellation=None) -> ProcessResult: ...
+            timeout: float | None = None, cancellation=None,
+            json_output: bool = False) -> ProcessResult: ...
 
 
 class BoundedProcessRunner:
@@ -129,6 +131,39 @@ class BoundedProcessRunner:
         self.max_output = max_output
         self._secrets = tuple(value for value in secret_values if value)
         self.terminate_on_output_limit = terminate_on_output_limit
+
+    def _redact_structure(self, value):
+        """Redact every string inside a parsed payload, leaving syntax intact."""
+        if isinstance(value, str):
+            return redact_text(value, exact_values=self._secrets)
+        if isinstance(value, list):
+            return [self._redact_structure(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                (redact_text(key, exact_values=self._secrets)
+                 if isinstance(key, str) else key): self._redact_structure(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _redact_json(self, value: str) -> str:
+        """Redact a JSON stream structurally so redaction cannot break it.
+
+        Text redaction rewrites secret-shaped assignments without regard for
+        the quoting around them, which consumes a closing quote and leaves the
+        payload unparseable. Parsing first keeps the document well formed while
+        every string it carries still passes through the same redaction. Any
+        payload that is not usable JSON falls back to text redaction, so this
+        never widens what a caller can see.
+        """
+        try:
+            parsed = json.loads(value)
+            rendered = json.dumps(self._redact_structure(parsed))
+        except (ValueError, TypeError, RecursionError):
+            return self._redact(value)
+        if len(rendered.encode("utf-8", errors="replace")) > self.max_output:
+            return self._redact(value)
+        return rendered
 
     def _redact(self, value: str) -> str:
         """Redact and re-bound one stream without losing its retained tail."""
@@ -205,7 +240,8 @@ class BoundedProcessRunner:
 
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: Mapping[str, str] | None = None,
-            timeout: float | None = None, cancellation=None) -> ProcessResult:
+            timeout: float | None = None, cancellation=None,
+            json_output: bool = False) -> ProcessResult:
         if isinstance(argv, (str, bytes)) or not argv:
             raise ValueError("argv must be a non-empty argument sequence")
         if (not all(isinstance(item, str) and "\x00" not in item for item in argv)
@@ -376,9 +412,12 @@ class BoundedProcessRunner:
             )
         process.stdout.close()
         process.stderr.close()
+        redact_stdout = self._redact_json if json_output else self._redact
         return ProcessResult(
             command, process.returncode,
-            self._redact(_decode_bounded_output(output["stdout"].render(), self.max_output)),
+            redact_stdout(
+                _decode_bounded_output(output["stdout"].render(), self.max_output),
+            ),
             self._redact(_decode_bounded_output(output["stderr"].render(), self.max_output)),
             output["stdout"].truncated,
             output["stderr"].truncated,

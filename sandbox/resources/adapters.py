@@ -331,8 +331,13 @@ class LocalResourceAdapter:
                 item.name == "cancellation" or item.kind == item.VAR_KEYWORD
                 for item in parameters
             )
+            self._runner_accepts_json_output = any(
+                item.name == "json_output" or item.kind == item.VAR_KEYWORD
+                for item in parameters
+            )
         except (TypeError, ValueError):
             self._runner_accepts_cancellation = False
+            self._runner_accepts_json_output = False
         self.registry_records = registry_records or (lambda: {})
         self.job_resource_records = job_resource_records or (
             lambda: {"jobs": [], "artifacts": []}
@@ -521,7 +526,7 @@ class LocalResourceAdapter:
             ))
         return updated
 
-    def _run(self, argv, timeout: float, cancellation=None):
+    def _run(self, argv, timeout: float, cancellation=None, *, json_output=False):
         command = tuple(str(item) for item in argv)
         if (
             cancellation is not None
@@ -533,6 +538,8 @@ class LocalResourceAdapter:
         kwargs = {"timeout": timeout}
         if cancellation is not None and self._runner_accepts_cancellation:
             kwargs["cancellation"] = cancellation
+        if json_output and self._runner_accepts_json_output:
+            kwargs["json_output"] = True
         return self.runner.run(command, **kwargs)
 
     def _du(self, path: Path, timeout: float, cancellation=None) -> tuple[str, int | None, str | None]:
@@ -554,7 +561,9 @@ class LocalResourceAdapter:
             return None
 
     def _docker_json(self, argv, timeout: float, cancellation=None):
-        result = self._run(("docker", *argv), timeout, cancellation)
+        result = self._run(
+            ("docker", *argv), timeout, cancellation, json_output=True,
+        )
         if result.returncode == 124:
             return None, "timed_out"
         try:

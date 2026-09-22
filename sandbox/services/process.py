@@ -158,7 +158,14 @@ class BoundedProcessRunner:
         """
         try:
             parsed = json.loads(value)
-            rendered = json.dumps(self._redact_structure(parsed))
+            # Keep the serialized form within the caller's byte budget when
+            # the original UTF-8 payload already fits. The default encoder
+            # escapes every non-ASCII code point and inserts spaces, which can
+            # trigger an avoidable text-redaction fallback at the exact bound.
+            rendered = json.dumps(
+                self._redact_structure(parsed),
+                ensure_ascii=False, separators=(",", ":"),
+            )
         except (ValueError, TypeError, RecursionError):
             return self._redact(value)
         if len(rendered.encode("utf-8", errors="replace")) > self.max_output:

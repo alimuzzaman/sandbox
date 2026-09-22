@@ -243,10 +243,11 @@ the quoting around it, so inside JSON it consumes the closing quote and leaves
 the document unparseable. Container inspect output is the case that hits this,
 because only it embeds process environment variables. The runner therefore
 parses the payload first, redacts every string inside the parsed structure, and
-re-serializes it, so the document stays well formed while each string still
-passes through the same redaction. A payload that is not usable JSON, or one
-that would exceed the output bound once re-serialized, falls back to text
-redaction; `json_output` never widens what a caller can see.
+re-serializes it compactly as UTF-8, so a payload that fits the byte bound does
+not fall back merely because JSON escaping or whitespace expanded it. A payload
+that is not usable JSON, or one that would exceed the output bound once
+re-serialized, still falls back to text redaction; `json_output` never widens
+what a caller can see, and malformed/over-limit inventory remains unavailable.
 
 Elevated measurement commands are bounded with `timeout` inside `sudo`: an
 unprivileged probe cannot signal a root child, and killing only the direct

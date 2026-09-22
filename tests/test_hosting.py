@@ -3008,6 +3008,62 @@ class TestHostingManifest(unittest.TestCase):
                 self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
                 fixture.stack.close()
 
+    def test_source_replay_reason_distinguishes_missing_or_unsupported_history(self):
+        revision = "a" * 40
+        for receipt in (
+                {},
+                {"source_state_identity": "sha256:" + "b" * 64,
+                 "source_state_clean": False},
+                {"source_state_identity": "sha256:" + "b" * 64,
+                 "source_state_clean": False,
+                 "source_state_identity_version": 1},
+                {"source_state_identity": "not-a-digest",
+                 "source_state_clean": True,
+                 "source_state_identity_version": 2},
+        ):
+            with self.subTest(receipt=receipt):
+                previous = {
+                    "recorded_revision": revision,
+                    "config_digest": "digest-1",
+                    **receipt,
+                }
+                reason = hosting_cmd._source_replay_refusal_reason(
+                    previous, revision, "digest-1", _clean_source_identity(), True,
+                )
+                self.assertEqual(
+                    reason,
+                    hosting_cmd._SOURCE_REPLAY_HISTORICAL_PROOF_UNAVAILABLE,
+                )
+                self.assertTrue(hosting_cmd._source_replay_must_refuse(
+                    previous, revision, "digest-1", _clean_source_identity(), True,
+                ))
+
+    def test_source_replay_reason_distinguishes_unchanged_dirty_artifact(self):
+        revision = "a" * 40
+        identity = "sha256:" + "b" * 64
+        previous = {
+            "recorded_revision": revision,
+            "config_digest": "digest-1",
+            "source_state_identity": identity,
+            "source_state_identity_version": 2,
+            "source_state_clean": False,
+        }
+        self.assertEqual(
+            hosting_cmd._source_replay_refusal_reason(
+                previous, revision, "digest-1", identity, False,
+            ),
+            hosting_cmd._SOURCE_REPLAY_UNCHANGED_DIRTY,
+        )
+        self.assertTrue(hosting_cmd._source_replay_must_refuse(
+            previous, revision, "digest-1", identity, False,
+        ))
+        self.assertIsNone(hosting_cmd._source_replay_refusal_reason(
+            previous, revision, "digest-1", "sha256:" + "c" * 64, False,
+        ))
+        self.assertFalse(hosting_cmd._source_replay_must_refuse(
+            previous, revision, "digest-1", "sha256:" + "c" * 64, False,
+        ))
+
     def test_changed_source_with_same_saved_config_runs_full_recreate(self):
         fixture = _HostingOwnerFixture(self)
         fixture.state["hosts"][fixture.key] = {"commit": "3" * 40,

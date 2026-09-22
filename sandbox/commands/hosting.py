@@ -2213,10 +2213,22 @@ def _runtime_apply_refusal_reason(*, previous: dict, requested_revision: str,
     }
 
 
-def _source_replay_must_refuse(previous: dict, requested_revision: str,
-                               config_digest: str, source_state_identity: str,
-                               source_state_clean: bool) -> bool:
-    """Refuse unprovable or unchanged dirty replay before runtime mutation."""
+_SOURCE_REPLAY_HISTORICAL_PROOF_UNAVAILABLE = (
+    "historical_source_proof_unavailable"
+)
+_SOURCE_REPLAY_UNCHANGED_DIRTY = "unchanged_dirty_source"
+
+
+def _source_replay_refusal_reason(
+        previous: dict, requested_revision: str, config_digest: str,
+        source_state_identity: str, source_state_clean: bool) -> str | None:
+    """Return the finite reason for refusing a source replay, if any.
+
+    A receipt may be replayed only when its source proof is current and the
+    dirty artifact has changed. Keep the distinction here, before any target
+    reset or runtime observation, so callers can explain a refusal without
+    weakening the existing fail-closed policy.
+    """
     recorded = previous.get("recorded_revision") or previous.get("commit")
     staged = previous.get("staged_revision")
     requested = previous.get("requested_revision")
@@ -2225,7 +2237,7 @@ def _source_replay_must_refuse(previous: dict, requested_revision: str,
         and requested_revision in {recorded, staged, requested}
     )
     if not same_deployment:
-        return False
+        return None
     previous_identity = previous.get("source_state_identity")
     known_current_identity = (
         previous.get("source_state_identity_version") == _SOURCE_STATE_IDENTITY_VERSION
@@ -2234,12 +2246,28 @@ def _source_replay_must_refuse(previous: dict, requested_revision: str,
         and isinstance(previous.get("source_state_clean"), bool)
     )
     if not known_current_identity:
-        return True
-    return (
+        return _SOURCE_REPLAY_HISTORICAL_PROOF_UNAVAILABLE
+    if (
         previous.get("source_state_clean") is False
         and source_state_clean is False
         and previous_identity == source_state_identity
-    )
+    ):
+        return _SOURCE_REPLAY_UNCHANGED_DIRTY
+    return None
+
+
+def _source_replay_must_refuse(previous: dict, requested_revision: str,
+                               config_digest: str, source_state_identity: str,
+                               source_state_clean: bool) -> bool:
+    """Refuse unprovable or unchanged dirty replay before runtime mutation.
+
+    Keep this boolean helper's public behavior for existing callers. Use
+    ``_source_replay_refusal_reason`` when a bounded diagnostic is needed.
+    """
+    return _source_replay_refusal_reason(
+        previous, requested_revision, config_digest,
+        source_state_identity, source_state_clean,
+    ) is not None
 
 
 def _safe_source_revision_receipt(source: dict | None) -> dict:
@@ -3288,6 +3316,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     if _source_replay_must_refuse(
             previous_entry, sha, config_digest,
             source_state_identity, source_state_clean):
+        refusal_reason = _source_replay_refusal_reason(
+            previous_entry, sha, config_digest,
+            source_state_identity, source_state_clean,
+        )
         try:
             _release_host_apply_reservation(entry, reservation)
         except Exception as cleanup_error:
@@ -3296,7 +3328,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 f"cleanup failed: {cleanup_error}"
             ) from cleanup_error
         raise RuntimeError(
-            "source identity cannot be safely replayed at the same revision/config; "
+            f"{refusal_reason}: source identity cannot be safely replayed at the same "
+            "revision/config; "
             "refusing before target reset, observation, Compose, or initializer mutation"
         )
     client = cloudflare.Client()

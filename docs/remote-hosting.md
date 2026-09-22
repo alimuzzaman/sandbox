@@ -623,10 +623,12 @@ observed and reconciled or refused; a dirty one is refused unless a real source 
 requires full convergence. Missing observation alone never reruns Compose initializers.
 Source receipts persist `source_state_identity_version: 2`. At the same revision/config,
 legacy missing/unknown identity evidence and an unchanged known v2 dirty artifact refuse
-before target reset regardless of runtime/edge phase. A different known v2 dirty artifact
-is a real source change and takes full convergence. Only the historical unversioned v1
-empty-overlay digest is migrated as proven clean; changing a manifest from dirty-allowed
-to clean does not rewrite other prior evidence.
+before target reset regardless of runtime/edge phase. The refusal names the finite cause
+(`historical_source_proof_unavailable` or `unchanged_dirty_source`) while retaining the
+same public failure envelope. A different known v2 dirty artifact is a real source
+change and takes full convergence. Only the historical unversioned v1 empty-overlay
+digest is migrated as proven clean; changing a manifest from dirty-allowed to clean does
+not rewrite other prior evidence.
 Hosting bounds its source artifact to 4,096 files and 64 MiB. This is intentionally
 narrower than public `sb deploy --include`, whose existing 10,000-file/512 MiB admission
 contract is validated before any remote admission or mutation.

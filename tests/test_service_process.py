@@ -128,6 +128,26 @@ class TestBoundedProcessRunner(unittest.TestCase):
         self.assertNotIn("sentinel-value", result.stdout)
         self.assertIn("[REDACTED]", result.stdout)
 
+    def test_json_output_uses_compact_utf8_at_exact_byte_bound(self):
+        """A fitting UTF-8 payload must not fall back because of JSON spacing."""
+        payload = json.dumps(
+            {"env": ["FIXTURE_TOKEN=secret", "emoji😀"]},
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        expected = json.dumps(
+            {"env": ["FIXTURE_TOKEN=[REDACTED]", "emoji😀"]},
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        runner = BoundedProcessRunner(max_output=len(expected.encode("utf-8")))
+        result = runner.run(
+            [sys.executable, "-c", "import sys; sys.stdout.write(sys.argv[1])", payload],
+            timeout=5, json_output=True,
+        )
+        self.assertFalse(result.stdout_truncated)
+        self.assertEqual(result.stdout, expected)
+        self.assertEqual(len(result.stdout.encode("utf-8")), runner.max_output)
+        self.assertEqual(json.loads(result.stdout), json.loads(expected))
+
     def test_shell_string_is_rejected(self):
         with self.assertRaises(ValueError):
             BoundedProcessRunner().run("echo unsafe")

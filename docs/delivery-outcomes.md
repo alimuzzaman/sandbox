@@ -107,10 +107,11 @@ case an operator must close by hand:
 
 The command observes nothing and changes no runtime effect. It records the
 attempt as `interrupted`, leaves `evidence_completeness` at whatever was
-actually retained, and pins the reason that a human closed it. It refuses when
-the owning job is still running, when the record is already terminal, and when
-the request is unknown. Use it only after `./sb delivery inspect` shows the
-attempt has no `terminal_snapshot_digest` and its job has stopped.
+actually retained, and pins the reason that a human closed it. It refuses while
+the owning job is active (`accepted`, `queued`, `running`, or `cancelling`),
+when the record is already terminal, and when the request is unknown. Use it
+only after `./sb delivery inspect` shows the attempt has no
+`terminal_snapshot_digest` and its job has stopped.
 
 ## Deployment trace v1
 

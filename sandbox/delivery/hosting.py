@@ -82,8 +82,11 @@ def retire_interrupted_operation(validated, remote_name, original_request_id, *,
             job = job_lookup(job_id)
         except Exception:
             raise DeliveryError('required_evidence_missing') from None
-        # A live owner is still the authority over its own attempt.
-        if isinstance(job, dict) and job.get('lifecycle') in {'running', 'queued'}:
+        # Every non-terminal job lifecycle is still the authority over its own
+        # attempt. Retiring during accepted/cancelling could close a record
+        # while its owner is still able to publish the real outcome.
+        if isinstance(job, dict) and job.get('lifecycle') in {
+                'accepted', 'queued', 'running', 'cancelling'}:
             raise DeliveryError('authority_pending')
     candidate = copy.deepcopy(operation)
     at = now()

@@ -378,7 +378,8 @@ sb host retire-delivery --project-dir DIR --environment ENV --remote NAME \
 ```
 
 It observes nothing, records the attempt as `interrupted` with its real evidence
-completeness, and refuses while the owning job still runs.
+completeness, and refuses while the owning job is active (`accepted`, `queued`,
+`running`, or `cancelling`).
 
 Retiring the delivery record does not reset the target's staged runtime state. A
 failed apply that staged its revision leaves `staged_revision` set with

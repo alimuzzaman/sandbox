@@ -215,6 +215,12 @@ class RetireInterruptedDeliveryTests(unittest.TestCase):
         self.assert_code('authority_pending', self.retire,
                          job={'job_id': 'f' * 32, 'lifecycle': 'running'})
 
+    def test_every_active_owner_lifecycle_keeps_authority(self):
+        for lifecycle in ('accepted', 'queued', 'running', 'cancelling'):
+            with self.subTest(lifecycle=lifecycle):
+                self.assert_code('authority_pending', self.retire,
+                                 job={'job_id': 'f' * 32, 'lifecycle': lifecycle})
+
     def test_a_settled_record_is_never_rewritten(self):
         self.retire()
         self.assert_code('delivery_terminal_conflict', self.retire)

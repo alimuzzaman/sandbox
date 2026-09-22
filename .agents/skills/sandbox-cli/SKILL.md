@@ -536,8 +536,8 @@ cell; inspect the parent and children with ordinary job commands rather than
 streaming the runner over SSH.
 
 ```sh
-sb ci preflight .github/workflows/ci.yml --remote scaleway-sandbox --project-dir . --json
-sb ci run .github/workflows/ci.yml --remote scaleway-sandbox --workspace ci-run --timeout 1200 --json
+sb ci preflight .github/workflows/python.yml --remote scaleway-sandbox --project-dir . --accept-difference act.job-timeout-ignored --json
+sb ci run .github/workflows/python.yml --remote scaleway-sandbox --workspace ci-run --timeout 1200 --accept-difference act.job-timeout-ignored --json
 sb job-status <parent-job-id> --remote scaleway-sandbox --json
 sb job-output <child-job-id> --remote scaleway-sandbox --wait-seconds 20 --json
 sb job-artifacts <child-job-id> --remote scaleway-sandbox --json

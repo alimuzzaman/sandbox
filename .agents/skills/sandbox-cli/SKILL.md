@@ -550,6 +550,19 @@ compatibility differences. `actions/upload-artifact` is replaced with
 Sandbox's retained job-artifact collection because self-hosted `act` has no
 GitHub runtime token; declare literal project-relative artifact paths.
 
+For a workflow that does not need WordPress, opt into runtime-free CI with
+`--runtime none`:
+
+```sh
+sb ci run .github/workflows/python.yml --project-dir . --local --runtime none --json
+```
+
+This mode does not resolve, provision, or tear down a per-cell WordPress/runtime
+instance and does not inject `WP_BASE_URL` or `SANDBOX_INSTANCE`. The workflow's
+`act` result is authoritative. The default `--runtime sandbox` behavior is
+unchanged. The same flag can be passed to a remote `ci run`; it is propagated to
+each durable child.
+
 Retry only a terminal job, use a request ID for replay-safe control, and clean
 up only after retrieving any evidence you need:
 

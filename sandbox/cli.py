@@ -727,6 +727,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="per-step timeout in seconds (default: 900)")
     ci_p.add_argument("--output-profile", default=None,
         help="durable retained-output presentation profile for remote jobs")
+    ci_p.add_argument("--runtime", choices=("sandbox", "none"), default="sandbox",
+        help="CI runtime mode: sandbox provisions a per-cell runtime (default); "
+             "none runs act without a WordPress/runtime instance")
     ci_p.add_argument("--json", action="store_true",
         help="print the plan/result as JSON (for the MCP server)")
     ci_p.add_argument("--async", dest="run_async", action="store_true",

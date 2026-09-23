@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
 MAX_AGGREGATE_RESULT_BYTES = 262_144
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
+CHILD_IDENTITY_PUBLISH_WAIT_SECONDS = 1.0
 
 
 class JobServiceProtocol(Protocol):
@@ -1018,7 +1020,27 @@ class JobService:
                     self.scheduler.release(job_id)
                 self._finalize_terminal_workspace(job_id)
                 return self.repository.snapshot(job_id)
-            raise RuntimeError("process_identity_mismatch")
+            # The supervisor publishes the child identity immediately after
+            # launching it. A caller can observe RUNNING in the small window
+            # before that durable record is written; wait for publication, but
+            # keep the same fail-closed refusal if it never arrives.
+            if snapshot["lifecycle"] in {
+                    Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value,
+            }:
+                deadline = time.monotonic() + CHILD_IDENTITY_PUBLISH_WAIT_SECONDS
+                while time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    snapshot = self.repository.snapshot(job_id)
+                    if snapshot["lifecycle"] in {item.value for item in (
+                            Lifecycle.SUCCEEDED, Lifecycle.FAILED,
+                            Lifecycle.TIMED_OUT, Lifecycle.CANCELLED,
+                            Lifecycle.INTERRUPTED)}:
+                        return snapshot
+                    process = snapshot.get("process") or {}
+                    if process.get("child_pid") and process.get("child_pgid"):
+                        break
+            if not process.get("child_pid") or not process.get("child_pgid"):
+                raise RuntimeError("process_identity_mismatch")
         identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
             process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))
         # Verify before publishing cancellation intent.  Publishing it first lets the

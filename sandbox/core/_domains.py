@@ -1112,7 +1112,7 @@ def reload_proxy() -> bool:
     return proxy_apply()[0]
 
 
-def site_url(inst_cfg: dict) -> str:
+def site_url(inst_cfg: dict, *, probe: bool = True) -> str:
     """Browser URL for an instance. Precedence:
       • https://<domain>        — proxy serves it AND registry says HTTPS
       • http://<domain>         — proxy serves this .tst domain (clean, no port)
@@ -1136,7 +1136,7 @@ def site_url(inst_cfg: dict) -> str:
         return f"https://{dom}"
     if dom and dom.endswith(f".{_tld(inst_cfg)}"):
         secure = _domain_is_secure(dom, inst_cfg)
-        if _sandbox_proxy_active(dom, secure=secure):
+        if probe and _sandbox_proxy_active(dom, secure=secure):
             return f"{'https' if secure else 'http'}://{dom}"
         # A persisted clean URL is only a historical observation.  Once the
         # proxy is intercepted or stopped, return the reachable published port

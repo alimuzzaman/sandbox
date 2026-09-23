@@ -1727,11 +1727,17 @@ Per-project (each plugin carries its own sandbox.config.json):
     bounded_resource_status = (
         args.cmd == "resources" and getattr(args, "action", None) == "status"
     )
+    # Global instance inventory is observational.  It must not download the
+    # shared wp-cli asset or regenerate Compose before it can report state;
+    # those writes can block on an unavailable network even when the registry
+    # query itself is local and read-only.
+    bounded_instance_inventory = args.cmd == "instances"
     # Project-routed ensure owns its ready-path attestation.  Pre-writing
     # Compose or the legacy environment here would mutate persistent state
     # before it can refuse a stale live mount set.
     ensure_attestation_gate = args.cmd == "ensure" and args.cmd in PROJECT_ROUTED
     if (not predispatch_skip and not bounded_resource_status and
+            not bounded_instance_inventory and
             args.cmd != "secrets" and not ensure_attestation_gate):
         if not auto_migration_finalized:
             write_compose_files(cfg)

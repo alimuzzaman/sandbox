@@ -1091,7 +1091,10 @@ def cmd_instances(cfg, args) -> None:
                 )
         return
 
-    rows = collect_instance_rows(cfg)
+    # The global inventory is a registry view.  Runtime probing belongs to
+    # explicit lifecycle/status commands; keeping it out here makes this
+    # read-only command bounded even when Docker or local proxy DNS is down.
+    rows = collect_instance_rows(cfg, probe_runtime=False)
     project_dir = getattr(args, "project_dir", None)
     if project_dir:
         sc = _core()

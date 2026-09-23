@@ -1,5 +1,6 @@
 import unittest
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,29 @@ from unittest import mock
 
 
 class TestInstanceLifecycleConfig(unittest.TestCase):
+    def test_instance_running_bounds_unavailable_compose_probe(self):
+        from sandbox.core import _instances
+
+        with mock.patch.object(
+                _instances, 'compose',
+                side_effect=subprocess.TimeoutExpired(['docker', 'compose'], 5)) as compose:
+            self.assertFalse(_instances._instance_running('fixture'))
+        self.assertEqual(compose.call_args.kwargs['timeout'], 5.0)
+
+    def test_inventory_site_url_skips_network_probe(self):
+        from sandbox.core import _domains
+
+        cfg = {
+            'domain': 'fixture.tst',
+            'wordpress_port': 8999,
+            'url': 'https://fixture.tst',
+        }
+        with mock.patch.object(
+                _domains, '_sandbox_proxy_active',
+                side_effect=AssertionError('inventory must not probe')):
+            self.assertEqual(_domains.site_url(cfg, probe=False),
+                             'http://localhost:8999')
+
     def test_wordpress_wake_reads_new_instance_and_probes_backend(self):
         from sandbox.application import context
         from sandbox.runtimes.base import OperationRequest

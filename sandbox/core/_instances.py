@@ -1889,8 +1889,14 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
 
 def _instance_running(name: str) -> bool:
     """True if the instance's `wp` web container reports running."""
-    ps = compose("ps", "--format", "json", instance=name,
-                 check=False, capture=True)
+    # Inventory is observational.  A stopped/unreachable Docker daemon must
+    # not hang registry-wide commands such as `sb instances`; report the
+    # instance as not running and let the caller render the unavailable state.
+    try:
+        ps = compose("ps", "--format", "json", instance=name,
+                     check=False, capture=True, timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     for ln in (ps.stdout or "").splitlines():
         try:
             row = json.loads(ln)

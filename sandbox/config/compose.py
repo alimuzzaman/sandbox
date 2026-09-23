@@ -69,6 +69,8 @@ class ComposeSchemaProvider:
         project_secrets = raw_secret_layer(document)
         lifecycle_declared = "instanceLifecycle" in document
         lifecycle = document.get("instanceLifecycle")
+        delivery_declared = "delivery" in document
+        delivery = document.get("delivery")
         machine_domains = {}
         machine_runtime = {}
         machine_secrets = {}
@@ -84,6 +86,9 @@ class ComposeSchemaProvider:
             if "instanceLifecycle" in override_doc:
                 lifecycle_declared = True
                 lifecycle = override_doc["instanceLifecycle"]
+            if "delivery" in override_doc:
+                delivery_declared = True
+                delivery = override_doc["delivery"]
             machine_domains.update(raw_domain_layer(override_doc))
             machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
             merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
@@ -100,6 +105,9 @@ class ComposeSchemaProvider:
                 if "instanceLifecycle" in override_doc:
                     lifecycle_declared = True
                     lifecycle = override_doc["instanceLifecycle"]
+                if "delivery" in override_doc:
+                    delivery_declared = True
+                    delivery = override_doc["delivery"]
                 machine_domains.update(raw_domain_layer(override_doc))
                 machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
                 merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
@@ -187,4 +195,6 @@ class ComposeSchemaProvider:
                 "root": str(root), "source": config_path.name}
         if lifecycle_declared:
             result["instanceLifecycle"] = lifecycle
+        if delivery_declared:
+            result["delivery"] = delivery
         return result

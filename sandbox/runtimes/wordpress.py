@@ -15,7 +15,7 @@ OPTIONAL_WORDPRESS_CAPABILITIES = frozenset({
 })
 
 SAFE_ALTERNATIVES = {
-    "stop": "Use destroy for an explicit managed teardown.",
+    "stop": "Use instance delete for an explicit managed teardown.",
     "logs": "Use status and instance-specific log access.",
     "wordpress.snapshot": "Use an explicit export before recreating the instance.",
     "wordpress.mail": "Use the configured external mail capture service.",

@@ -131,6 +131,78 @@ class InstanceReadinessRegressions(unittest.TestCase):
                                              reveal_login=True)
         self.assertNotIn("NONSECRET-SENTINEL", output.getvalue())
 
+    def test_preferred_port_honored_and_distinct_from_db_and_mailpit(self):
+        def next_free(base, used):
+            return next(port for port in range(base, base + 50) if port not in used)
+
+        with patch.object(_instances, "resolve_instances", return_value={}), \
+             patch.object(_instances, "_next_free_port", side_effect=next_free):
+            ports = _instances._pick_instance_ports(
+                {"runtime": {"wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125}},
+                preferred_port=8290,
+            )
+        self.assertEqual(ports["wordpress_port"], 8290)
+        self.assertEqual(len(set(ports.values())), 3)
+
+    def test_ensure_distinct_ports_repairs_intra_trio_collision(self):
+        def next_free(base, used):
+            return next(port for port in range(base, base + 50) if port not in used)
+
+        with patch.object(_instances, "_next_free_port", side_effect=next_free):
+            repaired = _instances._ensure_distinct_ports(
+                {"wordpress_port": 8274, "db_port": 3394, "mailpit_port": 8274},
+                used_by_others={8275},
+            )
+        self.assertEqual(len(set(repaired.values())), 3)
+        self.assertEqual(repaired["wordpress_port"], 8274)
+        self.assertNotIn(8275, repaired.values())
+
+    def test_reachability_rejects_mailpit_signatures(self):
+        # Server: Mailpit header
+        response_mailpit_header = types.SimpleNamespace(
+            status=200, headers={"Server": "Mailpit"}, read=lambda _n=1024: b"OK", close=lambda: None)
+        opener = Mock()
+        opener.open.return_value = response_mailpit_header
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch.object(_instances, "site_url", return_value="http://localhost:8274"):
+            self.assertFalse(_instances._wait_reachable({}, timeout=1))
+
+        # Body with <title>Mailpit</title>
+        response_mailpit_body = types.SimpleNamespace(
+            status=200, headers={"Server": "nginx"}, read=lambda _n=1024: b"<html><title>Mailpit</title></html>", close=lambda: None)
+        opener.open.return_value = response_mailpit_body
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch.object(_instances, "site_url", return_value="http://localhost:8274"):
+            self.assertFalse(_instances._wait_reachable({}, timeout=1))
+
+        # Valid WordPress response
+        response_wp = types.SimpleNamespace(
+            status=200, headers={"Server": "nginx", "X-Powered-By": "PHP/8.3"}, read=lambda _n=1024: b"<!DOCTYPE html><html>WordPress</html>", close=lambda: None)
+        opener.open.return_value = response_wp
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch.object(_instances, "site_url", return_value="http://localhost:8274"):
+            self.assertTrue(_instances._wait_reachable({}, timeout=1))
+
+    def test_instance_web_services_running_detects_missing_nginx(self):
+        # mailpit and wp running, but nginx not running
+        ps_out = json.dumps({"Service": "wp", "State": "running"}) + "\n" + \
+                 json.dumps({"Service": "mailpit", "State": "running"})
+        with patch.object(_instances, "compose", return_value=types.SimpleNamespace(stdout=ps_out)):
+            running, msg = _instances._instance_web_services_running("demo", "nginx")
+            self.assertFalse(running)
+            self.assertIn("nginx", msg)
+
+        # all running
+        ps_all = ps_out + "\n" + json.dumps({"Service": "nginx", "State": "running"})
+        with patch.object(_instances, "compose", return_value=types.SimpleNamespace(stdout=ps_all)):
+            running, msg = _instances._instance_web_services_running("demo", "nginx")
+            self.assertTrue(running)
+            self.assertEqual(msg, "")
+
+    def test_safe_alternatives_stop_points_to_instance_delete(self):
+        from sandbox.runtimes.wordpress import SAFE_ALTERNATIVES
+        self.assertEqual(SAFE_ALTERNATIVES["stop"], "Use instance delete for an explicit managed teardown.")
+
     def test_url_update_and_readback_use_exact_instance_for_all_four_commands(self):
         with patch.object(_remote, "list_remote_instances", return_value=[
                 {"name": "primary", "label": "default"}, {"name": "preview", "label": "preview"}]), \

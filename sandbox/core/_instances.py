@@ -170,7 +170,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
                if e.get("instance") and e.get("kind") != "compose"}
     except Exception:
         reg = {}
-    reg_names = set(reg) or set(instances or {})
+    reg_names = set(reg) | set(instances or {})
 
     def _cfg_for(name):
         entry = reg.get(name) or {}
@@ -219,7 +219,32 @@ def _next_free_port(start: int, used: set[int]) -> int:
         p += 1
 
 
-def _pick_instance_ports(cfg: dict) -> dict[str, int]:
+def _ensure_distinct_ports(ports: dict[str, int], used_by_others: set[int]) -> dict[str, int]:
+    """Ensure wordpress_port, db_port, and mailpit_port are mutually distinct
+    and do not collide with ports used by other instances."""
+    res = dict(ports)
+    claimed = set(used_by_others)
+    wp = res.get("wordpress_port", 8188)
+    if wp in claimed:
+        wp = _next_free_port(wp, claimed)
+    res["wordpress_port"] = wp
+    claimed.add(wp)
+
+    db = res.get("db_port", 3318)
+    if db in claimed:
+        db = _next_free_port(db, claimed)
+    res["db_port"] = db
+    claimed.add(db)
+
+    mp = res.get("mailpit_port", 8125)
+    if mp in claimed:
+        mp = _next_free_port(mp, claimed)
+    res["mailpit_port"] = mp
+    claimed.add(mp)
+    return res
+
+
+def _pick_instance_ports(cfg: dict, *, preferred_port: int | None = None) -> dict[str, int]:
     """Pick wordpress_port, db_port, mailpit_port for a new instance.
 
     Walks every defined instance's resolved config to collect ports
@@ -235,7 +260,7 @@ def _pick_instance_ports(cfg: dict) -> dict[str, int]:
     # the top-level runtime: block. The base itself is assignable now that there
     # is no `main` instance occupying it (start AT the base, not base+1).
     runtime = cfg.get("runtime", {}) or {}
-    base_wp = runtime.get("wordpress_port", 8188)
+    base_wp = preferred_port if preferred_port is not None else runtime.get("wordpress_port", 8188)
     base_db = runtime.get("db_port", 3318)
     base_mp = runtime.get("mailpit_port", 8125)
     ports = {}
@@ -306,6 +331,14 @@ def _resolve_port_conflicts(cfg: dict, *, instance_names: set[str] | None = None
             new_wp, new_db, new_mp
         instances[name] = dict(ic, wordpress_port=new_wp,
                                db_port=new_db, mailpit_port=new_mp)
+        try:
+            sc = _core()
+            owner = sc.registry_find_instance(name)
+            if owner and owner.get("root"):
+                sc.registry_put(owner["root"], label=owner.get("label"),
+                                wordpress_port=new_wp, db_port=new_db, mailpit_port=new_mp)
+        except Exception:
+            pass
         changed = True
     if changed:
         _write_local_yaml(local)
@@ -617,6 +650,21 @@ def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
     return {"changed": True, "from": live, "to": now}
 
 
+def _is_mailpit_response(headers, body: bytes = b"") -> bool:
+    """True if response headers or body match Mailpit's signature."""
+    if headers:
+        server = (headers.get("Server") or "").lower()
+        if "mailpit" in server:
+            return True
+        if "mailpit" in (headers.get("X-Server") or "").lower():
+            return True
+    if body:
+        body_lower = body.lower()
+        if b"<title>mailpit" in body_lower or b"axllent/mailpit" in body_lower:
+            return True
+    return False
+
+
 def _wait_http(port: int, timeout: int = 30) -> bool:
     # WordPress can already redirect to its configured clean URL. Following
     # that redirect mixes backend liveness with DNS/TLS and can reject a working
@@ -689,7 +737,9 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = F
                 status = getattr(response, "status", None)
                 if status is None:
                     status = response.getcode()
-                if acceptable(status, getattr(response, "headers", None)):
+                headers = getattr(response, "headers", None)
+                body = response.read(1024) if hasattr(response, "read") else b""
+                if not _is_mailpit_response(headers, body) and acceptable(status, headers):
                     return True
             finally:
                 close = getattr(response, "close", None)
@@ -697,7 +747,9 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = F
                     close()
         except urllib.error.HTTPError as e:
             status = e.code
-            accepted = acceptable(status, e.headers)
+            headers = e.headers
+            body = e.read(1024) if hasattr(e, "read") else b""
+            accepted = not _is_mailpit_response(headers, body) and acceptable(status, headers)
             close = getattr(e, "close", None)
             if close is not None:
                 close()
@@ -727,10 +779,16 @@ def _instance_reachable(entry: dict) -> bool:
             return False
         url = f"http://localhost:{port}"
     try:
-        urllib.request.urlopen(
+        resp = urllib.request.urlopen(
             url, timeout=3, context=ssl._create_unverified_context())
+        body = resp.read(1024) if hasattr(resp, "read") else b""
+        if _is_mailpit_response(resp.headers, body):
+            return False
         return True
     except urllib.error.HTTPError as e:
+        body = e.read(1024) if hasattr(e, "read") else b""
+        if _is_mailpit_response(e.headers, body):
+            return False
         return e.code < 500
     except Exception:
         return False
@@ -1495,12 +1553,27 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                     "db_port": resolved["db_port"],
                     "mailpit_port": resolved["mailpit_port"],
                 }
+                preferred = pconf.get("port")
+                if preferred is not None and preferred != ports["wordpress_port"]:
+                    all_inst = resolve_instances(cfg)
+                    used_others = {
+                        inst[k] for oname, inst in all_inst.items() if oname != name
+                        for k in ("wordpress_port", "db_port", "mailpit_port")
+                    }
+                    ports["wordpress_port"] = _next_free_port(preferred, used_others)
             else:
                 taken = set(resolve_instances(cfg).keys())
                 taken |= {e.get("instance") for e in sc.registry_all().values()
                           if e.get("instance")}
                 name = _derive_instance_name(root, taken, label=label)
-                ports = _pick_instance_ports(cfg)
+                ports = _pick_instance_ports(cfg, preferred_port=pconf.get("port"))
+
+            all_inst = resolve_instances(cfg)
+            used_others = {
+                inst[k] for oname, inst in all_inst.items() if oname != name
+                for k in ("wordpress_port", "db_port", "mailpit_port")
+            }
+            ports = _ensure_distinct_ports(ports, used_others)
 
             # A truly new authoritative record receives one opaque incarnation.
             # Existing records preserve their exact projection.  In particular,
@@ -1570,6 +1643,12 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
             # document root before WordPress can answer HTTP. Probe only after core
             # installation, otherwise the first ensure fails before repair starts.
             if server != "herd":
+                web_running, missing_msg = _instance_web_services_running(name, server)
+                if not web_running:
+                    raise sc.ConfigError(
+                        f"instance_backend_unavailable: '{name}' {missing_msg}; "
+                        "its pending state is retained. Retry "
+                        f"`./sb ensure --local --project-dir {shlex.quote(str(root))} --label {label}`.")
                 if not _wait_http(ports["wordpress_port"]):
                     raise sc.ConfigError(
                         f"instance_backend_unavailable: '{name}' did not answer HTTP "
@@ -1617,11 +1696,18 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
 
             final_route = resolve_instances(cfg)[name]
             _base_url = site_url(final_route, timeout=5.0, retry=True)
+            if secured:
+                _auto_heal_wp_url(name, expected_url=_base_url)
             if not _wait_reachable(final_route, require_application_success=True,
                                    canonical_url=_base_url):
-                raise sc.ConfigError(
-                    f"instance_route_unavailable: '{name}' did not answer at its "
-                    "advertised URL; its pending state is retained.")
+                _base_url = site_url(final_route, timeout=5.0, retry=True)
+                if secured:
+                    _auto_heal_wp_url(name, expected_url=_base_url)
+                if not _wait_reachable(final_route, require_application_success=True,
+                                       canonical_url=_base_url, timeout=10):
+                    raise sc.ConfigError(
+                        f"instance_route_unavailable: '{name}' did not answer at its "
+                        "advertised URL; its pending state is retained.")
 
             # Spec 008: a newly provisioned instance gets both restore points only
             # after its project plugins/themes are in their final installed state.
@@ -1728,6 +1814,21 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
             "db_port": existing["db_port"],
             "mailpit_port": existing["mailpit_port"],
         }
+        preferred = pconf.get("port")
+        if preferred is not None and preferred != ports["wordpress_port"]:
+            all_inst = resolve_instances(cfg)
+            used_others = {
+                inst[k] for oname, inst in all_inst.items() if oname != name
+                for k in ("wordpress_port", "db_port", "mailpit_port")
+            }
+            ports["wordpress_port"] = _next_free_port(preferred, used_others)
+
+        all_inst = resolve_instances(cfg)
+        used_others = {
+            inst[k] for oname, inst in all_inst.items() if oname != name
+            for k in ("wordpress_port", "db_port", "mailpit_port")
+        }
+        ports = _ensure_distinct_ports(ports, used_others)
         server = _valid_server(pconf.get("server") or existing.get("server")
                                or "nginx")
         _assert_apply_runtime_dependencies(
@@ -1937,6 +2038,40 @@ def _instance_running(name: str) -> bool:
         if row.get("Service") == "wp" and row.get("State") == "running":
             return True
     return False
+
+
+def _instance_web_services_running(name: str, server: str = "nginx") -> tuple[bool, str]:
+    """True if the instance's web-facing containers report running.
+    Returns (True, '') if containers are running, or if container status
+    cannot be inspected. Returns (False, error_msg) if inspect succeeds
+    and shows required services are missing or exited."""
+    required = ["wp"]
+    if server == "nginx":
+        required.append("nginx")
+    ps = compose("ps", "--all", "--format", "json", instance=name, check=False, capture=True)
+    stdout = getattr(ps, "stdout", "") or ""
+    if not stdout.strip():
+        return True, ""
+    running = set()
+    states = {}
+    for ln in stdout.splitlines():
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue
+        svc = row.get("Service")
+        state = row.get("State")
+        if svc:
+            states[svc] = state
+            if state == "running":
+                running.add(svc)
+    if not states:
+        return True, ""
+    missing = [s for s in required if s not in running]
+    if missing:
+        details = [f"{s} ({states.get(s, 'not created')})" for s in missing]
+        return False, f"web service(s) not running: {', '.join(details)}"
+    return True, ""
 
 
 def _capture_apply_rollback_state(name: str, cfg: dict, existing: dict,

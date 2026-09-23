@@ -240,13 +240,14 @@ def _mountinfo_reference_count(text: str, checkout: Path, *,
     return count
 
 
-def _observe_mount_references(checkout: Path) -> int | None:
+def _observe_mount_references(checkout: Path,
+                              *, device: tuple[int, int] | None = None) -> int | None:
     mountinfo = Path("/proc/self/mountinfo")
     if not mountinfo.is_file():
         return 0 if not sys.platform.startswith("linux") else None
     try:
         return _mountinfo_reference_count(
-            mountinfo.read_text(errors="replace"), checkout)
+            mountinfo.read_text(errors="replace"), checkout, device=device)
     except (OSError, ValueError):
         return None
 
@@ -299,9 +300,11 @@ def _remove_tree_fd(directory_fd: int) -> None:
             os.unlink(name, dir_fd=directory_fd)
 
 
-def _observe_cleanup_references(checkout: Path) -> dict[str, int | None]:
+def _observe_cleanup_references(
+        checkout: Path, *, device: tuple[int, int] | None = None
+        ) -> dict[str, int | None]:
     """Return positive host/container mount absence or unknown on probe failure."""
-    mounts = _observe_mount_references(checkout)
+    mounts = _observe_mount_references(checkout, device=device)
     containers: int | None = None
     try:
         from sandbox.services.environment import compatible_subprocess_environment
@@ -2265,7 +2268,11 @@ class WorkspaceService:
             references = (
                 self.cleanup_reference_observer(checkout_path, record)
                 if self.cleanup_reference_observer is not None
-                else _observe_cleanup_references(checkout_path)
+                else _observe_cleanup_references(
+                    checkout_path,
+                    device=(os.major(expected_identity["device"]),
+                            os.minor(expected_identity["device"])),
+                )
             )
             if (not isinstance(references, dict) or
                     references.get("containers") != 0 or

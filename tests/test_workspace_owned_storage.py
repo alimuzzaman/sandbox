@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.owned_storage.cleanup import OwnedStorageCleanupManager, CleanupExecutionError
 from sandbox.owned_storage.models import (
@@ -249,7 +250,11 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
         )
         job = job_repo.get(row["job_id"])
 
-        result = ws_service.release_terminal_job(job, job_repo)
+        with patch(
+                "sandbox.application.ci_cleanup_broker.remove_workspace_metadata"
+                ) as remove_metadata:
+            result = ws_service.release_terminal_job(job, job_repo)
+        remove_metadata.assert_called_once()
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "released")
         self.assertGreaterEqual(result["observed_reclaimed_bytes"], 300)
@@ -416,5 +421,3 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

@@ -99,6 +99,48 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             "indeterminate",
         )
 
+    def test_failed_empty_quarantine_retries_by_authoritative_inode(self):
+        from sandbox.application.ci_cleanup_broker import CiCleanupBrokerError
+
+        checkout = self._checkout("recover-empty-quarantine")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="recover-empty-quarantine-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(
+            accepted["job_id"], "succeeded", exit_code=0)
+
+        with patch(
+                "sandbox.application.ci_cleanup_broker.finalize_checkout",
+                side_effect=CiCleanupBrokerError("cleanup_broker_unavailable")):
+            failed = service.get(accepted["job_id"])
+
+        self.assertEqual(failed["cleanup_state"], "failed")
+        self.assertFalse(checkout.exists())
+        quarantines = tuple(self.deploy_root.glob(".sandbox-ci-cleanup/*/owned"))
+        self.assertEqual(len(quarantines), 1)
+        self.assertEqual(tuple(quarantines[0].iterdir()), ())
+
+        self.workspaces.cleanup_reference_observer = None
+        with patch(
+                "sandbox.application.workspace_service._observe_cleanup_references",
+                return_value={"containers": 0, "mounts": 0}) as references, patch(
+                "sandbox.application.ci_cleanup_broker.recover_empty_checkout"
+                ) as recover, patch(
+                "sandbox.application.ci_cleanup_broker.remove_workspace_metadata"
+                ) as remove_metadata:
+            recovered = service.get(accepted["job_id"])
+
+        workspace_id = self.job_repository.get(accepted["job_id"])["workspace_id"]
+        record = self.workspace_repository.get(workspace_id)
+        self.assertEqual(recovered["cleanup_state"], "completed")
+        self.assertEqual(record.lifecycle, "destroyed")
+        expected_device = record.metadata["ci_cleanup_authority"]["checkout_identity"]["device"]
+        self.assertEqual(references.call_args.kwargs["device"],
+                         (os.major(expected_device), os.minor(expected_device)))
+        self.assertEqual(recover.call_count, 1)
+        self.assertEqual(remove_metadata.call_count, 1)
+
     def test_supervisor_success_and_failure_use_the_same_terminal_cleanup_seam(self):
         for name, command, lifecycle in (
             ("success", ("/bin/sh", "-c", "true"), "succeeded"),
@@ -739,7 +781,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 "sandbox.application.workspace_service._file_sha256",
                 side_effect=swap_after_hash):
             with self.assertRaisesRegex(
-                    Exception, "open descriptor identity"):
+                    Exception, "cleanup broker did not prove removal"):
                 service.cleanup(accepted["job_id"])
 
         self.assertTrue(verified.is_file())
@@ -814,7 +856,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                      if item["workspace_id"] == accepted_row["workspace_id"])
         self.assertEqual(owned["retained_materializations"]["count"], 1)
         with self.assertRaisesRegex(
-                Exception, "cannot retire an archive by open descriptor identity"):
+                Exception, "cleanup broker did not prove removal"):
             service.retention_sweep(retention_days=0)
         self.assertEqual(len(tuple(
             self.workspace_repository.index_path.parent.glob(
@@ -837,7 +879,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 self.workspaces, "_register",
                 side_effect=RuntimeError("fixture index failure")):
             with self.assertRaisesRegex(
-                    Exception, "cannot retire an archive by open descriptor identity"):
+                    Exception, "cleanup broker did not prove removal"):
                 service.submit(self._submission(
                     checkout, request_id="archive-index-failure-request"))
         self.assertEqual(len(tuple(
@@ -856,6 +898,23 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         ))
         self.assertEqual(_mountinfo_reference_count(
             mountinfo, checkout, device=(8, 1)), 3)
+
+    def test_missing_checkout_mount_probe_uses_authoritative_device(self):
+        from types import SimpleNamespace
+
+        from sandbox.application.workspace_service import _observe_cleanup_references
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing = root / "already-quarantined"
+            observed = os.stat(root)
+            device = (os.major(observed.st_dev), os.minor(observed.st_dev))
+            with patch(
+                    "sandbox.application.workspace_service.subprocess.run",
+                    return_value=SimpleNamespace(returncode=0, stdout="")):
+                references = _observe_cleanup_references(missing, device=device)
+
+        self.assertEqual(references, {"containers": 0, "mounts": 0})
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux mountinfo proof")
     def test_linux_mountinfo_probe_reads_current_namespace_without_unknown(self):

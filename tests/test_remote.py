@@ -2737,6 +2737,7 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertIn("sb", relative)
         self.assertIn("sandbox/commands/jobs_runtime.py", relative)
         self.assertIn("sandbox/workspaces/repository.py", relative)
+        self.assertIn("scripts/provision_ci_cleanup_broker.py", relative)
         self.assertIn("mcp/wp-server/server.py", relative)
         self.assertFalse(any(".venv" in source for source in relative))
 

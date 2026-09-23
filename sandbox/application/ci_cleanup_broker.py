@@ -29,7 +29,7 @@ QUARANTINE_ROOT = Path("/var/lib/sandbox-ci-cleanup")
 _HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-_NAMESPACE = re.compile(r"project-[0-9a-f]{24}\Z")
+_NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 
 

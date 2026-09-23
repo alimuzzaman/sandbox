@@ -742,16 +742,48 @@ _WP_INSTALL_STATE_UNAVAILABLE = "unavailable"
 _WP_INSTALL_STATE_TIMEOUT = 15
 
 
+def _clean_wp_diagnostic_output(text: str) -> str:
+    """Strip known PHP runtime noise, compose lifecycle logs, and uninstalled notices."""
+    cleaned_lines = []
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        # PHP notices, warnings, deprecations
+        if trimmed.startswith((
+            "Warning:", "Notice:", "Deprecated:",
+            "PHP Warning:", "PHP Notice:", "PHP Deprecated:",
+        )):
+            continue
+        # Compose lifecycle output when running via one-shot wpcli
+        if trimmed.startswith((
+            "Container ", "Network ", "Volume ",
+            "Creating ", "Created ", "Starting ", "Started ",
+        )):
+            continue
+        # WP-CLI uninstalled site indications
+        if any(marker in trimmed for marker in (
+            "The site you have requested is not installed",
+            "This does not seem to be a WordPress installation",
+            "Run 'wp core install'",
+            'Run `wp core install`',
+            "The used path is:",
+            "Pass --path=",
+        )):
+            continue
+        cleaned_lines.append(trimmed)
+    return "\n".join(cleaned_lines)
+
+
 def _wp_core_install_state(instance: str, *, timeout: float = _WP_INSTALL_STATE_TIMEOUT) -> str:
     """Classify a bounded, read-only WordPress install-state observation.
 
     A ready HTTP setup screen can be served before WordPress has initialized
     its database.  ``wp core is-installed`` is the authoritative first probe.
-    Its only resume-safe negative result is an empty ``rc=1`` response followed
-    by a successful, bounded ``SELECT 1`` database probe.  Diagnostics from
-    either command are deliberately not interpreted: transport failures,
-    malformed results, timeouts, and any output make the state unavailable so
-    callers can fail closed before a write-capable ensure step.
+    Its only resume-safe negative result is an empty or clean diagnostic ``rc=1``
+    response followed by a successful, bounded ``SELECT 1`` database probe.
+    Transport failures, malformed results, timeouts, or unexpected errors make
+    the state unavailable so callers can fail closed before a write-capable ensure step.
     """
     try:
         result = wpcli(
@@ -769,10 +801,15 @@ def _wp_core_install_state(instance: str, *, timeout: float = _WP_INSTALL_STATE_
         return _WP_INSTALL_STATE_UNAVAILABLE
     if returncode == 0:
         return _WP_INSTALL_STATE_INSTALLED
-    if returncode != 1 or stdout or stderr:
+    if returncode != 1:
         return _WP_INSTALL_STATE_UNAVAILABLE
 
-    # An empty negative result is not enough to authorize installation: it can
+    clean_stdout = _clean_wp_diagnostic_output(stdout)
+    clean_stderr = _clean_wp_diagnostic_output(stderr)
+    if clean_stdout or clean_stderr:
+        return _WP_INSTALL_STATE_UNAVAILABLE
+
+    # An empty or diagnostic negative result is not enough to authorize installation: it can
     # equally be an unavailable WP-CLI/database transport.  Route the query
     # through ``wp db`` (which deliberately skips the web-container CLI
     # preflight) and accept only a well-formed success result.
@@ -788,7 +825,7 @@ def _wp_core_install_state(instance: str, *, timeout: float = _WP_INSTALL_STATE_
     db_stderr = getattr(database, "stderr", None)
     if (isinstance(db_returncode, bool) or not isinstance(db_returncode, int) or
             not isinstance(db_stdout, str) or not isinstance(db_stderr, str) or
-            db_returncode != 0):
+            db_returncode != 0 or db_stdout.strip() != "1"):
         return _WP_INSTALL_STATE_UNAVAILABLE
     return _WP_INSTALL_STATE_UNINSTALLED
 

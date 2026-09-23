@@ -104,13 +104,21 @@ class TestWpCoreInstallState(_IsolatedInstanceTest):
             ([_Result(1, stdout="diagnostic")], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(1, stderr="database unavailable")],
              _instances._WP_INSTALL_STATE_UNAVAILABLE),
+            ([_Result(1, stderr="Warning: Undefined array key \"HTTP_HOST\"\n"), _Result(0, stdout="1\n")],
+             _instances._WP_INSTALL_STATE_UNINSTALLED),
+            ([_Result(1, stderr="Error: The site you have requested is not installed.\n"), _Result(0, stdout="1\n")],
+             _instances._WP_INSTALL_STATE_UNINSTALLED),
+            ([_Result(1, stderr="Container sandbox-fixture-wp Creating\n"), _Result(0, stdout="1\n")],
+             _instances._WP_INSTALL_STATE_UNINSTALLED),
+            ([_Result(1, stderr="Warning: Undefined array key \"HTTP_HOST\"\n"), _Result(1)],
+             _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(2)], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(-9)], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result("1")], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(1), _Result(1)], _instances._WP_INSTALL_STATE_UNAVAILABLE),
         )
-        for results, expected in cases:
-            with self.subTest(returncode=results[0].returncode), \
+        for idx, (results, expected) in enumerate(cases):
+            with self.subTest(case=idx, returncode=results[0].returncode), \
                     mock.patch.object(_instances, "wpcli", side_effect=results) as wpcli:
                 self.assertEqual(_instances._wp_core_install_state("fixture"), expected)
             self.assertEqual(wpcli.call_args_list[0].args[0], ["core", "is-installed"])

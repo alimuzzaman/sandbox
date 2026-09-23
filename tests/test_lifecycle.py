@@ -236,6 +236,21 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
         self.assertIn("$home_host !== $dest_host", rendered)
         self.assertIn("$home_port !== $dest_port", rendered)
 
+    def test_loopback_muplugin_intercepts_pre_http_request_and_routes_internally(self):
+        import sandbox.core._provision as provision
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(provision, "_ensure_muplugins_dir",
+                             return_value=Path(directory)):
+            provision._write_loopback_muplugin("preview-demo")
+
+            rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
+        self.assertIn("pre_http_request", rendered)
+        self.assertIn("_sandbox_loopback", rendered)
+        self.assertIn("X-Forwarded-Proto", rendered)
+        self.assertIn("wp_remote_request", rendered)
+        self.assertIn("$redirects_followed < $max_redirects", rendered)
+
     def test_shared_reconciler_writes_abilities_and_debug_plugins(self):
         import sandbox.core._provision as provision
 

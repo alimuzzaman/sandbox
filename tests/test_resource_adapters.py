@@ -911,6 +911,35 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertEqual(item.classification, "unverified")
         self.assertEqual(item.reclaimable_bytes, 0)
 
+    def test_unlabelled_docker_images_are_emitted_as_unmanaged_resources(self):
+        image_record = {
+            "Id": "sha256:unlabelled123456",
+            "RepoTags": ["wordpress:cli"],
+            "Size": 68234237,
+            "Config": {"Labels": {}},
+        }
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response(""),
+            ("docker", "volume", "ls", "-q"): response(""),
+            ("docker", "network", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "-q"): response("sha256:unlabelled123456\n"),
+            ("docker", "image", "inspect", "sha256:unlabelled123456"): response(json.dumps([image_record])),
+            ("docker", "buildx", "du"): response(""),
+            ("du", "-sk"): response("1\t/path\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        resources = adapter.observe(thorough=True, budget_seconds=30).resources
+        image = next(r for r in resources if r.kind == "image")
+        self.assertEqual(image.owner_kind, "unmanaged")
+        self.assertIsNone(image.owner_id)
+        self.assertEqual(image.classification, "unmanaged")
+        self.assertEqual(image.display_name, "wordpress:cli")
+        self.assertEqual(image.size_bytes, 68234237)
+        self.assertEqual(image.reclaimable_bytes, 0)
+        self.assertIn("unmanaged_image", image.evidence)
+
     def test_only_expired_terminal_job_artifact_is_disposable(self):
         artifact = self.home / "runtime" / "jobs" / "job-1" / "artifacts" / "a1"
         artifact.parent.mkdir(parents=True)

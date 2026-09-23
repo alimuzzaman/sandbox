@@ -781,6 +781,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "  ./sb remote service status NAME [--json]\n"
             "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
             "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
+            "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
             "  ./sb remote service stop NAME --confirm [--json]"
         ))
     remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh"],
@@ -807,7 +808,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--yes", action="store_true",
         help="accept the default HTTPS control-plane choice without prompting")
     remote_p.add_argument("--plan", action="store_true",
-        help="for `remote service migrate`: show the no-write service migration plan")
+        help="for protected remote service actions: show the no-write plan")
     remote_p.add_argument("--confirm", action="store_true",
         help="allow a protected remote service or Docker-pool mutation")
     remote_p.add_argument("--recover-interrupted", action="store_true",

@@ -248,11 +248,25 @@ check must prove no live recorded child/supervisor, residual child process group
 owned child cgroup, container mount, host mountpoint or bind source, resource binding,
 lease, or other active job. The exact filesystem identity is moved into a private
 owner-only cleanup root and emptied through its continuously open directory descriptor.
-On macOS/Linux the controller has no identity-conditional final unlink/rmdir API, so it
-retains the empty quarantine, marks cleanup failed/indeterminate, and retains the verified
-archive rather than exposing a check-then-path removal race. A private cleanup broker or
-equivalent ownership boundary inaccessible to the submitting UID is still required for
-automatic final reap. Workspace validation/materialization and
+Linux remotes can enable final removal with the protected, owner-scoped cleanup broker:
+
+```sh
+./sb remote service cleanup-broker scaleway-sandbox --plan --json
+./sb remote service cleanup-broker scaleway-sandbox --confirm --json
+```
+
+The installed helper is root-owned and pinned to the exact deploy, workspace-metadata,
+and CI-artifact roots. Its only delete operations accept an inode identity and fixed
+object names, move the object to a root-only quarantine, and verify it again before
+removal. Installation refuses when those roots and `/var/lib` do not share a filesystem,
+because atomic quarantine moves cannot cross filesystem boundaries. The service runtime
+must first match the current committed CLI revision; install
+that source with the normal protected service migration when needed. Unsupported platforms
+retain and report cleanup failure. If a broker install is interrupted, inspect service
+status and the broker capability before retrying; do not remove its retained quarantine
+manually. An exact terminal job whose cleanup previously failed is retried by reading its
+job status or invoking terminal job cleanup; recovery accepts only one empty quarantine
+whose inode matches the durable workspace authority. Workspace validation/materialization and
 durable job acceptance hold the same controller lock as terminal deletion, so a new
 accept cannot commit after the final active-job check. The same seam covers
 `supervisor_launch_failed`. Retry restores from one retained archive capped at 512 MiB

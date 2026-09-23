@@ -382,12 +382,24 @@ def _verified_artifact(artifact: Path, expected_digest: str,
 
 
 def _unlink_verified_artifact(artifact: Path, expected_digest: str,
-                              expected_size: int) -> None:
-    """Verify the exact archive, then fail closed without a safe unlink API."""
-    with _verified_artifact(artifact, expected_digest, expected_size):
-        raise WorkspaceIndexError(
-            "workspace_identity_bound_removal_unavailable",
-            "platform cannot retire an archive by open descriptor identity")
+                              expected_size: int) -> int:
+    """Retire one digest-verified archive through the Linux cleanup broker."""
+    with _verified_artifact(artifact, expected_digest, expected_size) as (_handle, identity):
+        try:
+            from sandbox.application.ci_cleanup_broker import (
+                CiCleanupBrokerError, retire_artifact,
+            )
+            reclaimed = retire_artifact(
+                artifact.name, identity,
+                expected_digest.removeprefix("sha256:"), expected_size,
+            )
+        except CiCleanupBrokerError as exc:
+            raise WorkspaceIndexError(
+                exc.code if exc.code.startswith("cleanup_")
+                else "workspace_identity_bound_removal_unavailable",
+                "retained CI materialization cleanup broker did not prove removal",
+            ) from exc
+    return reclaimed
 
 
 def _archive_checkout(checkout: Path, artifact: Path) -> tuple[str, int]:
@@ -2133,6 +2145,11 @@ class WorkspaceService:
             authority = record.metadata.get("ci_cleanup_authority")
             authority_digest = (authority.get("digest")
                                 if isinstance(authority, dict) else None)
+            recovering = (
+                job.get("cleanup_state") == "failed"
+                and record.lifecycle == "indeterminate"
+                and record.status == "indeterminate"
+            )
             authorized_policy = (
                 mode in {"isolated", "ephemeral"}
                 and (policy in {"always", "ephemeral"}
@@ -2145,7 +2162,8 @@ class WorkspaceService:
             if (record.project_identity != job.get("project_identity") or
                     record.label != job.get("workspace_label") or
                     record.source != "ci-materialization" or
-                    record.lifecycle != "ready" or record.status != "ready" or
+                    not ((record.lifecycle == "ready" and record.status == "ready")
+                         or recovering) or
                     record.metadata.get("checkout_locator") != checkout or
                     record.metadata.get("checkout_locator_digest") != expected_digest or
                     authority.get("owner") != "controller-ci-materialization" or
@@ -2227,6 +2245,23 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_path_unsafe",
                     "terminal workspace locator is unsafe")
+            expected_identity = authority.get("checkout_identity")
+            if not isinstance(expected_identity, dict):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal checkout identity is unavailable")
+            try:
+                checkout_info = checkout_path.lstat()
+                checkout_missing = False
+            except FileNotFoundError:
+                checkout_info = None
+                checkout_missing = True
+            if ((checkout_missing and not recovering) or
+                    (checkout_info is not None and
+                     _artifact_identity(checkout_info) != expected_identity)):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal checkout filesystem identity changed")
             references = (
                 self.cleanup_reference_observer(checkout_path, record)
                 if self.cleanup_reference_observer is not None
@@ -2267,13 +2302,8 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
                     "workspace metadata directory is not an exact owned leaf")
-            expected_identity = authority.get("checkout_identity")
-            if (not isinstance(expected_identity, dict) or
-                    _filesystem_identity(checkout_path) != expected_identity):
-                raise WorkspaceIndexError(
-                    "workspace_ownership_drift",
-                    "terminal checkout filesystem identity changed")
-
+            metadata_directory_identity = _filesystem_identity(metadata_path.parent)
+            metadata_file_identity = _filesystem_identity(metadata_path)
             owned_storage_object_id = record.metadata.get("owned_storage_object_id")
             if not owned_storage_object_id and self.owned_storage_cleanup_manager is not None:
                 auth_obj = self.owned_storage_cleanup_manager.repository.find_object_by_workspace(workspace_id)
@@ -2296,13 +2326,22 @@ class WorkspaceService:
                 except Exception:
                     repo.mark_lifecycle(workspace_id, "indeterminate", status="indeterminate")
                     raise
-                if metadata_path is not None and metadata_path.exists():
-                    try:
-                        metadata_path.unlink()
-                        if metadata_path.parent.exists():
-                            metadata_path.parent.rmdir()
-                    except OSError:
-                        pass
+                try:
+                    from sandbox.application.ci_cleanup_broker import (
+                        CiCleanupBrokerError, remove_workspace_metadata,
+                    )
+                    remove_workspace_metadata(
+                        record.namespace, record.label,
+                        metadata_directory_identity, metadata_file_identity,
+                    )
+                except CiCleanupBrokerError as exc:
+                    repo.mark_lifecycle(
+                        workspace_id, "indeterminate", status="indeterminate")
+                    raise WorkspaceIndexError(
+                        exc.code if exc.code.startswith("cleanup_")
+                        else "workspace_identity_bound_removal_unavailable",
+                        "workspace metadata cleanup broker did not prove removal",
+                    ) from exc
                 repo.mark_lifecycle(workspace_id, "destroyed", status="destroyed")
                 job_repository.set_cleanup_state(job["job_id"], "completed")
                 return {
@@ -2327,6 +2366,35 @@ class WorkspaceService:
                     "workspace_path_unsafe", "private cleanup root is not owner-only")
             repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
             try:
+                if checkout_missing:
+                    try:
+                        from sandbox.application.ci_cleanup_broker import (
+                            CiCleanupBrokerError, recover_empty_checkout,
+                        )
+                        recover_empty_checkout(expected_identity)
+                    except CiCleanupBrokerError as exc:
+                        raise WorkspaceIndexError(
+                            exc.code if exc.code.startswith("cleanup_")
+                            else "workspace_identity_bound_removal_unavailable",
+                            "terminal CI checkout recovery broker did not prove removal",
+                        ) from exc
+                    try:
+                        from sandbox.application.ci_cleanup_broker import (
+                            CiCleanupBrokerError, remove_workspace_metadata,
+                        )
+                        remove_workspace_metadata(
+                            record.namespace, record.label,
+                            metadata_directory_identity, metadata_file_identity,
+                        )
+                    except CiCleanupBrokerError as exc:
+                        raise WorkspaceIndexError(
+                            exc.code if exc.code.startswith("cleanup_")
+                            else "workspace_identity_bound_removal_unavailable",
+                            "workspace metadata cleanup broker did not prove removal",
+                        ) from exc
+                    repo.mark_lifecycle(workspace_id, "destroyed", status="destroyed")
+                    job_repository.set_cleanup_state(job["job_id"], "completed")
+                    return {"ok": True, "status": "recovered"}
                 directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                                    getattr(os, "O_NOFOLLOW", 0))
                 parent_fd = os.open(checkout_path.parent, directory_flags)
@@ -2335,6 +2403,11 @@ class WorkspaceService:
                 os.mkdir(operation_name, mode=0o700, dir_fd=cleanup_fd)
                 operation_fd = os.open(operation_name, directory_flags,
                                        dir_fd=cleanup_fd)
+                operation_entry = os.fstat(operation_fd)
+                operation_identity = {
+                    "device": int(operation_entry.st_dev),
+                    "inode": int(operation_entry.st_ino),
+                }
                 expected_fd = None
                 owned_fd = None
                 try:
@@ -2369,10 +2442,19 @@ class WorkspaceService:
                             "workspace_ownership_drift",
                             "quarantined checkout identity changed")
                     _remove_tree_fd(owned_fd)
-                    raise WorkspaceIndexError(
-                        "workspace_identity_bound_removal_unavailable",
-                        "platform cannot remove an emptied quarantine by "
-                        "open descriptor identity")
+                    try:
+                        from sandbox.application.ci_cleanup_broker import (
+                            CiCleanupBrokerError, finalize_checkout,
+                        )
+                        finalize_checkout(
+                            operation_name, operation_identity, expected_identity,
+                        )
+                    except CiCleanupBrokerError as exc:
+                        raise WorkspaceIndexError(
+                            exc.code if exc.code.startswith("cleanup_")
+                            else "workspace_identity_bound_removal_unavailable",
+                            "terminal CI checkout cleanup broker did not prove removal",
+                        ) from exc
                 finally:
                     if owned_fd is not None:
                         os.close(owned_fd)
@@ -2381,8 +2463,20 @@ class WorkspaceService:
                     os.close(operation_fd)
                     os.close(cleanup_fd)
                     os.close(parent_fd)
-                metadata_path.unlink()
-                metadata_path.parent.rmdir()
+                try:
+                    from sandbox.application.ci_cleanup_broker import (
+                        CiCleanupBrokerError, remove_workspace_metadata,
+                    )
+                    remove_workspace_metadata(
+                        record.namespace, record.label,
+                        metadata_directory_identity, metadata_file_identity,
+                    )
+                except CiCleanupBrokerError as exc:
+                    raise WorkspaceIndexError(
+                        exc.code if exc.code.startswith("cleanup_")
+                        else "workspace_identity_bound_removal_unavailable",
+                        "workspace metadata cleanup broker did not prove removal",
+                    ) from exc
             except Exception:
                 repo.mark_lifecycle(
                     workspace_id, "indeterminate", status="indeterminate")

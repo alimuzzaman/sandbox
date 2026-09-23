@@ -31,6 +31,8 @@ _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+_MAX_CHECKOUT_ENTRIES = 1_000_000
+_MAX_CHECKOUT_DEPTH = 256
 
 
 class CiCleanupBrokerError(RuntimeError):
@@ -89,9 +91,9 @@ def finalize_checkout(operation_name: str, operation_identity: dict[str, int],
             str(tree_dev), str(tree_ino))
 
 
-def recover_empty_checkout(checkout_identity: dict[str, int]) -> None:
+def recover_quarantined_checkout(checkout_identity: dict[str, int]) -> None:
     device, inode = _identity(checkout_identity)
-    _invoke("recover-empty-checkout", str(device), str(inode))
+    _invoke("recover-quarantined-checkout", str(device), str(inode))
 
 
 def retire_artifact(name: str, identity: dict[str, int], digest: str,
@@ -360,18 +362,57 @@ def _finalize_checkout(config: dict[str, Any], owner_uid: int,
                     pass
 
 
-def _recover_empty_checkout(config: dict[str, Any], owner_uid: int,
-                            expected_tree: tuple[int, int]) -> dict[str, Any]:
+def _remove_checkout_contents(directory_fd: int, device: int,
+                              counters: list[int], depth: int = 0) -> None:
+    if depth > _MAX_CHECKOUT_DEPTH:
+        raise CiCleanupBrokerError("cleanup_checkout_depth_limit")
+    for name in os.listdir(directory_fd):
+        counters[0] += 1
+        if counters[0] > _MAX_CHECKOUT_ENTRIES:
+            raise CiCleanupBrokerError("cleanup_checkout_entry_limit")
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if info.st_dev != device:
+            raise CiCleanupBrokerError("cleanup_cross_device_unavailable")
+        if stat.S_ISDIR(info.st_mode):
+            child_fd = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW |
+                os.O_CLOEXEC, dir_fd=directory_fd,
+            )
+            try:
+                child_info = os.fstat(child_fd)
+                if ((child_info.st_dev, child_info.st_ino) !=
+                        (info.st_dev, info.st_ino)):
+                    raise CiCleanupBrokerError("cleanup_identity_changed")
+                os.fchown(child_fd, 0, 0)
+                os.fchmod(child_fd, 0o700)
+                _remove_checkout_contents(child_fd, device, counters, depth + 1)
+                os.fsync(child_fd)
+            finally:
+                os.close(child_fd)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise CiCleanupBrokerError("cleanup_identity_changed")
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise CiCleanupBrokerError("cleanup_identity_changed")
+            os.unlink(name, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
+def _recover_quarantined_checkout(config: dict[str, Any], owner_uid: int,
+                                  expected_tree: tuple[int, int]) -> dict[str, Any]:
     deployment_fd = _open_pinned_root(config, "deployment")
     quarantine_fd = _quarantine_fd(owner_uid)
-    cleanup_fd = moved_fd = None
+    cleanup_fd = operation_fd = moved_fd = None
     try:
         cleanup_fd = _open_child_dir(deployment_fd, ".sandbox-ci-cleanup",
                                      owner=owner_uid, mode=0o700)
         entries = os.listdir(cleanup_fd)
         if len(entries) > 4096:
             raise CiCleanupBrokerError("cleanup_recovery_limit")
-        matches: list[tuple[str, tuple[int, int]]] = []
+        matches: list[tuple[str, tuple[int, int], str]] = []
         for name in entries:
             if _HEX32.fullmatch(name) is None:
                 continue
@@ -391,35 +432,77 @@ def _recover_empty_checkout(config: dict[str, Any], owner_uid: int,
                     continue
                 try:
                     owned_info = os.fstat(owned_fd)
-                    if ((owned_info.st_dev, owned_info.st_ino) == expected_tree
-                            and not os.listdir(owned_fd)):
+                    if (owned_info.st_dev, owned_info.st_ino) == expected_tree:
                         matches.append((name, (operation_info.st_dev,
-                                               operation_info.st_ino)))
+                                               operation_info.st_ino), "deployment"))
                 finally:
                     os.close(owned_fd)
             finally:
                 os.close(operation_fd)
+                operation_fd = None
+        for name in os.listdir(quarantine_fd):
+            match = re.fullmatch(r"checkout-([0-9a-f]{32})", name)
+            if match is None:
+                continue
+            try:
+                checkout_fd = _open_child_dir(quarantine_fd, name)
+            except (OSError, CiCleanupBrokerError):
+                continue
+            try:
+                checkout_info = os.fstat(checkout_fd)
+                if (checkout_info.st_dev, checkout_info.st_ino) == expected_tree:
+                    matches.append((match.group(1), expected_tree, "quarantine"))
+            finally:
+                os.close(checkout_fd)
         if not matches:
             raise CiCleanupBrokerError("cleanup_recovery_not_found")
         if len(matches) != 1:
             raise CiCleanupBrokerError("cleanup_recovery_ambiguous")
-        name, expected_operation = matches[0]
-        quarantine_name, moved_fd = _move_into_quarantine(
-            cleanup_fd, name, quarantine_fd, expected_operation, "checkout")
-        try:
-            owned_fd = _open_child_dir(
-                moved_fd, "owned", owner=owner_uid, mode=0o700)
+        name, identity, location = matches[0]
+        quarantine_name = f"checkout-{name}"
+        if location == "deployment":
+            operation_fd = _open_child_dir(
+                cleanup_fd, name, owner=owner_uid, mode=0o700)
             try:
-                owned_info = os.fstat(owned_fd)
-                if ((owned_info.st_dev, owned_info.st_ino) != expected_tree
-                        or os.listdir(owned_fd)):
-                    raise CiCleanupBrokerError("cleanup_checkout_not_empty")
-                os.fchown(owned_fd, 0, 0)
-                os.fchmod(owned_fd, 0o700)
-                os.fsync(owned_fd)
+                operation_info = os.fstat(operation_fd)
+                if (operation_info.st_dev, operation_info.st_ino) != identity:
+                    raise CiCleanupBrokerError("cleanup_identity_changed")
+                owned_info = os.stat(
+                    "owned", dir_fd=operation_fd, follow_symlinks=False)
+                if (owned_info.st_dev, owned_info.st_ino) != expected_tree:
+                    raise CiCleanupBrokerError("cleanup_identity_changed")
+                _rename_noreplace(
+                    operation_fd, "owned", quarantine_fd, quarantine_name)
+                os.fsync(operation_fd)
+                moved_fd = _open_child_dir(
+                    quarantine_fd, quarantine_name, owner=owner_uid)
+                moved_info = os.fstat(moved_fd)
+                if (moved_info.st_dev, moved_info.st_ino) != expected_tree:
+                    raise CiCleanupBrokerError("cleanup_identity_changed")
+                os.fchown(moved_fd, 0, 0)
+                os.fchmod(moved_fd, 0o700)
+                os.fsync(moved_fd)
+                os.close(moved_fd)
+                moved_fd = None
+                if os.listdir(operation_fd):
+                    raise CiCleanupBrokerError("cleanup_operation_not_empty")
             finally:
-                os.close(owned_fd)
-            os.rmdir("owned", dir_fd=moved_fd)
+                os.close(operation_fd)
+                operation_fd = None
+            current = os.stat(name, dir_fd=cleanup_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != identity:
+                raise CiCleanupBrokerError("cleanup_identity_changed")
+            os.rmdir(name, dir_fd=cleanup_fd)
+            os.fsync(cleanup_fd)
+        moved_fd = _open_child_dir(
+            quarantine_fd, quarantine_name)
+        try:
+            moved_info = os.fstat(moved_fd)
+            if (moved_info.st_dev, moved_info.st_ino) != expected_tree:
+                raise CiCleanupBrokerError("cleanup_identity_changed")
+            os.fchown(moved_fd, 0, 0)
+            os.fchmod(moved_fd, 0o700)
+            _remove_checkout_contents(moved_fd, expected_tree[0], [0])
             os.fsync(moved_fd)
         finally:
             os.close(moved_fd)
@@ -428,7 +511,7 @@ def _recover_empty_checkout(config: dict[str, Any], owner_uid: int,
         os.fsync(quarantine_fd)
         return {"ok": True, "status": "completed", "recovered": True}
     finally:
-        for fd in (moved_fd, cleanup_fd, quarantine_fd, deployment_fd):
+        for fd in (moved_fd, operation_fd, cleanup_fd, quarantine_fd, deployment_fd):
             if fd is not None:
                 try:
                     os.close(fd)
@@ -563,8 +646,8 @@ def _helper_main(argv: list[str] | None = None) -> int:
             numbers = [int(value) for value in argv[2:]]
             response = _finalize_checkout(config, owner_uid, name,
                 (numbers[0], numbers[1]), (numbers[2], numbers[3]))
-        elif len(argv) == 3 and argv[0] == "recover-empty-checkout":
-            response = _recover_empty_checkout(config, owner_uid,
+        elif len(argv) == 3 and argv[0] == "recover-quarantined-checkout":
+            response = _recover_quarantined_checkout(config, owner_uid,
                                                (int(argv[1]), int(argv[2])))
         elif len(argv) == 7 and argv[0] == "remove-metadata":
             numbers = [int(value) for value in argv[3:]]

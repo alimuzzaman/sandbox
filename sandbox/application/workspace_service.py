@@ -2376,9 +2376,9 @@ class WorkspaceService:
                 if checkout_missing:
                     try:
                         from sandbox.application.ci_cleanup_broker import (
-                            CiCleanupBrokerError, recover_empty_checkout,
+                            CiCleanupBrokerError, recover_quarantined_checkout,
                         )
-                        recover_empty_checkout(expected_identity)
+                        recover_quarantined_checkout(expected_identity)
                     except CiCleanupBrokerError as exc:
                         raise WorkspaceIndexError(
                             exc.code if exc.code.startswith("cleanup_")

@@ -266,8 +266,10 @@ that source with the normal protected service migration when needed. Unsupported
 retain and report cleanup failure. If a broker install is interrupted, inspect service
 status and the broker capability before retrying; do not remove its retained quarantine
 manually. An exact terminal job whose cleanup previously failed is retried by reading its
-job status or invoking terminal job cleanup; recovery accepts only one empty quarantine
-whose inode matches the durable workspace authority. Workspace validation/materialization and
+job status or invoking terminal job cleanup; recovery accepts only one quarantine
+whose inode matches the durable workspace authority. The privileged helper removes
+that exact tree through descriptor-relative, no-follow operations, refuses device
+crossings, and bounds entry count and depth. Workspace validation/materialization and
 durable job acceptance hold the same controller lock as terminal deletion, so a new
 accept cannot commit after the final active-job check. The same seam covers
 `supervisor_launch_failed`. Retry restores from one retained archive capped at 512 MiB

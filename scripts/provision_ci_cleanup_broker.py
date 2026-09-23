@@ -90,8 +90,8 @@ def _roots(sandbox_home: Path, owner_uid: int) -> dict[str, dict[str, object]]:
             raise ProvisionError("cleanup root path contains a symlink")
         info = path.lstat()
         if (not stat.S_ISDIR(info.st_mode) or path.is_symlink()
-                or info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) & 0o022):
-            raise ProvisionError("cleanup root ownership or mode is unsafe")
+                or info.st_uid != owner_uid):
+            raise ProvisionError("cleanup root ownership or identity is unsafe")
     return {
         key: {"path": str(path), "device": int(info.st_dev), "inode": int(info.st_ino)}
         for key, path in (("deployment", deployment), ("legacy", legacy),

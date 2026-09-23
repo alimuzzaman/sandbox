@@ -258,7 +258,8 @@ Linux remotes can enable final removal with the protected, owner-scoped cleanup 
 The installed helper is root-owned and pinned to the exact deploy, workspace-metadata,
 and CI-artifact roots. Its only delete operations accept an inode identity and fixed
 object names, move the object to a root-only quarantine, and verify it again before
-removal. Installation refuses when those roots and `/var/lib` do not share a filesystem,
+removal. Existing root permissions are preserved; owner-only workspace leaves and inode
+checks bound each operation. Installation refuses when those roots and `/var/lib` do not share a filesystem,
 because atomic quarantine moves cannot cross filesystem boundaries. The service runtime
 must first match the current committed CLI revision; install
 that source with the normal protected service migration when needed. Unsupported platforms

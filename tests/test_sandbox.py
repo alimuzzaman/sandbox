@@ -456,6 +456,49 @@ class TestProxyTransportHealth(unittest.TestCase):
             self.assertFalse(domains_core._sandbox_proxy_route_serving(
                 "demo.tst", secure=True))
 
+    def test_proxy_probe_retries_transient_oserror_until_success(self):
+        class Response:
+            headers = {"Server": "Caddy"}
+            def close(self): pass
+
+        attempts = 0
+        def fake_open(req, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionRefusedError("Connection refused")
+            return Response()
+
+        opener = mock.Mock()
+        opener.open = fake_open
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            self.assertTrue(domains_core._sandbox_proxy_route_serving(
+                "demo.tst", secure=True, timeout=1.0, retry=True))
+        self.assertEqual(attempts, 2)
+
+    def test_proxy_probe_times_out_on_persistent_oserror(self):
+        attempts = 0
+        def fake_open(req, timeout):
+            nonlocal attempts
+            attempts += 1
+            raise ConnectionRefusedError("Connection refused")
+
+        opener = mock.Mock()
+        opener.open = fake_open
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            self.assertFalse(domains_core._sandbox_proxy_route_serving(
+                "demo.tst", secure=True, timeout=0.1, retry=True))
+        self.assertGreater(attempts, 1)
+
+    def test_site_url_passes_timeout_to_proxy_active(self):
+        inst_cfg = {"domain": "demo.tst", "tld": "tst", "wordpress_port": 8080}
+        with mock.patch.object(domains_core, "_domain_is_secure", return_value=True), \
+             mock.patch.object(domains_core, "_sandbox_proxy_active", return_value=True) as active:
+            url = domains_core.site_url(inst_cfg, timeout=4.2, retry=True)
+            self.assertEqual(url, "https://demo.tst")
+            active.assert_called_once_with("demo.tst", secure=True, timeout=4.2, retry=True)
+
+
     def test_foreign_wildcard_response_blocks_clean_url_claim(self):
         with mock.patch.object(domains_core, "resolve_instances", return_value={
                 "demo": {"domain": "demo.tst", "tld": "tst"},

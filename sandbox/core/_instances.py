@@ -1138,7 +1138,8 @@ def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
     """
     cfg = load_config()
     ic = resolve_instances(cfg).get(name) or {}
-    expected = expected_url if expected_url is not None else site_url(ic)
+    expected = expected_url if expected_url is not None else site_url(
+        ic, timeout=5.0, retry=True)
     if not expected.startswith(("http://", "https://")):
         return False
 
@@ -1425,7 +1426,7 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                 route_cfg = resolve_instances(cfg).get(existing["instance"]) or existing
                 # Proxy availability can change between observations. Reconcile,
                 # prove and publish one selected URL within this ensure call.
-                advertised_url = site_url(route_cfg)
+                advertised_url = site_url(route_cfg, timeout=5.0, retry=True)
                 _auto_heal_wp_url(existing["instance"], expected_url=advertised_url)
                 if not _wait_reachable(
                         route_cfg, require_application_success=True,
@@ -1540,7 +1541,7 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                 # A fresh document root may not answer the proxy's route proof
                 # until installation completes. Retry the same owned route now.
                 if (_proxy_sudoers_installed()
-                        and (not secured or site_url(resolve_instances(cfg)[name]).startswith("http://localhost:"))
+                        and (not secured or site_url(resolve_instances(cfg)[name], timeout=5.0, retry=True).startswith("http://localhost:"))
                         and _secure_at_create(cfg, name)):
                     secured = True
                     cfg = load_config()
@@ -1578,7 +1579,7 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
             _wire_project_themes(name, root, pconf)
 
             final_route = resolve_instances(cfg)[name]
-            _base_url = site_url(final_route)
+            _base_url = site_url(final_route, timeout=5.0, retry=True)
             if not _wait_reachable(final_route, require_application_success=True,
                                    canonical_url=_base_url):
                 raise sc.ConfigError(

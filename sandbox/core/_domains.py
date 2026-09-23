@@ -253,7 +253,8 @@ def _proxy_container_running() -> bool:
     return res.returncode == 0 and bool((res.stdout or "").strip())
 
 
-def _sandbox_proxy_active(domain: str, *, secure: bool = False) -> bool:
+def _sandbox_proxy_active(domain: str, *, secure: bool = False,
+                          timeout: float = 1.5, retry: bool = False) -> bool:
     """True when the proxy is running AND has a route for this domain — i.e.
     the selected http(s)://<domain> actually serves. Used by site_url()."""
     if not _caddyfile_has_route(domain):
@@ -266,11 +267,13 @@ def _sandbox_proxy_active(domain: str, *, secure: bool = False) -> bool:
     # URL that never reached Caddy.  A bounded response-header probe is the
     # final authority: even an upstream 4xx/5xx is useful evidence when the
     # response is Caddy's, while a foreign listener is rejected.
-    return _sandbox_proxy_route_serving(domain, secure=secure)
+    return _sandbox_proxy_route_serving(domain, secure=secure, timeout=timeout,
+                                        retry=retry)
 
 
 def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
-                                 timeout: float = 1.5) -> bool:
+                                 timeout: float = 1.5,
+                                 retry: bool = False) -> bool:
     """Return whether a request for ``domain`` is answered by Sandbox Caddy.
 
     This deliberately checks Caddy's ``Server``/``Via`` headers rather than
@@ -283,6 +286,7 @@ def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
     from urllib.request import (HTTPRedirectHandler, Request, build_opener,
                                 ProxyHandler)
     import ssl
+    import time
 
     scheme = "https" if secure else "http"
     request = Request(
@@ -301,25 +305,45 @@ def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
         from urllib.request import HTTPSHandler
         handlers.append(HTTPSHandler(context=context))
     opener = build_opener(*handlers)
-    try:
-        response = opener.open(request, timeout=timeout)
-    except HTTPError as exc:
-        response = exc
-    except (OSError, ValueError):
-        return False
-    try:
-        server = str(response.headers.get("Server", "")).lower()
-        via = str(response.headers.get("Via", "")).lower()
-        # OrbStack's HTTPS interception also adds ``Via: 1.0 Caddy`` to its
-        # BaseHTTP response. Sandbox Caddy's reverse-proxy response is
-        # ``Via: 1.1 Caddy`` (or advertises itself as Server: Caddy), so keep
-        # the probe strict enough not to bless the foreign helper.
-        return "caddy" in server or via.startswith("1.1 caddy")
-    finally:
-        # urllib keeps the socket/file descriptor open until the response is
-        # garbage-collected.  Health checks run for every managed hostname at
-        # startup, so close both normal and HTTPError responses explicitly.
-        response.close()
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    backoff = 0.05
+    while True:
+        remaining = deadline - time.monotonic()
+        per_call_timeout = max(0.05, min(1.0, remaining)) if (timeout > 0 and retry) else min(1.0, max(0.05, float(timeout)))
+        response = None
+        try:
+            response = opener.open(request, timeout=per_call_timeout)
+        except HTTPError as exc:
+            response = exc
+        except (OSError, ValueError):
+            response = None
+
+        if response is not None:
+            try:
+                server = str(response.headers.get("Server", "")).lower()
+                via = str(response.headers.get("Via", "")).lower()
+                # OrbStack's HTTPS interception also adds ``Via: 1.0 Caddy`` to its
+                # BaseHTTP response. Sandbox Caddy's reverse-proxy response is
+                # ``Via: 1.1 Caddy`` (or advertises itself as Server: Caddy), so keep
+                # the probe strict enough not to bless the foreign helper.
+                if "caddy" in server or via.startswith("1.1 caddy"):
+                    return True
+                return False
+            finally:
+                # urllib keeps the socket/file descriptor open until the response is
+                # garbage-collected.  Health checks run for every managed hostname at
+                # startup, so close both normal and HTTPError responses explicitly.
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
+
+        if not retry or time.monotonic() >= deadline:
+            return False
+
+        sleep_time = min(backoff, max(0.01, deadline - time.monotonic()))
+        time.sleep(sleep_time)
+        backoff = min(0.5, backoff * 1.5)
 
 
 def sandbox_caddy_health(cfg: dict, *, domains=None) -> dict:
@@ -384,6 +408,7 @@ def sandbox_caddy_health(cfg: dict, *, domains=None) -> dict:
             serving = bool(running and readable is not False and configured and
                            _sandbox_proxy_route_serving(
                                dom, secure=secure, timeout=probe_timeout,
+                               retry=bool(requested is not None),
                            ))
         except Exception:
             return unavailable()
@@ -1112,7 +1137,8 @@ def reload_proxy() -> bool:
     return proxy_apply()[0]
 
 
-def site_url(inst_cfg: dict) -> str:
+def site_url(inst_cfg: dict, *, timeout: float | None = None,
+             retry: bool = False) -> str:
     """Browser URL for an instance. Precedence:
       • https://<domain>        — proxy serves it AND registry says HTTPS
       • http://<domain>         — proxy serves this .tst domain (clean, no port)
@@ -1136,7 +1162,9 @@ def site_url(inst_cfg: dict) -> str:
         return f"https://{dom}"
     if dom and dom.endswith(f".{_tld(inst_cfg)}"):
         secure = _domain_is_secure(dom, inst_cfg)
-        if _sandbox_proxy_active(dom, secure=secure):
+        proxy_timeout = timeout if timeout is not None else 1.5
+        if _sandbox_proxy_active(dom, secure=secure, timeout=proxy_timeout,
+                                 retry=retry):
             return f"{'https' if secure else 'http'}://{dom}"
         # A persisted clean URL is only a historical observation.  Once the
         # proxy is intercepted or stopped, return the reachable published port

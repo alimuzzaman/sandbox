@@ -258,6 +258,39 @@ class TestDurableRemoteE2EShards(unittest.TestCase):
                 e2e.cmd_e2e({}, args)
         self.assertIs(raised.exception, admission)
 
+    def test_cmd_e2e_disallows_inferred_remote(self):
+        captured_requests = []
+
+        def fake_resolve(req):
+            captured_requests.append(req)
+            return SimpleNamespace(
+                kind="local", project_root=str(self.root), remote_name=None,
+                workspace_label=None, sources={"identity": "project:e2e"},
+            )
+
+        args = SimpleNamespace(project_dir=str(self.root), playwright_config=None,
+                               local=False, remote=None, workspace=None, timeout=120,
+                               workers=2, concurrency=None, grep=None, keep_on_fail=False,
+                               strict_provision=False, passthrough=[], json=True,
+                               shard_index=None, shard_total=None)
+
+        with patch.object(e2e, "_core", return_value=SimpleNamespace(
+                load_project_config=lambda _path: {"root": str(self.root)})), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(resolve=fake_resolve),
+                }), \
+                patch.object(e2e, "_playwright_browser_preflight", return_value={"code": "mock_err", "message": "err"}):
+            with self.assertRaises(SystemExit):
+                e2e.cmd_e2e({}, args)
+
+        self.assertEqual(len(captured_requests), 1)
+        req = captured_requests[0]
+        self.assertFalse(req.allow_inferred_remote, "e2e must not infer remote when local/remote omitted")
+        self.assertFalse(req.local)
+        self.assertIsNone(req.remote)
+        self.assertEqual(req.required_capability, "job.exec")
+
+
 
 class TestAggregateResult(unittest.TestCase):
     def test_failed_worker_retains_bounded_diagnostic_output(self):

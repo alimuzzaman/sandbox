@@ -290,6 +290,15 @@ class CreationRequestOwnerTests(unittest.TestCase):
         self.assertEqual(next_receipt["relation"], "reused")
         self.assertEqual(next_receipt["instance_incarnation_id"], receipt["instance_incarnation_id"])
 
+    def test_compose_creation_context_with_default_startup_timeout(self):
+        root = self.project("default-timeout")
+        context = self.context(root, "creation/default-timeout")
+        result = self.invoke(root, context)
+        self.assertTrue(result.ok)
+        receipt = self.proof(root, context)["creation_receipt"]
+        self.assertEqual(receipt["completion"], "succeeded")
+        self.assertEqual(receipt["relation"], "created")
+
     def test_failed_start_replay_preserves_failure_and_never_repeats_effects(self):
         root = self.project("failed")
         context = self.context(root, "creation/failed")

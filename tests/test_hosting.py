@@ -1255,7 +1255,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertIn("--force-recreate --renew-anon-volumes --remove-orphans web worker", commands[0])
+        self.assertIn("--force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[0])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")
@@ -1286,7 +1286,7 @@ class TestHostingManifest(unittest.TestCase):
             if " up -d" in command or " run --rm " in command
         ))
         self.assertIn(
-            "up -d --no-build --force-recreate --renew-anon-volumes "
+            "up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes "
             "--remove-orphans web worker",
             next(command for command in commands if " up -d" in command),
         )

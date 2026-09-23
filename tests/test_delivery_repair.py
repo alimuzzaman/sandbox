@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from sandbox.application.job_service import JobService
-from sandbox.core import _instances, _remote
+from sandbox.core import _docker, _instances, _remote
 from sandbox.commands import instances_cmd
 from sandbox.jobs.listing import job_page, MAX_JOB_PAGE_BYTES
 from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -218,6 +218,37 @@ class InstanceReadinessRegressions(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not uniquely registered"):
                 _remote.set_remote_instance_url({}, "/remote/project", "preview", "https://preview.test")
             run.assert_not_called()
+
+
+class StoppedInstanceAndExposureRegressions(unittest.TestCase):
+    def test_attest_source_mounts_stopped_when_containers_absent(self):
+        with patch.object(_docker, "run", return_value=types.SimpleNamespace(returncode=0, stdout="")):
+            attestation = _docker.attest_source_mounts("fixture", "nginx", ["/fixture/path"])
+        self.assertFalse(attestation["ok"])
+        self.assertEqual(attestation["code"], "instance_runtime_stopped")
+
+    def test_exposure_ensure_failure_checks_receipt_and_raises_specific_code(self):
+        from sandbox.delivery.exposure import ExposureAttempt
+        from tests.test_delivery_models import make_operation, make_target
+
+        attempt = object.__new__(ExposureAttempt)
+        attempt.operation = make_operation("exp-fail")
+        attempt.repository = Mock()
+        attempt.receipt = None
+        attempt.prepare_creation = Mock()
+        attempt.bind_creation = Mock()
+        sr = Mock()
+        sr.prepare_creation_context.return_value = {
+            "ok": True,
+            "creation_context": {"operation_id": "op", "request_id": "req"},
+        }
+        sr.ensure_remote_instance.return_value = {
+            "ok": False,
+            "error": {"code": "creation_request_conflict"},
+        }
+        sr.read_remote_creation_receipt.return_value = {"ok": False}
+        with self.assertRaisesRegex(ValueError, "creation_request_conflict"):
+            attempt.ensure({"name": "remote"}, make_target(), label="default", transport=sr)
 
 
 class RetireInterruptedDeliveryTests(unittest.TestCase):

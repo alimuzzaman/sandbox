@@ -1079,7 +1079,7 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     # code/config changes are not shadowed by a previous container. Persistent
     # data must be declared as named volumes (for WordPress: database/uploads).
     converge_flags = (
-        f"{build_flag} --force-recreate --renew-anon-volumes"
+        f"{build_flag} --force-recreate --always-recreate-deps --renew-anon-volumes"
         if force_recreate else " --no-build" if not build else ""
     )
     command = f"{prefix} up -d{converge_flags} --remove-orphans {service_args}"

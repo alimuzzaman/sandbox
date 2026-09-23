@@ -30,7 +30,8 @@ _ASSIGNMENT = re.compile(
     r"(?P<name>[A-Za-z0-9_-]*(?:authorization|cookie|credential|password|passphrase|"
     r"secret|token|api[_-]?key|private[_-]?key|basic[_-]?auth|"
     r"access[_-]?key(?:[_-]?id)?)[A-Za-z0-9_-]*)"
-    r"(?P<separator>\s*[=:]\s*)(?:bearer\s+|basic\s+)?[^\s,;&\]\[}\{]+"
+    r"(?P<separator>\s*[=:]\s*)(?:bearer\s+|basic\s+)?"
+    r"(?:(?P<quote>[\"'])(?P<quoted_value>(?:[^\"'\r\n\\]|\\.)*)(?P=quote)|(?P<value>[^\s,;&\]\[\}\{\"\']+))"
 )
 _AUTH_HEADER = re.compile(
     r"(?i)\b(?P<name>authorization)\s*:\s*(?:bearer|basic)\s+[^\s,;]+"
@@ -119,7 +120,8 @@ def _redact_text_impl(value: str, *, exact_values: Iterable[str | bytes] = (),
         text = _URL.sub(lambda match: _redact_url_impl(match.group(0)), text)
     text = _AUTH_HEADER.sub(lambda match: f"{match.group('name')}: {REDACTED}", text)
     text = _ASSIGNMENT.sub(
-        lambda match: f"{match.group('name')}{match.group('separator')}{REDACTED}", text,
+        lambda match: f"{match.group('name')}{match.group('separator')}{match.group('quote') or ''}{REDACTED}{match.group('quote') or ''}",
+        text,
     )
     text = _BEARER.sub(f"Bearer {REDACTED}", text)
     return _PROVIDER_SECRET.sub(REDACTED, text)

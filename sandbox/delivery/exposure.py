@@ -179,6 +179,12 @@ class ExposureAttempt:
             if receipt_result.get('ok'):
                 attempt.bind_creation(context, receipt_result['creation_receipt'])
             raise
+        if instance.get('ok') is False:
+            receipt_result = sr.read_remote_creation_receipt(entry, target, label, creation_context=context)
+            if receipt_result.get('ok'):
+                attempt.bind_creation(context, receipt_result['creation_receipt'])
+            error_code = (instance.get('error') or {}).get('code') if isinstance(instance.get('error'), dict) else 'instance_ensure_failed'
+            raise ValueError(error_code or 'instance_ensure_failed')
         receipt_result = sr.read_remote_creation_receipt(entry, target, label, creation_context=context)
         if receipt_result.get('ok') is not True:
             raise ValueError('creation_receipt_unavailable')

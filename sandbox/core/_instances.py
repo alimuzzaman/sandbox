@@ -820,13 +820,16 @@ def _clean_wp_diagnostic_output(text: str) -> str:
         )):
             continue
         # WP-CLI uninstalled site indications
-        if any(marker in trimmed for marker in (
-            "The site you have requested is not installed",
-            "This does not seem to be a WordPress installation",
-            "Run 'wp core install'",
-            'Run `wp core install`',
-            "The used path is:",
-            "Pass --path=",
+        lowered = trimmed.lower()
+        if any(marker in lowered for marker in (
+            "not installed",
+            "this does not seem to be a wordpress installation",
+            "wp core install",
+            "the used path is:",
+            "pass --path=",
+            "tables not found",
+            "doesn't exist",
+            "error: wordpress",
         )):
             continue
         cleaned_lines.append(trimmed)

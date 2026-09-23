@@ -1557,8 +1557,9 @@ def creation_query(project_dir, *, label='default', context=None,
     from sandbox.project_registry.json import JsonRegistryRepository
     from sandbox.core._paths import RUNTIME_DIR
     records = JsonRegistryRepository(Path(RUNTIME_DIR) / 'registry.json').read_only_all()
+    target_root = Path(pconf['root']).resolve()
     selected = [record for record in records.values()
-                if record.get('root') == str(Path(pconf['root']).resolve()) and record.get('label') == label]
+                if Path(record.get('root', '')).resolve() == target_root and record.get('label') == label]
     if len(selected) > 1:
         raise ValueError('creation_request_conflict')
     return lookup_creation_receipt(selected[0] if selected else None, context, expected_incarnation)

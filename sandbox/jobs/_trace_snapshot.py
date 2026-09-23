@@ -37,10 +37,10 @@ class SnapshotMissing(FileNotFoundError):
 class SnapshotBudget:
     """Standalone legacy reads have a finite budget; traces pass their own."""
 
-    def __init__(self):
+    def __init__(self, timeout_seconds: float = 2.5):
         # Admission already owns a five-second publication loop. A legacy
         # read must not add another five seconds to each pass through it.
-        self.deadline = time.monotonic() + 0.1
+        self.deadline = time.monotonic() + max(0.1, timeout_seconds)
 
     def remaining_seconds(self):
         return max(0.0, self.deadline - time.monotonic())

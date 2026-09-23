@@ -398,6 +398,10 @@ class JobRepository:
             self._migrate()
 
     def close(self) -> None:
+        try:
+            self.connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except sqlite3.Error:
+            pass
         self.connection.close()
 
     @contextmanager

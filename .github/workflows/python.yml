@@ -25,11 +25,21 @@ jobs:
 
       - name: Create CLI test environment
         run: |
-          python -m venv .cli-venv
-          .cli-venv/bin/python -m pip install --disable-pip-version-check PyYAML
+          # Keep the runner-only environment outside a local `act --bind`
+          # checkout, so the job cannot overwrite a developer's host venv.
+          python -m venv /tmp/sandbox-cli-venv
+          /tmp/sandbox-cli-venv/bin/python -m pip install --disable-pip-version-check PyYAML
+          echo "/tmp/sandbox-cli-venv/bin" >> "$GITHUB_PATH"
 
       - name: Show exact revision
-        run: git rev-parse HEAD
+        run: |
+          # A local `act --bind` run can expose a Git worktree marker whose
+          # host-only admin path is not mounted in the runner container.
+          if git rev-parse HEAD 2>/dev/null; then
+            :
+          else
+            echo "Git metadata is unavailable in the bound local runner; continuing with the checked-out files."
+          fi
 
       - name: Run Sandbox Python acceptance
         run: ./sb selftest

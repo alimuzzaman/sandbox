@@ -144,6 +144,12 @@ own code still touches (for planning/mapping/safety) is:
 | Deploy/publish-class `uses:` or `run:` | Our safety deny-list | Neutralized BEFORE act sees them, unless `--allow-deploy` (§3.6) |
 | `${{ secrets.* }}` | Resolved from `sandbox.local.yml` `ci_secrets:` / `$SANDBOX_CI_SECRET_*`, fed to act via `--secret-file` | Never GitHub's; unresolved → fail loud before anything runs |
 
+When `act --bind` runs from a Git worktree, the mounted `.git` marker can point to
+host-only worktree administration paths, and repo-local virtual environments can
+point at host-only interpreters. Workflows must keep runner-only environments in
+`/tmp`, treat revision display as informational in that local mode, and continue
+with the bound source files; hosted GitHub runners still have normal Git metadata.
+
 ### 3.3 The real-world shape this targets (survey, unchanged from original research)
 
 Query Monitor's real CI (`johnbillion/query-monitor`) uses an 8-cell `strategy.matrix.include`

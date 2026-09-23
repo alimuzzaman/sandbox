@@ -125,7 +125,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         with patch(
                 "sandbox.application.workspace_service._observe_cleanup_references",
                 return_value={"containers": 0, "mounts": 0}) as references, patch(
-                "sandbox.application.ci_cleanup_broker.recover_empty_checkout"
+                "sandbox.application.ci_cleanup_broker.recover_quarantined_checkout"
                 ) as recover, patch(
                 "sandbox.application.ci_cleanup_broker.remove_workspace_metadata"
                 ) as remove_metadata:
@@ -140,6 +140,51 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                          (os.major(expected_device), os.minor(expected_device)))
         self.assertEqual(recover.call_count, 1)
         self.assertEqual(remove_metadata.call_count, 1)
+
+    def test_privileged_checkout_removal_is_recursive_and_does_not_follow_symlinks(self):
+        from sandbox.application.ci_cleanup_broker import _remove_checkout_contents
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "checkout"
+            root.mkdir()
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "file.txt").write_text("owned")
+            outside = Path(temporary) / "outside.txt"
+            outside.write_text("preserve")
+            (root / "outside-link").symlink_to(outside)
+            directory_fd = os.open(
+                root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                with patch("sandbox.application.ci_cleanup_broker.os.fchown"):
+                    _remove_checkout_contents(
+                        directory_fd, os.fstat(directory_fd).st_dev, [0])
+                self.assertEqual(os.listdir(directory_fd), [])
+                self.assertEqual(outside.read_text(), "preserve")
+            finally:
+                os.close(directory_fd)
+
+    def test_privileged_checkout_removal_refuses_a_different_device(self):
+        from sandbox.application.ci_cleanup_broker import (
+            CiCleanupBrokerError, _remove_checkout_contents,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "checkout"
+            root.mkdir()
+            payload = root / "owned.txt"
+            payload.write_text("keep on proof failure")
+            directory_fd = os.open(
+                root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                with self.assertRaises(CiCleanupBrokerError) as raised:
+                    _remove_checkout_contents(
+                        directory_fd, os.fstat(directory_fd).st_dev + 1, [0])
+                self.assertEqual(raised.exception.code,
+                                 "cleanup_cross_device_unavailable")
+                self.assertEqual(payload.read_text(), "keep on proof failure")
+            finally:
+                os.close(directory_fd)
 
     def test_supervisor_success_and_failure_use_the_same_terminal_cleanup_seam(self):
         for name, command, lifecycle in (

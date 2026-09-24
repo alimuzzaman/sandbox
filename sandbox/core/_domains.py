@@ -840,13 +840,21 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
     instance, keyed by its primary domain), so the alias block has to read the
     primary's cert files or it would fall back to http while https is live."""
     cert, key = _cert_paths(cert_domain or domain)
+    # Bound retries to one additional attempt. `forward_auth` accepts the same
+    # reverse_proxy subdirectives as a backend route.
+    proxy_retry = """        lb_retries 1
+        lb_try_interval 250ms
+        transport http {
+            dial_timeout 3s
+        }
+"""
     auth = ""
     if activation_route is not None:
         auth = f'''    forward_auth host.docker.internal:8766 {{
         uri /v1/activate?
         header_up Authorization "Bearer {activation_route.token}"
         header_up X-Sandbox-Route-ID "{activation_route.route_id}"
-    }}
+{proxy_retry}    }}
 '''
     hosts = [domain, _wildcard_san(domain)] if wildcard else [domain]
     if secure and cert.exists() and key.exists():
@@ -858,7 +866,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
 {host} {{
     tls /certs/{cert.name} /certs/{key.name}
 {auth}    reverse_proxy host.docker.internal:{port} {{
-        header_up X-Forwarded-Proto https
+{proxy_retry}        header_up X-Forwarded-Proto https
         header_up Host {{host}}
     }}
 }}
@@ -868,7 +876,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
     return "\n".join(
         f"""http://{host} {{
 {auth}    reverse_proxy host.docker.internal:{port} {{
-        header_up Host {{host}}
+{proxy_retry}        header_up Host {{host}}
     }}
 }}
 """

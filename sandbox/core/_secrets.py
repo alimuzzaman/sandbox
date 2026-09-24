@@ -540,7 +540,9 @@ def read_hosting_binding_metadata(target_key: str, *, path: Path | None = None,
         isinstance(epoch, dict) and
         set(epoch) == {"device", "inode", "size", "mtime_ns", "ctime_ns"} and
         all(isinstance(item, int) and not isinstance(item, bool) and item >= 0
-            for item in epoch.values()) and metadata.get("environment_backed") == [] and
+            for item in epoch.values()) and
+        isinstance(metadata.get("environment_backed"), list) and
+        all(isinstance(item, str) for item in metadata["environment_backed"]) and
         re.fullmatch(r"sha256:[0-9a-f]{64}", metadata.get("key_identity", "")) is not None and
         re.fullmatch(r"sha256:[0-9a-f]{64}", claimed or "") is not None)
     secret_epoch = _secret_file_epoch(secret_path)
@@ -548,13 +550,25 @@ def read_hosting_binding_metadata(target_key: str, *, path: Path | None = None,
         current_key, _current_key_version = hosting_binding_key(key_path, create=False)
     except ValueError:
         current_key = None
-    if (secret_epoch is None or current_key is None or
-            not shape_valid or metadata.get("schema_version") != 1 or
-            metadata.get("target_digest") != "sha256:" + target_digest or
-            claimed != _metadata_digest(metadata) or metadata.get("environment_backed") or
-            metadata.get("secret_file_epoch") != secret_epoch or
-            metadata.get("key_identity") !=
-            "sha256:" + hashlib.sha256(current_key).hexdigest()):
-        raise ValueError("hosting secret binding metadata is stale")
+    reasons = []
+    if secret_epoch is None:
+        reasons.append("secret_file_epoch_missing")
+    if current_key is None:
+        reasons.append("binding_key_missing")
+    if not shape_valid or metadata.get("schema_version") != 1:
+        reasons.append("metadata_shape_invalid")
+    if metadata.get("target_digest") != "sha256:" + target_digest:
+        reasons.append("target_digest_mismatch")
+    if claimed != _metadata_digest(metadata):
+        reasons.append("metadata_digest_mismatch")
+    if metadata.get("environment_backed"):
+        reasons.append("environment_backed_secret_override")
+    if secret_epoch is not None and metadata.get("secret_file_epoch") != secret_epoch:
+        reasons.append("secret_file_epoch_mismatch")
+    if current_key is not None and metadata.get("key_identity") != "sha256:" + hashlib.sha256(current_key).hexdigest():
+        reasons.append("key_identity_mismatch")
+
+    if reasons:
+        raise ValueError(f"hosting secret binding metadata is stale: {', '.join(reasons)}")
     return {"metadata_id": claimed, "key_version": metadata.get("key_version"),
             "revision": metadata.get("revision")}

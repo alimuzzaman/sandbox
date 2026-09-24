@@ -318,6 +318,53 @@ class HostRecoveryModelsTests(unittest.TestCase):
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
+    def test_stale_binding_metadata_reports_specific_reasons(self):
+        target = "remote/project/development"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            secret = root / "secrets"
+            secret.write_text("TOKEN=val\n")
+            secret.chmod(0o600)
+            key = root / "key"
+            key.write_bytes(b"k" * 32)
+            key.chmod(0o600)
+            metadata = root / "metadata"
+            write_hosting_binding_metadata(
+                target, {"TOKEN": "val"}, key=b"k" * 32,
+                key_version="v1-test", path=metadata,
+                secret_path=secret, key_path=key)
+            dest = next(metadata.glob("*.json"))
+
+            # 1. Environment-backed secret override
+            with patch.dict(os.environ, {"TOKEN": "val"}):
+                write_hosting_binding_metadata(
+                    target, {"TOKEN": "val"}, key=b"k" * 32,
+                    key_version="v1-test", path=metadata,
+                    secret_path=secret, key_path=key)
+            with self.assertRaisesRegex(ValueError, r"stale: environment_backed_secret_override\b"):
+                read_hosting_binding_metadata(target, path=metadata, secret_path=secret, key_path=key)
+
+            # Re-write clean metadata without environment override
+            write_hosting_binding_metadata(
+                target, {"TOKEN": "val"}, key=b"k" * 32,
+                key_version="v1-test", path=metadata,
+                secret_path=secret, key_path=key)
+
+            # 2. Secret file epoch mismatch
+            secret.write_text("TOKEN=changed\n")
+            with self.assertRaisesRegex(ValueError, "stale: secret_file_epoch_mismatch"):
+                read_hosting_binding_metadata(target, path=metadata, secret_path=secret, key_path=key)
+
+            # 3. Key identity mismatch
+            secret.write_text("TOKEN=val\n")  # restore matching epoch / content
+            write_hosting_binding_metadata(
+                target, {"TOKEN": "val"}, key=b"k" * 32,
+                key_version="v1-test", path=metadata,
+                secret_path=secret, key_path=key)
+            key.write_bytes(b"x" * 32)
+            with self.assertRaisesRegex(ValueError, "stale: key_identity_mismatch"):
+                read_hosting_binding_metadata(target, path=metadata, secret_path=secret, key_path=key)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1934,6 +1934,14 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
         prospective = personal_secrets.prospective_hosting_binding_reference(
             key, secret_values, key=binding_key, key_version=key_version)
         preflight = json.loads(json.dumps(operation))
+        # Environment overrides cannot authorize recovery because the
+        # registered secret source cannot prove they still match. Refuse before
+        # publishing binding metadata or starting source/runtime effects.
+        if prospective.get("environment_backed"):
+            raise hosting.HostingError(
+                "hosted apply requires registered secret-source values; "
+                "environment overrides cannot authorize recovery"
+            )
         preflight["evidence"].update({
             "secret_binding_metadata_id": prospective["metadata_id"],
             "secret_binding_revision": prospective["revision"],
@@ -2144,8 +2152,10 @@ def _runtime_apply_decision(*, previous: dict, requested_revision: str,
     runtime_state = (previous.get("runtime") or {}).get("state")
     same_source_state = previous.get("source_state_identity") == source_state_identity
     recorded_identity = recorded == requested_revision and observed == requested_revision
+    # A staged ready record is not proof by itself. The caller must freshly
+    # observe the exact runtime before this identity can select edge-only.
     staged_identity = staged == requested_revision and runtime_state in {
-        "pending", "unverified",
+        "pending", "unverified", "ready",
     }
     same_config = previous.get("config_digest") == config_digest
     if source_state_clean and same_source_state and same_config and exact_runtime_proven \
@@ -2187,7 +2197,7 @@ def _runtime_apply_refusal_reason(*, previous: dict, requested_revision: str,
     staged = previous.get("staged_revision")
     runtime_state = (previous.get("runtime") or {}).get("state")
     staged_identity = staged == requested_revision and runtime_state in {
-        "pending", "unverified",
+        "pending", "unverified", "ready",
     }
     if previous.get("source_state_identity") is None and staged_identity:
         # Nothing records what the source tree looked like, so a replay could
@@ -3419,7 +3429,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 (recorded_before == sha
                  and previous_entry.get("observed_runtime_revision") == sha)
                 or (staged_before == sha
-                    and previous_runtime_state in {"pending", "unverified"}
+                    and previous_runtime_state in {"pending", "unverified", "ready"}
                     and previous_source_clean)
             )
         )

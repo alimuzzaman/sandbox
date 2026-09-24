@@ -2958,6 +2958,32 @@ class TestHostingManifest(unittest.TestCase):
         fixture.configure_edge.assert_not_called()
         self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
+    def test_identical_staged_ready_retry_observes_exact_runtime_without_reapplying(self):
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        fixture.patch.object(
+            hosting_cmd, "_origin_certificate",
+            return_value=("/cert.pem", "/key.pem", "cert-data"),
+        )
+        fixture.client.current_ssl_mode.return_value = "strict"
+        fixture.state["hosts"][fixture.key] = {
+            "commit": "a" * 40, "recorded_revision": "a" * 40,
+            "requested_revision": fixture.commit, "staged_revision": fixture.commit,
+            "source_state_identity": _clean_source_identity(), "source_state_clean": True,
+            "source_state_identity_version": 2, "config_digest": fixture.config_digest(),
+            "runtime": {"state": "ready"}, "edge": {"state": "pending"},
+        }
+        fixture.observe.return_value = _ready_observation(fixture.commit)
+
+        result = fixture.apply()
+
+        fixture.observe.assert_called_once()
+        fixture.compose.assert_not_called()
+        fixture.health.assert_not_called()
+        self.assertEqual(result["runtime"]["state"], "ready")
+        self.assertEqual(result["edge"]["state"], "ready")
+        self.assertEqual(fixture.state["hosts"][fixture.key]["recorded_revision"], fixture.commit)
+        self.assertTrue(fixture.delivery()["operation"]["delivery_succeeded"])
+
     def test_current_dirty_same_identity_refuses_for_pending_and_ready_receipts(self):
         fixture = _HostingOwnerFixture(self, _public_acme_manifest().replace(
             "      require_clean: true\n", "      require_clean: false\n"))
@@ -3294,6 +3320,26 @@ class TestHostingManifest(unittest.TestCase):
         fixture.prepare.side_effect = first_effect
         with self.assertRaisesRegex(RuntimeError, "stop-before-effect"):
             fixture.apply()
+        fixture.push.assert_not_called()
+        fixture.update.assert_not_called()
+        fixture.compose.assert_not_called()
+
+    def test_environment_backed_secret_refuses_before_publishing_or_deploying(self):
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        fixture.patch.object(
+            hosting_cmd.personal_secrets, "prospective_hosting_binding_reference",
+            return_value={"metadata_id": "sha256:" + "1" * 64, "revision": 1,
+                          "key_version": "v1-test",
+                          "environment_backed": ["SYNTHETIC_HOSTING_SECRET"]},
+        )
+        write_binding = fixture.patch.object(
+            hosting_cmd.personal_secrets, "write_hosting_binding_metadata")
+
+        with self.assertRaisesRegex(
+                hosting.HostingError, "environment overrides cannot authorize recovery"):
+            fixture.apply()
+
+        write_binding.assert_not_called()
         fixture.push.assert_not_called()
         fixture.update.assert_not_called()
         fixture.compose.assert_not_called()

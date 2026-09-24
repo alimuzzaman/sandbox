@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 from sandbox.delivery.context import target_for_project
@@ -348,6 +349,47 @@ class TestDeliveryService(unittest.TestCase):
         self.assertTrue(projection['ok'])
         self.assertEqual(projection['error']['code'], 'missing')
         self.assertIsNone(projection['selected_operation'])
+
+    def test_retire_interrupted_operation_tolerates_missing_job(self):
+        from sandbox.delivery.hosting import retire_interrupted_operation
+        target = hosted_source_target()
+        op = hosted_source_operation()
+        op.update(request_id='interrupted-req', job_id='missing-job-id', execution_state='running', finished_at=None)
+        self.repository.reserve_request(request_scope(target), 'interrupted-req', op['operation_id'], op['intent_digest'], operation=op)
+
+        def failing_job(job_id):
+            raise RuntimeError("job missing")
+
+        with tempfile.TemporaryDirectory() as pdir:
+            validated = {'project_root': pdir, 'environment': target['environment']}
+            with mock.patch('sandbox.delivery.hosting.target_for_project', return_value=target), \
+                    mock.patch('sandbox.delivery.hosting.RUNTIME_DIR', self.home / 'runtime'):
+                summary = retire_interrupted_operation(validated, target['remote_name'], 'interrupted-req', job_lookup=failing_job)
+
+        self.assertEqual(summary['execution_state'], 'interrupted')
+
+    def test_require_previous_snapshot_allows_interrupted_predecessor_without_admission(self):
+        from sandbox.delivery.hosting import HostingAttempt, retire_interrupted_operation
+        target = hosted_source_target()
+        op = hosted_source_operation()
+        op.update(request_id='interrupted-req-2', job_id='job-1', execution_state='running', finished_at=None, admission=None)
+        self.repository.reserve_request(request_scope(target), 'interrupted-req-2', op['operation_id'], op['intent_digest'], operation=op)
+
+        with tempfile.TemporaryDirectory() as pdir:
+            validated = {'project_root': pdir, 'environment': target['environment']}
+            with mock.patch('sandbox.delivery.hosting.target_for_project', return_value=target), \
+                    mock.patch('sandbox.delivery.hosting.RUNTIME_DIR', self.home / 'runtime'), \
+                    mock.patch('sandbox.delivery.hosting.require_delivery_capabilities'):
+                retire_interrupted_operation(validated, target['remote_name'], 'interrupted-req-2', job_lookup=lambda j: None)
+
+                attempt = HostingAttempt(
+                    validated, target['remote_name'], {'provisioned': True}, kind='hosted_apply',
+                    request_id='req-next', job_id='job-next',
+                    application=copy.deepcopy(op['requested_outcome']['application']),
+                    configuration_digest=CONFIG_DIGEST, machine_identity=target['machine_identity'],
+                    registered_host_digest=target['registered_host_digest'], requirements=[],
+                )
+                attempt.require_previous_snapshot({'request_id': 'interrupted-req-2', 'job_id': 'job-1', 'starting_generation': 1})
 
 
 if __name__ == '__main__':

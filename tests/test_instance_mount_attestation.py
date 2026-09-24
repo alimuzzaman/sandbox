@@ -409,6 +409,28 @@ class TestApplyRuntimeDependencies(unittest.TestCase):
                         "sb ensure --project-dir <project-dir> --label recovery"):
                     _instances.apply_config({}, str(root))
 
+    def test_build_instance_block_includes_symlinked_extra_targets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            project_root = temp_path / "project"
+            project_root.mkdir()
+            vendor_dir = project_root / "vendor"
+            vendor_dir.mkdir()
+            external_target = temp_path / "external_pkg"
+            external_target.mkdir()
+            (vendor_dir / "my_pkg").symlink_to(external_target)
+
+            cfg = {"plugins_home": str(temp_path / "plugins_home")}
+            Path(cfg["plugins_home"]).mkdir()
+            pconf = {"plugins": [], "mappings": {"vendor": str(vendor_dir)}}
+
+            ports = {"wordpress_port": 8080, "db_port": 3306, "mailpit_port": 8025}
+            block = _instances._build_instance_block(
+                cfg, "test_inst", str(project_root), pconf, ports, "apache"
+            )
+            self.assertIn("extra_mounts", block)
+            self.assertIn(str(external_target.resolve()), block["extra_mounts"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

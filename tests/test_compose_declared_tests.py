@@ -73,6 +73,7 @@ class ComposeDeclaredTests(unittest.TestCase):
                 debug.cmd_test({}, args)
 
         self.assertEqual(captured["request"].required_capability, "job.exec")
+        self.assertFalse(captured["request"].allow_inferred_remote)
         self.assertEqual(captured["submission"].argv, ("pnpm", "test:fast"))
         self.assertEqual(captured["submission"].workspace_label, "lenzora-test")
         self.assertEqual(captured["submission"].project_identity, "project:compose")
@@ -81,3 +82,39 @@ class ComposeDeclaredTests(unittest.TestCase):
             "sha256:" + hashlib.sha256("/fixture".encode()).hexdigest(),
         )
         self.assertEqual(json.loads(output.getvalue())["job_id"], "job-1")
+
+    def test_cmd_test_disallows_inferred_remote_when_remote_omitted(self):
+        import sandbox.commands.debug as debug
+
+        captured = {}
+        args = SimpleNamespace(project_dir="/fixture", label=None, mode="fast",
+                               provision_only=False, local=False, remote=None,
+                               workspace=[None], timeout=1200,
+                               output_profile="smart", json=True, passthrough=[])
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None):
+                return {"kind": "compose", "root": "/fixture",
+                        "tests": {"modes": {"fast": {"argv": ["pnpm", "test:fast"]}}}}
+
+        target = SimpleNamespace(kind="local", project_root="/fixture",
+                                 workspace_label=None, remote_name=None,
+                                 sources={"identity": "project:compose"})
+
+        def resolve(request):
+            captured["request"] = request
+            return target
+
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(resolve=resolve),
+                }), \
+                patch.object(debug, "_local_test_entry", side_effect=StopIteration):
+            with self.assertRaises(StopIteration):
+                debug.cmd_test({}, args)
+
+        self.assertFalse(captured["request"].allow_inferred_remote)
+        self.assertIsNone(captured["request"].required_capability)

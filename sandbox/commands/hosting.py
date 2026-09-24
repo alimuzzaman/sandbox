@@ -1466,11 +1466,15 @@ def _classify_host_observation(validated: dict, observation: dict,
         if not isinstance(raw, dict):
             continue
         observed_revision = raw.get("observed")
+        state = ("match" if expected_revision and observed_revision == expected_revision
+                 else "missing" if not observed_revision else "mismatch")
         item = {"service": raw.get("service"), "key": raw.get("key"),
                 "provider": "pushed_commit_sha",
-                "expected": expected_revision}
-        item["state"] = ("match" if expected_revision and observed_revision == expected_revision
-                         else "missing" if not observed_revision else "mismatch")
+                "expected": expected_revision,
+                "state": state}
+        if (state == "mismatch" and isinstance(observed_revision, str)
+                and re.fullmatch(r"[0-9a-f]{7,40}", observed_revision)):
+            item["observed"] = observed_revision
         checks.append(item)
     expected_pairs = {
         (service, key)
@@ -1483,12 +1487,23 @@ def _classify_host_observation(validated: dict, observation: dict,
                     and len(checks) == len(expected_pairs) and all(
         item["state"] == "match" for item in checks
     ))
+    distinct_observed = {
+        item["observed"] for item in checks
+        if "observed" in item and item["state"] == "mismatch"
+    }
+    if source_ready:
+        observed_runtime_rev = expected_revision
+    elif (distinct_observed and len(distinct_observed) == 1
+          and all(item["state"] == "mismatch" for item in checks)):
+        observed_runtime_rev = next(iter(distinct_observed))
+    else:
+        observed_runtime_rev = None
     return {"complete": bool(observation.get("complete")), "services": service_rows,
             "topology": topology, "health": health,
             "source_revision": {"state": "not_declared" if not expected_pairs else
                                 "ready" if source_ready
                                 else "degraded", "checks": checks},
-            "observed_runtime_revision": expected_revision if source_ready else None,
+            "observed_runtime_revision": observed_runtime_rev,
             "phases": phase_values[:_HOST_OBSERVATION_MAX_PHASES]}
 
 
@@ -1769,8 +1784,16 @@ def _durable_host_context(project_dir: str) -> dict:
 def _host_delivery_guidance(validated: dict, remote_name: str) -> list[str]:
     """A reviewable argv template, never an implicit job submission."""
     executable = str(Path(__file__).resolve().parents[2] / 'sb')
+    try:
+        source_commit = _resolve_host_source_commit(validated["project_root"])
+    except Exception:
+        source_commit = "<full-clean-HEAD>"
+    import secrets
+    req_token = secrets.token_hex(6)
+    env_name = validated.get("environment", "env")
+    request_id = f"deploy-{env_name}-{req_token}"
     return [executable, "job-start", "--local", "--project-dir", validated["project_root"],
-            "--request-id", "<original-request-id>", "--source-commit", "<full-clean-HEAD>",
+            "--request-id", request_id, "--source-commit", source_commit,
             "--timeout", "900", "--", executable, "host", "apply", "--project-dir",
             validated.get('manifest_root') or validated['project_root'], "--remote", remote_name, "--environment",
             validated["environment"], "--confirm"]
@@ -2165,6 +2188,7 @@ class HostRuntimeApplyRefused(RuntimeError):
 
     def __init__(self, detail: dict):
         self.detail = detail
+        self.code = detail.get("code") or "runtime_apply_refused"
         super().__init__(
             f"{detail['code']}: existing runtime identity/topology is not fully "
             "proven; refusing Compose or initializer replay"
@@ -2262,6 +2286,10 @@ def _safe_source_revision_receipt(source: dict | None) -> dict:
         expected = raw.get("expected")
         if isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{40}", expected):
             item["expected"] = expected
+        observed = raw.get("observed")
+        if (item["state"] == "mismatch" and isinstance(observed, str)
+                and re.fullmatch(r"[0-9a-f]{7,40}", observed)):
+            item["observed"] = observed
         checks.append(item)
         if len(checks) >= _HOST_OBSERVATION_MAX_SERVICES * _HOST_OBSERVATION_MAX_KEYS:
             break
@@ -2402,10 +2430,11 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         classified = _classify_host_observation(
             validated, observation, recorded.get("commit") or recorded.get("staged_revision"),
         )
-        result.update({key: classified[key] for key in (
-            "services", "topology", "health", "source_revision",
-            "observed_runtime_revision", "phases",
-        )})
+        for key in ("services", "topology", "health", "source_revision", "phases"):
+            if key in classified:
+                result[key] = classified[key]
+        if classified.get("observed_runtime_revision") is not None:
+            result["observed_runtime_revision"] = classified["observed_runtime_revision"]
     except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
         result["health"] = {"state": "unavailable", "reason": remote.redact_text(str(exc))[:500]}
     return result
@@ -2577,6 +2606,16 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
     try:
         summary = retire_interrupted_operation(
             validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup)
+        target_key = hosting.state_key(remote_name, validated)
+        state = hosting.load_host_state()
+        record = (state.get("hosts") or {}).get(target_key)
+        if record:
+            record["active_operation"] = None
+            record["recovery_uncertainty"] = None
+            activation = record.get("image_activation")
+            if isinstance(activation, dict) and activation.get("active") is not None:
+                activation["active"] = None
+            hosting.save_host_state(state)
     except DeliveryError as exc:
         payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
                    "original_request_id": original.strip()}
@@ -5892,6 +5931,11 @@ def cmd_host(cfg, args) -> None:
         else:
             print(f"{result['project']} / {result['environment']} ({result['remote']})")
             print(f"  deployed revision: {result['deployed_revision'] or 'unknown'}")
+            observed_rev = result.get("observed_runtime_revision")
+            if observed_rev:
+                print(f"  observed runtime revision: {observed_rev}")
+                if result.get("deployed_revision") and observed_rev != result["deployed_revision"]:
+                    print(f"  warning: deployed revision does not match observed runtime revision ({result['deployed_revision']} vs {observed_rev})")
             print(f"  health: {result['health']['state']}")
             print(f"  generation: {result['generation']}")
             cache = result.get("edge_cache_purge")
@@ -5911,13 +5955,21 @@ def cmd_host(cfg, args) -> None:
         else:
             print(f"{result['project']} / {result['environment']} ({result['remote']})")
             print(f"  deployed revision: {result['deployed_revision'] or 'unknown'}")
+            observed_rev = result.get("observed_runtime_revision")
+            if observed_rev:
+                print(f"  observed runtime revision: {observed_rev}")
+                if result.get("deployed_revision") and observed_rev != result["deployed_revision"]:
+                    print(f"  warning: deployed revision does not match observed runtime revision ({result['deployed_revision']} vs {observed_rev})")
             print(f"  health: {result['health']['state']}")
             print(f"  disk: {result['disk']['free_mb']} MiB free ({result['disk']['state']})")
             print(f"  images: {len(result['images'])} ({result['image_state']['state']})")
             source = result["source_revision"]
             print(f"  source revision: {source['state']}")
             for check in source.get("checks", []):
-                print(f"    {check['key']}: {check['state']}")
+                if check.get("observed") and check.get("state") == "mismatch":
+                    print(f"    {check['key']}: {check['state']} (expected {check.get('expected') or 'unknown'}, observed {check['observed']})")
+                else:
+                    print(f"    {check['key']}: {check['state']}")
             for service in result["services"]:
                 print(f"  {service['service']}: {service['state']} ({service['health']})")
             if result["health"].get("reason"):

@@ -652,16 +652,19 @@ def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
 
 def _is_mailpit_response(headers, body: bytes = b"") -> bool:
     """True if response headers or body match Mailpit's signature."""
-    if headers:
-        server = (headers.get("Server") or "").lower()
-        if "mailpit" in server:
-            return True
-        if "mailpit" in (headers.get("X-Server") or "").lower():
-            return True
-    if body:
-        body_lower = body.lower()
-        if b"<title>mailpit" in body_lower or b"axllent/mailpit" in body_lower:
-            return True
+    try:
+        if headers:
+            server = str(headers.get("Server") or "").lower()
+            if "mailpit" in server:
+                return True
+            if "mailpit" in str(headers.get("X-Server") or "").lower():
+                return True
+        if body and isinstance(body, (bytes, bytearray)):
+            body_lower = body.lower()
+            if b"<title>mailpit" in body_lower or b"axllent/mailpit" in body_lower:
+                return True
+    except Exception:
+        pass
     return False
 
 
@@ -1077,6 +1080,17 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         _src = _src.resolve()
         if _src.exists() and not _src.is_relative_to(plugins_home_p):
             _extra.append(str(_src))
+    for _path_str in list(_extra):
+        _p = Path(_path_str)
+        if _p.is_dir():
+            try:
+                for _child in _p.iterdir():
+                    if _child.is_symlink():
+                        _target = _child.resolve()
+                        if _target.exists() and not _target.is_relative_to(_p) and not _target.is_relative_to(plugins_home_p):
+                            _extra.append(str(_target))
+            except (OSError, PermissionError):
+                pass
     extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
     if extra_mounts:
         block["extra_mounts"] = extra_mounts
@@ -1241,9 +1255,17 @@ def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
     if not expected.startswith(("http://", "https://")):
         return False
 
+    from urllib.parse import urlparse
+    expected_host = urlparse(expected).netloc
     current = wpcli(["option", "get", "siteurl"], instance=name,
                     check=False, capture=True)
     if (getattr(current, "stdout", "") or "").strip() == expected:
+        if _multisite_mode(ic) and expected_host:
+            wpcli([
+                "db", "query",
+                f"UPDATE wp_site SET domain='{expected_host}'; "
+                f"UPDATE wp_blogs SET domain='{expected_host}' WHERE blog_id=1;"
+            ], instance=name, check=False)
         return False
 
     if expected.startswith("https://"):
@@ -1254,6 +1276,12 @@ def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
           check=False)
     wpcli(["option", "update", "home", expected], instance=name,
           check=False)
+    if expected_host:
+        wpcli([
+            "db", "query",
+            f"UPDATE wp_site SET domain='{expected_host}'; "
+            f"UPDATE wp_blogs SET domain='{expected_host}' WHERE blog_id=1;"
+        ], instance=name, check=False)
     info(f"{name}: auto-healed WP url → {expected}")
     return True
 

@@ -3242,6 +3242,57 @@ class TestHostingManifest(unittest.TestCase):
         fixture.update.assert_not_called()
         fixture.compose.assert_not_called()
 
+    def test_host_delivery_guidance_mints_runnable_command_without_placeholders(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        with patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="a" * 40):
+            argv = hosting_cmd._host_delivery_guidance(validated, "scaleway-sandbox")
+        joined = " ".join(argv)
+        self.assertNotIn("<original-request-id>", joined)
+        self.assertNotIn("<full-clean-HEAD>", joined)
+        self.assertIn("a" * 40, joined)
+        req_idx = argv.index("--request-id") + 1
+        self.assertTrue(argv[req_idx].startswith("deploy-"))
+
+    def test_host_status_and_diagnose_report_observed_revision_on_mismatch(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        expected = "a" * 40
+        observed = "b" * 40
+        classified = hosting_cmd._classify_host_observation(validated, {
+            "complete": True,
+            "configured_services": ["web"],
+            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
+            "revision_checks": [{
+                "service": "web", "key": "LENZORA_SOURCE_REVISION",
+                "observed": observed,
+            }],
+            "phases": [{"phase": "source_revision:web", "state": "complete"}],
+        }, expected)
+        self.assertEqual(classified["source_revision"]["checks"][0]["observed"], observed)
+        self.assertEqual(classified["observed_runtime_revision"], observed)
+
+    def test_host_retire_delivery_clears_host_state(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {target_key: {
+            "active_operation": "active-1",
+            "recovery_uncertainty": "uncertain-1",
+            "image_activation": {"active": "active-img"},
+        }}}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req", "execution_state": "interrupted", "evidence_completeness": "missing"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state") as mock_save:
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        record = state["hosts"][target_key]
+        self.assertIsNone(record["active_operation"])
+        self.assertIsNone(record["recovery_uncertainty"])
+        self.assertIsNone(record["image_activation"]["active"])
+        mock_save.assert_called_once_with(state)
+
 
 class _Response:
     def __init__(self, data):
@@ -3751,5 +3802,6 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
         reason = {"code": "unproven_staged_revision"}
         error = hosting_cmd.HostRuntimeApplyRefused(reason)
         self.assertIs(error.detail, reason)
+        self.assertEqual(error.code, "unproven_staged_revision")
         self.assertIn("unproven_staged_revision", str(error))
         self.assertIsInstance(error, RuntimeError)

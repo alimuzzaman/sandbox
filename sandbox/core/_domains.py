@@ -1404,6 +1404,13 @@ def _persist_composed_clean_urls(cfg: dict, lifecycle: dict) -> dict:
               instance=name, check=False)
         wpcli(["option", "update", "home", verified_url],
               instance=name, check=False)
+        verified_host = urlparse(verified_url).netloc
+        if verified_host:
+            wpcli([
+                "db", "query",
+                f"UPDATE wp_site SET domain='{verified_host}'; "
+                f"UPDATE wp_blogs SET domain='{verified_host}' WHERE blog_id=1;"
+            ], instance=name, check=False)
     return refreshed
 
 

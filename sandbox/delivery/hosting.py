@@ -81,7 +81,7 @@ def retire_interrupted_operation(validated, remote_name, original_request_id, *,
         try:
             job = job_lookup(job_id)
         except Exception:
-            raise DeliveryError('required_evidence_missing') from None
+            job = None
         # A live owner is still the authority over its own attempt.
         if isinstance(job, dict) and job.get('lifecycle') in {'running', 'queued'}:
             raise DeliveryError('authority_pending')
@@ -218,6 +218,8 @@ class HostingAttempt:
         if old is None or old['execution_state'] not in TERMINAL or old['terminal_snapshot_digest'] is None:
             raise DeliveryError('required_evidence_missing')
         admission = old.get('admission') or {}
+        if old.get('execution_state') == 'interrupted' and not admission:
+            return
         if (old.get('job_id') != previous.get('job_id')
                 or admission.get('generation') != previous.get('starting_generation')
                 or admission.get('application_revision') != (previous.get('source') or {}).get('commit')

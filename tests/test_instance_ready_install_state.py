@@ -579,6 +579,25 @@ class TestReadyEnsureInstallState(_IsolatedInstanceTest):
                         _instances.ensure_instance({}, "/project")
                 self.assertEqual([call.kwargs.get("status") for call in state.registry_put.call_args_list], ["pending"])
 
+    def test_auto_heal_wp_url_updates_multisite_domain(self):
+        queries = []
+
+        def fake_wpcli(cmd, **kwargs):
+            if cmd[:2] == ["option", "get"]:
+                return _Result(0, "http://localhost:8088\n")
+            if cmd[:2] == ["db", "query"]:
+                queries.append(cmd[2])
+            return _Result(0, "")
+
+        with mock.patch.object(_instances, "wpcli", side_effect=fake_wpcli), \
+                mock.patch.object(_instances, "load_config", return_value={}), \
+                mock.patch.object(_instances, "resolve_instances", return_value={"test_inst": {"multisite": True}}):
+            healed = _instances._auto_heal_wp_url("test_inst", expected_url="https://test.tst")
+
+        self.assertTrue(healed)
+        self.assertTrue(any("UPDATE wp_site SET domain='test.tst'" in q for q in queries))
+        self.assertTrue(any("UPDATE wp_blogs SET domain='test.tst'" in q for q in queries))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

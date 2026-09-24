@@ -626,6 +626,13 @@ runtime WordPress tree (`runtime/wp-<instance>`), including its `wp-content`
 state, uploads, and cache directories; the shared download caches remain
 writable as well.
 
+For a declared local source with a `vendor/` symlink, Sandbox resolves an
+existing readable target and adds a separate read-only bind when no declared
+source mount already contains it. This keeps Composer autoload paths visible
+inside the container. On an already-ready instance, a newly required target
+changes the source mount policy; `ensure` refuses with `instance_mount_drift`
+without mutation and directs the operator to `sb apply` to reconcile it.
+
 The local runtime also sets WordPress `FS_METHOD` to `direct` and repairs the
 parent `wp-content` directory during bootstrap. This prevents wp-admin and
 Templately dependency installs from falling back to unavailable FTP/SSH

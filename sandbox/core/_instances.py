@@ -809,6 +809,38 @@ def _wp_install_state_refusal() -> dict:
     }
 
 
+def _external_vendor_mount_targets(plugin_sources: list[str],
+                                  mounted_sources: list[str]) -> list[str]:
+    """Resolve declared source ``vendor`` links not covered by existing binds."""
+    mounted = []
+    for raw in mounted_sources:
+        try:
+            mounted.append(Path(raw).resolve())
+        except (OSError, RuntimeError):
+            continue
+
+    targets = []
+    for raw in plugin_sources:
+        try:
+            source = Path(raw).resolve()
+            vendor = source / "vendor"
+            if not vendor.is_symlink():
+                continue
+            target = vendor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise OSError(
+                "local plugin vendor symlink target is unavailable"
+            ) from None
+        if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
+            raise OSError(
+                "local plugin vendor symlink target is not a readable directory"
+            )
+        if any(target.is_relative_to(root) for root in mounted):
+            continue
+        targets.append(str(target))
+    return list(dict.fromkeys(targets))
+
+
 def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
                           ports: dict, server: str) -> dict:
     """Construct the sandbox.local.yml `instances.<name>` block from a project's
@@ -938,6 +970,7 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     plugins_home_p = _plugins_home(cfg).resolve()
     root_p = Path(root)
     _extra: list[str] = []
+    _plugin_sources: list[str] = []
     for _entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
         if _entry == ".":
             _src = root_p
@@ -950,22 +983,28 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
             _src = _src.resolve()
         else:
             continue
-        if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+        if _src.exists():
+            _plugin_sources.append(str(_src.resolve()))
+            if not _src.resolve().is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
     for _src_raw in (pconf.get("mappings") or {}).values():
         _src = Path(str(_src_raw)).expanduser()
         if not _src.is_absolute():
             _src = (root_p / _src).resolve()
         _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+        if _src.exists():
+            _plugin_sources.append(str(_src))
+            if not _src.is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
     for _src_raw in (pconf.get("mappings_inactive") or {}).values():
         _src = Path(str(_src_raw)).expanduser()
         if not _src.is_absolute():
             _src = (root_p / _src).resolve()
         _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+        if _src.exists():
+            _plugin_sources.append(str(_src))
+            if not _src.is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
     # Spec 010: canonical plugin map — every LOCAL-path source (active, inactive,
     # or on-demand) needs a bind-mount so the symlink resolves / the on-demand
     # mu-plugin can read+zip it inside the container.
@@ -977,8 +1016,13 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         if not _src.is_absolute():
             _src = (root_p / _src).resolve()
         _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+        if _src.exists():
+            _plugin_sources.append(str(_src))
+            if not _src.is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
+    _extra.extend(_external_vendor_mount_targets(
+        _plugin_sources, [str(plugins_home_p), *_extra],
+    ))
     extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
     if extra_mounts:
         block["extra_mounts"] = extra_mounts
@@ -1017,6 +1061,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             raise OSError("plugins home is unavailable")
         root_path = Path(root)
         sources = [str(plugins_home)]
+        plugin_sources: list[str] = []
 
         def add_if_external(value: object) -> None:
             source = Path(str(value)).expanduser()
@@ -1029,6 +1074,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             # instance look safe against a weakened desired set.
             if not source.exists() or not os.access(source, os.R_OK):
                 raise OSError("declared local source is unavailable")
+            plugin_sources.append(str(source))
             if not source.is_relative_to(plugins_home):
                 sources.append(str(source))
 
@@ -1047,6 +1093,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             source = entry.get("source") or {}
             if source.get("kind") == "path" and source.get("value"):
                 add_if_external(source["value"])
+        sources.extend(_external_vendor_mount_targets(plugin_sources, sources))
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return None
     return list(dict.fromkeys(sources))

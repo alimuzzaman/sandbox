@@ -201,6 +201,11 @@ A plugin repo carries a **`sandbox.config.json`** describing its stack:
 }
 ```
 
+Declared local sources are mounted read-only. When a plugin source has an
+existing `vendor/` symlink whose target is outside the current mounts, Sandbox
+adds that target as a read-only bind so Composer autoloading works in the
+container.
+
 (An existing **`.wp-env.json`** is read as a fallback and converted on
 `sandbox init`. Full schema: [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).)
 

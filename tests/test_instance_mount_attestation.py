@@ -258,6 +258,78 @@ class TestSourceMountAttestation(unittest.TestCase):
             })
             self.assertEqual(policy, [str(plugins_home.resolve())])
 
+    def test_external_vendor_symlink_target_is_added_to_source_mount_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            plugin = root / "plugin"
+            plugins_home = Path(temporary) / "plugins-home"
+            vendor_target = Path(temporary) / "shared" / "vendor"
+            plugin.mkdir(parents=True)
+            plugins_home.mkdir()
+            vendor_target.mkdir(parents=True)
+            (plugin / "vendor").symlink_to(vendor_target, target_is_directory=True)
+            pconf = {"plugins": [str(plugin)]}
+            cfg = {"defaults": {"plugins_home": str(plugins_home)}}
+
+            policy = _instances._desired_source_mounts(cfg, str(root), pconf)
+            with mock.patch.object(_instances, "_plugins_home",
+                                   return_value=plugins_home), \
+                    mock.patch.object(_instances, "_local_yaml",
+                                      return_value={"instances": {}}):
+                block = _instances._build_instance_block(
+                    cfg, "fixture", str(root), pconf,
+                    {"wordpress_port": 8181, "db_port": 3307,
+                     "mailpit_port": 8026}, "nginx",
+                )
+
+            expected = [
+                str(plugins_home.resolve()),
+                str(plugin.resolve()),
+                str(vendor_target.resolve()),
+            ]
+            self.assertEqual(policy, expected)
+            self.assertEqual(block["extra_mounts"], expected[1:])
+
+    def test_vendor_symlink_target_covered_by_another_source_is_not_repeated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            plugin = root / "plugin"
+            shared = Path(temporary) / "shared"
+            plugins_home = Path(temporary) / "plugins-home"
+            vendor_target = shared / "vendor"
+            plugin.mkdir(parents=True)
+            plugins_home.mkdir()
+            vendor_target.mkdir(parents=True)
+            (plugin / "vendor").symlink_to(vendor_target, target_is_directory=True)
+
+            policy = _instances._desired_source_mounts(
+                {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
+                {"plugins": [str(plugin)],
+                 "mappings": {"wp-content/mu-plugins/helper": str(shared)}},
+            )
+
+            self.assertEqual(policy, [
+                str(plugins_home.resolve()), str(plugin.resolve()), str(shared.resolve()),
+            ])
+
+    def test_dangling_vendor_symlink_fails_mount_policy_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            plugin = root / "plugin"
+            plugins_home = Path(temporary) / "plugins-home"
+            plugin.mkdir(parents=True)
+            plugins_home.mkdir()
+            (plugin / "vendor").symlink_to(
+                Path(temporary) / "missing-vendor", target_is_directory=True,
+            )
+
+            policy = _instances._desired_source_mounts(
+                {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
+                {"plugins": [str(plugin)]},
+            )
+
+            self.assertIsNone(policy)
+
     def test_ready_ensure_attests_normally_with_remote_theme_archive(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

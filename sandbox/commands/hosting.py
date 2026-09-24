@@ -5986,7 +5986,7 @@ def cmd_host(cfg, args) -> None:
                 path = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}/apply.log"
                 output = _remote_checked(
                     entry,
-                    f"test -f {shlex.quote(path)} && tail -n {int(args.lines)} {shlex.quote(path)}",
+                    f"if test -f {shlex.quote(path)}; then tail -n {int(args.lines)} {shlex.quote(path)}; fi",
                     timeout=60,
                 )
             else:

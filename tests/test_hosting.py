@@ -2629,6 +2629,33 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("config --services", commands[0])
         self.assertIn("logs --no-color --tail 50 web", commands[1])
 
+    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
+    @patch("sandbox.commands.hosting._remote_checked", return_value="apply line 1\napply line 2\n")
+    def test_host_logs_apply_log_uses_guarded_remote_check(self, remote_checked, _resolve_home):
+        manifest = _manifest()
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+
+        args = types.SimpleNamespace(
+            action="logs", remote="myvps", lines=20, apply_log=True, json=True,
+            project_dir=None, environment=None,
+        )
+        entry = {"provisioned": True}
+        output_buf = io.StringIO()
+        with patch("sandbox.commands.hosting.hosting.validate_manifest", return_value=validated), \
+             patch("sandbox.commands.hosting.remote.get_remote", return_value=entry), \
+             patch("sandbox.commands.hosting.hosting.load_host_state", return_value={}), \
+             redirect_stdout(output_buf):
+            hosting_cmd.cmd_host({}, args)
+
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertEqual(len(commands), 1)
+        self.assertIn("if test -f", commands[0])
+        self.assertIn("then tail -n 20", commands[0])
+        data = json.loads(output_buf.getvalue())
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["output"], "apply line 1\napply line 2\n")
+
     def test_state_round_trip_is_atomic_and_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hosts.json"

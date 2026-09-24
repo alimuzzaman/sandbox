@@ -281,12 +281,29 @@ def _error_detail(payload: dict | None, result: object) -> str:
                 return _safe_remote_detail(message)
         elif isinstance(error, str) and error.strip():
             return _safe_remote_detail(error)
+        code = payload.get("code")
+        if isinstance(code, str) and code.strip():
+            return _safe_remote_detail(code)
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return _safe_remote_detail(message)
     detail = getattr(result, "stderr", "")
     if isinstance(detail, str) and detail.strip():
         safe = _safe_remote_detail(detail)
         if safe:
             return safe
-    return f"remote exit code {getattr(result, 'returncode', 1)}"
+    returncode = getattr(result, "returncode", 1)
+    if returncode == 0:
+        if not isinstance(output, str) or not output.strip():
+            return "remote command produced no output"
+        if payload is None:
+            return "remote command output contained no valid JSON"
+        if isinstance(payload, dict) and payload.get("ok") is not True:
+            status = payload.get("status")
+            if isinstance(status, str) and status.strip():
+                return f"remote status {status}"
+            return "remote command returned unsuccessful response"
+    return f"remote exit code {returncode}"
 
 
 def _require_submission_ack(payload: object, *, aggregate: bool = False,

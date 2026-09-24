@@ -800,13 +800,17 @@ def _wpcli_unleased(args: list[str], instance: str,
                          if timeout is not None else _wp_has_builtin_cli(instance))
     else:
         cli_available = False
+    # WP-CLI may invoke its configured pager for help even when output is
+    # captured. Neither managed image promises `less`, so force plain output
+    # on both execution paths.
     if cli_available:
         # exec into the running web container as www-data (uid 33) so files stay
         # www-data-owned and no --allow-root is needed; same PHP the site serves.
-        return compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,
+        return compose("exec", "-e", "PAGER=cat", "-u", "www-data", "-T",
+                       "wp", "wp", *args,
                        instance=instance, check=check, capture=capture,
                        timeout=timeout)
-    return compose("run", "--rm", "wpcli", *args,
+    return compose("run", "--rm", "-e", "PAGER=cat", "wpcli", *args,
                    instance=instance, check=check, capture=capture,
                    timeout=timeout)
 

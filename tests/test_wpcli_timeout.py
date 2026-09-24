@@ -70,7 +70,10 @@ class TestWpCliTimeout(unittest.TestCase):
                           instance="fixture", check=False, capture=True, timeout=11)
         preflight.assert_not_called()
         compose.assert_called_once()
-        self.assertEqual(compose.call_args.args[:3], ("run", "--rm", "wpcli"))
+        self.assertEqual(
+            compose.call_args.args[:5],
+            ("run", "--rm", "-e", "PAGER=cat", "wpcli"),
+        )
         self.assertEqual(compose.call_args.kwargs["timeout"], 11)
 
     def test_cmd_wp_uses_default_timeout_for_direct_namespace(self):

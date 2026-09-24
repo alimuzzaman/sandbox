@@ -832,15 +832,9 @@ def save_local_app_password(app_pw: str, instance: str) -> None:
     Written to `instances.<name>.app_password` so each instance has its own
     secret without colliding. (Per-project model — there is no global key.)
     """
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["app_password"] = app_pw
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def save_local_abilities_enabled(enabled: bool, instance: str) -> None:
@@ -850,15 +844,9 @@ def save_local_abilities_enabled(enabled: bool, instance: str) -> None:
     it lives in the DB and is wiped by a recreate / db-reset. Mirroring the choice
     to `instances.<name>.abilities_enabled` makes it durable so `up` can re-apply
     it. Written via the same per-instance pattern as the other secrets."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["abilities_enabled"] = bool(enabled)
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def read_local_abilities_enabled(instance: str):
@@ -866,12 +854,11 @@ def read_local_abilities_enabled(instance: str):
     if not CONFIG_LOCAL.exists():
         return None
     try:
-        ensure_pyyaml()
-        import yaml
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+        local = _local_yaml()
         val = (local.get("instances", {}).get(instance, {}) or {}).get("abilities_enabled")
         return None if val is None else bool(val)
+    except ConfigParseError:
+        raise
     except Exception:
         return None
 
@@ -879,15 +866,9 @@ def read_local_abilities_enabled(instance: str):
 def save_local_autologin_token(token: str, instance: str) -> None:
     """Persist the sandbox autologin token in sandbox.local.yml so it can be
     included in the ensure_instance return value as login_url."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["autologin_token"] = token
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def _autologin_mu_plugin(token: str) -> str:

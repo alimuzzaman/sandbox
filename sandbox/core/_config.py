@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -79,16 +80,190 @@ def expand(value, vars_: dict) -> object:
     return value
 
 
+class ConfigParseError(ValueError):
+    """A safe, source-free parse diagnostic for Sandbox YAML configuration."""
+
+    code = "config_parse_error"
+
+    def __init__(self, path: Path, line: int | None, column: int | None,
+                 backup_path: Path | None = None):
+        self.path = Path(path)
+        self.line = line
+        self.column = column
+        self.backup_path = Path(backup_path) if backup_path else None
+        message = f"{self.path} contains invalid YAML"
+        if line is not None:
+            message += f" at line {line}"
+            if column is not None:
+                message += f", column {column}"
+        if self.backup_path is not None:
+            message += f"; inspect the last-good backup at {self.backup_path}"
+        super().__init__(message)
+
+    def to_payload(self) -> dict:
+        error = {"code": self.code, "message": str(self), "file": str(self.path)}
+        if self.line is not None:
+            error["line"] = self.line
+        if self.column is not None:
+            error["column"] = self.column
+        if self.backup_path is not None:
+            error["backup"] = str(self.backup_path)
+        return {"schema_version": 1, "ok": False, "error": error}
+
+
+class ConfigWriteError(RuntimeError):
+    """A safe diagnostic for a refused or failed local-config replacement."""
+
+
+def _set_owner_only(descriptor: int, path: Path) -> None:
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        else:
+            os.chmod(path, 0o600)
+    except OSError as exc:
+        raise ConfigWriteError(
+            f"Could not secure local config file {path}: {exc.strerror or 'I/O error'}"
+        ) from None
+
+
+def _parse_yaml_mapping(text: str, path: Path,
+                        backup_path: Path | None = None) -> dict:
+    import yaml
+    try:
+        value = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        mark = (getattr(exc, "problem_mark", None)
+                or getattr(exc, "context_mark", None))
+        raise ConfigParseError(
+            path,
+            mark.line + 1 if mark is not None else None,
+            mark.column + 1 if mark is not None else None,
+            backup_path,
+        ) from None
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigParseError(path, None, None, backup_path)
+    return value
+
+
+def _load_yaml_mapping(path: Path, *, backup_path: Path | None = None) -> dict:
+    ensure_pyyaml()
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    return _parse_yaml_mapping(text, path, backup_path)
+
+
+_LOCAL_CONFIG_THREAD_LOCK = threading.RLock()
+
+
+@contextmanager
+def _local_config_write_lock():
+    """Serialize local YAML replacements across threads and Sandbox processes."""
+    path = Path(CONFIG_LOCAL)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigWriteError(
+            f"Could not access local config directory {path.parent}: {exc.strerror or 'I/O error'}"
+        ) from None
+    lock_path = path.with_name(path.name + ".lock")
+    if lock_path.is_symlink():
+        raise ConfigWriteError(f"Refusing symlinked config lock: {lock_path}")
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    with _LOCAL_CONFIG_THREAD_LOCK:
+        try:
+            descriptor = os.open(str(lock_path), flags, 0o600)
+        except OSError as exc:
+            raise ConfigWriteError(
+                f"Could not open local config lock {lock_path}: {exc.strerror or 'I/O error'}"
+            ) from None
+        locked = False
+        try:
+            _set_owner_only(descriptor, lock_path)
+            if os.name == "nt":
+                import msvcrt
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                locked = True
+            else:
+                import fcntl
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                locked = True
+            yield
+        finally:
+            if locked:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+
+def _atomic_replace_owner_only(path: Path, content: bytes) -> None:
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent),
+    )
+    temporary_path = Path(temporary)
+    open_descriptor = descriptor
+    try:
+        _set_owner_only(descriptor, temporary_path)
+        with os.fdopen(descriptor, "wb") as stream:
+            open_descriptor = None
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        try:
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise ConfigWriteError(
+            f"Could not safely replace {path}: {exc.strerror or 'I/O error'}"
+        ) from None
+    finally:
+        if open_descriptor is not None:
+            os.close(open_descriptor)
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _local_config_backup_path() -> Path:
+    path = Path(CONFIG_LOCAL)
+    return path.with_name(path.name + ".bak")
+
+
 def load_config() -> dict:
     ensure_pyyaml()
-    import yaml
     if not CONFIG.exists():
         die(f"missing {CONFIG} — run from the sandbox/ directory")
-    with CONFIG.open() as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = _load_yaml_mapping(Path(CONFIG))
     if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+        local = _load_yaml_mapping(
+            Path(CONFIG_LOCAL), backup_path=_local_config_backup_path(),
+        )
         cfg = deep_merge(cfg, local)
     vars_ = cfg.get("defaults", {}) or {}
     return expand(cfg, vars_)
@@ -280,19 +455,56 @@ def _make_venv(py: str, path: Path) -> None:
 
 
 def _local_yaml() -> dict:
-    ensure_pyyaml()
-    import yaml
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            return yaml.safe_load(f) or {}
-    return {}
+    return _load_yaml_mapping(
+        Path(CONFIG_LOCAL), backup_path=_local_config_backup_path(),
+    )
 
 
 def _write_local_yaml(local: dict) -> None:
     ensure_pyyaml()
     import yaml
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    if not isinstance(local, dict):
+        raise ConfigWriteError("Local Sandbox config must be a YAML mapping")
+    output = io.StringIO()
+    try:
+        yaml.safe_dump(local, output, default_flow_style=False, sort_keys=False)
+        serialized = output.getvalue()
+        parsed = _parse_yaml_mapping(
+            serialized, Path(CONFIG_LOCAL), _local_config_backup_path(),
+        )
+    except ConfigParseError:
+        raise
+    except Exception:
+        # PyYAML errors can include a repr of an unsupported value. Keep that
+        # detail out of terminal output because this file contains secrets.
+        raise ConfigWriteError("Could not serialize local Sandbox config") from None
+    if parsed != local:
+        raise ConfigWriteError("Serialized local Sandbox config did not validate")
+
+    config_path = Path(CONFIG_LOCAL)
+    backup_path = _local_config_backup_path()
+    with _local_config_write_lock():
+        if config_path.is_symlink():
+            raise ConfigWriteError(f"Refusing symlinked local config: {config_path}")
+        if backup_path.is_symlink() or (backup_path.exists() and not backup_path.is_file()):
+            raise ConfigWriteError(f"Refusing unsafe local config backup path: {backup_path}")
+        try:
+            if config_path.exists():
+                existing = config_path.read_bytes()
+                try:
+                    _parse_yaml_mapping(
+                        existing.decode("utf-8"), config_path, backup_path,
+                    )
+                except UnicodeDecodeError:
+                    raise ConfigWriteError(
+                        f"Refusing to replace unreadable local config: {config_path}"
+                    ) from None
+                _atomic_replace_owner_only(backup_path, existing)
+            _atomic_replace_owner_only(config_path, serialized.encode("utf-8"))
+        except OSError as exc:
+            raise ConfigWriteError(
+                f"Could not safely read local Sandbox config: {exc.strerror or 'I/O error'}"
+            ) from None
 
 
 def _write_env_local(values: dict) -> None:

@@ -57,8 +57,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from sandbox.core import *  # noqa: F401,F403
-from sandbox.core._config import ensure_pyyaml, _local_yaml
-from sandbox.core._paths import CONFIG_LOCAL, RUNTIME_DIR
+from sandbox.core._config import _local_yaml, _write_local_yaml
+from sandbox.core._paths import RUNTIME_DIR
 from sandbox.services.redaction import redact_structure, redact_text
 from sandbox.services.runtime_revision import runtime_revision, runtime_revision_sources
 
@@ -265,22 +265,12 @@ def _remote_block() -> dict:
 def _write_remote_block(block: dict) -> None:
     """Persist the `remotes:` mapping back into sandbox.local.yml, preserving
     the rest of the file. Mirrors _licensing.py's _write_licensing_block."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     if block:
         local["remotes"] = block
     else:
         local.pop("remotes", None)
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
-    try:
-        CONFIG_LOCAL.chmod(0o600)  # secret store stays owner-only
-    except OSError:
-        pass
+    _write_local_yaml(local)
 
 
 def validate_remote_name(name: str) -> str:

@@ -901,6 +901,13 @@ defaults:
   github_org: "wpdeveloper"
 ```
 
+Sandbox validates this machine-local YAML before using it. Changes are written
+through a locked, validated temporary file and atomic replacement. The previous
+valid file is retained at `$SANDBOX_HOME/sandbox.local.yml.bak` with owner-only
+permissions. Parse errors report the file and line and point to that backup
+without printing the source line. `sb feedback submit` remains available while
+machine config needs repair.
+
 `pro_plugins_home` (default `~/Sites/plugins-pro`) is the one directory holding Pro
 plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a remote
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**

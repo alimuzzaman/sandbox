@@ -35,22 +35,12 @@ def _licensing_block() -> dict:
 def _write_licensing_block(block: dict) -> None:
     """Persist the `licensing:` mapping back into sandbox.local.yml, preserving
     the rest of the file. Mirrors save_local_bridge_token's read-modify-write."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     if block:
         local["licensing"] = block
     else:
         local.pop("licensing", None)
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
-    try:
-        CONFIG_LOCAL.chmod(0o600)  # secret store stays owner-only
-    except OSError:
-        pass
+    _write_local_yaml(local)
 
 
 def set_license(family: str, key: str) -> None:

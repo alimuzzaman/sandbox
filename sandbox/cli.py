@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+from functools import wraps
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 from sandbox.core import *  # noqa: F401,F403
+from sandbox.core._config import ConfigParseError
 
 from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
 from sandbox.application.context import preflight_instance_capability
@@ -373,6 +375,21 @@ def _cli_version() -> str:
     return value or "unknown"
 
 
+def _config_parse_error_boundary(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except ConfigParseError as exc:
+            if "--json" in sys.argv[1:]:
+                print(json.dumps(exc.to_payload(), sort_keys=True))
+            else:
+                print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(2)
+    return wrapped
+
+
+@_config_parse_error_boundary
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -1306,6 +1323,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         args.label = pre_command_label
     if not args.cmd:
         p.print_help()
+        return
+
+    # Feedback storage is independent of machine config and must remain usable
+    # when sandbox.local.yml itself needs recovery.
+    if args.cmd == "feedback":
+        COMMANDS["feedback"]({}, args)
         return
 
     if getattr(args, "config_file", None) and not getattr(args, "project_dir", None):

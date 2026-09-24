@@ -24,6 +24,12 @@ URL:
 }
 ```
 
+For WordPress instances with `phpExtensions`, `up` prepares missing
+Sandbox-managed child images before Compose startup. A preparation failure
+emits one bounded, redacted JSON failure document with
+`error.code: "php_extension_image_prepare_failed"`; Compose is not started.
+Successfully built local images are retained for a later retry.
+
 Generic Compose and Herd responses use the same envelope and omit
 `mailpit_url` when that service is not part of the runtime. For Generic Compose,
 startup failures emit one bounded, redacted JSON failure document on stdout and

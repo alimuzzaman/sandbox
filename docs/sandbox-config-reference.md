@@ -734,6 +734,11 @@ neither GD nor Imagick is named. Sandbox pins official WordPress web and WP-CLI
 parents by registry digest, builds content-addressed child images below
 `$SANDBOX_HOME/runtime/build/php-extensions/`, and verifies the requirement in
 web, WP-CLI, bounded-exec, and PHPUnit planes.
+When `sb up --instance NAME` resumes an existing WordPress instance with
+`phpExtensions`, it verifies or rebuilds the child images from the persisted
+plan before starting Compose. If preparation fails, the command returns
+`php_extension_image_prepare_failed` without starting the stack; any image
+already built remains available for the next retry.
 
 During `sb migrate --apply`, automatic first-run migration, or `sb home <dir>`,
 the persisted extension requirement and digest metadata move with the other

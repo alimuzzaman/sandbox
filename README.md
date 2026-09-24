@@ -844,6 +844,11 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb clean                # stop + wipe DB volume (start fresh)
 ```
 
+For WordPress projects with `phpExtensions`, `sb up --instance NAME` verifies
+or rebuilds missing Sandbox-managed child images before starting the stack.
+Sandbox builds those child images locally instead of expecting the registry to
+host their generated tags.
+
 Run `./sb` with no args for the full list. `doctor` runs on the local controller and
 intentionally has no `--project-dir`, `--local`, or `--remote`; run it from the project
 directory, or resolve the registered instance with `./sb instances --project-dir DIR --json`

@@ -33,7 +33,7 @@ from sandbox.core import (
     info, mcp_server_name, ok, plugins_dir,
     proxy_available, resolve_instances, run, save_local_app_password,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
-    runtime_health_lines, wp_dir, wpcli,
+    runtime_health_lines, wp_dir, wpcli, prepare_php_extension_runtime,
     php_extension_status,
 )
 
@@ -309,6 +309,7 @@ def _emit_generic_up_failure(
     code: object,
     message: object,
     *,
+    runtime: str = "compose",
     mutated: bool = False,
     recovery: Mapping[str, object] | None = None,
     exit_code: object = None,
@@ -329,7 +330,7 @@ def _emit_generic_up_failure(
         "mutated": mutated,
         "command": "up",
         "instance": instance,
-        "runtime": "compose",
+        "runtime": runtime,
         "error": {"code": safe_code, "message": safe_message},
     }
     if recovery is not None and isinstance(recovery.get("command"), str):
@@ -413,6 +414,22 @@ def cmd_up(cfg: dict, args) -> None:
     # (for example an old nginx service), so repeated setup cannot accumulate
     # orphan containers.
     services = _web_services(inst_cfg.get("server", "nginx"))
+    if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
+        # The generated child images are local Sandbox build artifacts, not
+        # registry images. Restore them from the persisted immutable plan
+        # before Compose sees the project or it may try to pull those tags.
+        try:
+            prepare_php_extension_runtime(inst_cfg, inst_cfg.get("server", "nginx"))
+        except (TypeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            message = f"PHP extension image preparation failed: {exc}"
+            if json_output:
+                _emit_generic_up_failure(
+                    inst, "php_extension_image_prepare_failed", message,
+                    runtime="wordpress", mutated=False,
+                )
+            from sandbox.services.redaction import redact_text
+            detail = " ".join(redact_text(str(exc)).split())[:500]
+            die(f"php_extension_image_prepare_failed: {detail}")
     if json_output:
         _compose_up(inst, services, quiet=True, json_output=True)
     else:
@@ -432,7 +449,7 @@ def cmd_up(cfg: dict, args) -> None:
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
     # shared runtime bind-mount, which exists for any provisioned instance.
     if wp_dir(inst).exists():
-        _prepare_mu_plugin_directory(inst)
+        _prepare_mu_plugin_directory(inst, capture=json_output)
         _write_mail_muplugin(inst)
         _write_loopback_muplugin(inst)
         _write_dl_cache_muplugin(inst)
@@ -485,7 +502,7 @@ def cmd_up(cfg: dict, args) -> None:
         ok(f"Mailpit:   {mailpit_url}")
 
 
-def _prepare_mu_plugin_directory(instance: str) -> None:
+def _prepare_mu_plugin_directory(instance: str, *, capture: bool = False) -> None:
     """Make the shared mu-plugin directory writable by host and container tools.
 
     Docker can create a fresh bind-mounted document root as ``www-data``. The
@@ -500,7 +517,7 @@ def _prepare_mu_plugin_directory(instance: str) -> None:
         "mkdir -p /var/www/html/wp-content/mu-plugins && "
         "chown -R www-data:www-data /var/www/html/wp-content/mu-plugins && "
         "chmod -R a+rwX /var/www/html/wp-content/mu-plugins",
-        instance=instance, check=True,
+        instance=instance, check=True, capture=capture,
     )
 
 def cmd_down(cfg, args) -> None:

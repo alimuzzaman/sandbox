@@ -901,12 +901,14 @@ defaults:
   github_org: "wpdeveloper"
 ```
 
-Sandbox validates this machine-local YAML before using it. Changes are written
-through a locked, validated temporary file and atomic replacement. The previous
-valid file is retained at `$SANDBOX_HOME/sandbox.local.yml.bak` with owner-only
-permissions. Parse errors report the file and line and point to that backup
-without printing the source line. `sb feedback submit` remains available while
-machine config needs repair.
+Sandbox validates this machine-local YAML before using it. Under a shared lock,
+each write compares the version its operation read with the latest file, merges
+independent concurrent updates, then uses a validated temporary file and atomic
+replacement. Conflicting edits fail safely for retry. The previous valid file is
+retained at `$SANDBOX_HOME/sandbox.local.yml.bak` with owner-only permissions.
+Parse errors report the file and line and point to that backup without printing
+the source line. `sb feedback submit` remains available while machine config
+needs repair.
 
 `pro_plugins_home` (default `~/Sites/plugins-pro`) is the one directory holding Pro
 plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a remote

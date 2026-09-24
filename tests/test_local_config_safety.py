@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import copy
+import io
+import json
 import os
 import stat
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -63,6 +67,64 @@ class TestLocalConfigSafety(unittest.TestCase):
                 self.path.with_name(self.path.name + ".lock").stat().st_mode
             ), 0o600)
 
+    def test_stale_independent_nested_updates_are_merged(self):
+        self.path.write_text(
+            "service:\n  php: '8.3'\n  server: nginx\n",
+            encoding="utf-8",
+        )
+        self.path.chmod(0o600)
+        first = config._local_yaml()
+        second = config._local_yaml()
+
+        first["service"]["php"] = "8.4"
+        second["service"]["server"] = "caddy"
+        config._write_local_yaml(first)
+        config._write_local_yaml(second)
+
+        self.assertEqual(
+            yaml.safe_load(self.path.read_text(encoding="utf-8")),
+            {"service": {"php": "8.4", "server": "caddy"}},
+        )
+
+    def test_stale_conflicting_updates_fail_without_overwriting_newer_value(self):
+        self.path.write_text("service:\n  server: nginx\n", encoding="utf-8")
+        self.path.chmod(0o600)
+        first = config._local_yaml()
+        second = config._local_yaml()
+        first["service"]["server"] = "caddy"
+        second["service"]["server"] = "apache"
+
+        config._write_local_yaml(first)
+        with self.assertRaisesRegex(config.ConfigWriteError, "changed concurrently"):
+            config._write_local_yaml(second)
+
+        self.assertEqual(
+            yaml.safe_load(self.path.read_text(encoding="utf-8")),
+            {"service": {"server": "caddy"}},
+        )
+
+    def test_deep_copied_snapshot_keeps_its_merge_baseline(self):
+        self.path.write_text(
+            "instances:\n  one:\n    enabled: false\n  two:\n    enabled: false\n",
+            encoding="utf-8",
+        )
+        self.path.chmod(0o600)
+        rollback_snapshot = copy.deepcopy(config._local_yaml())
+        concurrent = config._local_yaml()
+
+        concurrent["instances"]["one"]["enabled"] = True
+        rollback_snapshot["instances"]["two"]["enabled"] = True
+        config._write_local_yaml(concurrent)
+        config._write_local_yaml(rollback_snapshot)
+
+        self.assertEqual(
+            yaml.safe_load(self.path.read_text(encoding="utf-8")),
+            {"instances": {
+                "one": {"enabled": True},
+                "two": {"enabled": True},
+            }},
+        )
+
     def test_parse_error_reports_location_and_backup_without_source_text(self):
         self.path.write_text(
             "credential: do-not-display\ninvalid: scalar: mapping\n",
@@ -98,6 +160,27 @@ class TestLocalConfigSafety(unittest.TestCase):
         handler.assert_called_once()
         self.assertEqual(handler.call_args.args[0], {})
         self.assertEqual(handler.call_args.args[1].action, "submit")
+
+    def test_config_write_conflict_returns_typed_json_error(self):
+        import sandbox.cli as cli
+
+        handler = mock.Mock(side_effect=config.ConfigWriteError(
+            "Local Sandbox config changed concurrently; reload it and retry safely"
+        ))
+        commands = dict(cli.COMMANDS)
+        commands["feedback"] = handler
+        output = io.StringIO()
+        with mock.patch.object(cli, "COMMANDS", commands), \
+                mock.patch.object(cli.sys, "argv", [
+                    "sb", "feedback", "submit", "--json",
+                ]), redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["error"]["code"], "config_write_error")
+        self.assertFalse(payload["ok"])
 
 
 if __name__ == "__main__":

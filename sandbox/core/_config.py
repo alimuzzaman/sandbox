@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import copy
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -113,6 +115,79 @@ class ConfigParseError(ValueError):
 
 class ConfigWriteError(RuntimeError):
     """A safe diagnostic for a refused or failed local-config replacement."""
+
+    code = "config_write_error"
+
+    def to_payload(self) -> dict:
+        return {"schema_version": 1, "ok": False,
+                "error": {"code": self.code, "message": str(self)}}
+
+
+class _LocalYamlDocument(dict):
+    """Mutable local config plus the exact mapping this edit started from."""
+
+    def __init__(self, value, *, baseline=None):
+        super().__init__(value)
+        self._baseline = copy.deepcopy(dict(value) if baseline is None else baseline)
+
+    def __deepcopy__(self, memo):
+        copied = type(self)(
+            copy.deepcopy(dict(self), memo),
+            baseline=copy.deepcopy(self._baseline, memo),
+        )
+        memo[id(self)] = copied
+        return copied
+
+
+_MISSING_LOCAL_VALUE = object()
+
+
+def _same_local_value(left, right) -> bool:
+    if left is _MISSING_LOCAL_VALUE or right is _MISSING_LOCAL_VALUE:
+        return left is right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, Mapping):
+        return (left.keys() == right.keys()
+                and all(_same_local_value(left[key], right[key]) for key in left))
+    if isinstance(left, (list, tuple)):
+        return (len(left) == len(right)
+                and all(_same_local_value(a, b) for a, b in zip(left, right)))
+    return left == right
+
+
+def _merge_local_yaml_edits(base: Mapping, desired: Mapping,
+                            current: Mapping) -> dict:
+    """Merge independent stale read-modify-writes; refuse same-key conflicts."""
+    merged = copy.deepcopy(dict(current))
+    keys = dict.fromkeys((*base.keys(), *desired.keys()))
+    for key in keys:
+        before = base.get(key, _MISSING_LOCAL_VALUE)
+        wanted = desired.get(key, _MISSING_LOCAL_VALUE)
+        latest = current.get(key, _MISSING_LOCAL_VALUE)
+        if _same_local_value(wanted, before):
+            continue
+        if (_same_local_value(latest, before)
+                or _same_local_value(latest, wanted)):
+            if wanted is _MISSING_LOCAL_VALUE:
+                merged.pop(key, None)
+            else:
+                merged[key] = copy.deepcopy(wanted)
+            continue
+        if (wanted is not _MISSING_LOCAL_VALUE
+                and latest is not _MISSING_LOCAL_VALUE
+                and isinstance(wanted, Mapping)
+                and isinstance(latest, Mapping)
+                and (before is _MISSING_LOCAL_VALUE or isinstance(before, Mapping))):
+            merged[key] = _merge_local_yaml_edits(
+                {} if before is _MISSING_LOCAL_VALUE else before,
+                wanted, latest,
+            )
+            continue
+        raise ConfigWriteError(
+            "Local Sandbox config changed concurrently; reload it and retry safely"
+        )
+    return merged
 
 
 def _set_owner_only(descriptor: int, path: Path) -> None:
@@ -455,9 +530,10 @@ def _make_venv(py: str, path: Path) -> None:
 
 
 def _local_yaml() -> dict:
-    return _load_yaml_mapping(
+    value = _load_yaml_mapping(
         Path(CONFIG_LOCAL), backup_path=_local_config_backup_path(),
     )
+    return _LocalYamlDocument(value)
 
 
 def _write_local_yaml(local: dict) -> None:
@@ -465,22 +541,7 @@ def _write_local_yaml(local: dict) -> None:
     import yaml
     if not isinstance(local, dict):
         raise ConfigWriteError("Local Sandbox config must be a YAML mapping")
-    output = io.StringIO()
-    try:
-        yaml.safe_dump(local, output, default_flow_style=False, sort_keys=False)
-        serialized = output.getvalue()
-        parsed = _parse_yaml_mapping(
-            serialized, Path(CONFIG_LOCAL), _local_config_backup_path(),
-        )
-    except ConfigParseError:
-        raise
-    except Exception:
-        # PyYAML errors can include a repr of an unsupported value. Keep that
-        # detail out of terminal output because this file contains secrets.
-        raise ConfigWriteError("Could not serialize local Sandbox config") from None
-    if parsed != local:
-        raise ConfigWriteError("Serialized local Sandbox config did not validate")
-
+    desired = copy.deepcopy(dict(local))
     config_path = Path(CONFIG_LOCAL)
     backup_path = _local_config_backup_path()
     with _local_config_write_lock():
@@ -489,18 +550,50 @@ def _write_local_yaml(local: dict) -> None:
         if backup_path.is_symlink() or (backup_path.exists() and not backup_path.is_file()):
             raise ConfigWriteError(f"Refusing unsafe local config backup path: {backup_path}")
         try:
+            existing = None
+            current = {}
             if config_path.exists():
                 existing = config_path.read_bytes()
                 try:
-                    _parse_yaml_mapping(
+                    current = _parse_yaml_mapping(
                         existing.decode("utf-8"), config_path, backup_path,
                     )
                 except UnicodeDecodeError:
                     raise ConfigWriteError(
                         f"Refusing to replace unreadable local config: {config_path}"
                     ) from None
-                _atomic_replace_owner_only(backup_path, existing)
-            _atomic_replace_owner_only(config_path, serialized.encode("utf-8"))
+            baseline = (local._baseline if isinstance(local, _LocalYamlDocument)
+                        else current)
+            merged = _merge_local_yaml_edits(baseline, desired, current)
+
+            output = io.StringIO()
+            try:
+                yaml.safe_dump(merged, output, default_flow_style=False,
+                               sort_keys=False)
+                serialized = output.getvalue()
+                parsed = _parse_yaml_mapping(
+                    serialized, config_path, backup_path,
+                )
+            except ConfigParseError:
+                raise
+            except Exception:
+                # PyYAML errors can include a repr of an unsupported value.
+                # Keep that detail out of terminal output because this file
+                # contains secrets.
+                raise ConfigWriteError(
+                    "Could not serialize local Sandbox config"
+                ) from None
+            if parsed != merged:
+                raise ConfigWriteError(
+                    "Serialized local Sandbox config did not validate"
+                )
+
+            if not _same_local_value(current, merged):
+                if existing is not None:
+                    _atomic_replace_owner_only(backup_path, existing)
+                _atomic_replace_owner_only(config_path, serialized.encode("utf-8"))
+            if isinstance(local, _LocalYamlDocument):
+                local._baseline = copy.deepcopy(merged)
         except OSError as exc:
             raise ConfigWriteError(
                 f"Could not safely read local Sandbox config: {exc.strerror or 'I/O error'}"

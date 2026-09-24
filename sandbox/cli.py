@@ -18,7 +18,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 from sandbox.core import *  # noqa: F401,F403
-from sandbox.core._config import ConfigParseError
+from sandbox.core._config import ConfigParseError, ConfigWriteError
 
 from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
 from sandbox.application.context import preflight_instance_capability
@@ -380,7 +380,7 @@ def _config_parse_error_boundary(function):
     def wrapped(*args, **kwargs):
         try:
             return function(*args, **kwargs)
-        except ConfigParseError as exc:
+        except (ConfigParseError, ConfigWriteError) as exc:
             if "--json" in sys.argv[1:]:
                 print(json.dumps(exc.to_payload(), sort_keys=True))
             else:

@@ -399,6 +399,12 @@ Recovery never resolves or parses secrets. It accepts only exact owner-only opaq
 binding metadata created by an eligible apply; missing, stale, environment-backed, or
 manually changed secret-source metadata refuses. Missing, symbolic-link, non-regular,
 or non-owner-only secret sources and binding keys never carry authorizing epoch/identity.
+Ordinary hosted apply also refuses environment-backed secret overrides before source
+publication or runtime effects; use the registered secret source instead. If a failed
+apply already staged a revision and recorded runtime `ready`, first close any failed
+delivery owner through the protected retirement command. A new apply must freshly prove
+that exact runtime before it can continue edge work, and must not rerun Compose or an
+initializer on that proof alone.
 The broker revision is guarded from validation through commit, and the raw digest of
 secret-bearing `environment.env` is never a receipt field. `host sync --watch` uses only
 a target effect lease after its short active-owner state check, so unrelated targets are

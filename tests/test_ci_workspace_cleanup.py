@@ -1,4 +1,6 @@
+import base64
 import hashlib
+from contextlib import ExitStack, contextmanager
 import json
 import tempfile
 import unittest
@@ -24,7 +26,7 @@ from sandbox.workspaces.repository import WorkspaceRepository
 class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.deploy_root = self.root / "deploy-src"
         self.deploy_root.mkdir()
         self.job_repository = JobRepository(self.root / "runtime" / "jobs" / "registry.sqlite3")
@@ -42,8 +44,17 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 "containers": 0, "mounts": 0},
         )
         self.sources = {}
+        self.broker_operations = self.root / "broker-state" / "operations"
+        self.broker_quarantine = self.root / "broker-state" / "quarantine"
+        self.broker_operations.mkdir(parents=True, mode=0o700)
+        self.broker_quarantine.mkdir(mode=0o700)
+        self.broker_configs = {}
+        self.broker_rename_hook = None
+        self.broker_patcher = None
 
     def tearDown(self):
+        if self.broker_patcher is not None:
+            self.broker_patcher.stop()
         self.job_repository.close()
         self.temporary.cleanup()
 
@@ -53,6 +64,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         (source / "retained-evidence.txt").write_text("fixture")
         checkout = self.deploy_root / name
         shutil.copytree(source, checkout)
+        checkout.chmod(0o700)
         self.sources[str(checkout)] = source
         return checkout
 
@@ -65,10 +77,67 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         )
 
     def _service(self, launcher):
+        if self.broker_patcher is None:
+            from sandbox.application import ci_cleanup_broker as broker
+
+            self.broker_patcher = patch.object(
+                broker, "_invoke", side_effect=self._invoke_test_broker)
+            self.broker_patcher.start()
         return JobService(
             self.job_repository, self.storage, None, launcher=launcher,
             workspace_registry=self.workspaces,
         )
+
+    def _invoke_test_broker(self, action, *args):
+        """Exercise the real journal operations with only test-owned roots."""
+        from sandbox.application import ci_cleanup_broker as broker
+
+        def decode_request(encoded):
+            padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+            return json.loads(base64.urlsafe_b64decode(padded))
+
+        if action == "begin-cleanup":
+            cleanup_id, encoded_request = args
+            request = decode_request(encoded_request)
+            config = {"roots": {
+                name: (Path(pin["path"]).resolve(strict=True),
+                       (pin["device"], pin["inode"]))
+                for name, pin in request["pinned_roots"].items()
+            }}
+            self.broker_configs[cleanup_id] = config
+        elif action in {"resume-checkout", "resume-metadata"}:
+            cleanup_id = args[0]
+            config = self.broker_configs.get(cleanup_id)
+            if config is None:
+                raise broker.CiCleanupBrokerError("cleanup_journal_missing")
+        elif action == "ack-cleanup":
+            cleanup_id, workspace_id, authority_digest, encoded_request = args
+            request = decode_request(encoded_request)
+            config = self.broker_configs[cleanup_id]
+        else:
+            raise broker.CiCleanupBrokerError("cleanup_broker_unsupported")
+
+        paths = {"operations": self.broker_operations,
+                 "quarantine": self.broker_quarantine}
+        with ExitStack() as stack:
+            for filesystem_patch in self._patch_broker_filesystem(broker, paths):
+                stack.enter_context(filesystem_patch)
+            if self.broker_rename_hook is not None:
+                real_rename = broker._rename_noreplace
+                hook = self.broker_rename_hook
+                stack.enter_context(patch.object(
+                    broker, "_rename_noreplace",
+                    side_effect=lambda *args: hook(real_rename, *args)))
+            if action == "begin-cleanup":
+                return broker._begin_cleanup(
+                    config, os.getuid(), cleanup_id, request)
+            if action == "resume-checkout":
+                return broker._resume_checkout(config, os.getuid(), cleanup_id)
+            if action == "resume-metadata":
+                return broker._resume_metadata(config, os.getuid(), cleanup_id)
+            return broker._acknowledge_cleanup(
+                config, os.getuid(), cleanup_id, workspace_id,
+                authority_digest, request)
 
     def _fd_path(self, descriptor):
         if sys.platform.startswith("linux"):
@@ -81,6 +150,30 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         row = self.job_repository.get(accepted["job_id"])
         record = self.workspace_repository.get(row["workspace_id"])
         return Path(record.metadata["ci_cleanup_authority"]["artifact_locator"])
+
+    def _fail_checkout_removal(self, *, after_emptying=False):
+        from sandbox.application import ci_cleanup_broker as broker
+
+        real_remove = broker._remove_checkout_contents
+
+        def fail(directory_fd, device, counters, depth=0):
+            if after_emptying:
+                real_remove(directory_fd, device, counters, depth)
+            raise broker.CiCleanupBrokerError("cleanup_broker_unavailable")
+
+        return patch.object(
+            broker, "_remove_checkout_contents", side_effect=fail)
+
+    def _quarantined_owned(self):
+        return tuple(self.broker_quarantine.glob("checkout-*/owned"))
+
+    @contextmanager
+    def _rename_hook(self, hook):
+        self.broker_rename_hook = hook
+        try:
+            yield
+        finally:
+            self.broker_rename_hook = None
 
     def _broker_cleanup_fixture(self, cleanup_id):
         from sandbox.application import ci_cleanup_broker as broker
@@ -435,22 +528,26 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         service = self._service(
             lambda _descriptor: (_ for _ in ()).throw(OSError("launch failed")))
 
-        with self.assertRaisesRegex(RuntimeError, "supervisor_launch_failed"):
-            service.submit(self._submission(
-                checkout, request_id="launch-failure-request"))
+        with self._fail_checkout_removal(after_emptying=True):
+            with self.assertRaisesRegex(RuntimeError, "supervisor_launch_failed"):
+                service.submit(self._submission(
+                    checkout, request_id="launch-failure-request"))
 
         row = self.job_repository.list(limit=1)[0]
         self.assertEqual(row["lifecycle"], "failed")
         self.assertEqual(row["termination_reason"], "supervisor_launch_failed")
         self.assertEqual(row["cleanup_state"], "failed")
         self.assertFalse(checkout.exists())
+        quarantines = self._quarantined_owned()
+        self.assertEqual(len(quarantines), 1)
+        self.assertEqual(tuple(quarantines[0].iterdir()), ())
         self.assertEqual(
             self.workspace_repository.get(row["workspace_id"]).lifecycle,
             "indeterminate",
         )
 
     def test_failed_empty_quarantine_retries_by_authoritative_inode(self):
-        from sandbox.application.ci_cleanup_broker import CiCleanupBrokerError
+        from sandbox.application import ci_cleanup_broker as broker
 
         checkout = self._checkout("recover-empty-quarantine")
         service = self._service(lambda _descriptor: None)
@@ -460,36 +557,32 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
 
-        with patch(
-                "sandbox.application.ci_cleanup_broker.finalize_checkout",
-                side_effect=CiCleanupBrokerError("cleanup_broker_unavailable")):
+        real_store = broker._store_journal
+        failed_once = False
+
+        def fail_after_checkout_removal(*args, **kwargs):
+            nonlocal failed_once
+            journal = args[2]
+            if (not failed_once and journal.get("checkout", {}).get("phase")
+                    == "removed"):
+                failed_once = True
+                raise broker.CiCleanupBrokerError("cleanup_broker_unavailable")
+            return real_store(*args, **kwargs)
+
+        with patch.object(
+                broker, "_store_journal", side_effect=fail_after_checkout_removal):
             failed = service.get(accepted["job_id"])
 
         self.assertEqual(failed["cleanup_state"], "failed")
         self.assertFalse(checkout.exists())
-        quarantines = tuple(self.deploy_root.glob(".sandbox-ci-cleanup/*/owned"))
-        self.assertEqual(len(quarantines), 1)
-        self.assertEqual(tuple(quarantines[0].iterdir()), ())
+        self.assertEqual(self._quarantined_owned(), ())
 
-        self.workspaces.cleanup_reference_observer = None
-        with patch(
-                "sandbox.application.workspace_service._observe_cleanup_references",
-                return_value={"containers": 0, "mounts": 0}) as references, patch(
-                "sandbox.application.ci_cleanup_broker.recover_quarantined_checkout"
-                ) as recover, patch(
-                "sandbox.application.ci_cleanup_broker.remove_workspace_metadata"
-                ) as remove_metadata:
-            recovered = service.get(accepted["job_id"])
+        recovered = service.get(accepted["job_id"])
 
         workspace_id = self.job_repository.get(accepted["job_id"])["workspace_id"]
         record = self.workspace_repository.get(workspace_id)
         self.assertEqual(recovered["cleanup_state"], "completed")
         self.assertEqual(record.lifecycle, "destroyed")
-        expected_device = record.metadata["ci_cleanup_authority"]["checkout_identity"]["device"]
-        self.assertEqual(references.call_args.kwargs["device"],
-                         (os.major(expected_device), os.minor(expected_device)))
-        self.assertEqual(recover.call_count, 1)
-        self.assertEqual(remove_metadata.call_count, 1)
 
     def test_privileged_checkout_removal_is_recursive_and_does_not_follow_symlinks(self):
         from sandbox.application.ci_cleanup_broker import _remove_checkout_contents
@@ -559,7 +652,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
 
                 row = self.job_repository.get(accepted["job_id"])
                 self.assertEqual(row["lifecycle"], lifecycle)
-                self.assertEqual(row["cleanup_state"], "failed")
+                self.assertEqual(row["cleanup_state"], "completed")
                 self.assertFalse(checkout.exists())
 
     def test_persistent_or_retained_workspace_is_never_deleted(self):
@@ -608,16 +701,14 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
 
-        with patch(
-                "sandbox.application.workspace_service._remove_tree_fd",
-                side_effect=OSError("fixture cleanup failed")):
+        with self._fail_checkout_removal():
             row = service.get(accepted["job_id"])
 
         self.assertEqual(row["lifecycle"], "succeeded")
         self.assertEqual(row["exit_code"], 0)
         self.assertEqual(row["cleanup_state"], "failed")
         self.assertFalse(checkout.exists())
-        quarantines = tuple(self.deploy_root.glob(".sandbox-ci-cleanup/*/owned"))
+        quarantines = self._quarantined_owned()
         self.assertEqual(len(quarantines), 1)
         self.assertTrue((quarantines[0] / "retained-evidence.txt").is_file())
         self.assertEqual(
@@ -657,8 +748,9 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         service = self._service(
             lambda _descriptor: (_ for _ in ()).throw(OSError("launch failed")))
         submission = self._submission(checkout, request_id="replay-request")
-        with self.assertRaisesRegex(RuntimeError, "supervisor_launch_failed"):
-            service.submit(submission)
+        with self._fail_checkout_removal(after_emptying=True):
+            with self.assertRaisesRegex(RuntimeError, "supervisor_launch_failed"):
+                service.submit(submission)
         first = self.job_repository.list(limit=1)[0]
 
         replay = service.submit(submission)
@@ -689,7 +781,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         after = self.workspace_repository.ownership_projection()["records"]
         projected = next(item for item in after if item["workspace_id"] == workspace_id)
         self.assertEqual(projected["active_references"]["jobs"], 0)
-        self.assertEqual(projected["lifecycle"], "indeterminate")
+        self.assertEqual(projected["lifecycle"], "destroyed")
 
     def test_reconciled_terminal_job_refuses_cleanup_while_recorded_child_is_live(self):
         checkout = self._checkout("live-child")
@@ -836,25 +928,26 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         metadata_path = Path(record.path)
         artifact = self._materialization_artifact(accepted)
         moved = self.deploy_root / "reviewer-moved-owned"
-        real_rename = os.rename
         attacked = False
 
-        def replace_before_quarantine(src, dst, *args, **kwargs):
+        def replace_before_quarantine(real_rename, source_fd, source,
+                                      target_fd, target):
             nonlocal attacked
-            if not attacked and src == checkout.name:
+            if not attacked and source == checkout.name and target == "owned":
                 attacked = True
-                real_rename(checkout, moved)
+                checkout.rename(moved)
                 checkout.mkdir()
                 (checkout / "foreign.txt").write_text("must survive")
-            return real_rename(src, dst, *args, **kwargs)
+            return real_rename(source_fd, source, target_fd, target)
 
-        with patch(
-                "sandbox.application.workspace_service.os.rename",
-                side_effect=replace_before_quarantine):
+        with self._rename_hook(replace_before_quarantine):
             row = service.get(accepted["job_id"])
 
         self.assertEqual(row["cleanup_state"], "failed")
-        self.assertEqual((checkout / "foreign.txt").read_text(), "must survive")
+        foreign = tuple(self.deploy_root.glob(
+            ".sandbox-ci-cleanup/*/owned/foreign.txt"))
+        self.assertEqual(len(foreign), 1)
+        self.assertEqual(foreign[0].read_text(), "must survive")
         self.assertTrue((moved / "retained-evidence.txt").is_file())
         self.assertTrue(metadata_path.is_file())
         self.assertTrue(artifact.is_file())
@@ -863,7 +956,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             "indeterminate")
 
     def test_quarantine_replacement_after_validation_is_never_deleted(self):
-        from sandbox.application import workspace_service as workspace_module
+        from sandbox.application import ci_cleanup_broker as broker
 
         checkout = self._checkout("quarantine-second-aba")
         service = self._service(lambda _descriptor: None)
@@ -872,38 +965,30 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
-        moved = self.deploy_root / "reviewer-moved-quarantine"
-        real_remove = workspace_module._remove_tree_fd
+        moved = self.broker_quarantine / "reviewer-moved-quarantine"
+        real_remove = broker._remove_checkout_contents
 
-        def replace_quarantine(directory_fd):
-            fd_link = (f"/proc/self/fd/{directory_fd}"
-                       if sys.platform.startswith("linux")
-                       else f"/dev/fd/{directory_fd}")
-            if sys.platform.startswith("linux"):
-                candidate = Path(os.readlink(fd_link))
-            else:
-                encoded = fcntl.fcntl(
-                    directory_fd, fcntl.F_GETPATH, b"\0" * 1024)
-                candidate = Path(encoded.split(b"\0", 1)[0].decode())
+        def replace_quarantine(directory_fd, device, counters, depth=0):
+            real_remove(directory_fd, device, counters, depth)
+            candidate = self._fd_path(directory_fd)
             candidate.rename(moved)
             candidate.mkdir()
             (candidate / "foreign.txt").write_text("must survive")
-            return real_remove(directory_fd)
 
         with patch(
-                "sandbox.application.workspace_service._remove_tree_fd",
+                "sandbox.application.ci_cleanup_broker._remove_checkout_contents",
                 side_effect=replace_quarantine):
             row = service.get(accepted["job_id"])
 
         self.assertEqual(row["cleanup_state"], "failed")
-        foreign = tuple(self.deploy_root.glob(
-            ".sandbox-ci-cleanup/*/owned/foreign.txt"))
+        foreign = tuple(self.broker_quarantine.glob(
+            "checkout-*/owned/foreign.txt"))
         self.assertEqual(len(foreign), 1)
         self.assertEqual(foreign[0].read_text(), "must survive")
         self.assertFalse((moved / "retained-evidence.txt").exists())
 
     def test_empty_quarantine_aba_never_deletes_path_replacement(self):
-        from sandbox.application import workspace_service as workspace_module
+        from sandbox.application import ci_cleanup_broker as broker
 
         checkout = self._checkout("empty-quarantine-aba")
         service = self._service(lambda _descriptor: None)
@@ -912,30 +997,27 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
-        moved = self.deploy_root / "reviewer-empty-owned"
-        real_remove = workspace_module._remove_tree_fd
+        moved = self.broker_quarantine / "reviewer-empty-owned"
+        real_remove = broker._remove_checkout_contents
 
-        def replace_empty_quarantine(directory_fd):
-            real_remove(directory_fd)
+        def replace_empty_quarantine(directory_fd, device, counters, depth=0):
+            real_remove(directory_fd, device, counters, depth)
             candidate = self._fd_path(directory_fd)
             candidate.rename(moved)
             candidate.mkdir()
 
         with patch(
-                "sandbox.application.workspace_service._remove_tree_fd",
+                "sandbox.application.ci_cleanup_broker._remove_checkout_contents",
                 side_effect=replace_empty_quarantine):
             row = service.get(accepted["job_id"])
 
         self.assertEqual(row["cleanup_state"], "failed")
-        replacements = tuple(self.deploy_root.glob(
-            ".sandbox-ci-cleanup/*/owned"))
+        replacements = tuple(self.broker_quarantine.glob("checkout-*/owned"))
         self.assertEqual(len(replacements), 1)
         self.assertTrue(replacements[0].is_dir())
         self.assertTrue(moved.is_dir())
 
     def test_checkout_disappears_after_validation_before_quarantine_fails_closed(self):
-        from sandbox.application import workspace_service as workspace_module
-
         checkout = self._checkout("checkout-disappears-before-quarantine")
         service = self._service(lambda _descriptor: None)
         accepted = service.submit(self._submission(
@@ -948,24 +1030,18 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         metadata_path = Path(record.path)
         artifact = self._materialization_artifact(accepted)
         moved = self.deploy_root / "reviewer-disappeared-checkout"
-        real_rename = workspace_module.os.rename
         attacked = False
 
-        def disappear_at_quarantine(source, destination, *,
-                                    src_dir_fd=None, dst_dir_fd=None):
+        def disappear_at_quarantine(real_rename, source_fd, source, target_fd,
+                                    destination):
             nonlocal attacked
-            if (source == checkout.name and destination == "owned" and
-                    src_dir_fd is not None and not attacked):
+            if (source == checkout.name and destination == "owned" and not attacked):
                 attacked = True
-                candidate = self._fd_path(src_dir_fd) / source
-                real_rename(candidate, moved)
-            return real_rename(
-                source, destination,
-                src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+                candidate = self._fd_path(source_fd) / source
+                candidate.rename(moved)
+            return real_rename(source_fd, source, target_fd, destination)
 
-        with patch(
-                "sandbox.application.workspace_service.os.rename",
-                side_effect=disappear_at_quarantine):
+        with self._rename_hook(disappear_at_quarantine):
             observed = service.get(accepted["job_id"])
 
         self.assertTrue(attacked)
@@ -980,8 +1056,6 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             "indeterminate")
 
     def test_quarantine_post_recheck_replacement_is_never_deleted(self):
-        from sandbox.application import workspace_service as workspace_module
-
         checkout = self._checkout("quarantine-post-recheck")
         service = self._service(lambda _descriptor: None)
         accepted = service.submit(self._submission(
@@ -990,33 +1064,32 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
         moved = self.deploy_root / "reviewer-post-recheck-owned"
-        real_rmdir = workspace_module.os.rmdir
         attacked = False
 
-        def replace_at_remove(path, *, dir_fd=None):
+        def replace_after_checkout_verification(real_rename, source_fd, source,
+                                                target_fd, target):
             nonlocal attacked
-            if path == "owned" and dir_fd is not None and not attacked:
+            if (source == target.removeprefix("checkout-")
+                    and target.startswith("checkout-") and not attacked):
                 attacked = True
-                candidate = self._fd_path(dir_fd) / path
+                candidate = self._fd_path(source_fd) / source / "owned"
                 candidate.rename(moved)
                 candidate.mkdir()
-            return real_rmdir(path, dir_fd=dir_fd)
+                (candidate / "foreign.txt").write_text("must survive")
+            return real_rename(source_fd, source, target_fd, target)
 
-        with patch(
-                "sandbox.application.workspace_service.os.rmdir",
-                side_effect=replace_at_remove):
+        with self._rename_hook(replace_after_checkout_verification):
             row = service.get(accepted["job_id"])
 
         self.assertEqual(row["cleanup_state"], "failed")
-        self.assertFalse(attacked)
-        replacements = tuple(self.deploy_root.glob(
-            ".sandbox-ci-cleanup/*/owned"))
-        self.assertEqual(len(replacements), 1)
-        self.assertTrue(replacements[0].is_dir())
-        self.assertFalse(moved.exists())
+        self.assertTrue(attacked)
+        foreign = tuple(self.broker_quarantine.glob("checkout-*/owned/foreign.txt"))
+        self.assertEqual(len(foreign), 1)
+        self.assertEqual(foreign[0].read_text(), "must survive")
+        self.assertTrue((moved / "retained-evidence.txt").is_file())
 
     def test_concurrent_accept_during_delete_cannot_lose_checkout(self):
-        from sandbox.application import workspace_service as workspace_module
+        from sandbox.application import ci_cleanup_broker as broker
 
         checkout = self._checkout("concurrent-accept-delete")
         service = self._service(lambda _descriptor: None)
@@ -1030,13 +1103,13 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         submit_finished = threading.Event()
         submit_results = []
         submit_errors = []
-        real_remove = workspace_module._remove_tree_fd
+        real_remove = broker._remove_checkout_contents
 
-        def pause_delete(directory_fd):
+        def pause_delete(directory_fd, device, counters, depth=0):
             entered_delete.set()
             if not continue_delete.wait(5):
                 raise RuntimeError("fixture delete wait expired")
-            return real_remove(directory_fd)
+            return real_remove(directory_fd, device, counters, depth)
 
         def cleanup_worker():
             service.get(accepted["job_id"])
@@ -1051,7 +1124,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 submit_finished.set()
 
         with patch(
-                "sandbox.application.workspace_service._remove_tree_fd",
+                "sandbox.application.ci_cleanup_broker._remove_checkout_contents",
                 side_effect=pause_delete):
             cleanup_thread = threading.Thread(target=cleanup_worker)
             cleanup_thread.start()
@@ -1078,7 +1151,9 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
-        self.assertEqual(service.get(accepted["job_id"])["cleanup_state"], "failed")
+        with self._fail_checkout_removal():
+            cleanup = service.get(accepted["job_id"])
+        self.assertEqual(cleanup["cleanup_state"], "failed")
         self.assertFalse(checkout.exists())
 
         retry = service.retry(
@@ -1101,8 +1176,9 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
-        self.assertEqual(service.get(accepted["job_id"])["cleanup_state"],
-                         "failed")
+        with self._fail_checkout_removal():
+            cleanup = service.get(accepted["job_id"])
+        self.assertEqual(cleanup["cleanup_state"], "failed")
         artifact = self._materialization_artifact(accepted)
         verified = artifact.with_name("reviewer-verified-restore.tar.gz")
         replacement = b"unrelated replacement"
@@ -1137,7 +1213,8 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(
             accepted["job_id"], "succeeded", exit_code=0)
-        service.get(accepted["job_id"])
+        with self._fail_checkout_removal():
+            service.get(accepted["job_id"])
         self._materialization_artifact(accepted).write_bytes(b"invalid archive")
 
         with self.assertRaises(Exception):

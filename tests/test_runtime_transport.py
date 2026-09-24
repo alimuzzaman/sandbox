@@ -581,6 +581,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                     registry_find_instance=lambda _name: owner)), \
                 mock.patch.object(
                     commands, "runtime_service", return_value=service), \
+                mock.patch.object(
+                    commands, "_refresh_caddy_routes_after_instance_delete"), \
                 contextlib.redirect_stdout(io.StringIO()):
             commands.cmd_instance({}, args)
 

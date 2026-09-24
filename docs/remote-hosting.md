@@ -1012,6 +1012,10 @@ selected unit declares a valid non-secret digest, and `runtime_revision_state`
 (`match`, `mismatch`, `unavailable`, or `unknown`). A configured service record is
 not treated as proof of the installed revision. It treats unavailable evidence as
 degraded; it never reads a credential into command arguments or output.
+The systemd and login-session calls are individually time-bounded. Status also reports
+`probe_state` (`complete`, `partial`, or `unavailable`) and a stable `probe_error`
+when the bounded SSH observation cannot finish. Confirmed service lifecycle changes
+refuse incomplete evidence before source upload or service mutation.
 
 When an older PID-file-managed MCP process is detected, confirmed migration proves that
 exact process's PID, working directory, bind, and port before handing it off. If the

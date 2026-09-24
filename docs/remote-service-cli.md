@@ -17,6 +17,12 @@ refreshes the immutable, owner-scoped image staging helper for that exact source
 revision before it changes or restarts the user service. Helper validation failure
 therefore leaves the existing service untouched.
 
+`status` bounds each user-systemd probe and returns `probe_state` (`complete`,
+`partial`, or `unavailable`) with a stable `probe_error` when evidence is
+incomplete. SSH transport failures return a degraded JSON result and a nonzero
+exit. Confirmed migrate, `remote up`, cleanup, and stop operations refuse
+incomplete status before uploading source or changing the service.
+
 Source archives may contain symlinks only when parent-relative lexical
 resolution stays inside the archive root. Tar hardlinks use archive-root
 semantics and must name a direct regular archived file. Absolute links,

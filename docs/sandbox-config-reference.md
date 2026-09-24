@@ -842,7 +842,12 @@ Two special cases:
   `config.DISABLE_WP_CRON: false` spelling remains a compatibility alias when
   `wpCron` is omitted; if both spellings are present, they must describe the
   same effective setting. Managed-native uses the same policy for its isolated
-  five-minute scheduler and never enables both triggers.
+  five-minute scheduler and never enables both triggers. Do not manually run
+  `wp config set DISABLE_WP_CRON ...`: it writes into generated `wp-config.php`
+  instead of the project config and can add a duplicate `define()` with a PHP
+  warning. Set `wpCron.enabled` in `sandbox.config.json` and reconcile it with
+  `./sb apply`. Sandbox's LiteSpeed setup manages its required literal writes
+  itself; do not add those literals by hand.
 - On a **litespeed** instance the constants are additionally written as
   literals via `wp config set` (lsphp runs via suExec and can't read the
   container env; the OLS image doesn't regenerate `wp-config.php`, so the

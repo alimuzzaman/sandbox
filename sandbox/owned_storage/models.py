@@ -355,6 +355,15 @@ class CleanupIntent:
     created_at: str
     updated_at: str
     completed_at: Optional[str] = None
+    # Fields below are nullable for pre-recovery journal rows. Such rows remain
+    # readable for diagnostics, but cannot authorize filesystem recovery.
+    request_digest: Optional[str] = None
+    source_relative_path: Optional[str] = None
+    quarantine_relative_path: Optional[str] = None
+    storage_root_identity: Optional[Dict[str, Any]] = None
+    source_parent_identity: Optional[Dict[str, Any]] = None
+    source_identity: Optional[Dict[str, Any]] = None
+    quarantine_container_identity: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

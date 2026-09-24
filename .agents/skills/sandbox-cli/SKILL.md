@@ -571,6 +571,35 @@ sb job-retry <failed-job-id> --remote scaleway-sandbox --request-id ci-retry-1 -
 sb job-cleanup <terminal-job-id> --remote scaleway-sandbox --logs --artifacts --metrics --json
 ```
 
+For terminal CI workspace cleanup, require the durable controller intent and
+matching broker receipt. The broker journals checkout and metadata phases
+independently under root-owned state; retries may resume only from recorded
+identities and deterministic quarantine targets. Prepared-but-absent objects,
+unknown journal versions, identity changes, and historical failures without a
+journal remain refused. Do not search quarantine by inode or delete retained
+journal/quarantine entries by hand. A successful cleanup means exact checkout
+and metadata removal, workspace lifecycle `destroyed`, and acknowledgement of
+the matching receipt; it does not prove remote runtime behavior without an
+installed broker and observed runtime evidence.
+
+Broker tombstones are retained without expiry to prevent cleanup-ID reuse.
+The current limit is 512 IDs and 32 MiB; when full, new cleanup operations are
+refused while existing IDs may finish. Separately, an interruption inside the
+owned-storage manager's quarantine step uses its own canonical request digest
+and SQLite cleanup intent; the CI broker receipt does not cover it. Replay the
+same request ID, or use the existing reconciliation path, to resume only when
+the recorded source and quarantine identities match. Source-only and
+quarantine-only states can resume from a captured intent. Both/neither states, identity changes, historical intents
+without captured inode evidence, and unknown quarantine entries stay retained
+with diagnostics. Never infer old identities from the current object row.
+Cleanup replay uses a deterministic preview identity and serializes by intent
+and object across processes. Recovery rechecks current-generation selection or
+materialization leases before resuming removal; a newly active reference blocks
+the retry. Phase writes compare the recorded prior phase, and retained lock files
+in the private database-side lock directory must not be deleted manually.
+Symlink descendants are treated only as leaves: recovery rechecks their link
+identity without following them, then unlinks by the open parent descriptor.
+
 Use this skill when MCP is unavailable, unnecessary, or would load tools for a
 different runtime. The `sb` CLI is the primary operational interface; MCP is an
 optional adapter for MCP-capable clients.

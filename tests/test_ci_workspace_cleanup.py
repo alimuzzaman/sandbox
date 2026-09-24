@@ -1,3 +1,5 @@
+import hashlib
+import json
 import tempfile
 import unittest
 import fcntl
@@ -79,6 +81,354 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         row = self.job_repository.get(accepted["job_id"])
         record = self.workspace_repository.get(row["workspace_id"])
         return Path(record.metadata["ci_cleanup_authority"]["artifact_locator"])
+
+    def _broker_cleanup_fixture(self, cleanup_id):
+        from sandbox.application import ci_cleanup_broker as broker
+
+        owner_uid = os.getuid()
+        # macOS exposes temporary directories through /var -> /private/var;
+        # the broker intentionally rejects symlinked absolute path components.
+        base = self.root.resolve() / f"broker-{cleanup_id}"
+        deployment = base / "deployment"
+        legacy = base / "legacy"
+        artifacts = base / "artifacts"
+        state = base / "state"
+        for root in (deployment, legacy, artifacts, state):
+            root.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+        operations = state / "operations"
+        quarantine = state / "quarantine"
+        operations.mkdir(mode=0o700)
+        quarantine.mkdir(mode=0o700)
+
+        checkout = deployment / "checkout-fixture"
+        checkout.mkdir(mode=0o700)
+        (checkout / "retained.txt").write_text("fixture")
+        cleanup_root = deployment / ".sandbox-ci-cleanup"
+        cleanup_root.mkdir(mode=0o700)
+        wrapper = cleanup_root / cleanup_id
+        wrapper.mkdir(mode=0o700)
+
+        namespace = "namespace-fixture"
+        label = "workspace-fixture"
+        metadata_directory = legacy / namespace / label
+        metadata_directory.mkdir(parents=True, mode=0o700)
+        (legacy / namespace).chmod(0o700)
+        metadata_directory.chmod(0o700)
+        workspace_id = "ws_" + "1" * 32
+        metadata_path = metadata_directory / "workspace.json"
+        metadata_bytes = json.dumps({
+            "workspace_id": workspace_id,
+            "project_identity": "project:ci",
+            "label": label,
+            "mode": "isolated",
+            "path": str(metadata_directory),
+        }, sort_keys=True, separators=(",", ":")).encode()
+        metadata_path.write_bytes(metadata_bytes)
+        metadata_path.chmod(0o600)
+
+        roots = {"deployment": deployment, "legacy": legacy,
+                 "artifacts": artifacts}
+        config = {"roots": {
+            name: (path, (path.stat().st_dev, path.stat().st_ino))
+            for name, path in roots.items()
+        }}
+
+        def identity(path):
+            info = path.stat()
+            return {"device": info.st_dev, "inode": info.st_ino}
+
+        locator = str(checkout)
+        request = {
+            "schema_version": 1,
+            "job_id": "job-fixture",
+            "workspace_id": workspace_id,
+            "authority_digest": "sha256:" + "a" * 64,
+            "project_identity": "project:ci",
+            "workspace_label": label,
+            "workspace_mode": "isolated",
+            "checkout_locator": locator,
+            "checkout_locator_digest": "sha256:" + hashlib.sha256(
+                locator.encode()).hexdigest(),
+            "wrapper_identity": identity(wrapper),
+            "checkout_identity": identity(checkout),
+            "metadata_namespace": namespace,
+            "metadata_label": label,
+            "metadata_directory_identity": identity(metadata_directory),
+            "metadata_file_identity": identity(metadata_path),
+            "metadata_content_digest": hashlib.sha256(metadata_bytes).hexdigest(),
+            "pinned_roots": {
+                name: {"path": str(path), "device": config["roots"][name][1][0],
+                       "inode": config["roots"][name][1][1]}
+                for name, path in roots.items()
+            },
+        }
+        return broker, owner_uid, config, request, {
+            "checkout": checkout, "wrapper": wrapper,
+            "checkout_parent": deployment, "operations": operations,
+            "quarantine": quarantine,
+        }
+
+    def _patch_broker_filesystem(self, broker, paths):
+        patches = [
+            patch.object(
+                broker, "_operations_fd",
+                side_effect=lambda _uid: os.open(
+                    paths["operations"], os.O_RDONLY | os.O_DIRECTORY)),
+            patch.object(
+                broker, "_quarantine_fd",
+                side_effect=lambda _uid: os.open(
+                    paths["quarantine"], os.O_RDONLY | os.O_DIRECTORY)),
+            # The fixture belongs to the test user, so root-only chowning is
+            # intentionally skipped while all broker traversal remains real.
+            patch.object(broker.os, "fchown", side_effect=lambda *_args: None),
+        ]
+        if not hasattr(__import__("ctypes").CDLL(None), "renameat2"):
+            def rename_noreplace(source_fd, source, target_fd, target):
+                try:
+                    os.stat(target, dir_fd=target_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    os.rename(source, target, src_dir_fd=source_fd,
+                              dst_dir_fd=target_fd)
+                else:
+                    raise broker.CiCleanupBrokerError("cleanup_target_exists")
+
+            patches.append(patch.object(
+                broker, "_rename_noreplace", side_effect=rename_noreplace))
+        return patches
+
+    def test_cleanup_intent_replay_accepts_canonical_path_aliases(self):
+        from types import SimpleNamespace
+
+        from sandbox.application.workspace_service import (
+            _digest_payload,
+            _validate_ci_cleanup_intent,
+        )
+
+        cleanup_id = "4" * 32
+        _broker, _owner_uid, _config, request, paths = (
+            self._broker_cleanup_fixture(cleanup_id))
+        base = paths["checkout_parent"].parent
+        legacy_root = base / "legacy"
+        deployment_root = paths["checkout_parent"]
+        artifact_root = base / "artifacts"
+
+        # Equivalent lexical aliases model filesystems that expose a path via
+        # an alias such as /var -> /private/var. The journal digest still
+        # covers the exact saved payload; replay compares resolved identities.
+        metadata_path = legacy_root / request["metadata_namespace"] / request[
+            "metadata_label"] / "workspace.json"
+        record_path_alias = metadata_path.parent / "missing" / ".." / "workspace.json"
+        request["pinned_roots"]["deployment"]["path"] = str(
+            deployment_root / "missing" / "..")
+        request["pinned_roots"]["legacy"]["path"] = str(
+            legacy_root / "missing" / "..")
+        intent = {
+            "schema_version": 1,
+            "cleanup_id": cleanup_id,
+            "request": request,
+        }
+        intent["digest"] = _digest_payload({
+            "cleanup_id": cleanup_id,
+            "request": request,
+        })
+        record = SimpleNamespace(
+            path=str(record_path_alias),
+            namespace=request["metadata_namespace"],
+            label=request["metadata_label"],
+        )
+
+        replay_cleanup_id, replay_request = _validate_ci_cleanup_intent(
+            intent,
+            job={
+                "job_id": request["job_id"],
+                "project_identity": request["project_identity"],
+                "workspace_label": request["workspace_label"],
+            },
+            workspace_id=request["workspace_id"],
+            record=record,
+            authority={
+                "digest": request["authority_digest"],
+                "checkout_identity": request["checkout_identity"],
+            },
+            checkout=request["checkout_locator"],
+            checkout_digest=request["checkout_locator_digest"],
+            mode=request["workspace_mode"],
+            artifact_root=artifact_root,
+            deployment_root=deployment_root,
+            legacy_root=legacy_root,
+        )
+
+        self.assertEqual(replay_cleanup_id, cleanup_id)
+        self.assertIs(replay_request, request)
+
+    def test_cleanup_broker_resumes_fresh_intent_through_one_checkout_removal(self):
+        from contextlib import ExitStack
+
+        cleanup_id = "2" * 32
+        broker, owner_uid, config, request, paths = self._broker_cleanup_fixture(
+            cleanup_id)
+        with ExitStack() as stack:
+            for filesystem_patch in self._patch_broker_filesystem(broker, paths):
+                stack.enter_context(filesystem_patch)
+            prepared = broker._begin_cleanup(
+                config, owner_uid, cleanup_id, request)
+            self.assertEqual(prepared["status"], "in_progress")
+
+            # This call traverses the real broker implementation and must
+            # complete the exact checkout without the old FD ambiguity.
+            result = broker._resume_checkout(config, owner_uid, cleanup_id)
+
+            self.assertFalse(paths["checkout"].exists())
+            self.assertFalse(paths["wrapper"].exists())
+            self.assertTrue(result["ok"])
+            operations_fd = os.open(
+                paths["operations"], os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                journal = broker._read_journal(
+                    operations_fd, cleanup_id, owner_uid)
+            finally:
+                os.close(operations_fd)
+            self.assertEqual(journal["checkout"]["phase"], "removed")
+            self.assertEqual(
+                journal["receipt"]["checkout_identity"],
+                request["checkout_identity"],
+            )
+
+    def test_checkout_recovery_fsyncs_parent_and_wrapper_before_quarantine_phase(self):
+        from contextlib import ExitStack
+
+        cleanup_id = "3" * 32
+        broker, owner_uid, config, request, paths = self._broker_cleanup_fixture(
+            cleanup_id)
+        parent_info = paths["checkout_parent"].stat()
+        expected_parent = (parent_info.st_dev, parent_info.st_ino)
+        expected_wrapper = (
+            request["wrapper_identity"]["device"],
+            request["wrapper_identity"]["inode"],
+        )
+        synced = set()
+        wrapper_rename_seen = []
+        real_fsync = os.fsync
+        real_store = broker._store_journal
+
+        def tracked_fsync(descriptor):
+            info = os.fstat(descriptor)
+            identity = (info.st_dev, info.st_ino)
+            if identity in {expected_parent, expected_wrapper}:
+                synced.add(identity)
+            real_fsync(descriptor)
+
+        def require_recovery_syncs(*args, **kwargs):
+            payload = args[2]
+            if payload["checkout"]["phase"] == "quarantined":
+                self.assertTrue(
+                    {expected_parent, expected_wrapper}.issubset(synced),
+                    "recovered move must fsync its source parent and wrapper "
+                    "before persisting the quarantined phase",
+                )
+            return real_store(*args, **kwargs)
+
+        with ExitStack() as stack:
+            for filesystem_patch in self._patch_broker_filesystem(broker, paths):
+                stack.enter_context(filesystem_patch)
+            real_rename = broker._rename_noreplace
+
+            def require_recovery_syncs_before_wrapper_rename(
+                    source_fd, source, target_fd, target):
+                if (source == cleanup_id and
+                        target == f"checkout-{cleanup_id}"):
+                    wrapper_rename_seen.append(True)
+                    self.assertTrue(
+                        {expected_parent, expected_wrapper}.issubset(synced),
+                        "recovered source move must fsync its parent and "
+                        "wrapper before renaming the wrapper into quarantine",
+                    )
+                return real_rename(source_fd, source, target_fd, target)
+
+            stack.enter_context(patch.object(
+                broker, "_rename_noreplace",
+                side_effect=require_recovery_syncs_before_wrapper_rename))
+            broker._begin_cleanup(config, owner_uid, cleanup_id, request)
+            # Model a process crash after the checkout rename but before the
+            # broker has durably advanced the prepared journal.
+            os.rename(paths["checkout"], paths["wrapper"] / "owned")
+            stack.enter_context(patch.object(os, "fsync", side_effect=tracked_fsync))
+            stack.enter_context(patch.object(
+                broker, "_store_journal", side_effect=require_recovery_syncs))
+
+            result = broker._resume_checkout(config, owner_uid, cleanup_id)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(wrapper_rename_seen)
+            self.assertFalse(paths["checkout"].exists())
+            self.assertFalse(paths["wrapper"].exists())
+            operations_fd = os.open(
+                paths["operations"], os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                journal = broker._read_journal(
+                    operations_fd, cleanup_id, owner_uid)
+            finally:
+                os.close(operations_fd)
+            self.assertEqual(journal["checkout"]["phase"], "removed")
+
+    def test_ci_cleanup_accepts_group_writable_roots_but_keeps_private_leaves(self):
+        from sandbox.application import workspace_service as workspace_service_module
+        from sandbox.workspaces import WorkspaceIndexError
+
+        canonical_root = self.root.resolve()
+        deployment = canonical_root / "group-writable-deployment"
+        legacy = canonical_root / "group-writable-legacy"
+        artifacts = canonical_root / "group-writable-artifacts"
+        for root in (deployment, legacy, artifacts):
+            root.mkdir(mode=0o770)
+            root.chmod(0o770)
+        namespace = "namespace-fixture"
+        label = "workspace-fixture"
+        metadata_directory = legacy / namespace / label
+        metadata_directory.mkdir(parents=True, mode=0o700)
+        (legacy / namespace).chmod(0o700)
+        metadata_directory.chmod(0o700)
+        workspace_id = "ws_" + "4" * 32
+        metadata_path = metadata_directory / "workspace.json"
+        metadata_path.write_text(json.dumps({
+            "workspace_id": workspace_id,
+            "project_identity": "project:ci",
+            "label": label,
+            "mode": "isolated",
+            "path": str(metadata_directory),
+        }))
+        metadata_path.chmod(0o600)
+
+        pins = workspace_service_module._ci_cleanup_root_pins(
+            deployment, legacy, artifacts)
+        self.assertEqual(set(pins), {"deployment", "legacy", "artifacts"})
+        identity = workspace_service_module._read_ci_cleanup_metadata(
+            legacy, namespace, label, metadata_path,
+            workspace_id=workspace_id,
+            project_identity="project:ci",
+            mode="isolated",
+        )
+        self.assertEqual(identity[0]["inode"], metadata_directory.stat().st_ino)
+
+        namespace_path = legacy / namespace
+        namespace_path.chmod(0o770)
+        with self.assertRaises(WorkspaceIndexError):
+            workspace_service_module._read_ci_cleanup_metadata(
+                legacy, namespace, label, metadata_path,
+                workspace_id=workspace_id,
+                project_identity="project:ci",
+                mode="isolated",
+            )
+        namespace_path.chmod(0o700)
+        metadata_directory.chmod(0o770)
+        with self.assertRaises(WorkspaceIndexError):
+            workspace_service_module._read_ci_cleanup_metadata(
+                legacy, namespace, label, metadata_path,
+                workspace_id=workspace_id,
+                project_identity="project:ci",
+                mode="isolated",
+            )
 
     def test_prelaunch_failure_retains_row_and_fails_closed_after_emptying_checkout(self):
         checkout = self._checkout("launch-failure")

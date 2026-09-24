@@ -175,6 +175,7 @@ def provision(*, sandbox_home: Path) -> dict[str, object]:
         (STATE_DIR, 0o700),
         (state_user, 0o700),
         (state_user / "quarantine", 0o700),
+        (state_user / "operations", 0o700),
         (SUDOERS_DIR, None),
     ))
     try:
@@ -192,6 +193,8 @@ def provision(*, sandbox_home: Path) -> dict[str, object]:
           str(state_user))
     _sudo("/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0700",
           str(state_user / "quarantine"))
+    _sudo("/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0700",
+          str(state_user / "operations"))
     _sudo("/usr/bin/install", "-d", "-o", "root", "-g", "root", "-m", "0755",
           "/usr/local/libexec", str(CONFIG_DIR))
     _read_existing(HELPER_TARGET, expected_mode=0o755)

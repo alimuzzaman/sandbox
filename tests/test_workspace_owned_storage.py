@@ -15,8 +15,13 @@ from sandbox.owned_storage.models import (
     MaterializationLease,
     ObjectKind,
     ObjectLifecycle,
+    OperationType,
+    RelationshipCurrentSelection,
 )
-from sandbox.owned_storage.repository import StorageAuthorityRepository
+from sandbox.owned_storage.repository import (
+    StorageAuthorityRepository,
+    StorageRepositoryConflictError,
+)
 
 
 class TestWorkspaceOwnedStorage(unittest.TestCase):
@@ -105,6 +110,112 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
         self.assertEqual(updated_obj.lifecycle, ObjectLifecycle.REMOVED)
         self.assertIsNotNone(updated_obj.removed_at)
 
+    def test_cleanup_unlinks_symlink_leaf_without_following_target(self):
+        obj, obj_dir = self._create_materialization_object("mat_obj_symlink", file_count=1, byte_count=20)
+        target = self.root / "outside-owned-storage.txt"
+        target.write_text("outside data must survive")
+        link = obj_dir / "outside-link"
+        link.symlink_to(target)
+
+        result = self.cleanup_manager.cleanup_object(
+            preview_id="prev_symlink",
+            object_id=obj.object_id,
+            request_id="req_symlink_cleanup",
+            confirm=True,
+            expected_object_evidence_digest="sha256:obj_ev",
+            expected_reference_digest="sha256:ref_ev",
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertFalse(link.is_symlink())
+        self.assertEqual(target.read_text(), "outside data must survive")
+
+    def test_cleanup_replays_after_quarantine_rename_interruption(self):
+        obj, obj_dir = self._create_materialization_object("mat_obj_replay_crash", file_count=1, byte_count=20)
+        original_update = self.repo.update_cleanup_intent
+        interrupted = False
+
+        def interrupt_phase_advance(*args, **kwargs):
+            nonlocal interrupted
+            if (
+                not interrupted
+                and kwargs.get("expected_phase") == CleanupPhase.INTENT
+                and kwargs.get("phase") == CleanupPhase.QUARANTINED
+            ):
+                interrupted = True
+                raise OSError("simulated process stop after quarantine rename")
+            return original_update(*args, **kwargs)
+
+        with patch.object(self.repo, "update_cleanup_intent", side_effect=interrupt_phase_advance):
+            with self.assertRaises(CleanupExecutionError):
+                self.cleanup_manager.cleanup_object(
+                    preview_id="prev_crash_replay",
+                    object_id=obj.object_id,
+                    request_id="req_crash_replay",
+                    confirm=True,
+                    expected_object_evidence_digest="sha256:obj_ev",
+                    expected_reference_digest="sha256:ref_ev",
+                )
+
+        operation = self.repo.get_operation_by_request(
+            OperationType.CLEANUP, "req_crash_replay", self.remote_id, self.project_id
+        )
+        first_intent = self.repo.get_cleanup_intent_for_operation(operation.operation_id)
+        self.assertTrue((self.storage_root / "quarantine" / first_intent.cleanup_id).exists())
+        self.assertFalse(obj_dir.exists())
+
+        with self.assertRaises(StorageRepositoryConflictError):
+            self.repo.set_current_selection(
+                RelationshipCurrentSelection(
+                    relationship_id="rel_pending_cleanup",
+                    object_id=obj.object_id,
+                    generation_id="gen_pending_cleanup",
+                    selection_generation=1,
+                    operation_id="op_select_pending_cleanup",
+                    changed_at="2026-09-04T00:02:00Z",
+                )
+            )
+        with self.assertRaises(StorageRepositoryConflictError):
+            self.repo.save_lease(MaterializationLease(
+                lease_id="lease_pending_cleanup",
+                object_id=obj.object_id,
+                job_id=self.job_id,
+                workspace_id=self.workspace_id,
+                lifecycle_generation=1,
+                mount_identity_digest="sha256:mount-pending-cleanup",
+                state=LeaseState.ACTIVE,
+                opened_at="2026-09-04T00:02:00Z",
+                heartbeat_at="2026-09-04T00:02:00Z",
+                expires_at="2026-09-04T01:02:00Z",
+                closed_at=None,
+            ))
+
+        recovered = self.cleanup_manager.reconcile_startup()
+        self.assertEqual(recovered["reconciled_quarantine_count"], 1)
+        self.assertFalse((self.storage_root / "quarantine" / first_intent.cleanup_id).exists())
+
+        replay = self.cleanup_manager.cleanup_object(
+            preview_id="prev_crash_replay",
+            object_id=obj.object_id,
+            request_id="req_crash_replay",
+            confirm=True,
+            expected_object_evidence_digest="sha256:obj_ev",
+            expected_reference_digest="sha256:ref_ev",
+        )
+
+        self.assertEqual(replay["status"], "already_completed")
+        self.assertEqual(replay["cleanup_id"], first_intent.cleanup_id)
+        self.assertFalse((self.storage_root / "quarantine" / first_intent.cleanup_id).exists())
+
+    def test_workspace_cleanup_ids_are_stable_for_replay(self):
+        from sandbox.application.workspace_service import _owned_storage_workspace_cleanup_ids
+
+        first = _owned_storage_workspace_cleanup_ids("ws_cleanup_replay", "job_cleanup_replay")
+        replay = _owned_storage_workspace_cleanup_ids("ws_cleanup_replay", "job_cleanup_replay")
+
+        self.assertEqual(first, replay)
+        self.assertEqual(first[1], "req_job_cleanup_replay")
+
     def test_cleanup_refused_when_active_lease_exists(self):
         obj, obj_dir = self._create_materialization_object("mat_obj_active", file_count=2, byte_count=100)
 
@@ -175,6 +286,7 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
         deploy_root.mkdir(parents=True, exist_ok=True)
         ws_repo_dir = self.root / "workspaces"
         ws_repo_dir.mkdir(parents=True, exist_ok=True)
+        (ws_repo_dir / "ci-materializations").mkdir(parents=True, exist_ok=True)
         job_repo_path = self.root / "jobs.sqlite3"
         job_repo = JobRepository(job_repo_path)
         ws_repo = WorkspaceRepository(
@@ -250,11 +362,17 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
         )
         job = job_repo.get(row["job_id"])
 
-        with patch(
-                "sandbox.application.ci_cleanup_broker.remove_workspace_metadata"
-                ) as remove_metadata:
+        with (
+            patch("sandbox.application.ci_cleanup_broker.begin_cleanup") as begin_cleanup,
+            patch("sandbox.application.ci_cleanup_broker.resume_cleanup_checkout") as resume_checkout,
+            patch("sandbox.application.ci_cleanup_broker.resume_cleanup_metadata") as resume_metadata,
+            patch("sandbox.application.ci_cleanup_broker.acknowledge_cleanup") as acknowledge,
+        ):
             result = ws_service.release_terminal_job(job, job_repo)
-        remove_metadata.assert_called_once()
+        begin_cleanup.assert_called_once()
+        resume_checkout.assert_called_once()
+        resume_metadata.assert_called_once()
+        acknowledge.assert_called_once()
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "released")
         self.assertGreaterEqual(result["observed_reclaimed_bytes"], 300)
@@ -283,6 +401,7 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
         deploy_root.mkdir(parents=True, exist_ok=True)
         ws_repo_dir = self.root / "workspaces"
         ws_repo_dir.mkdir(parents=True, exist_ok=True)
+        (ws_repo_dir / "ci-materializations").mkdir(parents=True, exist_ok=True)
         job_repo_path = self.root / "jobs.sqlite3"
         job_repo = JobRepository(job_repo_path)
         ws_repo = WorkspaceRepository(
@@ -375,8 +494,14 @@ class TestWorkspaceOwnedStorage(unittest.TestCase):
         )
         job = job_repo.get(row["job_id"])
 
-        with self.assertRaises(CleanupExecutionError) as ctx:
-            ws_service.release_terminal_job(job, job_repo)
+        with (
+            patch("sandbox.application.ci_cleanup_broker.begin_cleanup"),
+            patch("sandbox.application.ci_cleanup_broker.resume_cleanup_checkout"),
+            patch("sandbox.application.ci_cleanup_broker.resume_cleanup_metadata"),
+            patch("sandbox.application.ci_cleanup_broker.acknowledge_cleanup"),
+        ):
+            with self.assertRaises(CleanupExecutionError) as ctx:
+                ws_service.release_terminal_job(job, job_repo)
         self.assertEqual(ctx.exception.code, "workspace_lease_active")
 
         # Workspace marked indeterminate (fail-closed), obj preserved

@@ -52,8 +52,10 @@ _REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --jso
 _LOCAL_WORKSPACE_RECOVERY = "./sb workspace migrate --local --json"
 _SYNC_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SYNC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_CI_CLEANUP_ID = re.compile(r"[0-9a-f]{32}\Z")
 _SYNC_MAX_BYTES = 512 * 1024 * 1024
 _SYNC_MAX_FILES = 1_000_000
+_CI_CLEANUP_METADATA_MAX_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,13 @@ def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
 
 
+def _owned_storage_workspace_cleanup_ids(workspace_id: str, job_id: Any) -> tuple[str, str]:
+    """Return replay-stable owned-storage preview and request identities."""
+    request_id = f"req_{job_id or workspace_id}"
+    preview_digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:12]
+    return f"prev_{preview_digest}", request_id
+
+
 def _measure_tree(root: Path, *, entry_budget: int,
                   deadline: float) -> tuple[int | None, str]:
     """Sum a tree's apparent size under explicit entry and time budgets.
@@ -184,6 +193,228 @@ def _digest_payload(value: dict[str, Any]) -> str:
 def _filesystem_identity(path: Path) -> dict[str, int]:
     observed = os.stat(path, follow_symlinks=False)
     return {"device": int(observed.st_dev), "inode": int(observed.st_ino)}
+
+
+def _open_absolute_directory_nofollow(path: Path) -> int:
+    if not path.is_absolute():
+        raise OSError("directory locator is not absolute")
+    descriptor = os.open("/", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for part in path.parts[1:]:
+            child = os.open(
+                part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                getattr(os, "O_NOFOLLOW", 0), dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_ci_cleanup_metadata(legacy_root: Path, namespace: str, label: str,
+                              path: Path, *, workspace_id: str,
+                              project_identity: str, mode: str
+                              ) -> tuple[dict[str, int], dict[str, int], str]:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = namespace_fd = directory_fd = file_fd = None
+    try:
+        root_fd = _open_absolute_directory_nofollow(legacy_root)
+        root_info = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.getuid():
+            raise WorkspaceIndexError(
+                "workspace_path_unsafe", "workspace metadata root ownership is unsafe")
+        namespace_fd = os.open(namespace, flags, dir_fd=root_fd)
+        namespace_info = os.fstat(namespace_fd)
+        if (namespace_info.st_uid != os.getuid()
+                or stat.S_IMODE(namespace_info.st_mode) != 0o700):
+            raise WorkspaceIndexError(
+                "workspace_path_unsafe", "workspace metadata namespace is unsafe")
+        directory_fd = os.open(label, flags, dir_fd=namespace_fd)
+        directory_info = os.fstat(directory_fd)
+        if (directory_info.st_uid != os.getuid()
+                or stat.S_IMODE(directory_info.st_mode) != 0o700
+                or os.listdir(directory_fd) != ["workspace.json"]):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "workspace metadata directory is not an exact owned leaf")
+        file_fd = os.open(
+            "workspace.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd)
+        before = os.fstat(file_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or before.st_nlink != 1 or before.st_size > _CI_CLEANUP_METADATA_MAX_BYTES):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift", "workspace metadata identity is unsafe")
+        raw = bytearray()
+        while len(raw) <= _CI_CLEANUP_METADATA_MAX_BYTES:
+            block = os.read(
+                file_fd, min(4096, _CI_CLEANUP_METADATA_MAX_BYTES + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(file_fd)
+        current_file = os.stat(
+            "workspace.json", dir_fd=directory_fd, follow_symlinks=False)
+        current_directory = os.fstat(directory_fd)
+        try:
+            payload = json.loads(raw)
+        except (UnicodeError, ValueError) as exc:
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "workspace metadata cannot prove exact ownership") from exc
+        if (len(raw) > _CI_CLEANUP_METADATA_MAX_BYTES
+                or (after.st_dev, after.st_ino, after.st_size) !=
+                (before.st_dev, before.st_ino, before.st_size)
+                or (current_file.st_dev, current_file.st_ino) !=
+                (before.st_dev, before.st_ino)
+                or (current_directory.st_dev, current_directory.st_ino) !=
+                (directory_info.st_dev, directory_info.st_ino)
+                or os.listdir(directory_fd) != ["workspace.json"]
+                or not isinstance(payload, dict)
+                or payload.get("workspace_id") != workspace_id
+                or payload.get("project_identity") != project_identity
+                or payload.get("label") != label
+                or payload.get("mode") != mode
+                or payload.get("path") != str(path.parent)):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "workspace metadata content or identity changed")
+        return (
+            {"device": int(directory_info.st_dev), "inode": int(directory_info.st_ino)},
+            {"device": int(before.st_dev), "inode": int(before.st_ino)},
+            hashlib.sha256(raw).hexdigest(),
+        )
+    except WorkspaceIndexError:
+        raise
+    except OSError as exc:
+        raise WorkspaceIndexError(
+            "workspace_ownership_drift",
+            "workspace metadata cannot prove exact ownership") from exc
+    finally:
+        for descriptor in (file_fd, directory_fd, namespace_fd, root_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def _ci_cleanup_root_pins(deployment_root: Path, legacy_root: Path,
+                          artifact_root: Path) -> dict[str, dict[str, Any]]:
+    pins = {}
+    for name, path in (("deployment", deployment_root), ("legacy", legacy_root),
+                       ("artifacts", artifact_root)):
+        if path.is_symlink():
+            raise WorkspaceIndexError(
+                "workspace_path_unsafe", "CI cleanup root identity is unsafe")
+        try:
+            canonical_path = path.resolve(strict=False)
+            info = canonical_path.lstat()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorkspaceIndexError(
+                "workspace_path_unsafe", "CI cleanup root identity is unavailable") from exc
+        if (not stat.S_ISDIR(info.st_mode) or canonical_path.is_symlink()
+                or info.st_uid != os.getuid()):
+            raise WorkspaceIndexError(
+                "workspace_path_unsafe", "CI cleanup root ownership is unsafe")
+        pins[name] = {
+            "path": str(canonical_path),
+            "device": int(info.st_dev),
+            "inode": int(info.st_ino),
+        }
+    return pins
+
+
+def _canonicalize_ci_cleanup_root_pins(pins: Any) -> dict[str, dict[str, Any]] | None:
+    expected_names = {"deployment", "legacy", "artifacts"}
+    if not isinstance(pins, dict) or set(pins) != expected_names:
+        return None
+    canonical: dict[str, dict[str, Any]] = {}
+    for name, pin in pins.items():
+        if (not isinstance(pin, dict) or set(pin) != {"path", "device", "inode"}
+                or not isinstance(pin.get("path"), str)
+                or type(pin.get("device")) is not int
+                or type(pin.get("inode")) is not int):
+            return None
+        try:
+            resolved_path = Path(pin["path"]).resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        canonical[name] = {
+            "path": str(resolved_path),
+            "device": pin["device"],
+            "inode": pin["inode"],
+        }
+    return canonical
+
+
+def _validate_ci_cleanup_intent(intent: Any, *, job: dict[str, Any],
+                                workspace_id: str, record, authority: dict[str, Any],
+                                checkout: str, checkout_digest: str,
+                                mode: str, artifact_root: Path,
+                                deployment_root: Path, legacy_root: Path
+                                ) -> tuple[str, dict[str, Any]]:
+    expected_intent_fields = {"schema_version", "cleanup_id", "request", "digest"}
+    if (not isinstance(intent, dict) or set(intent) != expected_intent_fields
+            or type(intent.get("schema_version")) is not int
+            or intent["schema_version"] != 1
+            or not isinstance(intent.get("cleanup_id"), str)
+            or _CI_CLEANUP_ID.fullmatch(intent["cleanup_id"]) is None
+            or not isinstance(intent.get("request"), dict)):
+        raise WorkspaceIndexError(
+            "workspace_cleanup_journal_invalid",
+            "durable CI cleanup intent is invalid")
+    request = intent["request"]
+    expected_request_fields = {
+        "schema_version", "job_id", "workspace_id", "authority_digest",
+        "project_identity", "workspace_label", "workspace_mode",
+        "checkout_locator", "checkout_locator_digest", "wrapper_identity",
+        "checkout_identity", "metadata_namespace", "metadata_label",
+        "metadata_directory_identity", "metadata_file_identity",
+        "metadata_content_digest", "pinned_roots",
+    }
+    if set(request) != expected_request_fields:
+        raise WorkspaceIndexError(
+            "workspace_cleanup_journal_invalid",
+            "durable CI cleanup intent fields changed")
+    digest = _digest_payload({
+        "cleanup_id": intent["cleanup_id"], "request": request,
+    })
+    expected_metadata_path = legacy_root / record.namespace / record.label / "workspace.json"
+    if not isinstance(record.path, str):
+        raise WorkspaceIndexError(
+            "workspace_ownership_drift",
+            "workspace metadata locator is unavailable")
+    metadata_locator = Path(record.path)
+    if metadata_locator.is_symlink() or metadata_locator.parent.is_symlink():
+        raise WorkspaceIndexError(
+            "workspace_path_unsafe", "workspace metadata locator is unsafe")
+    try:
+        resolved_record_path = metadata_locator.resolve(strict=False)
+        resolved_expected_metadata_path = expected_metadata_path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WorkspaceIndexError(
+            "workspace_ownership_drift",
+            "workspace metadata locator cannot be resolved") from exc
+    recorded_pins = _canonicalize_ci_cleanup_root_pins(request.get("pinned_roots"))
+    current_pins = _ci_cleanup_root_pins(deployment_root, legacy_root, artifact_root)
+    if (intent.get("digest") != digest
+            or request.get("schema_version") != 1
+            or request.get("job_id") != job.get("job_id")
+            or request.get("workspace_id") != workspace_id
+            or request.get("authority_digest") != authority.get("digest")
+            or request.get("project_identity") != job.get("project_identity")
+            or request.get("workspace_label") != job.get("workspace_label")
+            or request.get("workspace_mode") != mode
+            or request.get("checkout_locator") != checkout
+            or request.get("checkout_locator_digest") != checkout_digest
+            or request.get("checkout_identity") != authority.get("checkout_identity")
+            or request.get("metadata_namespace") != record.namespace
+            or request.get("metadata_label") != record.label
+            or resolved_record_path != resolved_expected_metadata_path
+            or recorded_pins != current_pins):
+        raise WorkspaceIndexError(
+            "workspace_ownership_drift",
+            "durable CI cleanup intent no longer matches workspace authority")
+    return intent["cleanup_id"], request
 
 
 def _path_is_within(candidate: str, root: Path) -> bool:
@@ -2109,8 +2340,11 @@ class WorkspaceService:
             )
             return True
 
-    def release_terminal_job(self, job: dict, job_repository) -> dict[str, Any]:
+    def _release_terminal_job_without_journal(self, job: dict, job_repository) -> dict[str, Any]:
         """Attempt fail-closed disposal of one exact terminal CI checkout."""
+        raise WorkspaceIndexError(
+            "workspace_cleanup_journal_required",
+            "terminal CI cleanup requires a durable broker journal")
         terminal = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
         if job.get("lifecycle") not in terminal:
             raise WorkspaceIndexError(
@@ -2322,10 +2556,13 @@ class WorkspaceService:
             if self.owned_storage_cleanup_manager is not None and owned_storage_object_id:
                 repo.mark_lifecycle(workspace_id, "destroying", status="destroying")
                 try:
+                    preview_id, request_id = _owned_storage_workspace_cleanup_ids(
+                        workspace_id, job.get("job_id")
+                    )
                     cleanup_res = self.owned_storage_cleanup_manager.cleanup_object(
-                        preview_id=f"prev_{uuid.uuid4().hex[:12]}",
+                        preview_id=preview_id,
                         object_id=owned_storage_object_id,
-                        request_id=f"req_{job.get('job_id', uuid.uuid4().hex[:12])}",
+                        request_id=request_id,
                         confirm=True,
                         expected_object_evidence_digest=record.metadata.get("expected_object_evidence_digest", "sha256:default"),
                         expected_reference_digest=record.metadata.get("expected_reference_digest", "sha256:default"),
@@ -2491,6 +2728,398 @@ class WorkspaceService:
             repo.mark_lifecycle(workspace_id, "destroyed", status="destroyed")
             job_repository.set_cleanup_state(job["job_id"], "completed")
             return {"ok": True, "status": "released"}
+
+    def release_terminal_job(self, job: dict, job_repository) -> dict[str, Any]:
+        """Release one terminal CI workspace through a durable broker journal."""
+        terminal = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
+        if job.get("lifecycle") not in terminal:
+            raise WorkspaceIndexError(
+                "active_job_protected", "workspace cleanup requires a terminal job")
+        policy = job.get("cleanup_policy")
+        mode = job.get("workspace_mode")
+        if job.get("kind") != "ci":
+            job_repository.set_cleanup_state(job["job_id"], "retained")
+            return {"ok": True, "status": "retained"}
+        workspace_id = job.get("workspace_id")
+        if not isinstance(workspace_id, str) or not re.fullmatch(
+                r"ws_[0-9a-f]{32}", workspace_id):
+            raise WorkspaceIndexError(
+                "workspace_identity_ambiguous",
+                "terminal job has no exact workspace identity")
+        repo = self._repo()
+        preliminary = repo.get(workspace_id)
+        if preliminary is None:
+            raise WorkspaceIndexError(
+                "workspace_identity_ambiguous",
+                "terminal workspace identity is unavailable")
+        guard = repo.operation_lock(self._submission_operation_key(
+            preliminary.project_identity, preliminary.label))
+        with guard:
+            record = repo.get(workspace_id)
+            if record is None:
+                raise WorkspaceIndexError(
+                    "workspace_identity_ambiguous",
+                    "terminal workspace identity is unavailable")
+            authorized_policy = (
+                mode in {"isolated", "ephemeral"}
+                and (policy in {"always", "ephemeral"}
+                     or policy == "on-success" and
+                     job.get("lifecycle") == "succeeded")
+            )
+            if not authorized_policy or job.get("workspace_authority_digest") is None:
+                job_repository.set_cleanup_state(job["job_id"], "retained")
+                return {"ok": True, "status": "retained"}
+            raw_checkout = Path(str(job.get("project_root")))
+            if raw_checkout.is_symlink():
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "terminal workspace locator is unsafe")
+            checkout = str(raw_checkout.resolve(strict=False))
+            expected_digest = "sha256:" + hashlib.sha256(checkout.encode()).hexdigest()
+            authority = record.metadata.get("ci_cleanup_authority")
+            if not isinstance(authority, dict):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift", "terminal checkout authority is unavailable")
+            authority_digest = authority.get("digest")
+            if (record.project_identity != job.get("project_identity")
+                    or record.label != job.get("workspace_label")
+                    or record.source != "ci-materialization"
+                    or record.metadata.get("checkout_locator") != checkout
+                    or record.metadata.get("checkout_locator_digest") != expected_digest
+                    or authority.get("owner") != "controller-ci-materialization"
+                    or authority.get("job_kind") != "ci"
+                    or authority.get("checkout_locator") != checkout
+                    or authority.get("workspace_label") != record.label
+                    or authority_digest != job.get("workspace_authority_digest")
+                    or authority_digest != _digest_payload({
+                        key: value for key, value in authority.items()
+                        if key != "digest"
+                    })):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal job does not exactly own the indexed workspace")
+
+            cleanup_intent = record.metadata.get("ci_cleanup_intent")
+            if record.lifecycle == "destroyed" and record.status == "destroyed":
+                if job.get("cleanup_state") == "completed" and cleanup_intent is None:
+                    return {"ok": True, "status": "already_released"}
+                if cleanup_intent is None:
+                    raise WorkspaceIndexError(
+                        "workspace_cleanup_journal_missing",
+                        "historical cleanup has no durable broker receipt")
+                if self.deployment_root is None:
+                    raise WorkspaceIndexError(
+                        "workspace_ownership_drift",
+                        "deployment root is unavailable for terminal cleanup")
+                artifact_root = repo.index_path.parent / "ci-materializations"
+                legacy_root = repo.legacy_root.resolve(strict=False)
+                cleanup_id, request = _validate_ci_cleanup_intent(
+                    cleanup_intent, job=job, workspace_id=workspace_id,
+                    record=record, authority=authority, checkout=checkout,
+                    checkout_digest=expected_digest, mode=mode,
+                    artifact_root=artifact_root, deployment_root=Path(self.deployment_root),
+                    legacy_root=legacy_root,
+                )
+                try:
+                    from sandbox.application.ci_cleanup_broker import (
+                        CiCleanupBrokerError, acknowledge_cleanup,
+                    )
+                    acknowledge_cleanup(
+                        cleanup_id, workspace_id, authority_digest, request)
+                except CiCleanupBrokerError as exc:
+                    raise WorkspaceIndexError(
+                        exc.code if exc.code.startswith("cleanup_")
+                        else "workspace_identity_bound_removal_unavailable",
+                        "terminal CI cleanup acknowledgement was not durable",
+                    ) from exc
+                job_repository.set_cleanup_state(job["job_id"], "completed")
+                return {"ok": True, "status": "already_released",
+                        "cleanup_id": cleanup_id}
+
+            intent_resuming = (
+                cleanup_intent is not None
+                and record.lifecycle in {"destroying", "indeterminate"}
+            )
+            if not ((record.lifecycle == "ready" and record.status == "ready"
+                     and cleanup_intent is None) or intent_resuming):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "workspace lifecycle does not authorize terminal cleanup")
+            if (job_repository.connection.execute(
+                    "SELECT job_id FROM jobs WHERE workspace_id=? AND job_id<>? "
+                    "AND lifecycle IN ('accepted','queued','running','cancelling') LIMIT 1",
+                    (workspace_id, job["job_id"]),
+            ).fetchone() is not None):
+                raise WorkspaceIndexError(
+                    "workspace_busy", "another active job still owns the disposable workspace")
+            if job_repository.connection.execute(
+                    "SELECT lease_id FROM workspace_leases WHERE project_identity=? "
+                    "AND workspace_label=? LIMIT 1",
+                    (job.get("project_identity"), job.get("workspace_label")),
+            ).fetchone() is not None:
+                raise WorkspaceIndexError(
+                    "workspace_busy", "workspace lease is still live")
+            process = job_repository.snapshot(job["job_id"]).get("process") or {}
+            for role, pid_key, identity_key in (
+                    ("supervisor", "supervisor_pid", "supervisor_start_identity"),
+                    ("child", "child_pid", "child_start_identity")):
+                pid = process.get(pid_key)
+                identity = process.get(identity_key)
+                if not pid or not identity:
+                    continue
+                observed = capture_process_identity(int(pid))
+                if observed is not None:
+                    observed = ProcessIdentity(
+                        observed.host_boot_id, observed.pid, observed.start_identity,
+                        process.get("supervisor_nonce_hash") or "",
+                        observed.process_group_id,
+                    )
+                expected = ProcessIdentity(
+                    process.get("host_boot_id") or "", int(pid), identity,
+                    process.get("supervisor_nonce_hash") or "",
+                    process.get("child_pgid") if role == "child" else None,
+                )
+                if verify_process_identity(expected, observed):
+                    if role == "supervisor" and int(pid) == os.getpid():
+                        continue
+                    raise WorkspaceIndexError(
+                        "workspace_busy", f"recorded {role} process is still live")
+            child_pgid = process.get("child_pgid")
+            if child_pgid is not None and not _process_group_empty(int(child_pgid)):
+                raise WorkspaceIndexError(
+                    "workspace_busy", "recorded child process group is not proven empty")
+            child_cgroup = process.get("child_cgroup_path")
+            if child_cgroup is not None and not _owned_cgroup_empty(child_cgroup):
+                raise WorkspaceIndexError(
+                    "workspace_busy", "recorded child cgroup is not proven empty")
+            if self.deployment_root is None:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "deployment root is unavailable for terminal cleanup")
+            deployment_root = Path(self.deployment_root).resolve(strict=False)
+            checkout_path = Path(checkout)
+            try:
+                checkout_path.relative_to(deployment_root)
+            except ValueError as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape", "terminal workspace escapes deploy storage") from exc
+            if checkout_path == deployment_root:
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "terminal workspace locator is unsafe")
+            expected_identity = authority.get("checkout_identity")
+            if not isinstance(expected_identity, dict):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift", "terminal checkout identity is unavailable")
+            try:
+                checkout_info = checkout_path.lstat()
+                checkout_missing = False
+            except FileNotFoundError:
+                checkout_info = None
+                checkout_missing = True
+            if ((checkout_missing and cleanup_intent is None)
+                    or (checkout_info is not None
+                        and _artifact_identity(checkout_info) != expected_identity)):
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "terminal checkout filesystem identity changed")
+            references = (
+                self.cleanup_reference_observer(checkout_path, record)
+                if self.cleanup_reference_observer is not None
+                else _observe_cleanup_references(
+                    checkout_path,
+                    device=(os.major(expected_identity["device"]),
+                            os.minor(expected_identity["device"])),
+                )
+            )
+            if (not isinstance(references, dict)
+                    or references.get("containers") != 0
+                    or references.get("mounts") != 0 or record.bindings):
+                raise WorkspaceIndexError(
+                    "workspace_busy",
+                    "live container, mount, or binding absence is not proven")
+
+            metadata_path = Path(record.path) if isinstance(record.path, str) else None
+            legacy_root = repo.legacy_root.resolve(strict=False)
+            if (metadata_path is None or metadata_path.name != "workspace.json"
+                    or metadata_path.is_symlink() or metadata_path.parent.is_symlink()):
+                raise WorkspaceIndexError(
+                    "workspace_path_unsafe", "workspace metadata is unsafe")
+            try:
+                resolved_metadata_path = metadata_path.resolve(strict=False)
+                resolved_metadata_path.parent.relative_to(legacy_root)
+            except (OSError, ValueError) as exc:
+                raise WorkspaceIndexError(
+                    "workspace_path_escape",
+                    "workspace metadata escapes its owner root") from exc
+            expected_metadata_path = legacy_root / record.namespace / record.label / "workspace.json"
+            if resolved_metadata_path != expected_metadata_path:
+                raise WorkspaceIndexError(
+                    "workspace_ownership_drift",
+                    "workspace metadata locator changed")
+
+            artifact_root = repo.index_path.parent / "ci-materializations"
+            if cleanup_intent is None:
+                if record.lifecycle != "ready" or record.status != "ready":
+                    raise WorkspaceIndexError(
+                        "workspace_cleanup_journal_missing",
+                        "historical cleanup has no durable broker intent")
+                metadata_directory_identity, metadata_file_identity, metadata_digest = (
+                    _read_ci_cleanup_metadata(
+                        legacy_root, record.namespace, record.label, metadata_path,
+                        workspace_id=workspace_id,
+                        project_identity=job.get("project_identity"), mode=mode,
+                    )
+                )
+                pins = _ci_cleanup_root_pins(
+                    deployment_root, legacy_root, artifact_root)
+                cleanup_root = deployment_root / ".sandbox-ci-cleanup"
+                deployment_fd = cleanup_fd = None
+                try:
+                    cleanup_root.mkdir(mode=0o700, exist_ok=True)
+                    deployment_fd = os.open(
+                        deployment_root,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                    )
+                    os.fsync(deployment_fd)
+                    cleanup_root_info = cleanup_root.lstat()
+                    if (not stat.S_ISDIR(cleanup_root_info.st_mode)
+                            or cleanup_root_info.st_uid != os.getuid()
+                            or stat.S_IMODE(cleanup_root_info.st_mode) != 0o700):
+                        raise WorkspaceIndexError(
+                            "workspace_path_unsafe",
+                            "private cleanup root is not owner-only")
+                    cleanup_fd = os.open(
+                        cleanup_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0))
+                    cleanup_id = uuid.uuid4().hex
+                    os.mkdir(cleanup_id, mode=0o700, dir_fd=cleanup_fd)
+                    operation_fd = os.open(
+                        cleanup_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0), dir_fd=cleanup_fd)
+                    try:
+                        operation_info = os.fstat(operation_fd)
+                        request = {
+                            "schema_version": 1,
+                            "job_id": job["job_id"],
+                            "workspace_id": workspace_id,
+                            "authority_digest": authority_digest,
+                            "project_identity": job["project_identity"],
+                            "workspace_label": job["workspace_label"],
+                            "workspace_mode": mode,
+                            "checkout_locator": checkout,
+                            "checkout_locator_digest": expected_digest,
+                            "wrapper_identity": {
+                                "device": int(operation_info.st_dev),
+                                "inode": int(operation_info.st_ino),
+                            },
+                            "checkout_identity": expected_identity,
+                            "metadata_namespace": record.namespace,
+                            "metadata_label": record.label,
+                            "metadata_directory_identity": metadata_directory_identity,
+                            "metadata_file_identity": metadata_file_identity,
+                            "metadata_content_digest": metadata_digest,
+                            "pinned_roots": pins,
+                        }
+                        os.fsync(operation_fd)
+                    finally:
+                        os.close(operation_fd)
+                    os.fsync(cleanup_fd)
+                except OSError as exc:
+                    raise WorkspaceIndexError(
+                        "workspace_path_unsafe",
+                        "private cleanup operation could not be prepared") from exc
+                finally:
+                    if cleanup_fd is not None:
+                        os.close(cleanup_fd)
+                    if deployment_fd is not None:
+                        os.close(deployment_fd)
+                cleanup_intent = {
+                    "schema_version": 1,
+                    "cleanup_id": cleanup_id,
+                    "request": request,
+                    "digest": _digest_payload({
+                        "cleanup_id": cleanup_id, "request": request,
+                    }),
+                }
+                repo.mark_lifecycle(
+                    workspace_id, "destroying", status="destroying",
+                    metadata={"ci_cleanup_intent": cleanup_intent},
+                )
+                record = repo.get(workspace_id)
+            else:
+                cleanup_id, request = _validate_ci_cleanup_intent(
+                    cleanup_intent, job=job, workspace_id=workspace_id,
+                    record=record, authority=authority, checkout=checkout,
+                    checkout_digest=expected_digest, mode=mode,
+                    artifact_root=artifact_root, deployment_root=deployment_root,
+                    legacy_root=legacy_root,
+                )
+                if record.lifecycle == "indeterminate":
+                    repo.mark_lifecycle(
+                        workspace_id, "destroying", status="destroying")
+
+            owned_storage_object_id = record.metadata.get("owned_storage_object_id")
+            if (not owned_storage_object_id
+                    and self.owned_storage_cleanup_manager is not None):
+                auth_obj = self.owned_storage_cleanup_manager.repository.find_object_by_workspace(
+                    workspace_id)
+                if auth_obj is None and job.get("job_id"):
+                    auth_obj = self.owned_storage_cleanup_manager.repository.find_object_by_job(
+                        job["job_id"])
+                if auth_obj is not None:
+                    owned_storage_object_id = auth_obj.object_id
+
+            cleanup_result: dict[str, Any] = {}
+            try:
+                from sandbox.application.ci_cleanup_broker import (
+                    CiCleanupBrokerError, begin_cleanup,
+                    resume_cleanup_checkout, resume_cleanup_metadata,
+                    acknowledge_cleanup,
+                )
+                begin_cleanup(cleanup_id, request)
+                resume_cleanup_checkout(cleanup_id)
+                if self.owned_storage_cleanup_manager is not None and owned_storage_object_id:
+                    preview_id, request_id = _owned_storage_workspace_cleanup_ids(
+                        workspace_id, job["job_id"]
+                    )
+                    cleanup_result = self.owned_storage_cleanup_manager.cleanup_object(
+                        preview_id=preview_id,
+                        object_id=owned_storage_object_id,
+                        request_id=request_id,
+                        confirm=True,
+                        expected_object_evidence_digest=record.metadata.get(
+                            "expected_object_evidence_digest", "sha256:default"),
+                        expected_reference_digest=record.metadata.get(
+                            "expected_reference_digest", "sha256:default"),
+                    )
+                resume_cleanup_metadata(cleanup_id)
+                repo.mark_lifecycle(workspace_id, "destroyed", status="destroyed")
+                acknowledge_cleanup(
+                    cleanup_id, workspace_id, authority_digest, request)
+            except CiCleanupBrokerError as exc:
+                current = repo.get(workspace_id)
+                if current is not None and current.lifecycle != "destroyed":
+                    repo.mark_lifecycle(
+                        workspace_id, "indeterminate", status="indeterminate")
+                raise WorkspaceIndexError(
+                    exc.code if exc.code.startswith("cleanup_")
+                    else "workspace_identity_bound_removal_unavailable",
+                    "terminal CI cleanup broker did not prove durable removal",
+                ) from exc
+            except Exception:
+                current = repo.get(workspace_id)
+                if current is not None and current.lifecycle != "destroyed":
+                    repo.mark_lifecycle(
+                        workspace_id, "indeterminate", status="indeterminate")
+                raise
+            job_repository.set_cleanup_state(job["job_id"], "completed")
+            return {
+                "ok": True,
+                "status": "recovered" if checkout_missing else "released",
+                "observed_reclaimed_bytes": cleanup_result.get(
+                    "observed_reclaimed_bytes", 0),
+                "cleanup_id": cleanup_id,
+            }
 
     def create(self, request):
         target = self._target(request)

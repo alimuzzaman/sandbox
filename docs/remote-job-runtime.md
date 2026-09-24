@@ -256,22 +256,49 @@ Linux remotes can enable final removal with the protected, owner-scoped cleanup 
 ```
 
 The installed helper is root-owned and pinned to the exact deploy, workspace-metadata,
-and CI-artifact roots. Its only delete operations accept an inode identity and fixed
-object names, move the object to a root-only quarantine, and verify it again before
-removal. Existing root permissions are preserved; owner-only workspace leaves and inode
-checks bound each operation. Installation refuses when those roots and `/var/lib` do not share a filesystem,
+and CI-artifact roots. The installer also creates a root-owned, mode-0700
+`operations/` directory beside quarantine state. Before moving a checkout, the
+controller stores an immutable cleanup intent with a fresh cleanup ID, job/workspace
+authority, checkout and wrapper identities, metadata identities/content digest, and
+pinned-root identities. The broker stores its own root-owned, mode-0600 journal under
+that operations directory and serializes every transition. Checkout and metadata have
+independent `prepared`, `quarantined`, `removing`, and `removed` phases; metadata tracks
+its file and directory separately. Recovery follows the journal's deterministic target
+and verifies the wrapper plus its exact `owned` child inode. A prepared operation whose
+protected object is absent refuses; only a durably armed `removing` phase can treat an
+absent target as completed deletion. Retries do not infer success from missing paths or
+reread original metadata after the intent is durable.
+
+Only after both broker phases are removed does the controller mark the workspace
+destroyed and acknowledge the broker receipt. The broker then compacts the active
+journal to a terminal tombstone that prevents cleanup-ID reuse. Tombstones do not
+expire in this protocol. The retained quota is capped at 512 IDs and 32 MiB; when it is
+full, new cleanup IDs are refused while existing IDs can finish. Operators must plan
+for this limit rather than deleting journal files or quarantine contents by hand.
+Cleanup success means the exact checkout and workspace metadata were removed, the
+controller marked that workspace destroyed, and the matching receipt was acknowledged;
+it is not proof that a remote broker installation or unrelated storage object was
+recovered. Separate owned-storage cleanup still uses its own authority and recovery
+rules. An interruption inside that manager's quarantine step is not repaired by this
+broker journal and remains indeterminate until its own recovery path succeeds.
+Owned-storage cleanup retries use stable request evidence, recheck canonical
+selection/lease references, and serialize filesystem effects across processes.
+Symlink descendants are unlinked as no-follow leaf entries; ambiguous journal or
+filesystem states remain retained for operator review.
+
+This protocol cannot reconstruct historical failures that have no durable controller
+intent and broker journal. An older no-journal quarantine is not adopted by scanning
+for a matching inode; absent historical evidence remains refused. Existing root
+permissions are preserved; owner-only workspace leaves and inode checks bound each
+operation. Installation refuses when those roots and `/var/lib` do not share a filesystem,
 because atomic quarantine moves cannot cross filesystem boundaries. The service runtime
 must first match the current committed CLI revision; install
 that source with the normal protected service migration when needed. Unsupported platforms
 retain and report cleanup failure. If a broker install is interrupted, inspect service
 status and the broker capability before retrying; do not remove its retained quarantine
-manually. An exact terminal job whose cleanup previously failed is retried by reading its
-job status or invoking terminal job cleanup; recovery accepts only one quarantine
-whose inode matches the durable workspace authority. The privileged helper removes
-that exact tree through descriptor-relative, no-follow operations, refuses device
-crossings, and bounds entry count and depth. Workspace validation/materialization and
-durable job acceptance hold the same controller lock as terminal deletion, so a new
-accept cannot commit after the final active-job check. The same seam covers
+manually. Workspace validation/materialization and durable job acceptance hold the same
+controller lock as terminal deletion, so a new accept cannot commit after the final
+active-job check. The same seam covers
 `supervisor_launch_failed`. Retry restores from one retained archive capped at 512 MiB
 for both apparent input and compressed output, 100,000 entries, and a 1 GiB post-write
 free-space reserve; it does not accumulate a new archive per

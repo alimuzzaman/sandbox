@@ -907,6 +907,7 @@ class TestHostingManifest(unittest.TestCase):
             with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
                  patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
                  patch.object(hosting_cmd, "_cmd_host_sync") as sync, \
+                 patch.object(hosting_cmd, "_with_host_effect_lease", side_effect=lambda v, r, cb: cb(None)), \
                  patch.object(hosting_cmd.hosting, "desired_plan") as plan:
                 hosting_cmd.cmd_host(None, args)
 
@@ -1221,7 +1222,7 @@ class TestHostingManifest(unittest.TestCase):
             )
             self.assertEqual(stale_result.returncode, 0, stale_result.stderr)
             self.assertEqual(json.loads(stale_result.stdout), {
-                "schema_version": 1, "status": "foreign",
+                "schema_version": 1, "status": "foreign", "reason": "created_before_marker",
             })
 
             absent = hosting_cmd._initializer_status_command(
@@ -2569,6 +2570,33 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(result["source_revision"]["checks"][0]["state"], "match")
         self.assertEqual(checked.call_count, 1)
         self.assertTrue(result["apply_log"].endswith("/apply.log"))
+
+    def test_host_diagnose_parses_json_array_images_and_emits_initializers(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {}}
+        status = {
+            "project": "example-site", "environment": "production", "remote": "myvps",
+            "health": {"state": "ready"},
+            "services": [{"service": "web", "state": "running", "health": "healthy"}],
+            "initializers": [{"service": "migrate", "status": "foreign", "reason": "created_before_marker"}],
+        }
+        images_json_array = json.dumps([
+            {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
+        ])
+        with patch.object(hosting_cmd, "_host_runtime_status", return_value=status), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=4096), \
+             patch.object(hosting_cmd, "_remote_checked", return_value=images_json_array):
+            result = hosting_cmd._host_runtime_diagnose(
+                validated, {"provisioned": True}, "myvps", state,
+            )
+        self.assertEqual(result["images"], [
+            {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
+        ])
+        self.assertEqual(result["initializers"], [
+            {"service": "migrate", "status": "foreign", "reason": "created_before_marker"}
+        ])
 
     @patch("sandbox.commands.hosting.info")
     @patch("sandbox.commands.hosting._remote_checked")

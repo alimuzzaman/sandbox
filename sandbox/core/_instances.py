@@ -724,7 +724,15 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = F
                 destination = urlsplit(urljoin(url, location))
             except ValueError:
                 return False
-            return (destination.scheme, destination.netloc) == (original.scheme, original.netloc)
+            if (destination.scheme, destination.netloc) == (original.scheme, original.netloc):
+                return True
+            orig_host = original.hostname or ""
+            dest_host = destination.hostname or ""
+            if orig_host in ("localhost", "127.0.0.1"):
+                inst_domain = inst_cfg.get("domain") or ""
+                if dest_host in ("localhost", "127.0.0.1") or (inst_domain and dest_host == inst_domain):
+                    return True
+            return False
         return False
 
     ctx = ssl._create_unverified_context()
@@ -1270,8 +1278,7 @@ def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
 
     if expected.startswith("https://"):
         _write_ssl_muplugin(name)
-    else:
-        _write_loopback_muplugin(name)
+    _write_loopback_muplugin(name)
     wpcli(["option", "update", "siteurl", expected], instance=name,
           check=False)
     wpcli(["option", "update", "home", expected], instance=name,
@@ -1736,9 +1743,11 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                     _auto_heal_wp_url(name, expected_url=_base_url)
                 if not _wait_reachable(final_route, require_application_success=True,
                                        canonical_url=_base_url, timeout=10):
-                    raise sc.ConfigError(
+                    error = sc.ConfigError(
                         f"instance_route_unavailable: '{name}' did not answer at its "
                         "advertised URL; its pending state is retained.")
+                    error.code = "instance_route_unavailable"
+                    raise error
 
             # Spec 008: a newly provisioned instance gets both restore points only
             # after its project plugins/themes are in their final installed state.

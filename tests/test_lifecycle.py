@@ -248,6 +248,8 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
         self.assertIn("pre_http_request", rendered)
         self.assertIn("_sandbox_loopback", rendered)
         self.assertIn("X-Forwarded-Proto", rendered)
+        self.assertIn("X-Forwarded-Host", rendered)
+        self.assertIn("443 === $dest_port", rendered)
         self.assertIn("wp_remote_request", rendered)
         self.assertIn("$redirects_followed < $max_redirects", rendered)
 

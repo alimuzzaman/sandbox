@@ -586,7 +586,8 @@ def cmd_ensure(cfg, args) -> None:
             receipt = entry['creation_receipt']
             print(f"instance '{receipt['instance_id']}': {receipt['relation']}; original ensure {receipt['completion']} (retained receipt; no replay)")
         return
-    if not isinstance(entry, dict) or "instance" not in entry:
+    status = entry.get("status") if isinstance(entry, dict) else None
+    if not isinstance(entry, dict) or "instance" not in entry or entry.get("ok") is False or (status and status != "ready"):
         # A runtime that refuses returns its own typed result, not an instance
         # record; crashing on the missing key hid the actual reason from the
         # operator and printed a traceback instead.
@@ -594,12 +595,13 @@ def cmd_ensure(cfg, args) -> None:
         detail = (entry or {}).get("error") if isinstance(entry, dict) else None
         error = detail if isinstance(detail, dict) else None
         code = (reason.get("code") if isinstance(reason, dict) else reason) \
-            or (error.get("code") if error else None)
+            or (error.get("code") if error else None) \
+            or (entry.get("code") if isinstance(entry, dict) else None)
         # A runtime that succeeds without an instance record is not a failure.
         # Managed-native reports a backend and health instead of the Compose
         # instance entry, and printing "instance is not ready: ready" for a
         # working instance is worse than useless.
-        if isinstance(entry, dict) and entry.get("ok"):
+        if isinstance(entry, dict) and entry.get("ok") and (status == "ready" or status is None):
             if getattr(args, "json", False):
                 _print_ensure_json(
                     entry,
@@ -618,11 +620,14 @@ def cmd_ensure(cfg, args) -> None:
         # from any other, so emit the whole payload under --json and the
         # message plus the completed steps otherwise.
         if getattr(args, "json", False):
+            if status and status != "ready" and entry.get("ok") is not False:
+                entry = dict(entry, ok=False)
             _print_ensure_json(entry, compact=True)
+            raise SystemExit(1)
         message = (reason.get("message") if isinstance(reason, dict) else None) \
             or (error.get("message") if error else None)
         failed_after = reason.get("failed_after") if isinstance(reason, dict) else None
-        summary = f"instance is not ready: {code or detail or 'no reason reported'}"
+        summary = f"instance is not ready: {code or detail or status or 'no reason reported'}"
         if message and message != code:
             summary += f": {message}"
         if failed_after:
@@ -634,6 +639,8 @@ def cmd_ensure(cfg, args) -> None:
         # always a local instance -- the remote branch returned long before,
         # honouring --reveal-login on its own record.
         _print_ensure_json(entry, reveal_login=getattr(args, "reveal_login", False))
+        if entry.get("ok") is False or (status and status != "ready"):
+            raise SystemExit(1)
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
         print(f"  project: {entry['root']}")

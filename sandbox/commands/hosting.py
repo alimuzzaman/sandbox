@@ -907,69 +907,71 @@ def _initializer_status_command(prefix: str, service: str, *, not_before: float 
         "for i,value in enumerate(prefix[:-1]):",
         " if value in ('-p','--project-name'):project=prefix[i+1]",
         " if value.startswith('--project-name='):project=value.split('=',1)[1]",
-        "def emit(status):",
-        " print(json.dumps({'schema_version':1,'status':status},separators=(',',':')))",
+        "def emit(status,reason=None):",
+        " d={'schema_version':1,'status':status}",
+        " if reason:d['reason']=reason",
+        " print(json.dumps(d,separators=(',',':')))",
         " raise SystemExit(0)",
         "if marker_path:",
         " try:",
         "  with open(marker_path,encoding='ascii') as marker:not_before=float(marker.read().strip())",
-        " except (OSError,TypeError,ValueError):emit('foreign')",
+        " except (OSError,TypeError,ValueError):emit('foreign','marker_read_failed')",
         "def call(argv,timeout=30,input_text=None):",
         " try:return subprocess.run(argv,input=input_text,env=env,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=timeout,check=False)",
-        " except (OSError,subprocess.SubprocessError):emit('foreign')",
+        " except (OSError,subprocess.SubprocessError):emit('foreign','subprocess_error')",
         "def compose(*args,max_bytes=65536):",
         " result=call([*prefix,*args])",
-        " if result.returncode or len(result.stdout.encode('utf-8'))>max_bytes:emit('foreign')",
+        " if result.returncode or len(result.stdout.encode('utf-8'))>max_bytes:emit('foreign','compose_failed')",
         " return result.stdout.strip()",
         # Compose's hash subcommand skips env_file resolution. Resolve first,
         # then hash its escaped serialization over stdin. Never log the model.
         "resolved=compose('config','--format','json',max_bytes=8*1024*1024)",
-        "if not project:emit('foreign')",
+        "if not project:emit('foreign','missing_project')",
         "hashed=call(['docker','compose','-p',project,'-f','-','config','--hash',service],input_text=resolved)",
         "resolved=None",
-        "if hashed.returncode:emit('foreign')",
+        "if hashed.returncode:emit('foreign','config_hash_failed')",
         "config_hash=hashed.stdout.strip()",
-        "if not config_hash or '\\n' in config_hash or len(config_hash)>256:emit('foreign')",
+        "if not config_hash or '\\n' in config_hash or len(config_hash)>256:emit('foreign','invalid_config_hash')",
         "hash_parts=config_hash.split()",
         "if len(hash_parts)==2 and hash_parts[0]==service:config_hash=hash_parts[1]",
-        "elif len(hash_parts)!=1:emit('foreign')",
-        "if re.fullmatch(r'[0-9a-f]{64}',config_hash) is None:emit('foreign')",
+        "elif len(hash_parts)!=1:emit('foreign','invalid_config_hash_parts')",
+        "if re.fullmatch(r'[0-9a-f]{64}',config_hash) is None:emit('foreign','malformed_config_hash')",
         "ids=[row for row in compose('ps','-aq',service).splitlines() if row]",
         "if not ids:emit('absent')",
         "if len(ids)!=1:emit('ambiguous')",
         "image_ids=[row for row in compose('images','-q',service).splitlines() if row]",
-        "if len(image_ids)!=1:emit('foreign')",
+        "if len(image_ids)!=1:emit('foreign','ambiguous_or_missing_image')",
         "def image_digest(value):",
-        " if not isinstance(value,str):emit('foreign')",
+        " if not isinstance(value,str):emit('foreign','invalid_image_string')",
         " digest=value.removeprefix('sha256:')",
-        " if re.fullmatch(r'[0-9a-f]{64}',digest) is None:emit('foreign')",
+        " if re.fullmatch(r'[0-9a-f]{64}',digest) is None:emit('foreign','malformed_image_digest')",
         " return digest",
         "expected_image=image_digest(image_ids[0])",
         "container=ids[0]",
         "def inspect():",
         " raw=call(['docker','inspect','--format','{{json .}}',container])",
-        " if raw.returncode or len(raw.stdout)>65536:emit('foreign')",
+        " if raw.returncode or len(raw.stdout)>65536:emit('foreign','inspect_failed')",
         " try:value=json.loads(raw.stdout)",
-        " except (TypeError,ValueError,json.JSONDecodeError):emit('foreign')",
-        " return value if isinstance(value,dict) else emit('foreign')",
+        " except (TypeError,ValueError,json.JSONDecodeError):emit('foreign','malformed_inspect_json')",
+        " return value if isinstance(value,dict) else emit('foreign','inspect_not_dict')",
         "while True:",
         " value=inspect();labels=((value.get('Config') or {}).get('Labels') or {})",
-        " if (not project or labels.get('com.docker.compose.project')!=project or",
-        "     labels.get('com.docker.compose.service')!=service or",
-        "     labels.get('com.docker.compose.config-hash')!=config_hash or",
-        "     image_digest(value.get('Image'))!=expected_image):emit('foreign')",
+        " if not project or labels.get('com.docker.compose.project')!=project:emit('foreign','project_mismatch')",
+        " if labels.get('com.docker.compose.service')!=service:emit('foreign','service_mismatch')",
+        " if labels.get('com.docker.compose.config-hash')!=config_hash:emit('foreign','config_hash_mismatch')",
+        " if image_digest(value.get('Image'))!=expected_image:emit('foreign','image_mismatch')",
         " state=value.get('State') or {};status=state.get('Status')",
         " if status in ('running','created','restarting'):",
         "  if time.monotonic()>=deadline:emit('running')",
         "  time.sleep(min(2,deadline-time.monotonic()));continue",
         " created=value.get('Created')",
-        " if not isinstance(created,str):emit('foreign')",
+        " if not isinstance(created,str):emit('foreign','invalid_created_timestamp')",
         " try:created_at=datetime.datetime.fromisoformat(created.replace('Z','+00:00')).timestamp()",
-        " except (TypeError,ValueError,OverflowError):emit('foreign')",
-        " if created_at < not_before:emit('foreign')",
+        " except (TypeError,ValueError,OverflowError):emit('foreign','unparseable_created_timestamp')",
+        " if created_at < not_before:emit('foreign','created_before_marker')",
         " if status=='exited' and state.get('ExitCode')==0:emit('succeeded')",
-        " if status=='exited':emit('failed')",
-        " emit('foreign')",
+        " if status=='exited':emit('failed',f'exit_code_{state.get(\"ExitCode\")}')",
+        " emit('foreign',f'unknown_status_{status}')",
     ))
     return shlex.join([
         "python3", "-c", program, prefix, service, repr(float(not_before)), marker_path,
@@ -977,8 +979,8 @@ def _initializer_status_command(prefix: str, service: str, *, not_before: float 
 
 
 def _initializer_dependency_status(entry: dict, prefix: str, service: str,
-                                   *, not_before: float = 0.0, marker_path: str = "") -> str:
-    """Return the private, exact status of one Compose-owned initializer."""
+                                   *, not_before: float = 0.0, marker_path: str = "") -> dict:
+    """Return the private, exact status and diagnostic proof of one Compose-owned initializer."""
     raw = _remote_checked(
         entry,
         _initializer_status_command(
@@ -995,7 +997,7 @@ def _initializer_dependency_status(entry: dict, prefix: str, service: str,
                 "absent", "succeeded", "failed", "running", "foreign", "ambiguous",
             }):
         raise RuntimeError(f"initializer {service} proof was malformed")
-    return receipt["status"]
+    return receipt
 
 
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
@@ -1096,17 +1098,20 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
     for init_service in init_services if force_recreate else ():
-        status = _initializer_dependency_status(
+        receipt = _initializer_dependency_status(
             entry, f"{prefix} --profile jobs", init_service,
             marker_path=initializer_marker,
         )
+        status = receipt.get("status")
+        reason = receipt.get("reason")
         if status == "succeeded":
             if progress is not None:
                 progress(f"Init service {init_service} completed as a Compose dependency")
             continue
         if status != "absent":
+            reason_suffix = f" (reason: {reason})" if reason else ""
             raise RuntimeError(
-                f"initializer {init_service} has {status} evidence; refusing replay"
+                f"initializer {init_service} has {status} evidence{reason_suffix}; refusing replay"
             )
         no_build = " --no-build" if not build else ""
         _remote_checked(
@@ -1292,10 +1297,15 @@ def _host_observation_command(prefix: str, services: list[str],
         "   if isinstance(item,dict):r['rows'].append(item)",
         "images=None if expired else run('compose_images',p['prefix']+' --profile \\'*\\' images --format json')",
         "if images is not None:",
-        " for line in images.splitlines():",
-        "  if len(r['images'])>=32:break",
-        "  try:item=json.loads(line)",
-        "  except Exception:continue",
+        " try:parsed_imgs=json.loads(images)",
+        " except Exception:parsed_imgs=None",
+        " img_items=parsed_imgs if isinstance(parsed_imgs,list) else [parsed_imgs] if isinstance(parsed_imgs,dict) else []",
+        " if not img_items:",
+        "  for line in images.splitlines():",
+        "   try:item=json.loads(line)",
+        "   except Exception:continue",
+        "   if isinstance(item,dict):img_items.append(item)",
+        " for item in img_items[:32]:",
         "  if isinstance(item,dict):",
         "   service=item.get('Service') or item.get('Name');image_id=item.get('ID')",
         "   if service and image_id:r['images'].append({'name':str(service)[:128],'id':str(image_id)[:160]})",
@@ -2882,17 +2892,29 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
         )
         try:
             raw_images = _remote_checked(entry, f"{prefix} images --format json", timeout=60)
-            for line in (raw_images or "").splitlines():
-                try:
-                    item = json.loads(line)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                if isinstance(item, dict):
-                    result["images"].append({
-                        key: item.get(key)
-                        for key in ("Service", "Name", "Image", "ID", "Created", "Size")
-                        if item.get(key) is not None
-                    })
+            items = []
+            try:
+                parsed = json.loads(raw_images)
+                if isinstance(parsed, list):
+                    items = [x for x in parsed if isinstance(x, dict)]
+                elif isinstance(parsed, dict):
+                    items = [parsed]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            if not items:
+                for line in (raw_images or "").splitlines():
+                    try:
+                        item = json.loads(line)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if isinstance(item, dict):
+                        items.append(item)
+            for item in items:
+                result["images"].append({
+                    key: item.get(key)
+                    for key in ("Service", "Name", "Image", "ID", "Created", "Size")
+                    if item.get(key) is not None
+                })
             result["image_state"] = {"state": "ready" if result["images"] else "unknown"}
             if not result["images"]:
                 result["image_state"]["reason"] = "Compose returned no image rows"
@@ -2901,6 +2923,27 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
                 "state": "unavailable",
                 "reason": remote.redact_text(str(exc))[:500],
             }
+
+        init_services = validated.get("compose", {}).get("init_services", [])
+        if init_services:
+            result["initializers"] = []
+            for service in init_services:
+                try:
+                    init_proof = _initializer_dependency_status(
+                        entry, f"{prefix} --profile jobs", service,
+                        marker_path=f"{runtime_dir}/.initializer-started-at",
+                    )
+                    result["initializers"].append({
+                        "service": service,
+                        "status": init_proof.get("status"),
+                        "reason": init_proof.get("reason"),
+                    })
+                except Exception as exc:
+                    result["initializers"].append({
+                        "service": service,
+                        "status": "unavailable",
+                        "reason": remote.redact_text(str(exc))[:500],
+                    })
 
         # Source-revision and service-health evidence already came from the
         # single bounded status observer.  Diagnose adds disk and image facts;

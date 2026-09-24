@@ -57,9 +57,24 @@ def cmd_activation(cfg, args) -> None:
             payload["results"] = []
         print(json.dumps(payload, sort_keys=True))
         raise SystemExit(2)
+    _cached_catalog: list[object] = [catalog, 0.0, 0.0]
+
     def current_catalog():
-        """Read the registry/config on demand for the long-lived authority."""
-        return build_catalog(sc.registry_all(), resolve_instances(load_config()))
+        """Read the registry/config on demand for the long-lived authority with mtime caching."""
+        reg_file = sc.sandbox_base() / "runtime" / "registry.json"
+        local_file = sc.sandbox_base() / "sandbox.local.yml"
+        try:
+            reg_m = reg_file.stat().st_mtime if reg_file.exists() else 0.0
+            local_m = local_file.stat().st_mtime if local_file.exists() else 0.0
+            if _cached_catalog[0] is not None and reg_m == _cached_catalog[1] and local_m == _cached_catalog[2]:
+                return _cached_catalog[0]
+            cat = build_catalog(sc.registry_all(), resolve_instances(load_config()))
+            _cached_catalog[0] = cat
+            _cached_catalog[1] = reg_m
+            _cached_catalog[2] = local_m
+            return cat
+        except Exception:
+            return build_catalog(sc.registry_all(), resolve_instances(load_config()))
 
     generic = runtime_service(cfg)
     wordpress = wordpress_runtime_service(cfg)

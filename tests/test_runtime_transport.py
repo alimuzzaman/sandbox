@@ -213,6 +213,36 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         for secret in ("login-token", "raw-token", "raw-password", "raw-authorization"):
             self.assertNotIn(secret, serialized)
 
+    def test_cli_ensure_json_exits_nonzero_when_entry_not_ready_or_ok_false(self):
+        import sandbox.commands.instances_cmd as commands
+        from sandbox.runtimes.base import OperationResult
+
+        cases = [
+            {"ok": False, "status": "pending", "code": "instance_route_unavailable"},
+            {"instance": "fixture", "ok": False, "status": "failed"},
+            {"instance": "fixture", "ok": True, "status": "pending"},
+        ]
+        for entry in cases:
+            with self.subTest(entry=entry):
+                class MockService:
+                    def invoke(self, request):
+                        return OperationResult(
+                            True, "ensure", request.project_root, "wordpress",
+                            entry,
+                        )
+
+                args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                             create=False, json=True)
+                output = io.StringIO()
+                with mock.patch.object(commands, "wordpress_runtime_service",
+                                       return_value=MockService()), \
+                        contextlib.redirect_stdout(output), \
+                        self.assertRaises(SystemExit) as raised:
+                    commands.cmd_ensure({}, args)
+                self.assertEqual(raised.exception.code, 1)
+                payload = json.loads(output.getvalue())
+                self.assertFalse(payload.get("ok", True))
+
     def _ensure_json_payload(self, login_url, **overrides):
         """Run `cmd_ensure --json` over one fixture record and parse its line."""
         import sandbox.commands.instances_cmd as commands

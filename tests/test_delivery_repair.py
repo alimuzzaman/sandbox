@@ -118,6 +118,23 @@ class InstanceReadinessRegressions(unittest.TestCase):
                     actual = _instances._wait_reachable({}, timeout=1, require_application_success=True)
                 self.assertEqual(actual, expected)
 
+    def test_final_route_accepts_localhost_redirect_when_port_dropped_or_matching_domain(self):
+        cases = [
+            ("http://localhost:8189/", 301, "http://localhost/", {"domain": "site.tst"}, True),
+            ("http://localhost:8189/", 301, "https://site.tst/", {"domain": "site.tst"}, True),
+            ("http://localhost:8189/", 301, "https://foreign.com/", {"domain": "site.tst"}, False),
+        ]
+        for url, code, location, inst_cfg, expected in cases:
+            with self.subTest(url=url, code=code, location=location):
+                response = types.SimpleNamespace(status=code, headers={"Location": location}, close=lambda: None)
+                opener = Mock()
+                opener.open.return_value = response
+                with patch("urllib.request.build_opener", return_value=opener), \
+                     patch.object(_instances, "site_url", return_value=url), \
+                     patch("time.sleep"):
+                    actual = _instances._wait_reachable(inst_cfg, timeout=1, require_application_success=True)
+                self.assertEqual(actual, expected)
+
     def test_backend_probe_does_not_enter_canonical_route(self):
         with patch.object(_instances, "_wait_reachable", return_value=True) as reachable:
             self.assertTrue(_instances._wait_http(8252, timeout=1))

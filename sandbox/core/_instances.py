@@ -1142,19 +1142,43 @@ def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
     if not expected.startswith(("http://", "https://")):
         return False
 
-    current = wpcli(["option", "get", "siteurl"], instance=name,
-                    check=False, capture=True)
-    if (getattr(current, "stdout", "") or "").strip() == expected:
+    current = {}
+    for option in ("home", "siteurl"):
+        result = wpcli(["option", "get", option], instance=name,
+                       check=False, capture=True, timeout=15)
+        current[option] = (
+            (getattr(result, "stdout", "") or "").strip()
+            if getattr(result, "returncode", 1) in (0, None) else None
+        )
+    if all(value == expected for value in current.values()):
         return False
 
     if expected.startswith("https://"):
         _write_ssl_muplugin(name)
     else:
         _write_loopback_muplugin(name)
-    wpcli(["option", "update", "siteurl", expected], instance=name,
-          check=False)
-    wpcli(["option", "update", "home", expected], instance=name,
-          check=False)
+
+    failed = []
+    for option in ("home", "siteurl"):
+        result = wpcli(["option", "update", option, expected], instance=name,
+                       check=False, capture=True, timeout=15)
+        if getattr(result, "returncode", 1) not in (0, None):
+            failed.append(option)
+
+    if not failed:
+        for option in ("home", "siteurl"):
+            result = wpcli(["option", "get", option], instance=name,
+                           check=False, capture=True, timeout=15)
+            value = (getattr(result, "stdout", "") or "").strip()
+            if (getattr(result, "returncode", 1) not in (0, None)
+                    or value != expected):
+                failed.append(option)
+
+    if failed:
+        info(f"{name}: could not confirm WP home/siteurl URL repair; "
+             "the advertised-route check will determine readiness")
+        return False
+
     info(f"{name}: auto-healed WP url → {expected}")
     return True
 
@@ -1579,6 +1603,10 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
 
             final_route = resolve_instances(cfg)[name]
             _base_url = site_url(final_route)
+            # Plugin wiring and provider state can change the effective URL
+            # after the earlier install-time pass. Reconcile both WordPress
+            # URL options to the exact route we are about to accept.
+            _auto_heal_wp_url(name, expected_url=_base_url)
             if not _wait_reachable(final_route, require_application_success=True,
                                    canonical_url=_base_url):
                 raise sc.ConfigError(

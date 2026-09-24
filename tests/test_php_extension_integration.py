@@ -612,7 +612,10 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.object(instances, "_core", return_value=FakeCore()))
             stack.enter_context(patch.object(instances, "docker_daemon_preflight", return_value={"ok": True}))
-            stack.enter_context(patch.object(instances, "_wait_reachable", return_value=True))
+            stack.enter_context(patch.object(
+                instances, "_wait_reachable",
+                side_effect=lambda *_a, **_k: events.append("route") or True,
+            ))
             stack.enter_context(patch.object(instances, "_local_yaml", return_value=local))
             stack.enter_context(patch.object(instances, "_write_local_yaml"))
             stack.enter_context(patch.object(instances, "_resolve_port_conflicts", return_value={}))
@@ -637,6 +640,10 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 instances, "_wire_project_themes",
                 side_effect=lambda *_a, **_k: events.append("themes"),
             ))
+            heal = stack.enter_context(patch.object(
+                instances, "_auto_heal_wp_url",
+                side_effect=lambda *_a, **_k: events.append("heal"),
+            ))
             stack.enter_context(patch.object(instances, "_multisite_mode", return_value=False))
             stack.enter_context(patch.object(instances, "_proxy_sudoers_installed", return_value=False))
             stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8188"))
@@ -658,7 +665,10 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertLess(events.index("compose-file"), events.index("up"))
         self.assertLess(events.index("install"), events.index("plugins"))
         self.assertLess(events.index("plugins"), events.index("themes"))
-        self.assertLess(events.index("themes"), events.index("snapshots"))
+        self.assertLess(events.index("themes"), events.index("heal"))
+        self.assertLess(events.index("heal"), events.index("route"))
+        self.assertLess(events.index("route"), events.index("snapshots"))
+        heal.assert_called_once_with("fixture", expected_url="http://localhost:8188")
         capture.assert_called_once_with("fixture")
 
     def test_ready_ensure_does_not_recapture_install_snapshots(self):

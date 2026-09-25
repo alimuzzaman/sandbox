@@ -93,9 +93,10 @@ timeout and allow up to two additional upstream attempts within an eight-second 
 window, with 250 ms between attempts. This gives transient `host.docker.internal` dial
 failures another chance while bounding the extra wait when an instance or the activation
 gateway is unavailable. Each upstream also caps open, dialing, and idle connections at
-eight per host so a page load cannot create an unbounded burst of host-gateway dials. The
-retry and connection cap are resilience measures; they do not identify or repair an
-underlying Docker host-gateway problem.
+64 per host. This lets the reported 49-asset admin page avoid queuing behind an
+eight-connection limit while still bounding host-gateway dials. The retry and connection
+cap are resilience measures; they do not identify or repair an underlying Docker
+host-gateway problem.
 Exact single-host route probes wait nine seconds: the eight-second Caddy retry window plus
 one second to receive and inspect its response. This keeps `site_url()` and scoped ingress
 status from declaring a route unavailable while Caddy is still retrying. Whole-fleet route

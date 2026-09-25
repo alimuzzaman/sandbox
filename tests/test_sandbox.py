@@ -416,7 +416,7 @@ class TestCaddyBlocks(unittest.TestCase):
             self.assertIn("lb_try_interval 250ms", rendered)
             self.assertIn(
                 "transport http {\n            dial_timeout 3s\n"
-                "            max_conns_per_host 8\n        }",
+                "            max_conns_per_host 64\n        }",
                 rendered,
             )
 

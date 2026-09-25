@@ -15,7 +15,9 @@ from contextlib import redirect_stdout, redirect_stderr
 
 _CADDY_UPSTREAM_RETRY_WINDOW_SECONDS = 8
 _CADDY_EXACT_ROUTE_PROBE_TIMEOUT_SECONDS = _CADDY_UPSTREAM_RETRY_WINDOW_SECONDS + 1
-_CADDY_UPSTREAM_MAX_CONNECTIONS_PER_HOST = 8
+# Keep the burst bounded while allowing the reported 49-asset admin page to
+# reach its upstream without waiting behind an eight-connection dial queue.
+_CADDY_UPSTREAM_MAX_CONNECTIONS_PER_HOST = 64
 
 
 def _tld(ic: dict | None = None) -> str:

@@ -87,6 +87,19 @@ the activation authority is down while an older wake-route Caddyfile is still lo
 running WordPress container remains reachable and a stopped one fails at its backend
 port instead of every request failing at the dead gateway. `./sb activation status`
 shows whether the authority is active.
+
+Generated activation-gateway and backend routes use an explicit three-second HTTP dial
+timeout and allow up to two additional upstream attempts within an eight-second retry
+window, with 250 ms between attempts. This gives transient `host.docker.internal` dial
+failures another chance while bounding the extra wait when an instance or the activation
+gateway is unavailable. Each upstream also caps open, dialing, and idle connections at
+eight per host so a page load cannot create an unbounded burst of host-gateway dials. The
+retry and connection cap are resilience measures; they do not identify or repair an
+underlying Docker host-gateway problem.
+Exact single-host route probes wait nine seconds: the eight-second Caddy retry window plus
+one second to receive and inspect its response. This keeps `site_url()` and scoped ingress
+status from declaring a route unavailable while Caddy is still retrying. Whole-fleet route
+scans keep their shorter per-route budget.
 Activation request header names are matched case-insensitively. Caddy or the host HTTP
 server may canonicalize `X-Sandbox-Route-ID` to `X-Sandbox-Route-Id`; both spellings
 refer to the same HTTP field and must authorize the same registered route.

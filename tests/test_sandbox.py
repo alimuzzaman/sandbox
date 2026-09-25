@@ -246,6 +246,25 @@ class TestSiteUrl(unittest.TestCase):
                 "http://localhost:8214",
             )
 
+    def test_exact_clean_url_probe_waits_through_caddy_retry_window(self):
+        with mock.patch.object(domains_core, "_caddyfile_has_route",
+                               return_value=True), \
+             mock.patch.object(domains_core, "_proxy_container_running",
+                               return_value=True), \
+             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
+                               return_value=True) as serving:
+            self.assertEqual(
+                core.site_url({
+                    "url": "https://demo.tst",
+                    "domain": "demo.tst",
+                    "tld": "tst",
+                    "wordpress_port": 8214,
+                }),
+                "https://demo.tst",
+            )
+
+        self.assertEqual(serving.call_args.kwargs["timeout"], 9)
+
 
 class TestCanonicalReachability(unittest.TestCase):
     """Apply/rollback health probes use the canonical URL and no redirects."""
@@ -372,6 +391,34 @@ class TestCaddyBlocks(unittest.TestCase):
         self.assertIn("reverse_proxy host.docker.internal:8123", rendered)
         self.assertNotIn("redir https://{host}{uri} 308", rendered)
         self.assertNotIn("\ntls /certs/example.tst.pem", rendered)
+
+    def test_proxy_and_forward_auth_blocks_have_bounded_retries(self):
+        with tempfile.TemporaryDirectory() as td:
+            cert = Path(td) / "secure.tst.pem"
+            key = Path(td) / "secure.tst-key.pem"
+            cert.write_text("cert")
+            key.write_text("key")
+            activation_route = mock.Mock(token="route-token", route_id="route-id")
+            with mock.patch.object(domains_core, "_cert_paths",
+                                   return_value=(cert, key)):
+                rendered_routes = (
+                    core._caddy_block("plain.tst", 8123),
+                    core._caddy_block("secure.tst", 8123, secure=True),
+                    core._caddy_block("activation.tst", 8766,
+                                      activation_route=activation_route),
+                )
+
+        self.assertIn("reverse_proxy host.docker.internal:8123", rendered_routes[0])
+        self.assertIn("forward_auth host.docker.internal:8766", rendered_routes[2])
+        for rendered in rendered_routes:
+            self.assertIn("lb_retries 2", rendered)
+            self.assertIn("lb_try_duration 8s", rendered)
+            self.assertIn("lb_try_interval 250ms", rendered)
+            self.assertIn(
+                "transport http {\n            dial_timeout 3s\n"
+                "            max_conns_per_host 8\n        }",
+                rendered,
+            )
 
     def test_regen_uses_registry_url_instead_of_stale_certificate(self):
         with tempfile.TemporaryDirectory() as td:
@@ -542,7 +589,7 @@ class TestProxyTransportHealth(unittest.TestCase):
             )
 
         self.assertTrue(health["ok"])
-        self.assertEqual(serving.call_args.kwargs["timeout"], 5.0)
+        self.assertEqual(serving.call_args.kwargs["timeout"], 9)
 
     def test_exact_route_health_reason_is_shared_with_human_detail(self):
         observed = {

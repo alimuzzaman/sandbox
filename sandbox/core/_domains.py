@@ -13,6 +13,10 @@ import io
 import threading
 from contextlib import redirect_stdout, redirect_stderr
 
+_CADDY_UPSTREAM_RETRY_WINDOW_SECONDS = 8
+_CADDY_EXACT_ROUTE_PROBE_TIMEOUT_SECONDS = _CADDY_UPSTREAM_RETRY_WINDOW_SECONDS + 1
+_CADDY_UPSTREAM_MAX_CONNECTIONS_PER_HOST = 8
+
 
 def _tld(ic: dict | None = None) -> str:
     """Local domain TLD for an instance — from its `tld` (sandbox.config.json),
@@ -266,7 +270,13 @@ def _sandbox_proxy_active(domain: str, *, secure: bool = False) -> bool:
     # URL that never reached Caddy.  A bounded response-header probe is the
     # final authority: even an upstream 4xx/5xx is useful evidence when the
     # response is Caddy's, while a foreign listener is rejected.
-    return _sandbox_proxy_route_serving(domain, secure=secure)
+    # Caddy may spend the full bounded retry window recovering a transient
+    # upstream dial failure. A shorter probe makes site_url() publish the
+    # localhost fallback before Caddy has finished those retries.
+    return _sandbox_proxy_route_serving(
+        domain, secure=secure,
+        timeout=_CADDY_EXACT_ROUTE_PROBE_TIMEOUT_SECONDS,
+    )
 
 
 def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
@@ -377,7 +387,10 @@ def sandbox_caddy_health(cfg: dict, *, domains=None) -> dict:
     # being created. Give that one route a bounded window to finish the
     # existing Compose start; managed health scans keep their short per-route
     # budget so stale fleets cannot amplify startup time.
-    probe_timeout = 5.0 if requested is not None else 0.5
+    probe_timeout = (
+        _CADDY_EXACT_ROUTE_PROBE_TIMEOUT_SECONDS
+        if requested is not None else 0.5
+    )
     for dom, secure in dict.fromkeys(routes):
         try:
             configured = _caddyfile_has_route(dom, text)
@@ -840,13 +853,24 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
     instance, keyed by its primary domain), so the alias block has to read the
     primary's cert files or it would fall back to http while https is live."""
     cert, key = _cert_paths(cert_domain or domain)
+    # Bound recovery to two additional attempts and an eight-second total
+    # selection window. `forward_auth` accepts the same reverse_proxy
+    # subdirectives as a backend route.
+    proxy_retry = f"""        lb_retries 2
+        lb_try_duration {_CADDY_UPSTREAM_RETRY_WINDOW_SECONDS}s
+        lb_try_interval 250ms
+        transport http {{
+            dial_timeout 3s
+            max_conns_per_host {_CADDY_UPSTREAM_MAX_CONNECTIONS_PER_HOST}
+        }}
+"""
     auth = ""
     if activation_route is not None:
         auth = f'''    forward_auth host.docker.internal:8766 {{
         uri /v1/activate?
         header_up Authorization "Bearer {activation_route.token}"
         header_up X-Sandbox-Route-ID "{activation_route.route_id}"
-    }}
+{proxy_retry}    }}
 '''
     hosts = [domain, _wildcard_san(domain)] if wildcard else [domain]
     if secure and cert.exists() and key.exists():
@@ -858,7 +882,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
 {host} {{
     tls /certs/{cert.name} /certs/{key.name}
 {auth}    reverse_proxy host.docker.internal:{port} {{
-        header_up X-Forwarded-Proto https
+{proxy_retry}        header_up X-Forwarded-Proto https
         header_up Host {{host}}
     }}
 }}
@@ -868,7 +892,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False,
     return "\n".join(
         f"""http://{host} {{
 {auth}    reverse_proxy host.docker.internal:{port} {{
-        header_up Host {{host}}
+{proxy_retry}        header_up Host {{host}}
     }}
 }}
 """

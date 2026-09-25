@@ -227,3 +227,97 @@ class RetireInterruptedDeliveryTests(unittest.TestCase):
 
     def test_an_unknown_request_changes_nothing(self):
         self.assert_code('required_evidence_missing', self.retire, original='absent')
+
+
+class PreviousHostingSnapshotTests(unittest.TestCase):
+    """A new checkout must join the exact predecessor without rewriting it."""
+
+    def setUp(self):
+        from copy import deepcopy
+        from sandbox.delivery.hosting import HostingAttempt
+        from sandbox.delivery.models import intent_digest, request_scope, terminal_digest
+        from tests.test_delivery_models import make_operation, make_target
+
+        old_target = make_target()
+        old_target['project_root_digest'] = 'sha256:' + '1' * 64
+        current_target = deepcopy(old_target)
+        current_target['project_identity'] = 'new-worktree-project'
+        current_target['project_root_digest'] = 'sha256:' + '3' * 64
+
+        artifact = {'schema_version': 1, 'kind': 'git_commit',
+                    'root_relative': '.', 'revision': 'a' * 40}
+        config_digest = 'sha256:' + '4' * 64
+        job_id = 'f' * 32
+        self.previous = {
+            'request_id': 'previous-request', 'job_id': job_id,
+            'project_identity': old_target['project_identity'],
+            'project_root_digest': old_target['project_root_digest'],
+            'target': {'remote': old_target['remote_name'],
+                       'environment': old_target['environment']},
+            'starting_generation': 7,
+            'source': {'clean': True, 'identity': 'fixture-app',
+                       'commit': 'a' * 40, 'artifact': artifact},
+            'evidence': {'machine_identity': old_target['machine_identity'],
+                         'host_identity': old_target['registered_host_digest'],
+                         'runtime_identity': old_target['runtime_identity'],
+                         'config_digest': config_digest},
+        }
+
+        self.old = make_operation('previous-request')
+        self.old['job_id'] = job_id
+        self.old['requested_outcome']['application'].update(
+            source_artifact=artifact, config_digest=config_digest)
+        self.old['requested_outcome']['configuration_digest'] = config_digest
+        self.old['intent_digest'] = intent_digest(self.old['requested_outcome'])
+        self.old['admission'] = {
+            'job_id': job_id, 'generation': 7,
+            'application_revision': 'a' * 40,
+            'contract_digest': config_digest,
+        }
+        self.old.update(execution_state='interrupted', delivery_state='failed',
+                        delivery_succeeded=False, evidence_completeness='missing',
+                        phase='unknown', finished_at=self.old['updated_at'],
+                        pinned_reason={'code': 'effect_unknown',
+                                       'message': 'Retained original uncertainty.'})
+        self.old['terminal_snapshot_digest'] = terminal_digest(self.old)
+        self.old_bytes = json.dumps(self.old, sort_keys=True, separators=(',', ':'))
+
+        self.old_scope = request_scope(old_target)
+        self.current_scope = request_scope(current_target)
+        self.decoy = deepcopy(self.old)
+        self.decoy['job_id'] = 'e' * 32
+
+        self.repository = Mock()
+        self.repository.lookup_request.side_effect = lambda scope, request: {
+            'operation': self.decoy if scope == self.current_scope else self.old
+        }
+        self.attempt = HostingAttempt.__new__(HostingAttempt)
+        self.attempt.repository = self.repository
+        self.attempt.operation = {'request_id': 'new-request', 'target': current_target}
+
+    def test_uses_original_worktree_scope_and_preserves_unknown_terminal_snapshot(self):
+        self.attempt.require_previous_snapshot(self.previous)
+
+        self.repository.lookup_request.assert_called_once_with(
+            self.old_scope, 'previous-request')
+        self.assertEqual(self.old['pinned_reason']['code'], 'effect_unknown')
+        self.assertEqual(json.dumps(self.old, sort_keys=True, separators=(',', ':')),
+                         self.old_bytes)
+
+    def test_changed_root_binding_fails_closed(self):
+        from sandbox.delivery.models import DeliveryError
+
+        self.previous['project_root_digest'] = 'sha256:' + '9' * 64
+        with self.assertRaises(DeliveryError) as error:
+            self.attempt.require_previous_snapshot(self.previous)
+        self.assertEqual(error.exception.code, 'binding_mismatch')
+        self.repository.lookup_request.assert_called_once_with(
+            self.old_scope, 'previous-request')
+
+    def test_changed_terminal_digest_fails_closed(self):
+        from sandbox.delivery.models import DeliveryError
+
+        self.old['terminal_snapshot_digest'] = 'sha256:' + '9' * 64
+        with self.assertRaises(DeliveryError) as error:
+            self.attempt.require_previous_snapshot(self.previous)
+        self.assertEqual(error.exception.code, 'binding_mismatch')

@@ -47,10 +47,28 @@ class RemoteJobTransportTests(unittest.TestCase):
                 transport, "_prepare_workspace", return_value="/srv/project-unit"):
             result = transport.submit(JobSubmission(
                 "test", "/project", "project:remote", "remote", "unit",
-                ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+                ("python3", "canary/reopen.py", "--fixture",
+                 "canary/fixtures/synthetic.json"),
+                60, SourceIdentity("caller"), remote_name="vps",
             ))
         self.assertTrue(result["ok"])
         self.assertEqual(calls, [])
+
+    def test_inline_helper_source_rejection_gives_safe_file_path_guidance(self):
+        transport = RemoteJobTransport(
+            deploy=lambda *_args, **_kwargs: self.fail("unsafe argv must stop before deploy"),
+            ssh_run=lambda *_args, **_kwargs: self.fail("unsafe argv must stop before SSH"),
+            remote_lookup=lambda *_args: self.fail("unsafe argv must stop before lookup"),
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("python3", "-c", "api_key='synthetic-fixture'"), 60,
+            SourceIdentity("caller"), remote_name="vps",
+        )
+        with self.assertRaisesRegex(
+                RemoteJobTransportError,
+                "put public helper code in project files and pass relative paths"):
+            transport.submit(submission)
 
     def test_synchronized_submission_fails_closed_without_runtime_authority(self):
         calls = []

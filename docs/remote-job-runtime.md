@@ -44,6 +44,21 @@ development, and isolated labels for matrix cells:
 Resource samples are a separate bounded control-plane document retrieved with
 `job-metrics`; use `job-status` for the live health summary.
 
+### Source files in remote jobs
+
+Keep public helper code and synthetic fixtures inside the project tree. Remote
+`job-start` stages that exact working tree, records its commit and dirty-tree
+digest, then runs the command in the selected workspace. Pass relative file paths
+in argv and use `--cwd-relative` when the helper lives below the project root.
+The credential check still rejects credential-like command values. Keep
+credentials out of every transferred source file and fixture.
+
+```sh
+./sb job-start --remote NAME --project-dir /path/to/project \
+  --cwd-relative canary --request-id reopen-canary-1 --timeout 900 -- \
+  python3 reopen.py --fixture fixtures/synthetic.json
+```
+
 ## Ordinary hosted apply admission
 
 Process observation uses a real boot-session identity. An active record written

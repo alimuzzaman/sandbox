@@ -16,6 +16,12 @@ from sandbox.jobs.models import (normalize_output_page_bytes,
                                  normalize_output_wait_seconds, validate_ack_job_id)
 from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
 
+_CREDENTIAL_ARG_REJECTION = (
+    "remote job command contains credential-like material; put public helper code "
+    "in project files and pass relative paths. Credential-like command values "
+    "remain rejected."
+)
+
 
 class RemoteJobTransportError(RuntimeError):
     """Bounded, retryable failure from a remote job control operation."""
@@ -464,9 +470,7 @@ class RemoteJobTransport:
         try:
             require_safe_argv(submission.argv)
         except ValueError:
-            raise RemoteJobTransportError(
-                "remote job command contains credential-like material"
-            ) from None
+            raise RemoteJobTransportError(_CREDENTIAL_ARG_REJECTION) from None
         if submission.sync_relationship_id is not None and self.sync_submit is None:
             raise RemoteJobTransportError(
                 "synchronized job execution is unavailable without an enforced source authority"
@@ -535,9 +539,7 @@ class RemoteJobTransport:
             try:
                 require_safe_argv(item.argv)
             except ValueError:
-                raise RemoteJobTransportError(
-                    "remote job command contains credential-like material"
-                ) from None
+                raise RemoteJobTransportError(_CREDENTIAL_ARG_REJECTION) from None
         first = submissions[0]
         if (first.target_kind != "remote" or not first.remote_name or
                 any(item.target_kind != "remote" or item.remote_name != first.remote_name or

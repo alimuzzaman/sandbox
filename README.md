@@ -123,6 +123,12 @@ checkout by mistake. For an additional labeled instance, run
 Init treats that exact directory (or the exact current directory when omitted) as its
 maximum root, does not inherit ancestor project markers, and refuses the user home itself.
 
+`sb apply --instance NAME` uses that instance's registered project root and
+label together, so a project with several instances cannot redirect the apply
+to its default instance. If the saved target cannot be resolved, pass the exact
+`--project-dir DIR --label LABEL` pair; do not combine that pair with
+`--instance`.
+
 On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
 by default when Homebrew is available. It provides the `reader` command for
 opening local Sandbox documentation and read-only remote documentation folders.
@@ -850,7 +856,8 @@ directory, or resolve the registered instance with `./sb instances --project-dir
 and pass `--instance NAME`. Most instance-scoped commands accept
 `--instance <name>`; project-routed `ensure`/`test`/`init` use
 `--project-dir <dir>` (and `--label` where supported). Use
-`sb apply --instance NAME` to reconcile an existing named instance.
+`sb apply --instance NAME` to reconcile that exact named instance and its
+registered label.
 
 `snapshot` exports from the selected instance's already running database. It does
 not regenerate Compose files or start/recreate the web tier. If the existing

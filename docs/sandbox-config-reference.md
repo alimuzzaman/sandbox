@@ -1054,6 +1054,11 @@ database or uploads**. Use it after editing config — toggling a constant
 (`TEMPLATELY_DEV_API`, `WP_DEBUG`), adding a plugin/theme, or enabling
 multisite. It:
 
+The CLI shortcut `./sb apply --instance NAME` resolves both the instance's
+registered project root and its exact registry label. If that saved target is
+unavailable, select it explicitly with `--project-dir <DIR> --label <LABEL>`
+by itself; do not combine both selectors.
+
 For a ready Docker instance, `sb ensure` first attests that every required web
 plane has exactly the read-only self-bind source set generated from
 `defaults.plugins_home` plus that instance's `extra_mounts`. Drift returns

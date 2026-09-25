@@ -1508,22 +1508,26 @@ if __name__ == "__main__":
 class TestApplyProjectInference(unittest.TestCase):
     """`apply` reconciles a PROJECT. Without --project-dir it used to fall
     through to the whole-sandbox setup alias, so `apply --instance X` quietly
-    re-applied everything instead of reconciling X."""
+    re-applied everything instead of reconciling X. The registered label is
+    part of that exact target when a project owns multiple instances."""
 
     def _cli(self):
         from sandbox import cli
         return cli
 
-    def test_named_instance_resolves_its_registered_root(self):
+    def test_named_instance_resolves_its_registered_root_and_label(self):
         from unittest import mock
 
         cli = self._cli()
         core = mock.Mock()
-        core.registry_find_instance.return_value = {"root": "/projects/demo"}
+        core.registry_find_instance.return_value = {
+            "root": "/projects/demo", "label": "pr-123",
+        }
         with mock.patch.object(cli, "_core", return_value=core), \
              mock.patch.object(cli.Path, "is_dir", return_value=True):
-            root, source = cli._implied_project_dir("demo", None)
+            root, label, source = cli._implied_project_target("demo", None)
         self.assertEqual(root, "/projects/demo")
+        self.assertEqual(label, "pr-123")
         self.assertIn("demo", source)
 
     def test_unknown_instance_keeps_the_whole_sandbox_behaviour(self):
@@ -1533,7 +1537,8 @@ class TestApplyProjectInference(unittest.TestCase):
         core = mock.Mock()
         core.registry_find_instance.return_value = None
         with mock.patch.object(cli, "_core", return_value=core):
-            self.assertEqual(cli._implied_project_dir("missing", None), (None, None))
+            self.assertEqual(cli._implied_project_target("missing", None),
+                             (None, None, None))
 
     def test_registered_cwd_project_is_used_when_no_instance_is_named(self):
         from unittest import mock
@@ -1541,10 +1546,11 @@ class TestApplyProjectInference(unittest.TestCase):
         cli = self._cli()
         core = mock.Mock()
         core.find_project_root.return_value = "/projects/demo"
-        core.registry_get.return_value = {"instance": "demo"}
+        core.registry_get.return_value = {"instance": "demo", "label": "pr-123"}
         with mock.patch.object(cli, "_core", return_value=core):
-            root, source = cli._implied_project_dir(None, None)
+            root, label, source = cli._implied_project_target(None, None)
         self.assertEqual(root, "/projects/demo")
+        self.assertEqual(label, "pr-123")
         self.assertEqual(source, "current working directory")
 
     def test_unregistered_cwd_falls_back_to_the_setup_alias(self):
@@ -1555,7 +1561,8 @@ class TestApplyProjectInference(unittest.TestCase):
         core.find_project_root.return_value = "/somewhere"
         core.registry_get.return_value = None
         with mock.patch.object(cli, "_core", return_value=core):
-            self.assertEqual(cli._implied_project_dir(None, None), (None, None))
+            self.assertEqual(cli._implied_project_target(None, None),
+                             (None, None, None))
 
     def test_a_cwd_outside_any_project_falls_back(self):
         from unittest import mock
@@ -1564,7 +1571,73 @@ class TestApplyProjectInference(unittest.TestCase):
         core = mock.Mock()
         core.find_project_root.side_effect = ValueError("not a project")
         with mock.patch.object(cli, "_core", return_value=core):
-            self.assertEqual(cli._implied_project_dir(None, None), (None, None))
+            self.assertEqual(cli._implied_project_target(None, None),
+                             (None, None, None))
+
+    def test_apply_instance_dispatches_with_its_registered_label(self):
+        import sandbox.commands.migrate as migrate
+
+        cli = self._cli()
+        observed = []
+        core = SimpleNamespace(
+            registry_find_instance=lambda name: {
+                "instance": name, "root": "/projects/demo", "label": "pr-123",
+            },
+            registry_all=lambda: {},
+        )
+        with mock.patch.object(sys, "argv", ["sb", "apply", "--instance", "demo"]), \
+                mock.patch.dict(os.environ, {"SANDBOX_INSTANCE": "", "SANDBOX_LABEL": "default"}), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "apply": lambda _cfg, args: observed.append(args),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(cli.Path, "is_dir", return_value=True), \
+                mock.patch.object(cli, "_cwd_instance",
+                                  side_effect=AssertionError("cwd target consulted")), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                mock.patch.object(cli, "write_compose_files"), \
+                mock.patch.object(cli, "write_env_for_compose"), \
+                redirect_stdout(StringIO()):
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].project_dir, "/projects/demo")
+        self.assertEqual(observed[0].label, "pr-123")
+        self.assertEqual(observed[0].resolved_instance, "demo")
+
+    def test_apply_instance_rejects_a_conflicting_explicit_label(self):
+        import sandbox.commands.migrate as migrate
+
+        cli = self._cli()
+        core = SimpleNamespace(
+            registry_find_instance=lambda _name: {
+                "root": "/projects/demo", "label": "pr-123",
+            },
+            registry_all=lambda: {},
+        )
+        errors = StringIO()
+        with mock.patch.object(sys, "argv", [
+                "sb", "apply", "--instance", "demo", "--label", "default"]), \
+                mock.patch.dict(os.environ, {"SANDBOX_INSTANCE": "", "SANDBOX_LABEL": ""}), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(cli.Path, "is_dir", return_value=True), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("instance 'demo' is registered as label 'pr-123'", errors.getvalue())
+
+    def test_apply_rejects_combined_project_and_instance_selectors(self):
+        result = run_sb("apply", "--project-dir", "/tmp/project", "--instance", "demo")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("do not combine both selectors", result.stderr)
 
 
 class TestSkillProjectDirContract(unittest.TestCase):

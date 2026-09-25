@@ -62,28 +62,32 @@ class _KVAction(argparse.Action):
 
 
 
-def _implied_project_dir(instance: str | None, label: str | None):
-    """The project root a bare `apply` clearly meant, and where it came from.
+def _implied_project_target(instance: str | None, label: str | None):
+    """The exact project and registry label a bare `apply` clearly meant.
 
     A named instance is the strongest signal — the registry knows which project
-    owns it. Otherwise, standing inside a registered project means that project.
-    Returns (root, source) or (None, None) when neither applies, which keeps the
-    historical whole-sandbox behaviour for `./sb apply` run outside any project.
+    owns it and which label identifies it. Otherwise, standing inside a
+    registered project means that project. Returns (root, label, source) or
+    (None, None, None) when neither applies, which keeps the historical
+    whole-sandbox behaviour for `./sb apply` run outside any project.
     """
     sc = _core()
     if instance:
         entry = sc.registry_find_instance(instance) or {}
         root = entry.get("root")
-        if root and Path(root).is_dir():
-            return str(root), f"registered root of instance '{instance}'"
-        return None, None
+        target_label = entry.get("label")
+        if root and target_label and Path(root).is_dir():
+            return str(root), target_label, f"registered target of instance '{instance}'"
+        return None, None, None
     try:
         root = sc.find_project_root(Path.cwd())
     except Exception:
-        return None, None
-    if root and sc.registry_get(str(root), label=label):
-        return str(root), "current working directory"
-    return None, None
+        return None, None, None
+    entry = sc.registry_get(str(root), label=label) if root else None
+    target_label = entry.get("label") if entry else None
+    if root and target_label:
+        return str(root), target_label, "current working directory"
+    return None, None, None
 
 
 def _global_label_before_subcommand(argv: list[str]) -> str | None:
@@ -1388,6 +1392,13 @@ Per-project (each plugin carries its own sandbox.config.json):
             2,
         )
 
+    if args.cmd == "apply" and getattr(args, "project_dir", None) and _explicit_global_option(raw_argv, "--instance"):
+        die(
+            "apply accepts either --instance NAME or --project-dir DIR with "
+            "--label LABEL; do not combine both selectors.",
+            2,
+        )
+
     # `init` is project-routed and derives its target from --project-dir and
     # --label. A shared global --instance selector was otherwise accepted but
     # ignored by the initializer, which could scaffold/boot the controller cwd
@@ -1599,11 +1610,19 @@ Per-project (each plugin carries its own sandbox.config.json):
     # silently re-applied the whole sandbox instead of reconciling X. Infer the
     # project the caller clearly meant, and say which one was chosen.
     if args.cmd == "apply" and not getattr(args, "project_dir", None):
-        implied, source = _implied_project_dir(explicit, cwd_label)
+        implied, implied_label, source = _implied_project_target(explicit, cwd_label)
         if implied:
+            requested_label = _explicit_global_label(raw_argv)
+            if explicit and requested_label and requested_label != implied_label:
+                die(
+                    f"instance '{explicit}' is registered as label '{implied_label}', "
+                    f"not '{requested_label}'; omit --label or use the matching label.",
+                    2,
+                )
             args.project_dir = implied
+            args.label = implied_label
             info(f"apply: reconciling the project at {implied} ({source}). "
-                 "Run `./sb setup` for the whole sandbox instead.")
+                 f"label '{implied_label}'. Run `./sb setup` for the whole sandbox instead.")
     if args.cmd == "apply" and covered_creation and not getattr(args, "project_dir", None):
         die("creation context requires a resolved project; use --project-dir", 2)
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the

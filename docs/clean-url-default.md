@@ -102,7 +102,12 @@ status from declaring a route unavailable while Caddy is still retrying. Whole-f
 scans keep their shorter per-route budget.
 Activation request header names are matched case-insensitively. Caddy or the host HTTP
 server may canonicalize `X-Sandbox-Route-ID` to `X-Sandbox-Route-Id`; both spellings
-refer to the same HTTP field and must authorize the same registered route.
+refer to the same HTTP field and must authorize the same registered route. The long-lived
+activation authority caches its immutable route catalog against the config and registry
+source-file metadata, so unchanged asset requests do not reload YAML/JSON or republish
+route policies. A source change triggers a full validated rebuild. Read, validation, or
+concurrent-change failures revoke cached routes and fail closed until a stable refresh
+succeeds.
 The wake adapter resolves WordPress instance state through `sandbox.core`; it does not
 depend on the retired `sandbox_core` compatibility namespace for runtime ownership.
 It reloads current instance config for each wake. Backend readiness uses the owned

@@ -27,7 +27,11 @@ def cmd_activation(cfg, args) -> None:
     # owner used by the other command modules without changing behavior.
     from sandbox.core import _core
     sc = _core()
-    from sandbox.activation.catalog import ActivationCatalogError, build_catalog
+    from sandbox.activation.catalog import (
+        ActivationCatalogError,
+        CachedActivationCatalogProvider,
+        build_catalog,
+    )
     from sandbox.activation.http import ActivationHTTPApplication
     from sandbox.activation.server import serve
     from sandbox.activation.scheduler import ActivationScheduler, TcpActivityObserver
@@ -35,10 +39,17 @@ def cmd_activation(cfg, args) -> None:
     from sandbox.application.context import runtime_service, wordpress_runtime_service
     from sandbox.core import resolve_instances
     from sandbox.core._config import load_config
+    from sandbox.core._paths import CONFIG, CONFIG_LOCAL, RUNTIME_DIR
     from sandbox.runtimes.base import OperationRequest, OperationResult
 
+    def build_current_catalog():
+        return build_catalog(sc.registry_all(), resolve_instances(load_config()))
+
+    catalog_provider = CachedActivationCatalogProvider(
+        (CONFIG, CONFIG_LOCAL, RUNTIME_DIR / "registry.json"), build_current_catalog,
+    )
     try:
-        catalog = build_catalog(sc.registry_all(), resolve_instances(cfg))
+        catalog = catalog_provider()
     except ActivationCatalogError as exc:
         # Catalog construction is deliberately fail-closed: an invalid opted-in
         # route must never be silently skipped or reach the scheduler.  Keep
@@ -57,10 +68,6 @@ def cmd_activation(cfg, args) -> None:
             payload["results"] = []
         print(json.dumps(payload, sort_keys=True))
         raise SystemExit(2)
-    def current_catalog():
-        """Read the registry/config on demand for the long-lived authority."""
-        return build_catalog(sc.registry_all(), resolve_instances(load_config()))
-
     generic = runtime_service(cfg)
     wordpress = wordpress_runtime_service(cfg)
 
@@ -77,7 +84,7 @@ def cmd_activation(cfg, args) -> None:
 
     service = ActivationService()
     application = ActivationHTTPApplication(catalog, service, resume,
-                                             catalog_provider=current_catalog)
+                                             catalog_provider=catalog_provider)
     tcp = TcpActivityObserver()
     try:
         from sandbox.application.context import durable_job_dependencies
@@ -135,7 +142,7 @@ def cmd_activation(cfg, args) -> None:
         return
     import threading
     threading.Thread(target=scheduler.run, kwargs={"interval_seconds": args.interval,
-                                                    "catalog_provider": current_catalog},
+                                                    "catalog_provider": catalog_provider},
                      daemon=True, name="sandbox-activation-scheduler").start()
     serve(application, port=args.port)
 

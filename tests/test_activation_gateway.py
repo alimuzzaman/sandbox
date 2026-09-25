@@ -258,6 +258,73 @@ class ActivationHTTPTests(unittest.TestCase):
         self.assertEqual(app.handle("GET", "/v1/activate", self.headers).status, 404)
         self.assertEqual(self.calls, [])
 
+    def test_unchanged_catalog_is_not_republished_for_each_request(self):
+        from sandbox.activation.http import ActivationHTTPApplication
+
+        catalog = self.app.catalog
+        app = ActivationHTTPApplication(
+            catalog, self.app.service, lambda *_: True,
+            catalog_provider=lambda: catalog,
+        )
+        published = []
+        app._register_catalog = lambda value: published.append(value)
+
+        self.assertTrue(app._refresh_catalog())
+        self.assertTrue(app._refresh_catalog())
+        self.assertEqual(published, [])
+
+
+class CachedActivationCatalogProviderTests(unittest.TestCase):
+    def test_caches_unchanged_sources_and_rebuilds_after_metadata_change(self):
+        from sandbox.activation.catalog import ActivationCatalog, CachedActivationCatalogProvider
+
+        with TemporaryDirectory() as temp:
+            source = Path(temp) / "registry.json"
+            source.write_text("first", encoding="utf-8")
+            built_from = []
+
+            def build():
+                built_from.append(source.read_text(encoding="utf-8"))
+                return ActivationCatalog(())
+
+            provider = CachedActivationCatalogProvider((source,), build)
+            first = provider()
+            self.assertIs(first, provider())
+            self.assertEqual(built_from, ["first"])
+
+            source.write_text("second", encoding="utf-8")
+            refreshed = provider()
+            self.assertIsNot(first, refreshed)
+            self.assertIs(refreshed, provider())
+            self.assertEqual(built_from, ["first", "second"])
+
+    def test_failed_rebuild_discards_cached_catalog(self):
+        from sandbox.activation.catalog import ActivationCatalog, CachedActivationCatalogProvider
+
+        with TemporaryDirectory() as temp:
+            source = Path(temp) / "config.yml"
+            source.write_text("first", encoding="utf-8")
+            fail = [False]
+            builds = []
+
+            def build():
+                builds.append(1)
+                if fail[0]:
+                    raise RuntimeError("invalid config")
+                return ActivationCatalog(())
+
+            provider = CachedActivationCatalogProvider((source,), build)
+            first = provider()
+            source.write_text("invalid", encoding="utf-8")
+            fail[0] = True
+            with self.assertRaisesRegex(RuntimeError, "invalid config"):
+                provider()
+
+            fail[0] = False
+            recovered = provider()
+            self.assertIsNot(first, recovered)
+            self.assertEqual(len(builds), 3)
+
 
 class ActivationCaddyTests(unittest.TestCase):
     def test_forward_auth_is_only_rendered_for_explicit_route(self):

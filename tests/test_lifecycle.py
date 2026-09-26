@@ -17,6 +17,15 @@ import sandbox.core._instances as instances  # noqa: E402
 from sandbox.runtimes.base import OperationResult  # noqa: E402
 
 
+def _run_install_capture_stdout(args):
+    output = io.StringIO()
+    with patch("secrets.token_hex", side_effect=[
+            "install-login-sentinel", "snapshot-token-sentinel",
+    ]), contextlib.redirect_stdout(output):
+        lifecycle.cmd_install({}, args)
+    return output.getvalue()
+
+
 class TestWordPressCoreDownload(unittest.TestCase):
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")
@@ -117,7 +126,11 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 patch.object(lifecycle, "_write_ondemand_muplugin"), \
                 patch.object(lifecycle, "_write_licensing_muplugin"), \
                 patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"):
-            lifecycle.cmd_install({}, args)
+            output = _run_install_capture_stdout(args)
+
+        self.assertIn("Admin: http://localhost:8188/wp-admin", output)
+        self.assertNotIn("install-login-sentinel", output)
+        self.assertNotIn("sandbox_autologin=", output)
 
         compose.assert_called_once_with(
             "exec", "-T", "wp", "chown", "-R", "1000:1000",

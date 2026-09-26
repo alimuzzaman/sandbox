@@ -2592,23 +2592,35 @@ class TestHostingManifest(unittest.TestCase):
 
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._remote_checked",
-           side_effect=["web\nworker\n", "web | ready\nworker | polling\n"])
-    def test_reads_bounded_logs_for_all_declared_host_services(self, remote_checked, _resolve_home):
+           side_effect=[
+               "web\nworker\nmigrate\n",
+               "web | ready\nworker | polling\n"
+               "migrate | failed: token at https://example.test/"
+               "?sandbox_autologin=log-secret-sentinel\n",
+           ])
+    def test_reads_bounded_logs_for_runtime_background_and_initializer_services(
+            self, remote_checked, _resolve_home):
         manifest = _manifest().replace(
             "      service: web\n",
-            "      service: web\n      background_services: [worker]\n",
+            "      service: web\n"
+            "      background_services: [worker]\n"
+            "      init_services: [migrate]\n",
         )
         with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
 
         output = hosting_cmd._read_host_logs(validated, {}, lines=75)
 
-        self.assertEqual(output, "web | ready\nworker | polling\n")
+        self.assertIn("web | ready", output)
+        self.assertIn("worker | polling", output)
+        self.assertIn("migrate | failed", output)
+        self.assertIn("REDACTED", output)
+        self.assertNotIn("log-secret-sentinel", output)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertIn("--profile '*' config --services", commands[0])
         self.assertIn("docker compose", commands[1])
         self.assertIn("-p sandbox-host-example-site-production", commands[1])
-        self.assertIn("logs --no-color --tail 75 web worker", commands[1])
+        self.assertIn("--profile '*' logs --no-color --tail 75 web worker migrate", commands[1])
 
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._remote_checked",
@@ -2616,7 +2628,9 @@ class TestHostingManifest(unittest.TestCase):
     def test_reads_present_logs_and_reports_missing_declared_service(self, remote_checked, _resolve_home):
         manifest = _manifest().replace(
             "      service: web\n",
-            "      service: web\n      background_services: [worker]\n",
+            "      service: web\n"
+            "      background_services: [worker]\n"
+            "      init_services: [migrate]\n",
         )
         with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
@@ -2624,6 +2638,7 @@ class TestHostingManifest(unittest.TestCase):
         output = hosting_cmd._read_host_logs(validated, {}, lines=50)
 
         self.assertIn("[missing service: worker]", output)
+        self.assertIn("[missing service: migrate]", output)
         self.assertIn("web | ready", output)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertIn("config --services", commands[0])

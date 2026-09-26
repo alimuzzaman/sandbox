@@ -58,6 +58,16 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sync", result.stdout)
 
+    def test_remote_help_requires_confirm_for_every_direct_ssh_command(self):
+        result = run_sb("remote", "ssh", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        help_text = " ".join(result.stdout.split())
+        self.assertIn(
+            "required for every direct `remote ssh` command (including read-only commands)",
+            help_text,
+        )
+        self.assertIn("that command also requires `--confirm`", help_text)
+
     def test_remote_instance_control_flags_reach_registered_handlers(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

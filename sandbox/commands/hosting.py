@@ -1161,11 +1161,12 @@ def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
     services = [
         validated["compose"]["service"],
         *validated["compose"].get("background_services", []),
+        *validated["compose"].get("init_services", []),
     ]
     # Compose exits with "no such service" when a manifest still names a
-    # background service that is absent from the deployed compose files. That
-    # should not hide logs from the services that are present, nor turn a
-    # topology-drift observation into a generic command failure. Read the
+    # runtime, background, or initializer service absent from deployed compose
+    # files. That should not hide present logs or turn topology drift into a
+    # generic command failure. Read the
     # declared service names first, then request logs only for that intersection
     # and emit a bounded diagnostic for every missing declaration.
     declared = _remote_checked(
@@ -1184,12 +1185,12 @@ def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
         service_args = " ".join(shlex.quote(service) for service in present)
         chunks.append(_remote_checked(
             entry,
-            f"{prefix} logs --no-color --tail {lines} {service_args}",
+            f"{prefix} --profile '*' logs --no-color --tail {lines} {service_args}",
             timeout=60,
         ))
     if not chunks:
         chunks.append("[no declared services found in deployed compose configuration]\n")
-    return "".join(chunks)
+    return remote.redact_text("".join(chunks))
 
 
 def _host_observation_command(prefix: str, services: list[str],

@@ -613,7 +613,8 @@ emitting incremental changes.
 
 For the exceptional case where an operator must run a command directly on a host,
 use the explicit CLI escape hatch. It is never used internally and is not exposed as
-an MCP tool:
+an MCP tool. Every direct SSH command requires `--confirm`, including read-only
+diagnostics, and a short `--reason`:
 
 ```sh
 ./sb remote ssh <remote> --confirm --reason "diagnose service" --command 'systemctl --user status sandbox-remote-mcp'

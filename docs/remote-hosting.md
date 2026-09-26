@@ -482,14 +482,17 @@ out, the CLI reports the timeout and a redacted tail of any partial output inste
 discarding the captured stream; the remote command is not replayed automatically
 because its final state is unknown. During the 60-second loopback health window,
 Sandbox also emits a progress line every ten seconds with the last safe probe result.
-Use the host logs command for the declared service logs after a deployment:
+Use the host logs command for the declared runtime, background, and initializer
+services after a deployment:
 
 ```bash
 ./sb host logs --remote myvps --project-dir /path/to/site --environment production
 ```
 
-These diagnostics are bounded and are not a substitute for live-host acceptance or
-an unbounded log-follow mode.
+The command reads at most the requested tail for each service and redacts
+credential-shaped values. Failed one-shot initializer output appears when Compose
+retains that initializer's container. These diagnostics are not a substitute for
+live-host acceptance or an unbounded log-follow mode.
 
 #### Extra hostnames (`--alias`)
 

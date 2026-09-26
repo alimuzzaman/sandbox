@@ -831,7 +831,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--plan", action="store_true",
         help="for protected remote service actions: show the no-write plan")
     remote_p.add_argument("--confirm", action="store_true",
-        help="allow a protected remote service or Docker-pool mutation")
+        help="required for every direct `remote ssh` command (including read-only "
+             "commands); also allow protected remote service or Docker-pool mutations")
     remote_p.add_argument("--recover-interrupted", action="store_true",
         help="for `remote docker-pool`: plan/recover only containers proven to have stopped during the latest interrupted transaction")
     remote_p.add_argument("--expected-running", type=int, default=None,
@@ -852,7 +853,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--processes", action="store_true",
         help="with service diagnostics, include a bounded read-only process/app snapshot")
     remote_p.add_argument("--command", default=None,
-        help="required with `remote ssh`: exact operator command to run directly over SSH")
+        help="required with `remote ssh`: exact operator command to run directly "
+             "over SSH; that command also requires `--confirm`")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
     remote_p.add_argument("--upload-timeout", dest="upload_timeout", type=int,

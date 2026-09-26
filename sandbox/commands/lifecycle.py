@@ -562,8 +562,30 @@ def cmd_status(cfg, args) -> None:
         if getattr(args, "json", False):
             print(json.dumps(_public_status_json(remote_result), sort_keys=True))
         else:
-            print(f"{remote_result.get('label', getattr(args, 'workspace', 'default'))}: "
-                  f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
+            error = remote_result.get("error")
+            if (isinstance(error, Mapping)
+                    and error.get("code") == "remote_instance_unavailable"):
+                target = remote_result.get("target")
+                if not isinstance(target, Mapping):
+                    target = {}
+                workspace = (target.get("workspace")
+                             or getattr(args, "workspace", None) or "default")
+                remote_name = target.get("remote") or getattr(args, "remote", None)
+                remote_label = f" on {remote_name!r}" if remote_name else ""
+                print(
+                    f"Remote workspace {workspace!r}{remote_label}: unavailable "
+                    "(no registered Sandbox instance)."
+                )
+                if remote_name:
+                    print(
+                        "  Inspect registered instances with: ./sb instances "
+                        f"--remote {shlex.quote(str(remote_name))} --json"
+                    )
+            else:
+                label = (remote_result.get("label")
+                         or getattr(args, "workspace", None) or "default")
+                print(f"{label}: "
+                      f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
             if isinstance(remote_result.get("php_extensions"), Mapping):
                 public_extensions = _public_status_json(remote_result["php_extensions"])
                 if isinstance(public_extensions, Mapping):

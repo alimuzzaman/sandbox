@@ -5,6 +5,11 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+Remote project `status` is read-only. If no Sandbox instance is registered for
+the selected workspace, it reports that state and points to
+`sb instances --remote NAME --json` for the remote inventory. It does not
+create or register an instance.
+
 ## Host storage monitoring and cleanup
 
 Use the global `resources` command before raw host, Docker, or filesystem

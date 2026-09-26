@@ -853,6 +853,11 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb clean                # stop + wipe DB volume (start fresh)
 ```
 
+Remote project status is read-only. If the selected remote workspace has no
+registered Sandbox instance, the command reports that state and points to
+`./sb instances --remote NAME --json` to inspect the remote inventory; it does
+not create or register an instance.
+
 Run `./sb` with no args for the full list. `doctor` runs on the local controller and
 intentionally has no `--project-dir`, `--local`, or `--remote`; run it from the project
 directory, or resolve the registered instance with `./sb instances --project-dir DIR --json`

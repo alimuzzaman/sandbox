@@ -941,6 +941,41 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertTrue(payload["feasibility"]["read_only"])
         self.assertTrue(payload["feasibility"]["mutation_required"])
 
+    def test_status_text_explains_remote_missing_instance(self):
+        import sandbox.commands.lifecycle as commands
+
+        remote_result = {
+            "ok": False,
+            "exit_code": 1,
+            "status": "unavailable",
+            "error": {
+                "code": "remote_instance_unavailable",
+                "message": "the selected remote workspace has no registered instance",
+            },
+            "target": {"remote": "fixture-remote", "workspace": "preview"},
+        }
+        args = types.SimpleNamespace(
+            json=False, resolved_instance="fixture", remote="fixture-remote",
+            workspace="preview",
+        )
+        output = io.StringIO()
+        with mock.patch.object(commands, "_remote_lifecycle", return_value=remote_result), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            commands.cmd_status({}, args)
+
+        self.assertEqual(raised.exception.code, 1)
+        rendered = output.getvalue()
+        self.assertIn(
+            "Remote workspace 'preview' on 'fixture-remote': unavailable "
+            "(no registered Sandbox instance).",
+            rendered,
+        )
+        self.assertIn(
+            "./sb instances --remote fixture-remote --json",
+            rendered,
+        )
+        self.assertNotIn("None: unavailable", rendered)
+
     def test_status_json_fails_closed_on_inconsistent_remote_zero_exit(self):
         import sandbox.commands.lifecycle as commands
 

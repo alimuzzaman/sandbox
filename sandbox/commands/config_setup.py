@@ -26,6 +26,7 @@ from sandbox.core import (
 )
 
 from sandbox.registry import register
+from sandbox.commands._output import suppress_stdout
 from sandbox.application.context import wordpress_runtime_service
 from sandbox.runtimes.base import OperationError, OperationRequest
 
@@ -414,8 +415,9 @@ def cmd_apply_config(cfg, args) -> None:
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
     label = getattr(args, "label", None)
+    json_output = bool(getattr(args, "json", False))
     try:
-        result = wordpress_runtime_service(cfg).invoke(OperationRequest(
+        request = OperationRequest(
             project_root=pd,
             operation="apply",
             label=label or "default",
@@ -423,13 +425,18 @@ def cmd_apply_config(cfg, args) -> None:
                        "creation_context": (json.loads(args.creation_context_json)
                            if getattr(args, "creation_context_json", None) else None),
                        "expected_incarnation": getattr(args, "expected_incarnation", None)},
-        ))
+        )
+        if json_output:
+            with suppress_stdout():
+                result = wordpress_runtime_service(cfg).invoke(request)
+        else:
+            result = wordpress_runtime_service(cfg).invoke(request)
     except sc.ConfigError as e:
         die(str(e))
     if isinstance(result, OperationError):
         die(result.message)
     entry = dict(result.data)
-    if getattr(args, "json", False):
+    if json_output:
         from sandbox.services.redaction import redact_structure
 
         public_entry = redact_structure(entry)

@@ -179,6 +179,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
 
         class SuccessfulService:
             def invoke(self, request):
+                print("apply progress")
                 return OperationResult(
                     True, "apply", request.project_root, "wordpress",
                     {

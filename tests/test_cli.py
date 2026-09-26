@@ -1589,6 +1589,7 @@ class TestApplyProjectInference(unittest.TestCase):
 
         cli = self._cli()
         observed = []
+        output = StringIO()
         core = SimpleNamespace(
             registry_find_instance=lambda name: {
                 "instance": name, "root": "/projects/demo", "label": "pr-123",
@@ -1610,13 +1611,58 @@ class TestApplyProjectInference(unittest.TestCase):
                 mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
                 mock.patch.object(cli, "write_compose_files"), \
                 mock.patch.object(cli, "write_env_for_compose"), \
-                redirect_stdout(StringIO()):
+                redirect_stdout(output):
             cli.main()
 
         self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0].project_dir, "/projects/demo")
         self.assertEqual(observed[0].label, "pr-123")
         self.assertEqual(observed[0].resolved_instance, "demo")
+        self.assertIn("apply: reconciling the project", output.getvalue())
+
+    def test_apply_json_target_inference_keeps_one_json_document_on_stdout(self):
+        import sandbox.commands.migrate as migrate
+
+        cli = self._cli()
+        observed = []
+        output = StringIO()
+        core = SimpleNamespace(
+            registry_find_instance=lambda name: {
+                "instance": name, "root": "/projects/demo", "label": "pr-123",
+            },
+            registry_all=lambda: {},
+        )
+
+        def dispatch(_cfg, args):
+            observed.append(args)
+            print(json.dumps({
+                "ok": True,
+                "instance": args.resolved_instance,
+                "label": args.label,
+            }))
+
+        with mock.patch.object(sys, "argv", [
+                "sb", "apply", "--instance", "demo", "--json"]), \
+                mock.patch.dict(os.environ, {"SANDBOX_INSTANCE": "", "SANDBOX_LABEL": ""}), \
+                mock.patch.object(cli, "COMMANDS", {"apply": dispatch}), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(cli.Path, "is_dir", return_value=True), \
+                mock.patch.object(cli, "_cwd_instance", side_effect=AssertionError(
+                    "cwd target consulted")), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                mock.patch.object(cli, "write_compose_files"), \
+                mock.patch.object(cli, "write_env_for_compose"), \
+                redirect_stdout(output):
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": True, "instance": "demo", "label": "pr-123",
+        })
 
     def test_apply_instance_rejects_a_conflicting_explicit_label(self):
         import sandbox.commands.migrate as migrate

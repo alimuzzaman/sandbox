@@ -1623,8 +1623,9 @@ Per-project (each plugin carries its own sandbox.config.json):
                 )
             args.project_dir = implied
             args.label = implied_label
-            info(f"apply: reconciling the project at {implied} ({source}). "
-                 f"label '{implied_label}'. Run `./sb setup` for the whole sandbox instead.")
+            if not getattr(args, "json", False):
+                info(f"apply: reconciling the project at {implied} ({source}). "
+                     f"label '{implied_label}'. Run `./sb setup` for the whole sandbox instead.")
     if args.cmd == "apply" and covered_creation and not getattr(args, "project_dir", None):
         die("creation context requires a resolved project; use --project-dir", 2)
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the

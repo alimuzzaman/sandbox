@@ -41,6 +41,7 @@ from sandbox.registry import register
 from sandbox.application.context import (
     preflight_instance_capability, runtime_service, wordpress_runtime_dependencies,
 )
+from sandbox.commands._output import suppress_stdout
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
@@ -352,12 +353,25 @@ def _emit_generic_up_failure(
     raise SystemExit(max(1, min(code_value, 255)) if code_value > 0 else 1)
 
 
+@contextmanager
+def _suppress_progress_stdout(json_output: bool):
+    """Keep helper progress out of the single-document JSON stdout contract."""
+    if not json_output:
+        yield
+        return
+    with suppress_stdout():
+        yield
+
+
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
     json_output = bool(getattr(args, "json", False))
     owner = _core().registry_find_instance(inst)
     if owner and owner.get("kind") == "compose":
-        result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "start", label=owner.get("label", "default")))
+        with _suppress_progress_stdout(json_output):
+            result = runtime_service(cfg).invoke(OperationRequest(
+                owner["root"], "start", label=owner.get("label", "default"),
+            ))
         if isinstance(result, OperationError):
             if json_output:
                 _emit_generic_up_failure(inst, result.code, result.message)
@@ -392,8 +406,9 @@ def cmd_up(cfg: dict, args) -> None:
         # Host-served by Herd — nothing to boot; Herd serves linked sites
         # whenever it's running.
         if wp_dir(inst).exists():
-            _write_host_runtime_muplugins(inst)
-            _remove_obsolete_builder_authoring_assets(inst)
+            with _suppress_progress_stdout(json_output):
+                _write_host_runtime_muplugins(inst)
+                _remove_obsolete_builder_authoring_assets(inst)
         url = site_url(inst_cfg)
         if json_output:
             print(json.dumps({
@@ -422,7 +437,8 @@ def cmd_up(cfg: dict, args) -> None:
         # allowed to run.  The probe is standalone PHP and does not touch the
         # database or uploads; a drift/missing/version error is therefore a
         # safe, actionable startup failure rather than a half-provisioned site.
-        extension_status = php_extension_status(inst_cfg, instance=inst)
+        with _suppress_progress_stdout(json_output):
+            extension_status = php_extension_status(inst_cfg, instance=inst)
         if extension_status and extension_status.get("drift", {}).get("state") != "ready":
             issues = extension_status.get("drift", {}).get("issues") or []
             detail = issues[0].get("message", "PHP extension planes are not verified") \
@@ -432,43 +448,44 @@ def cmd_up(cfg: dict, args) -> None:
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
     # shared runtime bind-mount, which exists for any provisioned instance.
     if wp_dir(inst).exists():
-        _prepare_mu_plugin_directory(inst)
-        _write_mail_muplugin(inst)
-        _write_loopback_muplugin(inst)
-        _write_dl_cache_muplugin(inst)
-        _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
-        _write_host_runtime_muplugins(inst)  # specs 003/007 — host-file runtime tools
-        _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
-        _remove_obsolete_builder_authoring_assets(inst)
-        # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
-        # explicit on/off survives recreate / db-reset (which wipes the WP option,
-        # default-on). Only touches wpcli when the mirror is explicitly set.
-        try:
-            from sandbox.core._provision import read_local_abilities_enabled
-            _ab = read_local_abilities_enabled(inst)
-            if _ab is not None:
-                wpcli(["option", "update", "sandbox_abilities_enabled", "1" if _ab else "0"],
-                      instance=inst, check=False)
-        except Exception:
-            pass
-        try:  # spec 004 — reap old background-job artifacts (>24h)
-            from sandbox.commands.jobs import prune_jobs
-            prune_jobs(inst)
-        except Exception:
-            pass
-        # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
-        # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
-        # Mint the token if it's missing so `up` self-heals an instance whose
-        # token was never created (or was dropped by an older apply, before the
-        # _build_instance_block preservation fix). Not on herd (no bridge yet).
-        if not _is_herd_instance(inst):
-            _tok = _bridge_token_for(inst)
-            if not _tok:
-                import secrets as _secrets
-                _tok = _secrets.token_hex(16)
-                save_local_bridge_token(_tok, instance=inst)
-            _write_snapshot_muplugin(inst, _tok)
-            _ensure_bridge_server()
+        with _suppress_progress_stdout(json_output):
+            _prepare_mu_plugin_directory(inst)
+            _write_mail_muplugin(inst)
+            _write_loopback_muplugin(inst)
+            _write_dl_cache_muplugin(inst)
+            _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
+            _write_host_runtime_muplugins(inst)  # specs 003/007 — host-file runtime tools
+            _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
+            _remove_obsolete_builder_authoring_assets(inst)
+            # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
+            # explicit on/off survives recreate / db-reset (which wipes the WP option,
+            # default-on). Only touches wpcli when the mirror is explicitly set.
+            try:
+                from sandbox.core._provision import read_local_abilities_enabled
+                _ab = read_local_abilities_enabled(inst)
+                if _ab is not None:
+                    wpcli(["option", "update", "sandbox_abilities_enabled", "1" if _ab else "0"],
+                          instance=inst, check=False)
+            except Exception:
+                pass
+            try:  # spec 004 — reap old background-job artifacts (>24h)
+                from sandbox.commands.jobs import prune_jobs
+                prune_jobs(inst)
+            except Exception:
+                pass
+            # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
+            # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
+            # Mint the token if it's missing so `up` self-heals an instance whose
+            # token was never created (or was dropped by an older apply, before the
+            # _build_instance_block preservation fix). Not on herd (no bridge yet).
+            if not _is_herd_instance(inst):
+                _tok = _bridge_token_for(inst)
+                if not _tok:
+                    import secrets as _secrets
+                    _tok = _secrets.token_hex(16)
+                    save_local_bridge_token(_tok, instance=inst)
+                _write_snapshot_muplugin(inst, _tok)
+                _ensure_bridge_server()
     url = site_url(inst_cfg)
     mailpit_url = f"http://localhost:{inst_cfg['mailpit_port']}"
     if json_output:

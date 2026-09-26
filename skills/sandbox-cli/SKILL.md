@@ -701,6 +701,13 @@ Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.
 
+`sb wp -- help <command>` works without a pager installed; Sandbox runs the
+WP-CLI process with `PAGER=cat`. Default Apache and Nginx/FPM Compose instances
+also set `DISABLE_WP_CRON` to true. Use the project's `wpCron` setting instead
+of adding that constant again with `wp config set`; see the
+[WP passthrough guide](../../docs/wp-passthrough.md) and [config
+reference](../../docs/sandbox-config-reference.md) for server-specific rules.
+
 After a successful deploy, `sb wp --remote NAME --project-dir DIR` targets the
 existing deployed WordPress instance through authenticated control HTTP. It
 requires exact installed-runtime revision and service-ownership evidence,

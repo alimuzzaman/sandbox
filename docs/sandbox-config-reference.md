@@ -626,6 +626,11 @@ runtime WordPress tree (`runtime/wp-<instance>`), including its `wp-content`
 state, uploads, and cache directories; the shared download caches remain
 writable as well.
 
+During ensure and apply, Sandbox checks local plugin sources for a `vendor/`
+symlink whose target is missing or outside the generated Compose mounts. It
+prints a warning and leaves the link unchanged. Keep Composer dependencies
+inside a mounted plugin source root so the container can load them.
+
 The local runtime also sets WordPress `FS_METHOD` to `direct` and repairs the
 parent `wp-content` directory during bootstrap. This prevents wp-admin and
 Templately dependency installs from falling back to unavailable FTP/SSH
@@ -841,8 +846,13 @@ Two special cases:
   project that needs scheduled events. The older
   `config.DISABLE_WP_CRON: false` spelling remains a compatibility alias when
   `wpCron` is omitted; if both spellings are present, they must describe the
-  same effective setting. Managed-native uses the same policy for its isolated
-  five-minute scheduler and never enables both triggers.
+  same effective setting. On the default Apache and Nginx/FPM Compose servers,
+  do not add the same constant with `wp config set`: Sandbox already supplies
+  it through `WORDPRESS_CONFIG_EXTRA`, and a second literal can produce
+  duplicate-constant warnings. Change `wpCron` in the project config instead.
+  OpenLiteSpeed uses the runtime-specific literal sync described below.
+  Managed-native uses the same policy for its isolated five-minute scheduler
+  and never enables both triggers.
 - On a **litespeed** instance the constants are additionally written as
   literals via `wp config set` (lsphp runs via suExec and can't read the
   container env; the OLS image doesn't regenerate `wp-config.php`, so the

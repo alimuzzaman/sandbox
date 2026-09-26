@@ -35,9 +35,11 @@ a runtime or plugin failure.
 
 ## Noninteractive WP-CLI help
 
-The managed WordPress image does not require a pager binary. For a passthrough
-`help` command, Sandbox adds WP-CLI's `--no-pager` switch unless the command
-already includes `--pager` or `--no-pager`:
+The managed WordPress image does not require a pager binary. Sandbox runs the
+WP-CLI process with `PAGER=cat` (including its one-shot `wpcli` fallback), so
+help output works without `less`. For a passthrough `help` command, Sandbox
+also adds WP-CLI's `--no-pager` switch unless the command already includes
+`--pager` or `--no-pager`:
 
 ```sh
 ./sb wp -- help w3-total-cache option set

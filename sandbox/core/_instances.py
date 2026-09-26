@@ -938,20 +938,26 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     plugins_home_p = _plugins_home(cfg).resolve()
     root_p = Path(root)
     _extra: list[str] = []
-    for _entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
-        if _entry == ".":
-            _src = root_p
-        elif (isinstance(_entry, str)
-              and not _remote_package_source(_entry)
-              and ("/" in _entry or _entry.startswith((".", "~")))):
-            _src = Path(_entry).expanduser()
-            if not _src.is_absolute():
-                _src = (root_p / _entry).resolve()
-            _src = _src.resolve()
-        else:
-            continue
-        if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+    _vendor_sources: list[Path] = []
+    for _kind, _entries in (
+            ("plugin", list(pconf.get("plugins") or [])),
+            ("theme", list(pconf.get("themes") or []))):
+        for _entry in _entries:
+            if _entry == ".":
+                _src = root_p
+            elif (isinstance(_entry, str)
+                  and not _remote_package_source(_entry)
+                  and ("/" in _entry or _entry.startswith((".", "~")))):
+                _src = Path(_entry).expanduser()
+                if not _src.is_absolute():
+                    _src = (root_p / _entry).resolve()
+                _src = _src.resolve()
+            else:
+                continue
+            if _kind == "plugin" and _src.exists():
+                _vendor_sources.append(_src.resolve())
+            if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
     for _src_raw in (pconf.get("mappings") or {}).values():
         _src = Path(str(_src_raw)).expanduser()
         if not _src.is_absolute():
@@ -977,9 +983,38 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         if not _src.is_absolute():
             _src = (root_p / _src).resolve()
         _src = _src.resolve()
+        if _src.exists():
+            _vendor_sources.append(_src)
         if _src.exists() and not _src.is_relative_to(plugins_home_p):
             _extra.append(str(_src))
     extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
+    compose_mount_roots = [plugins_home_p, *(Path(path).resolve() for path in extra_mounts)]
+    for _plugin_src in dict.fromkeys(_vendor_sources):
+        _vendor_link = _plugin_src / "vendor"
+        if not _vendor_link.is_symlink():
+            continue
+        try:
+            _vendor_target = _vendor_link.resolve()
+        except (OSError, RuntimeError):
+            _vendor_target = None
+        if (_vendor_target is not None and _vendor_target.exists() and
+                any(_vendor_target.is_relative_to(mount_root)
+                    for mount_root in compose_mount_roots)):
+            continue
+        if _vendor_target is None:
+            _target_detail = "cannot be resolved on the host"
+        elif not _vendor_target.exists():
+            _target_detail = f"points to missing host path {_vendor_target}"
+        else:
+            _target_detail = f"resolves to {_vendor_target}, outside the mounts"
+        print(
+            f"warning: plugin vendor symlink {_vendor_link} {_target_detail}; "
+            "its dependency target is unavailable from this instance's "
+            "Compose mounts, "
+            "so vendor/autoload.php may be unavailable in the container. "
+            "Keep vendor/ under a mounted plugin source root.",
+            file=sys.stderr,
+        )
     if extra_mounts:
         block["extra_mounts"] = extra_mounts
 

@@ -430,7 +430,12 @@ def cmd_apply_config(cfg, args) -> None:
         die(result.message)
     entry = dict(result.data)
     if getattr(args, "json", False):
-        print(json.dumps(entry))
+        from sandbox.services.redaction import redact_structure
+
+        public_entry = redact_structure(entry)
+        if not isinstance(public_entry, dict):
+            die("apply result could not be safely redacted for JSON output")
+        print(json.dumps(public_entry))
     else:
         ok(f"instance '{entry['instance']}' reconciled in place "
            f"(no data loss) at {entry.get('url', '')}")

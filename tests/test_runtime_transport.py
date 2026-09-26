@@ -173,6 +173,53 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         legacy.assert_not_called()
         self.assertEqual(service.requests[0].operation, "apply")
 
+    def test_cli_apply_json_redacts_local_instance_credentials(self):
+        import sandbox.commands.config_setup as commands
+        from sandbox.runtimes.base import OperationResult
+
+        class SuccessfulService:
+            def invoke(self, request):
+                return OperationResult(
+                    True, "apply", request.project_root, "wordpress",
+                    {
+                        "instance": "nondefault-fixture",
+                        "url": "https://nondefault-fixture.tst",
+                        "login_url": (
+                            "https://default-fixture.tst/"
+                            "?sandbox_autologin=apply-login-sentinel"
+                        ),
+                        "autologin_token": "apply-token-sentinel",
+                        "password": "apply-password-sentinel",
+                        "authorization": "Bearer apply-auth-sentinel",
+                    },
+                )
+
+        args = types.SimpleNamespace(
+            project_dir="/tmp/project", label="nondefault", json=True,
+        )
+        output = io.StringIO()
+        with mock.patch.object(commands, "wordpress_runtime_service",
+                               return_value=SuccessfulService()), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_apply_config({}, args)
+
+        serialized = output.getvalue()
+        payload = json.loads(serialized)
+        self.assertEqual(payload["instance"], "nondefault-fixture")
+        self.assertEqual(payload["url"], "https://nondefault-fixture.tst")
+        self.assertEqual(
+            payload["login_url"],
+            "https://default-fixture.tst/?sandbox_autologin=%5BREDACTED%5D",
+        )
+        self.assertEqual(payload["autologin_token"], "[REDACTED]")
+        self.assertEqual(payload["password"], "[REDACTED]")
+        self.assertEqual(payload["authorization"], "[REDACTED]")
+        for secret in (
+            "apply-login-sentinel", "apply-token-sentinel",
+            "apply-password-sentinel", "apply-auth-sentinel",
+        ):
+            self.assertNotIn(secret, serialized)
+
     def test_cli_ensure_json_redacts_local_instance_credentials(self):
         import sandbox.commands.instances_cmd as commands
         from sandbox.runtimes.base import OperationResult

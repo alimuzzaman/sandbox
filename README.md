@@ -668,7 +668,9 @@ Use the same runtime operations without an MCP client:
 ```
 
 `--json` output is redacted: every credential-shaped field, including the
-`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. Test
+`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. This
+applies to `sb apply --json`, even when you target a non-default instance.
+Apply never returns a usable login URL. Test
 harnesses that need to open an admin session without a password pass
 `--reveal-login`, which restores `login_url` alone (other credentials stay
 redacted). A local instance qualifies when its host is loopback-bound; a remote

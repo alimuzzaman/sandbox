@@ -44,6 +44,27 @@ development, and isolated labels for matrix cells:
 Resource samples are a separate bounded control-plane document retrieved with
 `job-metrics`; use `job-status` for the live health summary.
 
+### Submit helper source as a project file
+
+Remote job arguments are persisted and credential-like values are refused before
+source deployment. Keep real credentials out of both arguments and project files.
+For public helper code and synthetic fixtures, put the files under the project
+directory and pass their project-relative paths instead of embedding source in
+`python -c` or another argument. The exact staged working tree is bound to the
+job by its source commit and dirty digest.
+
+```sh
+./sb job-start --remote NAME --project-dir . --workspace pg-reopen-canary \
+  --timeout 300 --request-id pg-reopen-canary-1 --cwd-relative . -- \
+  python scripts/reopen_canary.py --fixture fixtures/reopen-canary.json
+./sb job-status <job-id> --remote NAME --json
+./sb job-output <job-id> --remote NAME --stream combined --max-bytes 65536
+```
+
+The helper and fixture must be present in the submitted project tree. A file
+path in `argv` does not upload an external file; Sandbox stages and fingerprints
+the project working tree as a whole.
+
 ## Ordinary hosted apply admission
 
 Process observation uses a real boot-session identity. An active record written

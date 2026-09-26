@@ -17,6 +17,15 @@ from sandbox.jobs.models import (normalize_output_page_bytes,
 from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
 
 
+_CREDENTIAL_ARGV_REFUSAL = (
+    "remote job command contains credential-like material and was refused. Keep real "
+    "credentials out of argv and project files. For public helper source, save it under "
+    "the project directory and pass its project-relative file path (for example, "
+    "`python scripts/canary.py`); the submitted working tree is bound by its commit "
+    "and dirty digest."
+)
+
+
 class RemoteJobTransportError(RuntimeError):
     """Bounded, retryable failure from a remote job control operation."""
 
@@ -464,9 +473,7 @@ class RemoteJobTransport:
         try:
             require_safe_argv(submission.argv)
         except ValueError:
-            raise RemoteJobTransportError(
-                "remote job command contains credential-like material"
-            ) from None
+            raise RemoteJobTransportError(_CREDENTIAL_ARGV_REFUSAL) from None
         if submission.sync_relationship_id is not None and self.sync_submit is None:
             raise RemoteJobTransportError(
                 "synchronized job execution is unavailable without an enforced source authority"
@@ -535,9 +542,7 @@ class RemoteJobTransport:
             try:
                 require_safe_argv(item.argv)
             except ValueError:
-                raise RemoteJobTransportError(
-                    "remote job command contains credential-like material"
-                ) from None
+                raise RemoteJobTransportError(_CREDENTIAL_ARGV_REFUSAL) from None
         first = submissions[0]
         if (first.target_kind != "remote" or not first.remote_name or
                 any(item.target_kind != "remote" or item.remote_name != first.remote_name or

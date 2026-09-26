@@ -466,6 +466,12 @@ uncommitted and untracked changes. Named workspaces are reusable; matrix cells
 must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
 server for live remote job status/output operations.
 
+Keep real credentials out of job arguments and project files. Remote submission
+rejects credential-like arguments before deployment. For public helper source or
+synthetic fixtures, place files in the project tree and pass their
+project-relative paths instead of embedding source in an argument; the exact
+staged tree is bound by its source commit and dirty digest.
+
 Use a stable `--request-id` for every detached submission. The accepted JSON
 line is flushed immediately after the durable row exists. Empty, malformed, or
 lost output is `acceptance_unknown`, not an accepted job: inspect the bounded

@@ -931,6 +931,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded number of recent hosted-service log lines (1-1000; --tail is an alias)")
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
+    host_p.add_argument("--initializer", default=None, metavar="SERVICE",
+        help="with diagnose, read-only proof for one declared compose.init_services entry")
     host_p.add_argument("--request-id", default=None,
         help="replay-safe host sync/recovery request identity")
     host_p.add_argument("--verified-plan", default=None, metavar="PATH",

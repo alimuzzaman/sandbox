@@ -351,6 +351,14 @@ Optional detail may be elided with explicit coverage; missing or partial
 evidence never becomes deployment success. Feature 054 capability/source and
 installed-controller verification remain pending.
 
+For an exact one-shot initializer check without replay, use
+`sb host diagnose --project-dir DIR --environment ENV --remote NAME --initializer SERVICE --json`, where `SERVICE` is declared in
+`compose.init_services`. It returns a nonblocking read-only status and a finite
+identity mismatch reason without raw labels or image IDs. A foreign, stale, or
+failed result does not authorize rerunning that initializer. New apply-log entries
+show UTC timestamps, phase names, and exit codes; old unlabelled history remains
+unknown. A missing or unreadable protected apply log reports that state directly.
+
 ### Failed hosting apply recovery
 
 Use recovery when the first safe step must be observation. Do not substitute ordinary

@@ -733,7 +733,10 @@ the remote command runs. Compose output is streamed without changing the machine
 JSON contract and is appended to a mode-0600 remote log at the path returned as
 `apply_log` in apply evidence. Read its bounded tail later with
 `./sb host logs --remote NAME --apply-log --lines 1000`; timeout errors retain the
-latest output tail rather than reducing a failed build to a bare timeout message.
+latest output tail rather than reducing a failed build to a bare timeout message. New
+entries label each logged phase and record UTC start/finish times plus the remote exit
+code. Older unlabelled entries are not upgraded into historical phase evidence. If the
+protected log is absent or unreadable, the command reports that condition directly.
 
 For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
@@ -756,6 +759,16 @@ topology drift and makes readiness `degraded`. Init jobs and undeclared dependen
 services are excluded from this long-lived topology comparison. Missing remote evidence
 is reported as
 `unavailable` or `degraded`; the command never mutates the host or prints secrets.
+
+To inspect one declared one-shot initializer without running it, add
+`--initializer SERVICE` to `host diagnose`. The bounded result reports the current
+initializer status and, for foreign evidence, a finite reason such as
+`config_hash_label_mismatch`, `container_image_identity_mismatch`, or
+`container_precedes_apply`. It returns no raw labels, image IDs, or environment values
+and does not wait for a running container to finish. This read-only observation does not
+reconcile old outcomes or authorize replay;
+failed, stale, or foreign evidence continues to block another initializer run. Selecting
+an initializer adds one separate bounded SSH observation to `host diagnose`.
 
 An environment may also protect its public origin with Basic Auth:
 

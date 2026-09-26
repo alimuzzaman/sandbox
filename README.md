@@ -931,6 +931,12 @@ for source binding, replay limits and required initializer execution proof.
 An effect-entered incident stays fenced until recovery proves its outcome or an
 operator completes the separate [settlement procedure](docs/image-activation-settlement.md).
 
+For ordinary hosted deployments, `./sb host diagnose --remote NAME --json` is a
+read-only status view. Add `--initializer SERVICE` to inspect one declared setup job
+without rerunning it; foreign evidence includes a bounded identity-mismatch reason.
+New apply-log entries include UTC phase timestamps and exit codes. See the
+[remote-hosting guide](docs/remote-hosting.md) for the full evidence limits.
+
 There is **no central project catalog** — each plugin self-describes.
 
 ### Clean URLs and host ingress

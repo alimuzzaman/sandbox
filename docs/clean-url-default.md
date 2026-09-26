@@ -133,7 +133,10 @@ live in `tests/test_clean_url_default_policy.py`; they fail if the helper become
 again, if the NOPASSWD target moves back into the repo, or if the default mode changes.
 When clean routing is unavailable, Sandbox installs a generated loopback MU
 plugin. It keeps `home_url()` unchanged for the browser, while cURL requests to
-that exact localhost origin or the instance's clean `.tst` hostname resolve
-through `host.docker.internal`. This allows `wp_remote_get( home_url() )`
-without making a public or LAN address canonical. Other ports and hostnames
-are not rewritten.
+that exact localhost origin or the instance's clean `.tst` hostname first use
+the instance's private `nginx` service with the original `Host` header. This
+avoids routing container self-requests through a host port that may belong to
+OrbStack or another host service. When the instance has no resolvable `nginx`
+service, cURL falls back to `host.docker.internal`. This allows
+`wp_remote_get( home_url() )` without making a public or LAN address canonical.
+Other ports and hostnames are not rewritten.

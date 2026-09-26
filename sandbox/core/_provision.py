@@ -120,17 +120,17 @@ def _write_mail_muplugin(instance: str) -> None:
 
 
 def _write_loopback_muplugin(instance: str) -> None:
-    """Route the exact Sandbox home origin through Docker's host gateway.
+    """Route the exact Sandbox home origin back through its own web service.
 
     WordPress may store either its published localhost URL or its clean
-    ``.tst`` hostname. The latter is resolved by the host proxy, not by the
-    instance network, so self-fetches must use the same host-gateway path while
-    retaining the original Host header and request scheme.
+    ``.tst`` hostname. Nginx-backed instances can reach their own web service
+    over the private Compose network; other server types retain the host-gateway
+    fallback.
     """
     mu_dir = _ensure_muplugins_dir(instance)
     (mu_dir / "00-sandbox-loopback.php").write_text(
         "<?php\n"
-        "/* Sandbox: make the browser-facing Sandbox origin reachable from Docker. */\n"
+        "/* Sandbox: route matching self-fetches through the instance network. */\n"
         "add_action( 'http_api_curl', function ( $handle, $request, $url ) {\n"
         "    $home = wp_parse_url( home_url() );\n"
         "    $dest = wp_parse_url( $url );\n"
@@ -146,6 +146,51 @@ def _write_loopback_muplugin(instance: str) -> None:
         "         || ! $sandbox_host || $home_host !== $dest_host\n"
         "         || $home_port !== $dest_port ) {\n"
         "        return;\n"
+        "    }\n"
+        "    $nginx = gethostbyname( 'nginx' );\n"
+        "    $headers = $request['headers'] ?? array();\n"
+        "    if ( filter_var( $nginx, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 )\n"
+        "         && is_iterable( $headers ) ) {\n"
+        "        $curl_headers = array();\n"
+        "        $can_route_to_nginx = true;\n"
+        "        foreach ( $headers as $name => $value ) {\n"
+        "            if ( is_int( $name ) ) {\n"
+        "                $header = (string) $value;\n"
+        "                if ( preg_match( '/^\\s*host\\s*:/i', $header ) ) {\n"
+        "                    $can_route_to_nginx = false;\n"
+        "                    break;\n"
+        "                }\n"
+        "                $curl_headers[] = $header;\n"
+        "                continue;\n"
+        "            }\n"
+        "            if ( 'host' === strtolower( (string) $name ) ) {\n"
+        "                $can_route_to_nginx = false;\n"
+        "                break;\n"
+        "            }\n"
+        "            if ( is_array( $value ) ) {\n"
+        "                foreach ( $value as $item ) {\n"
+        "                    if ( is_scalar( $item ) ) {\n"
+        "                        $curl_headers[] = $name . ': ' . $item;\n"
+        "                    }\n"
+        "                }\n"
+        "            } elseif ( is_scalar( $value ) ) {\n"
+        "                $curl_headers[] = $name . ': ' . $value;\n"
+        "            }\n"
+        "        }\n"
+        "        if ( $can_route_to_nginx ) {\n"
+        "            $host_header = $dest_host;\n"
+        "            if ( ! empty( $dest['port'] ) ) {\n"
+        "                $host_header .= ':' . (int) $dest['port'];\n"
+        "            }\n"
+        "            $curl_headers[] = 'Host: ' . $host_header;\n"
+        "            $request_target = $dest['path'] ?? '/';\n"
+        "            if ( ! empty( $dest['query'] ) ) {\n"
+        "                $request_target .= '?' . $dest['query'];\n"
+        "            }\n"
+        "            curl_setopt( $handle, CURLOPT_URL, 'http://nginx' . $request_target );\n"
+        "            curl_setopt( $handle, CURLOPT_HTTPHEADER, $curl_headers );\n"
+        "            return;\n"
+        "        }\n"
         "    }\n"
         "    $gateway = gethostbyname( 'host.docker.internal' );\n"
         "    if ( 'host.docker.internal' === $gateway || ! filter_var( $gateway, FILTER_VALIDATE_IP ) ) {\n"

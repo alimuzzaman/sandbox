@@ -208,7 +208,7 @@ class TestBoundedLogs(unittest.TestCase):
 
 
 class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
-    def test_loopback_muplugin_preserves_url_and_routes_curl_via_host_gateway(self):
+    def test_loopback_muplugin_prefers_internal_nginx_and_keeps_gateway_fallback(self):
         import sandbox.core._provision as provision
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -217,8 +217,15 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
             provision._write_loopback_muplugin("preview-demo")
 
             rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
+            self.assertIn("gethostbyname( 'nginx' )", rendered)
+            self.assertIn("CURLOPT_URL, 'http://nginx' . $request_target", rendered)
+            self.assertIn("CURLOPT_HTTPHEADER, $curl_headers", rendered)
+            self.assertIn("'Host: ' . $host_header", rendered)
+            self.assertIn("$request_target .= '?' . $dest['query'];", rendered)
+            self.assertLess(rendered.index("CURLOPT_URL"),
+                            rendered.index("gethostbyname( 'host.docker.internal' )"))
             self.assertIn("CURLOPT_RESOLVE", rendered)
-            self.assertIn("host.docker.internal", rendered)
+            self.assertIn("gethostbyname( 'host.docker.internal' )", rendered)
             self.assertIn("$home_host !== $dest_host", rendered)
             self.assertNotIn("update_option", rendered)
 

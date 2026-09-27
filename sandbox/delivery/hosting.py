@@ -5,7 +5,8 @@ import uuid
 from sandbox.core._paths import RUNTIME_DIR
 from .context import control_metadata, target_for_project, require_delivery_capabilities
 from .models import (DeliveryError, canonical_digest, new_operation, now,
-                     request_scope, operation_summary, TERMINAL, append_event)
+                     request_scope, scope_digest, terminal_digest,
+                     operation_summary, TERMINAL, append_event)
 from .repository import DeliveryRepository
 from .service import evaluate_operation, normalize_recovery_projection
 
@@ -210,22 +211,84 @@ class HostingAttempt:
         return operation_summary(self.operation)
 
     def require_previous_snapshot(self, previous):
-        """Never overwrite an original authority whose terminal snapshot is missing."""
+        """Require the exact retained terminal predecessor from its original scope."""
         if not previous:
             return
         request = previous.get('request_id')
         if not request or request == self.operation['request_id']:
             raise DeliveryError('authority_pending')
-        result = self.repository.lookup_request(self.scope, request)
+
+        previous_target = previous.get('target') or {}
+        previous_evidence = previous.get('evidence') or {}
+        previous_source = previous.get('source') or {}
+        previous_scope = {
+            'project_identity': previous.get('project_identity'),
+            'target_kind': 'hosted',
+            'remote_name': previous_target.get('remote'),
+            'environment': previous_target.get('environment'),
+            'label': None,
+        }
+        try:
+            predecessor_scope = scope_digest(previous_scope)
+        except DeliveryError:
+            raise DeliveryError('binding_mismatch') from None
+
+        current_target = self.operation['target']
+        if (not previous.get('project_root_digest')
+                or previous_target.get('remote') != current_target['remote_name']
+                or previous_target.get('environment') != current_target['environment']):
+            raise DeliveryError('binding_mismatch')
+
+        # Worktree paths are part of the project identity. Resolve the request
+        # using the predecessor's retained scope, then bind it back to both the
+        # old hosting snapshot and this attempt's stable remote identities.
+        result = self.repository.lookup_request(predecessor_scope, request)
         old = result['operation']
         if old is None or old['execution_state'] not in TERMINAL or old['terminal_snapshot_digest'] is None:
             raise DeliveryError('required_evidence_missing')
         admission = old.get('admission') or {}
-        if (old.get('job_id') != previous.get('job_id')
+        old_target = old['target']
+        old_application = old['requested_outcome']['application']
+        old_scope = request_scope(old_target)
+        source_artifact = previous_source.get('artifact')
+        source_commit = previous_source.get('commit')
+        config_digest = previous_evidence.get('config_digest')
+        if (old['kind'] != 'hosted_apply'
+                or old_scope != predecessor_scope
+                or old.get('request_id') != request
+                or old_target['project_identity'] != previous.get('project_identity')
+                or old_target['project_root_digest'] != previous.get('project_root_digest')
+                or old_target['remote_name'] != previous_target.get('remote')
+                or old_target['environment'] != previous_target.get('environment')
+                or old_target['remote_name'] != current_target['remote_name']
+                or old_target['environment'] != current_target['environment']
+                or not old_target.get('machine_identity')
+                or old_target['machine_identity'] != previous_evidence.get('machine_identity')
+                or old_target['machine_identity'] != current_target.get('machine_identity')
+                or not old_target.get('registered_host_digest')
+                or old_target['registered_host_digest'] != previous_evidence.get('host_identity')
+                or old_target['registered_host_digest'] != current_target.get('registered_host_digest')
+                or old_target['runtime_identity'] != previous_evidence.get('runtime_identity')
+                or old_target['runtime_identity'] != current_target.get('runtime_identity')
+                or not previous.get('job_id')
+                or old.get('job_id') != previous.get('job_id')
+                or admission.get('job_id') != previous.get('job_id')
+                or type(previous.get('starting_generation')) is not int
                 or admission.get('generation') != previous.get('starting_generation')
-                or admission.get('application_revision') != (previous.get('source') or {}).get('commit')
-                or admission.get('contract_digest') != (previous.get('evidence') or {}).get('config_digest')
-                or old['requested_outcome']['application'].get('source_artifact') != (previous.get('source') or {}).get('artifact')):
+                or previous_source.get('clean') is not True
+                or old_application.get('dirty_policy') != 'clean_required'
+                or old_application.get('dirty_digest') is not None
+                or old_application.get('source_identity') != previous_source.get('identity')
+                or not source_commit
+                or old_application.get('commit') != source_commit
+                or admission.get('application_revision') != source_commit
+                or source_artifact is None
+                or old_application.get('source_artifact') != source_artifact
+                or not config_digest
+                or old_application.get('config_digest') != config_digest
+                or old['requested_outcome'].get('configuration_digest') != config_digest
+                or admission.get('contract_digest') != config_digest
+                or old['terminal_snapshot_digest'] != terminal_digest(old)):
             raise DeliveryError('binding_mismatch')
 
     def require_generation_snapshot(self, generation, results):

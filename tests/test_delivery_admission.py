@@ -39,13 +39,13 @@ class DurableAdmissionTests(unittest.TestCase):
         self.git = self.stack.enter_context(patch.object(admission.subprocess, 'run',
             side_effect=[SimpleNamespace(stdout='a' * 40 + '\n'), SimpleNamespace(stdout='')]))
 
-    def validate(self):
+    def validate(self, *, wait_seconds=0):
         return admission.validate_durable_context(self.root, database_path='/tmp/fixture.sqlite',
-            project_identity=self.fields['project_identity'], wait_seconds=0)
+            project_identity=self.fields['project_identity'], wait_seconds=wait_seconds)
 
-    def refused(self, code):
+    def refused(self, code, *, wait_seconds=0):
         with self.assertRaises(admission.AdmissionError) as caught:
-            self.validate()
+            self.validate(wait_seconds=wait_seconds)
         self.assertEqual(caught.exception.code, code)
 
     def test_genuine_original_child_join_keeps_source_and_control_separate(self):
@@ -82,6 +82,39 @@ class DurableAdmissionTests(unittest.TestCase):
         self.raw['process']['child_pid'] = None
         self.refused('recovery_context_invalid')
         self.capture.assert_not_called()
+
+    def test_transient_owner_snapshot_unavailable_is_retried(self):
+        unavailable = {'state': 'partial', 'reason': 'job_evidence_unavailable',
+                       'job': None, 'submitted': None, 'process': None}
+        self.reader.side_effect = [unavailable, self.raw]
+        with patch.object(admission.time, 'sleep') as sleep:
+            self.assertEqual(self.validate(wait_seconds=1), self.fields)
+        self.assertEqual(self.reader.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+
+    def test_persistent_owner_snapshot_unavailable_fails_closed_at_deadline(self):
+        unavailable = {'state': 'partial', 'reason': 'job_evidence_unavailable',
+                       'job': None, 'submitted': None, 'process': None}
+        self.reader.return_value = unavailable
+        with patch.object(admission.time, 'monotonic', side_effect=[0.0, 0.0, 1.01]):
+            with patch.object(admission.time, 'sleep') as sleep:
+                self.refused('recovery_context_invalid', wait_seconds=1)
+        self.assertEqual(self.reader.call_count, 1)
+        sleep.assert_called_once_with(0.05)
+        self.capture.assert_not_called()
+        self.git.assert_not_called()
+
+    def test_valid_owner_snapshot_completing_after_deadline_is_refused(self):
+        unavailable = {'state': 'partial', 'reason': 'job_evidence_unavailable',
+                       'job': None, 'submitted': None, 'process': None}
+        self.reader.side_effect = [unavailable, self.raw]
+        with patch.object(admission.time, 'monotonic', side_effect=[0.0, 0.0, 0.1, 1.01]):
+            with patch.object(admission.time, 'sleep') as sleep:
+                self.refused('recovery_context_invalid', wait_seconds=1)
+        self.assertEqual(self.reader.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+        self.capture.assert_not_called()
+        self.git.assert_not_called()
 
     def test_hostname_derived_boot_identity_is_not_accepted(self):
         self.raw['process']['host_boot_id'] = 'hostname-derived-legacy'

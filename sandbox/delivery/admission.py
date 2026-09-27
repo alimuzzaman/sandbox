@@ -53,8 +53,25 @@ def validate_durable_context(project_dir: str | Path, *, database_path=None,
         from sandbox.core._paths import RUNTIME_DIR
         database_path = RUNTIME_DIR / 'jobs' / 'registry.sqlite3'
     deadline = time.monotonic() + min(5.0, max(0.0, float(wait_seconds)))
+    first_read = True
     while True:
+        if not first_read and time.monotonic() >= deadline:
+            raise AdmissionError('recovery_context_invalid')
         evidence = read_delivery_job_evidence(database_path, fields['job_id'])
+        if first_read:
+            first_read = False
+        elif time.monotonic() >= deadline:
+            raise AdmissionError('recovery_context_invalid')
+        # The owner projection uses an optimistic bounded snapshot. A concurrent
+        # registry write can make one read unavailable without invalidating the
+        # still-running child; retry only that transient result inside this same
+        # finite admission window.
+        if evidence.get('reason') == 'job_evidence_unavailable':
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AdmissionError('recovery_context_invalid')
+            time.sleep(min(0.05, remaining))
+            continue
         job, submitted = evidence['job'], evidence['submitted']
         if not job or not submitted or submitted.get('version') != 1:
             raise AdmissionError('recovery_context_invalid')

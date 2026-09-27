@@ -21,6 +21,9 @@ SSH.
 backed. It does not mean that SSH has been removed from lifecycle or source-transfer
 recovery paths. The operator command is deliberately explicit:
 
+Every direct `remote ssh` command requires `--confirm`, including read-only commands,
+and a short `--reason`.
+
 ```sh
 ./sb remote ssh <remote> --confirm --reason "diagnose service" --command 'systemctl --user status sandbox-remote-mcp'
 ```

@@ -5,6 +5,11 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+Remote project `status` is read-only. If no Sandbox instance is registered for
+the selected workspace, it reports that state and points to
+`sb instances --remote NAME --json` for the remote inventory. It does not
+create or register an instance.
+
 ## Host storage monitoring and cleanup
 
 Use the global `resources` command before raw host, Docker, or filesystem
@@ -667,7 +672,9 @@ sb deploy --remote <name> --ensure --expose
 `sb ensure` is project-scoped and refuses `--instance NAME`: use
 `--project-dir DIR`, plus `--label LABEL` for a labelled instance and
 `--create` when minting that label. Use `sb apply --instance NAME` to
-reconcile an existing named instance.
+reconcile that exact instance and its registered label. If the saved target
+cannot be resolved, use the exact `--project-dir DIR --label LABEL` pair by
+itself; do not combine the two selectors.
 
 Pass an argv list to `sb exec`; do not rely on an implicit shell. If a shell is
 required, make the boundary explicit, for example `sb exec -- sh -lc 'npm
@@ -698,6 +705,13 @@ sb deploy --remote <name> --ensure --expose
 Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.
+
+`sb wp -- help <command>` works without a pager installed; Sandbox runs the
+WP-CLI process with `PAGER=cat`. Default Apache and Nginx/FPM Compose instances
+also set `DISABLE_WP_CRON` to true. Use the project's `wpCron` setting instead
+of adding that constant again with `wp config set`; see the
+[WP passthrough guide](../../docs/wp-passthrough.md) and [config
+reference](../../docs/sandbox-config-reference.md) for server-specific rules.
 
 After a successful deploy, `sb wp --remote NAME --project-dir DIR` targets the
 existing deployed WordPress instance through authenticated control HTTP. It

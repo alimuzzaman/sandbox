@@ -120,17 +120,17 @@ def _write_mail_muplugin(instance: str) -> None:
 
 
 def _write_loopback_muplugin(instance: str) -> None:
-    """Route the exact Sandbox home origin through Docker's host gateway.
+    """Route the exact Sandbox home origin back through its own web service.
 
     WordPress may store either its published localhost URL or its clean
-    ``.tst`` hostname. The latter is resolved by the host proxy, not by the
-    instance network, so self-fetches must use the same host-gateway path while
-    retaining the original Host header and request scheme.
+    ``.tst`` hostname. Nginx-backed instances can reach their own web service
+    over the private Compose network; other server types retain the host-gateway
+    fallback.
     """
     mu_dir = _ensure_muplugins_dir(instance)
     (mu_dir / "00-sandbox-loopback.php").write_text(
         "<?php\n"
-        "/* Sandbox: make the browser-facing Sandbox origin reachable from Docker. */\n"
+        "/* Sandbox: route matching self-fetches through the instance network. */\n"
         "add_action( 'http_api_curl', function ( $handle, $request, $url ) {\n"
         "    $home = wp_parse_url( home_url() );\n"
         "    $dest = wp_parse_url( $url );\n"
@@ -146,6 +146,51 @@ def _write_loopback_muplugin(instance: str) -> None:
         "         || ! $sandbox_host || $home_host !== $dest_host\n"
         "         || $home_port !== $dest_port ) {\n"
         "        return;\n"
+        "    }\n"
+        "    $nginx = gethostbyname( 'nginx' );\n"
+        "    $headers = $request['headers'] ?? array();\n"
+        "    if ( filter_var( $nginx, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 )\n"
+        "         && is_iterable( $headers ) ) {\n"
+        "        $curl_headers = array();\n"
+        "        $can_route_to_nginx = true;\n"
+        "        foreach ( $headers as $name => $value ) {\n"
+        "            if ( is_int( $name ) ) {\n"
+        "                $header = (string) $value;\n"
+        "                if ( preg_match( '/^\\s*host\\s*:/i', $header ) ) {\n"
+        "                    $can_route_to_nginx = false;\n"
+        "                    break;\n"
+        "                }\n"
+        "                $curl_headers[] = $header;\n"
+        "                continue;\n"
+        "            }\n"
+        "            if ( 'host' === strtolower( (string) $name ) ) {\n"
+        "                $can_route_to_nginx = false;\n"
+        "                break;\n"
+        "            }\n"
+        "            if ( is_array( $value ) ) {\n"
+        "                foreach ( $value as $item ) {\n"
+        "                    if ( is_scalar( $item ) ) {\n"
+        "                        $curl_headers[] = $name . ': ' . $item;\n"
+        "                    }\n"
+        "                }\n"
+        "            } elseif ( is_scalar( $value ) ) {\n"
+        "                $curl_headers[] = $name . ': ' . $value;\n"
+        "            }\n"
+        "        }\n"
+        "        if ( $can_route_to_nginx ) {\n"
+        "            $host_header = $dest_host;\n"
+        "            if ( ! empty( $dest['port'] ) ) {\n"
+        "                $host_header .= ':' . (int) $dest['port'];\n"
+        "            }\n"
+        "            $curl_headers[] = 'Host: ' . $host_header;\n"
+        "            $request_target = $dest['path'] ?? '/';\n"
+        "            if ( ! empty( $dest['query'] ) ) {\n"
+        "                $request_target .= '?' . $dest['query'];\n"
+        "            }\n"
+        "            curl_setopt( $handle, CURLOPT_URL, 'http://nginx' . $request_target );\n"
+        "            curl_setopt( $handle, CURLOPT_HTTPHEADER, $curl_headers );\n"
+        "            return;\n"
+        "        }\n"
         "    }\n"
         "    $gateway = gethostbyname( 'host.docker.internal' );\n"
         "    if ( 'host.docker.internal' === $gateway || ! filter_var( $gateway, FILTER_VALIDATE_IP ) ) {\n"
@@ -832,15 +877,9 @@ def save_local_app_password(app_pw: str, instance: str) -> None:
     Written to `instances.<name>.app_password` so each instance has its own
     secret without colliding. (Per-project model — there is no global key.)
     """
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["app_password"] = app_pw
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def save_local_abilities_enabled(enabled: bool, instance: str) -> None:
@@ -850,15 +889,9 @@ def save_local_abilities_enabled(enabled: bool, instance: str) -> None:
     it lives in the DB and is wiped by a recreate / db-reset. Mirroring the choice
     to `instances.<name>.abilities_enabled` makes it durable so `up` can re-apply
     it. Written via the same per-instance pattern as the other secrets."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["abilities_enabled"] = bool(enabled)
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def read_local_abilities_enabled(instance: str):
@@ -866,12 +899,11 @@ def read_local_abilities_enabled(instance: str):
     if not CONFIG_LOCAL.exists():
         return None
     try:
-        ensure_pyyaml()
-        import yaml
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+        local = _local_yaml()
         val = (local.get("instances", {}).get(instance, {}) or {}).get("abilities_enabled")
         return None if val is None else bool(val)
+    except ConfigParseError:
+        raise
     except Exception:
         return None
 
@@ -879,15 +911,9 @@ def read_local_abilities_enabled(instance: str):
 def save_local_autologin_token(token: str, instance: str) -> None:
     """Persist the sandbox autologin token in sandbox.local.yml so it can be
     included in the ensure_instance return value as login_url."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["autologin_token"] = token
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def _autologin_mu_plugin(token: str) -> str:

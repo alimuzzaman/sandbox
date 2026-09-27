@@ -455,6 +455,7 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_PASSWORD: wp
       WORDPRESS_DB_NAME: wp
       HOME: /tmp
+      PAGER: cat
       WP_CLI_CACHE_DIR: /tmp/.wp-cli/cache
 {_env_config_lines(inst_cfg, docroot)}
     volumes:
@@ -803,10 +804,11 @@ def _wpcli_unleased(args: list[str], instance: str,
     if cli_available:
         # exec into the running web container as www-data (uid 33) so files stay
         # www-data-owned and no --allow-root is needed; same PHP the site serves.
-        return compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,
+        return compose("exec", "-e", "PAGER=cat", "-u", "www-data", "-T",
+                       "wp", "wp", *args,
                        instance=instance, check=check, capture=capture,
                        timeout=timeout)
-    return compose("run", "--rm", "wpcli", *args,
+    return compose("run", "-e", "PAGER=cat", "--rm", "wpcli", *args,
                    instance=instance, check=check, capture=capture,
                    timeout=timeout)
 

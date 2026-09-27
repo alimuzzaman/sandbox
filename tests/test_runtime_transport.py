@@ -173,6 +173,54 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         legacy.assert_not_called()
         self.assertEqual(service.requests[0].operation, "apply")
 
+    def test_cli_apply_json_redacts_local_instance_credentials(self):
+        import sandbox.commands.config_setup as commands
+        from sandbox.runtimes.base import OperationResult
+
+        class SuccessfulService:
+            def invoke(self, request):
+                print("apply progress")
+                return OperationResult(
+                    True, "apply", request.project_root, "wordpress",
+                    {
+                        "instance": "nondefault-fixture",
+                        "url": "https://nondefault-fixture.tst",
+                        "login_url": (
+                            "https://default-fixture.tst/"
+                            "?sandbox_autologin=apply-login-sentinel"
+                        ),
+                        "autologin_token": "apply-token-sentinel",
+                        "password": "apply-password-sentinel",
+                        "authorization": "Bearer apply-auth-sentinel",
+                    },
+                )
+
+        args = types.SimpleNamespace(
+            project_dir="/tmp/project", label="nondefault", json=True,
+        )
+        output = io.StringIO()
+        with mock.patch.object(commands, "wordpress_runtime_service",
+                               return_value=SuccessfulService()), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_apply_config({}, args)
+
+        serialized = output.getvalue()
+        payload = json.loads(serialized)
+        self.assertEqual(payload["instance"], "nondefault-fixture")
+        self.assertEqual(payload["url"], "https://nondefault-fixture.tst")
+        self.assertEqual(
+            payload["login_url"],
+            "https://default-fixture.tst/?sandbox_autologin=%5BREDACTED%5D",
+        )
+        self.assertEqual(payload["autologin_token"], "[REDACTED]")
+        self.assertEqual(payload["password"], "[REDACTED]")
+        self.assertEqual(payload["authorization"], "[REDACTED]")
+        for secret in (
+            "apply-login-sentinel", "apply-token-sentinel",
+            "apply-password-sentinel", "apply-auth-sentinel",
+        ):
+            self.assertNotIn(secret, serialized)
+
     def test_cli_ensure_json_redacts_local_instance_credentials(self):
         import sandbox.commands.instances_cmd as commands
         from sandbox.runtimes.base import OperationResult
@@ -892,6 +940,41 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(payload["status"], "unavailable")
         self.assertTrue(payload["feasibility"]["read_only"])
         self.assertTrue(payload["feasibility"]["mutation_required"])
+
+    def test_status_text_explains_remote_missing_instance(self):
+        import sandbox.commands.lifecycle as commands
+
+        remote_result = {
+            "ok": False,
+            "exit_code": 1,
+            "status": "unavailable",
+            "error": {
+                "code": "remote_instance_unavailable",
+                "message": "the selected remote workspace has no registered instance",
+            },
+            "target": {"remote": "fixture-remote", "workspace": "preview"},
+        }
+        args = types.SimpleNamespace(
+            json=False, resolved_instance="fixture", remote="fixture-remote",
+            workspace="preview",
+        )
+        output = io.StringIO()
+        with mock.patch.object(commands, "_remote_lifecycle", return_value=remote_result), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            commands.cmd_status({}, args)
+
+        self.assertEqual(raised.exception.code, 1)
+        rendered = output.getvalue()
+        self.assertIn(
+            "Remote workspace 'preview' on 'fixture-remote': unavailable "
+            "(no registered Sandbox instance).",
+            rendered,
+        )
+        self.assertIn(
+            "./sb instances --remote fixture-remote --json",
+            rendered,
+        )
+        self.assertNotIn("None: unavailable", rendered)
 
     def test_status_json_fails_closed_on_inconsistent_remote_zero_exit(self):
         import sandbox.commands.lifecycle as commands

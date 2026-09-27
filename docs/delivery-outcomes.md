@@ -66,6 +66,25 @@ Keep the returned job ID and inspect it through the supported job owner:
   --request-id ORIGINAL --json
 ```
 
+Use the exact application root and original request ID recorded by the durable
+job. A sibling `dev` or `main` checkout is a different query scope, even when
+both checkouts use the same hosting manifest. A delivery `operation_id`, the
+original `request_id`, the durable `job_id`, and a deployment trace ID are
+different identifiers; do not substitute one for another. If a selected query
+reports missing evidence while an owner projection is conflicting, check the
+job's `project_root`, target environment, remote, and request ID, then repeat
+the read from that exact project root. The query never searches sibling roots
+or repairs missing history. A selected operation ID can also miss while the
+history still contains the attempt; in that case, use the exact `request_id`
+shown on the retained attempt. The human output prints that selector directly.
+
+`host status` and `host logs` describe the current target and a bounded log
+tail. Use delivery history for historical outcomes: an unselected inspect shows
+`latest_retained_complete_success` and the most recent attempts; selecting the
+returned `request_id` shows the full application revision, timestamps, and
+recorded failure phase. Current health or revision must not be used to infer an
+older deployment's result.
+
 `host plan` is read-only. A clean application and target normally report
 `recovery_eligibility.state=requires_submission` until the durable child exists;
 plan output is never admission. A direct `host apply` with only

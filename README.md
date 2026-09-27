@@ -123,6 +123,12 @@ checkout by mistake. For an additional labeled instance, run
 Init treats that exact directory (or the exact current directory when omitted) as its
 maximum root, does not inherit ancestor project markers, and refuses the user home itself.
 
+`sb apply --instance NAME` uses that instance's registered project root and
+label together, so a project with several instances cannot redirect the apply
+to its default instance. If the saved target cannot be resolved, pass the exact
+`--project-dir DIR --label LABEL` pair; do not combine that pair with
+`--instance`.
+
 On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
 by default when Homebrew is available. It provides the `reader` command for
 opening local Sandbox documentation and read-only remote documentation folders.
@@ -483,7 +489,11 @@ Inspect the retained job with `job-status`/`job-output`, then use
 `./sb delivery inspect` (or MCP `delivery_inspect`) for the joined outcome.
 The default query is recorded-only; `--observe` adds bounded current
 read-only evidence. `latest_attempt`, `latest_retained_complete_success`, and
-`current_observation` remain separate. See
+`current_observation` remain separate. For historical results, use the exact
+project root and request ID from the original job; sibling checkouts are
+different query scopes. `host status` and `host logs` show current state and a
+bounded log tail. If an operation selector misses while history has the
+attempt, use its retained request ID. See
 [`docs/delivery-outcomes.md`](docs/delivery-outcomes.md) for the closed route
 contract, exact incarnation/URL receipt rules, permanent guard limits, and
 validation status.
@@ -607,7 +617,8 @@ emitting incremental changes.
 
 For the exceptional case where an operator must run a command directly on a host,
 use the explicit CLI escape hatch. It is never used internally and is not exposed as
-an MCP tool:
+an MCP tool. Every direct SSH command requires `--confirm`, including read-only
+diagnostics, and a short `--reason`:
 
 ```sh
 ./sb remote ssh <remote> --confirm --reason "diagnose service" --command 'systemctl --user status sandbox-remote-mcp'
@@ -662,7 +673,9 @@ Use the same runtime operations without an MCP client:
 ```
 
 `--json` output is redacted: every credential-shaped field, including the
-`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. Test
+`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. This
+applies to `sb apply --json`, even when you target a non-default instance.
+Apply never returns a usable login URL. Test
 harnesses that need to open an admin session without a password pass
 `--reveal-login`, which restores `login_url` alone (other credentials stay
 redacted). A local instance qualifies when its host is loopback-bound; a remote
@@ -844,13 +857,19 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb clean                # stop + wipe DB volume (start fresh)
 ```
 
+Remote project status is read-only. If the selected remote workspace has no
+registered Sandbox instance, the command reports that state and points to
+`./sb instances --remote NAME --json` to inspect the remote inventory; it does
+not create or register an instance.
+
 Run `./sb` with no args for the full list. `doctor` runs on the local controller and
 intentionally has no `--project-dir`, `--local`, or `--remote`; run it from the project
 directory, or resolve the registered instance with `./sb instances --project-dir DIR --json`
 and pass `--instance NAME`. Most instance-scoped commands accept
 `--instance <name>`; project-routed `ensure`/`test`/`init` use
 `--project-dir <dir>` (and `--label` where supported). Use
-`sb apply --instance NAME` to reconcile an existing named instance.
+`sb apply --instance NAME` to reconcile that exact named instance and its
+registered label.
 
 `snapshot` exports from the selected instance's already running database. It does
 not regenerate Compose files or start/recreate the web tier. If the existing
@@ -901,6 +920,15 @@ defaults:
   github_org: "wpdeveloper"
 ```
 
+Sandbox validates this machine-local YAML before using it. Under a shared lock,
+each write compares the version its operation read with the latest file, merges
+independent concurrent updates, then uses a validated temporary file and atomic
+replacement. Conflicting edits fail safely for retry. The previous valid file is
+retained at `$SANDBOX_HOME/sandbox.local.yml.bak` with owner-only permissions.
+Parse errors report the file and line and point to that backup without printing
+the source line. `sb feedback submit` remains available while machine config
+needs repair.
+
 `pro_plugins_home` (default `~/Sites/plugins-pro`) is the one directory holding Pro
 plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a remote
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
@@ -911,6 +939,12 @@ overwriting retained deployment inputs. See the [v2 activation contract](docs/im
 for source binding, replay limits and required initializer execution proof.
 An effect-entered incident stays fenced until recovery proves its outcome or an
 operator completes the separate [settlement procedure](docs/image-activation-settlement.md).
+
+For ordinary hosted deployments, `./sb host diagnose --remote NAME --json` is a
+read-only status view. Add `--initializer SERVICE` to inspect one declared setup job
+without rerunning it; foreign evidence includes a bounded identity-mismatch reason.
+New apply-log entries include UTC phase timestamps and exit codes. See the
+[remote-hosting guide](docs/remote-hosting.md) for the full evidence limits.
 
 There is **no central project catalog** — each plugin self-describes.
 

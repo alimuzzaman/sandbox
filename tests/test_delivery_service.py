@@ -243,6 +243,43 @@ class TestDeliveryService(unittest.TestCase):
         self.assertIsNone(result['next_action'])
         self.assertEqual(self.repository.path.read_bytes(), before)
 
+    def test_missing_attempt_with_conflicting_owner_evidence_guides_exact_scope_retry(self):
+        operation = hosted_source_operation()
+        target = operation['target']
+        raw = hosted_admission_projection(operation)
+        raw['admission']['project_root_digest'] = 'sha256:' + '9' * 64
+        service = DeliveryService(
+            self.repository,
+            target_resolver=lambda **_query: target,
+            owner_readers={
+                'admission': lambda _target, _operation: normalize_recovery_projection(raw, _target),
+            },
+        )
+
+        result = service.inspect(
+            project_dir=str(self.project), remote=target['remote_name'],
+            environment=target['environment'], label=target['label'],
+            operation_id=str(uuid.uuid4()),
+        )
+
+        self.assertEqual(result['error']['code'], 'missing')
+        self.assertEqual(result['recorded_source_evidence']['admission']['state'], 'conflicting')
+        self.assertEqual(result['next_action_reason']['code'], 'binding_mismatch')
+        self.assertIn('project_root', result['next_action_reason']['message'])
+        self.assertIn('request_id', result['next_action_reason']['message'])
+        self.assertNotIn('/tmp/fixture-hosted-project', result['next_action_reason']['message'])
+
+    def test_missing_operation_selector_with_retained_history_guides_request_id(self):
+        retained = self.retain('fixture-retained-request')
+
+        result = self.inspect(operation_id=str(uuid.uuid4()))
+
+        self.assertEqual(result['error']['code'], 'missing')
+        self.assertEqual(result['latest_attempt']['request_id'], retained['request_id'])
+        self.assertEqual(result['next_action_reason']['code'], 'binding_mismatch')
+        self.assertIn('request_id', result['next_action_reason']['message'])
+        self.assertIn('operation_id', result['next_action_reason']['message'])
+
     def test_recovery_is_separate_from_immutable_original_failure(self):
         original = self.retain('original-failed', succeeded=False)
         recovered = delivery_fixture(self.project, 'recovery-succeeded')

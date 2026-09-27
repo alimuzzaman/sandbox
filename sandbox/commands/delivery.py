@@ -54,7 +54,10 @@ def format_projection(result):
         if operation is None:
             lines.append(title + ": unavailable")
         else:
-            lines.append(title + ": " + operation["operation_id"] + " / " + operation["delivery_state"] + " / evidence " + operation["evidence_completeness"])
+            line = title + ": " + operation["operation_id"] + " / " + operation["delivery_state"] + " / evidence " + operation["evidence_completeness"]
+            if operation.get("request_id") is not None:
+                line += " / request " + operation["request_id"]
+            lines.append(line)
     selected = result.get("selected_operation")
     if selected is not None:
         lines.append("Selected attempt: " + selected["operation_id"] + " / " + selected["delivery_state"])

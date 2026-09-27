@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+from functools import wraps
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 from sandbox.core import *  # noqa: F401,F403
+from sandbox.core._config import ConfigParseError, ConfigWriteError
 
 from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
 from sandbox.application.context import preflight_instance_capability
@@ -60,28 +62,32 @@ class _KVAction(argparse.Action):
 
 
 
-def _implied_project_dir(instance: str | None, label: str | None):
-    """The project root a bare `apply` clearly meant, and where it came from.
+def _implied_project_target(instance: str | None, label: str | None):
+    """The exact project and registry label a bare `apply` clearly meant.
 
     A named instance is the strongest signal — the registry knows which project
-    owns it. Otherwise, standing inside a registered project means that project.
-    Returns (root, source) or (None, None) when neither applies, which keeps the
-    historical whole-sandbox behaviour for `./sb apply` run outside any project.
+    owns it and which label identifies it. Otherwise, standing inside a
+    registered project means that project. Returns (root, label, source) or
+    (None, None, None) when neither applies, which keeps the historical
+    whole-sandbox behaviour for `./sb apply` run outside any project.
     """
     sc = _core()
     if instance:
         entry = sc.registry_find_instance(instance) or {}
         root = entry.get("root")
-        if root and Path(root).is_dir():
-            return str(root), f"registered root of instance '{instance}'"
-        return None, None
+        target_label = entry.get("label")
+        if root and target_label and Path(root).is_dir():
+            return str(root), target_label, f"registered target of instance '{instance}'"
+        return None, None, None
     try:
         root = sc.find_project_root(Path.cwd())
     except Exception:
-        return None, None
-    if root and sc.registry_get(str(root), label=label):
-        return str(root), "current working directory"
-    return None, None
+        return None, None, None
+    entry = sc.registry_get(str(root), label=label) if root else None
+    target_label = entry.get("label") if entry else None
+    if root and target_label:
+        return str(root), target_label, "current working directory"
+    return None, None, None
 
 
 def _global_label_before_subcommand(argv: list[str]) -> str | None:
@@ -373,6 +379,21 @@ def _cli_version() -> str:
     return value or "unknown"
 
 
+def _config_parse_error_boundary(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (ConfigParseError, ConfigWriteError) as exc:
+            if "--json" in sys.argv[1:]:
+                print(json.dumps(exc.to_payload(), sort_keys=True))
+            else:
+                print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(2)
+    return wrapped
+
+
+@_config_parse_error_boundary
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -810,7 +831,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--plan", action="store_true",
         help="for protected remote service actions: show the no-write plan")
     remote_p.add_argument("--confirm", action="store_true",
-        help="allow a protected remote service or Docker-pool mutation")
+        help="required for every direct `remote ssh` command (including read-only "
+             "commands); also allow protected remote service or Docker-pool mutations")
     remote_p.add_argument("--recover-interrupted", action="store_true",
         help="for `remote docker-pool`: plan/recover only containers proven to have stopped during the latest interrupted transaction")
     remote_p.add_argument("--expected-running", type=int, default=None,
@@ -831,7 +853,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--processes", action="store_true",
         help="with service diagnostics, include a bounded read-only process/app snapshot")
     remote_p.add_argument("--command", default=None,
-        help="required with `remote ssh`: exact operator command to run directly over SSH")
+        help="required with `remote ssh`: exact operator command to run directly "
+             "over SSH; that command also requires `--confirm`")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
     remote_p.add_argument("--upload-timeout", dest="upload_timeout", type=int,
@@ -908,6 +931,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded number of recent hosted-service log lines (1-1000; --tail is an alias)")
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
+    host_p.add_argument("--initializer", default=None, metavar="SERVICE",
+        help="with diagnose, read-only proof for one declared compose.init_services entry")
     host_p.add_argument("--request-id", default=None,
         help="replay-safe host sync/recovery request identity")
     host_p.add_argument("--verified-plan", default=None, metavar="PATH",
@@ -1308,6 +1333,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    # Feedback storage is independent of machine config and must remain usable
+    # when sandbox.local.yml itself needs recovery.
+    if args.cmd == "feedback":
+        COMMANDS["feedback"]({}, args)
+        return
+
     if getattr(args, "config_file", None) and not getattr(args, "project_dir", None):
         die("--config-file requires an explicit --project-dir", 2)
 
@@ -1362,6 +1393,13 @@ Per-project (each plugin carries its own sandbox.config.json):
         die(
             "setup is registry-wide; use `sb apply --instance NAME` or "
             "`sb ensure --project-dir DIR` for project-scoped setup.",
+            2,
+        )
+
+    if args.cmd == "apply" and getattr(args, "project_dir", None) and _explicit_global_option(raw_argv, "--instance"):
+        die(
+            "apply accepts either --instance NAME or --project-dir DIR with "
+            "--label LABEL; do not combine both selectors.",
             2,
         )
 
@@ -1576,11 +1614,20 @@ Per-project (each plugin carries its own sandbox.config.json):
     # silently re-applied the whole sandbox instead of reconciling X. Infer the
     # project the caller clearly meant, and say which one was chosen.
     if args.cmd == "apply" and not getattr(args, "project_dir", None):
-        implied, source = _implied_project_dir(explicit, cwd_label)
+        implied, implied_label, source = _implied_project_target(explicit, cwd_label)
         if implied:
+            requested_label = _explicit_global_label(raw_argv)
+            if explicit and requested_label and requested_label != implied_label:
+                die(
+                    f"instance '{explicit}' is registered as label '{implied_label}', "
+                    f"not '{requested_label}'; omit --label or use the matching label.",
+                    2,
+                )
             args.project_dir = implied
-            info(f"apply: reconciling the project at {implied} ({source}). "
-                 "Run `./sb setup` for the whole sandbox instead.")
+            args.label = implied_label
+            if not getattr(args, "json", False):
+                info(f"apply: reconciling the project at {implied} ({source}). "
+                     f"label '{implied_label}'. Run `./sb setup` for the whole sandbox instead.")
     if args.cmd == "apply" and covered_creation and not getattr(args, "project_dir", None):
         die("creation context requires a resolved project; use --project-dir", 2)
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the

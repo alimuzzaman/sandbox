@@ -522,6 +522,24 @@ class DeliveryService:
         # its exact target; current observations always use the selected target.
         recorded_target = selected["target"] if selected is not None else target
         result["recorded_source_evidence"] = self._observe(self.owner_readers, recorded_target, selected)
+        error = result.get("error")
+        source_evidence = result.get("recorded_source_evidence") or {}
+        has_conflicting_evidence = any(
+            isinstance(block, dict) and block.get("state") == "conflicting"
+            for block in source_evidence.values())
+        has_owner_selector = any(
+            isinstance(block, dict) and (block.get("request_id") or block.get("job_id"))
+            for block in source_evidence.values())
+        if (selected is None and isinstance(error, dict) and error.get("code") == "missing"
+                and (has_conflicting_evidence or has_owner_selector or result.get("latest_attempt") is not None)):
+            result["next_action_reason"] = {
+                "code": "binding_mismatch",
+                "message": (
+                    "No attempt matches this selector, but retained evidence exists. Verify the original job's "
+                    "exact project_root, environment, remote, and request_id; operation_id, job_id, and trace_id "
+                    "are separate identifiers."
+                ),
+            }
         if observe:
             result["current_observation"] = self._observe(self.current_readers, recorded_target, selected)
             if result["current_observation"] is None:

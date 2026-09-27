@@ -17,6 +17,15 @@ import sandbox.core._instances as instances  # noqa: E402
 from sandbox.runtimes.base import OperationResult  # noqa: E402
 
 
+def _run_install_capture_stdout(args):
+    output = io.StringIO()
+    with patch("secrets.token_hex", side_effect=[
+            "install-login-sentinel", "snapshot-token-sentinel",
+    ]), contextlib.redirect_stdout(output):
+        lifecycle.cmd_install({}, args)
+    return output.getvalue()
+
+
 class TestWordPressCoreDownload(unittest.TestCase):
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")
@@ -117,7 +126,11 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 patch.object(lifecycle, "_write_ondemand_muplugin"), \
                 patch.object(lifecycle, "_write_licensing_muplugin"), \
                 patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"):
-            lifecycle.cmd_install({}, args)
+            output = _run_install_capture_stdout(args)
+
+        self.assertIn("Admin: http://localhost:8188/wp-admin", output)
+        self.assertNotIn("install-login-sentinel", output)
+        self.assertNotIn("sandbox_autologin=", output)
 
         compose.assert_called_once_with(
             "exec", "-T", "wp", "chown", "-R", "1000:1000",
@@ -208,7 +221,7 @@ class TestBoundedLogs(unittest.TestCase):
 
 
 class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
-    def test_loopback_muplugin_preserves_url_and_routes_curl_via_host_gateway(self):
+    def test_loopback_muplugin_prefers_internal_nginx_and_keeps_gateway_fallback(self):
         import sandbox.core._provision as provision
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -217,8 +230,15 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
             provision._write_loopback_muplugin("preview-demo")
 
             rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
+            self.assertIn("gethostbyname( 'nginx' )", rendered)
+            self.assertIn("CURLOPT_URL, 'http://nginx' . $request_target", rendered)
+            self.assertIn("CURLOPT_HTTPHEADER, $curl_headers", rendered)
+            self.assertIn("'Host: ' . $host_header", rendered)
+            self.assertIn("$request_target .= '?' . $dest['query'];", rendered)
+            self.assertLess(rendered.index("CURLOPT_URL"),
+                            rendered.index("gethostbyname( 'host.docker.internal' )"))
             self.assertIn("CURLOPT_RESOLVE", rendered)
-            self.assertIn("host.docker.internal", rendered)
+            self.assertIn("gethostbyname( 'host.docker.internal' )", rendered)
             self.assertIn("$home_host !== $dest_host", rendered)
             self.assertNotIn("update_option", rendered)
 

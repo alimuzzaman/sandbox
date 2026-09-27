@@ -351,6 +351,14 @@ Optional detail may be elided with explicit coverage; missing or partial
 evidence never becomes deployment success. Feature 054 capability/source and
 installed-controller verification remain pending.
 
+For an exact one-shot initializer check without replay, use
+`sb host diagnose --project-dir DIR --environment ENV --remote NAME --initializer SERVICE --json`, where `SERVICE` is declared in
+`compose.init_services`. It returns a nonblocking read-only status and a finite
+identity mismatch reason without raw labels or image IDs. A foreign, stale, or
+failed result does not authorize rerunning that initializer. New apply-log entries
+show UTC timestamps, phase names, and exit codes; old unlabelled history remains
+unknown. A missing or unreadable protected apply log reports that state directly.
+
 ### Failed hosting apply recovery
 
 Use recovery when the first safe step must be observation. Do not substitute ordinary
@@ -465,6 +473,12 @@ Remote job submission deploys the exact local working tree first, including
 uncommitted and untracked changes. Named workspaces are reusable; matrix cells
 must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
 server for live remote job status/output operations.
+
+Keep real credentials out of job arguments and project files. Remote submission
+rejects credential-like arguments before deployment. For public helper source or
+synthetic fixtures, place files in the project tree and pass their
+project-relative paths instead of embedding source in an argument; the exact
+staged tree is bound by its source commit and dirty digest.
 
 Use a stable `--request-id` for every detached submission. The accepted JSON
 line is flushed immediately after the durable row exists. Empty, malformed, or

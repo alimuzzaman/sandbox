@@ -260,7 +260,8 @@ def _proxy_container_running() -> bool:
 
 
 def _sandbox_proxy_active(domain: str, *, secure: bool = False,
-                          timeout: float = 1.5, retry: bool = False) -> bool:
+                          timeout: float = _CADDY_EXACT_ROUTE_PROBE_TIMEOUT_SECONDS,
+                          retry: bool = False) -> bool:
     """True when the proxy is running AND has a route for this domain — i.e.
     the selected http(s)://<domain> actually serves. Used by site_url()."""
     if not _caddyfile_has_route(domain):
@@ -273,12 +274,8 @@ def _sandbox_proxy_active(domain: str, *, secure: bool = False,
     # URL that never reached Caddy.  A bounded response-header probe is the
     # final authority: even an upstream 4xx/5xx is useful evidence when the
     # response is Caddy's, while a foreign listener is rejected.
-    # Caddy may spend the full bounded retry window recovering a transient
-    # upstream dial failure. A shorter probe makes site_url() publish the
-    # localhost fallback before Caddy has finished those retries.
     return _sandbox_proxy_route_serving(
-        domain, secure=secure,
-        timeout=_CADDY_EXACT_ROUTE_PROBE_TIMEOUT_SECONDS,
+        domain, secure=secure, timeout=timeout, retry=retry,
     )
 
 
@@ -1162,7 +1159,8 @@ def reload_proxy() -> bool:
     return proxy_apply()[0]
 
 
-def site_url(inst_cfg: dict, *, probe: bool = True) -> str:
+def site_url(inst_cfg: dict, *, probe: bool = True,
+             timeout: float | None = None, retry: bool = False) -> str:
     """Browser URL for an instance. Precedence:
       • https://<domain>        — proxy serves it AND registry says HTTPS
       • http://<domain>         — proxy serves this .tst domain (clean, no port)
@@ -1186,8 +1184,18 @@ def site_url(inst_cfg: dict, *, probe: bool = True) -> str:
         return f"https://{dom}"
     if dom and dom.endswith(f".{_tld(inst_cfg)}"):
         secure = _domain_is_secure(dom, inst_cfg)
-        if probe and _sandbox_proxy_active(dom, secure=secure):
-            return f"{'https' if secure else 'http'}://{dom}"
+        if probe:
+            if timeout is None and not retry:
+                active = _sandbox_proxy_active(dom, secure=secure)
+            else:
+                active = _sandbox_proxy_active(
+                    dom, secure=secure,
+                    timeout=(timeout if timeout is not None
+                             else _CADDY_EXACT_ROUTE_PROBE_TIMEOUT_SECONDS),
+                    retry=retry,
+                )
+            if active:
+                return f"{'https' if secure else 'http'}://{dom}"
         # A persisted clean URL is only a historical observation.  Once the
         # proxy is intercepted or stopped, return the reachable published port
         # instead of handing callers a stale .tst/.orb.local-style hostname.

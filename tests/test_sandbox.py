@@ -761,10 +761,13 @@ class TestProxyHealthChecks(unittest.TestCase):
             with mock.patch.object(domains_core, "PROXY_CADDYFILE", caddyfile), \
                  mock.patch.object(domains_core, "_proxy_container_running",
                                    return_value=running), \
-                 mock.patch.object(domains_core, "_caddyfile_readable_in_container",
-                                   return_value=readable), \
-                 mock.patch.object(domains_core, "resolve_instances",
-                                   return_value=cfg):
+             mock.patch.object(domains_core, "_caddyfile_readable_in_container",
+                               return_value=readable), \
+             mock.patch.object(domains_core, "_published_listener_check",
+                               return_value={"label": "published endpoints available",
+                                             "ok": True}), \
+             mock.patch.object(domains_core, "resolve_instances",
+                               return_value=cfg):
                 return domains_core.proxy_health_checks({})
 
     def test_missing_route_for_configured_domain_fails(self):

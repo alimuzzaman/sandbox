@@ -481,7 +481,7 @@ class TestApplyRuntimeDependencies(unittest.TestCase):
                         "sb ensure --project-dir <project-dir> --label recovery"):
                     _instances.apply_config({}, str(root))
 
-    def test_build_instance_block_includes_symlinked_extra_targets(self):
+    def test_build_instance_block_does_not_mount_arbitrary_nested_vendor_symlinks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             project_root = temp_path / "project"
@@ -501,7 +501,8 @@ class TestApplyRuntimeDependencies(unittest.TestCase):
                 cfg, "test_inst", str(project_root), pconf, ports, "apache"
             )
             self.assertIn("extra_mounts", block)
-            self.assertIn(str(external_target.resolve()), block["extra_mounts"])
+            self.assertIn(str(vendor_dir.resolve()), block["extra_mounts"])
+            self.assertNotIn(str(external_target.resolve()), block["extra_mounts"])
 
 
 if __name__ == "__main__":

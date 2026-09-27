@@ -387,7 +387,7 @@ class TestDeliveryService(unittest.TestCase):
         self.assertEqual(projection['error']['code'], 'missing')
         self.assertIsNone(projection['selected_operation'])
 
-    def test_retire_interrupted_operation_tolerates_missing_job(self):
+    def test_retire_interrupted_operation_requires_job_lookup_evidence(self):
         from sandbox.delivery.hosting import retire_interrupted_operation
         target = hosted_source_target()
         op = hosted_source_operation()
@@ -401,11 +401,13 @@ class TestDeliveryService(unittest.TestCase):
             validated = {'project_root': pdir, 'environment': target['environment']}
             with mock.patch('sandbox.delivery.hosting.target_for_project', return_value=target), \
                     mock.patch('sandbox.delivery.hosting.RUNTIME_DIR', self.home / 'runtime'):
-                summary = retire_interrupted_operation(validated, target['remote_name'], 'interrupted-req', job_lookup=failing_job)
+                with self.assertRaisesRegex(DeliveryError, 'required_evidence_missing'):
+                    retire_interrupted_operation(
+                        validated, target['remote_name'], 'interrupted-req',
+                        job_lookup=failing_job,
+                    )
 
-        self.assertEqual(summary['execution_state'], 'interrupted')
-
-    def test_require_previous_snapshot_allows_interrupted_predecessor_without_admission(self):
+    def test_require_previous_snapshot_rejects_interrupted_predecessor_without_admission(self):
         from sandbox.delivery.hosting import HostingAttempt, retire_interrupted_operation
         target = hosted_source_target()
         op = hosted_source_operation()
@@ -417,7 +419,10 @@ class TestDeliveryService(unittest.TestCase):
             with mock.patch('sandbox.delivery.hosting.target_for_project', return_value=target), \
                     mock.patch('sandbox.delivery.hosting.RUNTIME_DIR', self.home / 'runtime'), \
                     mock.patch('sandbox.delivery.hosting.require_delivery_capabilities'):
-                retire_interrupted_operation(validated, target['remote_name'], 'interrupted-req-2', job_lookup=lambda j: None)
+                retired = retire_interrupted_operation(
+                    validated, target['remote_name'], 'interrupted-req-2',
+                    job_lookup=lambda j: None,
+                )
 
                 attempt = HostingAttempt(
                     validated, target['remote_name'], {'provisioned': True}, kind='hosted_apply',
@@ -426,7 +431,8 @@ class TestDeliveryService(unittest.TestCase):
                     configuration_digest=CONFIG_DIGEST, machine_identity=target['machine_identity'],
                     registered_host_digest=target['registered_host_digest'], requirements=[],
                 )
-                attempt.require_previous_snapshot({'request_id': 'interrupted-req-2', 'job_id': 'job-1', 'starting_generation': 1})
+                with self.assertRaisesRegex(DeliveryError, 'binding_mismatch'):
+                    attempt.require_previous_snapshot(retired)
 
 
 if __name__ == '__main__':

@@ -92,7 +92,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
                 RemoteJobTransportError,
-                "put public helper code in project files and pass relative paths"):
+                "save it under the project directory and pass its project-relative file path"):
             transport.submit(submission)
 
     def test_synchronized_submission_fails_closed_without_runtime_authority(self):

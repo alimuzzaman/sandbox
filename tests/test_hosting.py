@@ -2715,15 +2715,15 @@ class TestHostingManifest(unittest.TestCase):
                 )
         status.assert_not_called()
 
-    def test_host_diagnose_parses_json_array_images_and_emits_initializers(self):
+    def test_host_diagnose_parses_json_array_images_without_scanning_initializers(self):
         with self._write(_manifest()) as directory:
             validated = hosting.validate_manifest(directory)
+        validated["compose"]["init_services"] = ["migrate"]
         state = {"version": 1, "hosts": {}}
         status = {
             "project": "example-site", "environment": "production", "remote": "myvps",
             "health": {"state": "ready"},
             "services": [{"service": "web", "state": "running", "health": "healthy"}],
-            "initializers": [{"service": "migrate", "status": "foreign", "reason": "created_before_marker"}],
         }
         images_json_array = json.dumps([
             {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
@@ -2731,15 +2731,14 @@ class TestHostingManifest(unittest.TestCase):
         with patch.object(hosting_cmd, "_host_runtime_status", return_value=status), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=4096), \
-             patch.object(hosting_cmd, "_remote_checked", return_value=images_json_array):
+             patch.object(hosting_cmd, "_remote_checked", return_value=images_json_array), \
+             patch.object(hosting_cmd, "_initializer_dependency_status") as initializer_status:
             result = hosting_cmd._host_runtime_diagnose(
                 validated, {"provisioned": True}, "myvps", state,
             )
+        initializer_status.assert_not_called()
         self.assertEqual(result["images"], [
             {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
-        ])
-        self.assertEqual(result["initializers"], [
-            {"service": "migrate", "status": "foreign", "reason": "created_before_marker"}
         ])
 
     @patch("sandbox.commands.hosting.info")
@@ -2837,7 +2836,8 @@ class TestHostingManifest(unittest.TestCase):
 
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertEqual(len(commands), 1)
-        self.assertIn("if test -f", commands[0])
+        self.assertIn("if [ -f", commands[0])
+        self.assertIn("&& [ -r", commands[0])
         self.assertIn("then tail -n 20", commands[0])
         data = json.loads(output_buf.getvalue())
         self.assertTrue(data["ok"])

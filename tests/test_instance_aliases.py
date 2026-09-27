@@ -224,7 +224,7 @@ class TestAliasInstanceBlock(unittest.TestCase):
             previous={"domain": "demo.tst", "tld": "tst"})
         self.assertEqual(block["aliases"], ["cdn.tst"])
 
-    def test_vendor_symlink_outside_compose_mounts_emits_warning(self):
+    def test_declared_vendor_symlink_outside_compose_mounts_is_mounted(self):
         import sandbox.core._instances as instances
 
         with tempfile.TemporaryDirectory() as directory:
@@ -248,9 +248,11 @@ class TestAliasInstanceBlock(unittest.TestCase):
                     {"plugins": [str(plugin)]}, dict(self.PORTS), "nginx",
                 )
 
-            self.assertEqual(block["extra_mounts"], [str(plugin.resolve())])
-            self.assertIn("outside the mounts", diagnostic.getvalue())
-            self.assertIn(str(vendor_target.resolve()), diagnostic.getvalue())
+            self.assertEqual(
+                block["extra_mounts"],
+                [str(plugin.resolve()), str(vendor_target.resolve())],
+            )
+            self.assertEqual(diagnostic.getvalue(), "")
 
             (plugin / "vendor").unlink()
             internal_target = plugin / "vendor-copy"

@@ -951,15 +951,21 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
                          f"        {auth['username']} {basic_auth_hash}\n"
                          "    }\n")
     proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
+    # Cloudflare supplies this header only when it is the immediate peer.
+    # Direct-origin callers can set it themselves, so remove it before every
+    # served route (including Basic Auth bypass routes) reaches the app.
+    untrusted_peer = ("    @sandbox_untrusted_cloudflare_peer not remote_ip "
+                      + " ".join(_CLOUDFLARE_PROXY_CIDRS) + "\n"
+                      "    request_header @sandbox_untrusted_cloudflare_peer -CF-Connecting-IP\n")
     if robots:
         # Everything but the site-level `tls` moves inside a catch-all handle,
         # so the robots handler and the rest are mutually exclusive routes
         # rather than two candidates for the same request.
         body = "".join(f"    {line}\n" if line else "\n"
                        for line in (basic + proxy).splitlines())
-        blocks = [f"{', '.join(served)} {{\n{tls}{robots}    handle {{\n{body}    }}\n}}\n"]
+        blocks = [f"{', '.join(served)} {{\n{tls}{untrusted_peer}{robots}    handle {{\n{body}    }}\n}}\n"]
     else:
-        blocks = [f"{', '.join(served)} {{\n{basic}{tls}{proxy}}}\n"]
+        blocks = [f"{', '.join(served)} {{\n{untrusted_peer}{basic}{tls}{proxy}}}\n"]
     for route in validated["routes"]:
         if route["mode"] == "redirect":
             blocks.append(f"{route['hostname']} {{\n    redir {route['target']}{{uri}} 308\n}}\n")

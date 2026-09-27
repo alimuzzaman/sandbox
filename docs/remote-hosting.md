@@ -827,7 +827,10 @@ fail rather than silently omit a declared gate.
 client bypasses Basic Auth only when the request arrives through a Cloudflare proxy
 and its `CF-Connecting-IP` header exactly matches a declared address. Direct requests
 cannot spoof this bypass because Caddy also verifies the proxy source address against
-Cloudflare's published ranges.
+Cloudflare's published ranges. On served routes, Caddy removes `CF-Connecting-IP`
+from requests whose immediate peer is outside those ranges before forwarding to the
+application. Applications may use that header for client identity only on a
+Cloudflare-origin request; direct-origin requests reach them without it.
 
 `bypass_paths` is optional and allows unauthenticated `GET` requests to exact,
 non-root paths. It is intended for public discovery or health endpoints while the

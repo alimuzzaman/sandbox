@@ -625,6 +625,26 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("redir https://xn--94b2eraib0c0bd9i.xn--54b7fta0cc{uri} 308", rendered)
         self.assertIn("tls /cert.pem /key.pem", rendered)
 
+    def test_served_routes_remove_cloudflare_client_header_from_untrusted_peers(self):
+        for robots in ("allow", "deny"):
+            with self.subTest(robots=robots):
+                manifest = _manifest().replace(
+                    "    cloudflare:\n", f"    robots: {robots}\n    cloudflare:\n")
+                with self._write(manifest) as directory:
+                    result = hosting.validate_manifest(directory)
+                rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem")
+                served, separator, redirect = rendered.partition("asb.bd {")
+                self.assertTrue(separator)
+                self.assertIn(
+                    "@sandbox_untrusted_cloudflare_peer not remote_ip 173.245.48.0/20",
+                    served)
+                self.assertIn(
+                    "request_header @sandbox_untrusted_cloudflare_peer -CF-Connecting-IP",
+                    served)
+                self.assertLess(served.index("request_header @sandbox_untrusted_cloudflare_peer"),
+                                served.index("reverse_proxy 127.0.0.1:18001"))
+                self.assertNotIn("request_header", redirect)
+
     def test_normalizes_an_idn_redirect_target_before_rendering_or_planning(self):
         aliases = "        - hostname: asb.bd\n          mode: redirect\n          target: https://আমারসোনার.বাংলা"
         with self._write(_manifest(aliases)) as directory:

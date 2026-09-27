@@ -22,6 +22,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sandbox.core import (
     CONFIG_LOCAL, ROOT, RUNTIME_DIR, _cert_paths, _cleanup_herd_route, _core, _herd,
+    _proxy_container_running,
     _herd_tests_db, _hosts_edit, _local_yaml, _provision_test_harness,
     _valet_proxy_active, _write_local_yaml, active_project_file,
     collect_instance_rows, compose, compose_file, die, ensure_instance, ensure_pyyaml,
@@ -868,6 +869,19 @@ def _cleanup_instance_routes(cfg, owner) -> None:
         info("removed owned scoped resolver bindings")
 
 
+def _refresh_caddy_routes_after_instance_delete() -> None:
+    """Rebuild generated routes from the post-delete registry state."""
+    try:
+        regen_caddyfile(load_config())
+        proxy_running = _proxy_container_running()
+        if proxy_running and not reload_proxy():
+            info("instance was deleted, but Sandbox Caddy did not apply the "
+                 "updated routes; run `./sb domains up` to retry")
+    except (OSError, RuntimeError, TypeError, ValueError):
+        info("instance was deleted, but Sandbox Caddy routes could not be "
+             "refreshed; run `./sb domains up` to retry")
+
+
 def _cleanup_native_owner(cfg, owner) -> bool:
     """Retain registry identity when conservative native cleanup is incomplete.
 
@@ -960,6 +974,7 @@ def cmd_instance(cfg, args) -> None:
             return
         _core().registry_remove(owner["root"], label=owner.get("label"))
         info(f"deregistered '{name}' after complete native cleanup")
+        _refresh_caddy_routes_after_instance_delete()
         ok(f"Native instance '{name}' deleted.")
         return
 
@@ -970,6 +985,7 @@ def cmd_instance(cfg, args) -> None:
         ))
         if isinstance(result, OperationError):
             die(result.message)
+        _refresh_caddy_routes_after_instance_delete()
         ok(f"Generic instance '{name}' deleted without removing project volumes.")
         return
 
@@ -1057,12 +1073,10 @@ def cmd_instance(cfg, args) -> None:
         sc.registry_remove(owner["root"], label=owner.get("label"))
         info(f"deregistered '{name}' from the instance registry")
 
-    # The receipt-owned ingress/resolver state was reconciled before identity
-    # deletion.  Preserve any unreceipted aggregate proxy, Valet, hosts, cert,
-    # or DNS artifact; compare-before-remove cannot attribute it safely.
-    dom = instances.get(name, {}).get("domain")
-    if dom:
-        info(f"preserved unreceipted legacy domain artifacts for {dom}")
+    # Caddy's aggregate config is derived from the registry rather than an
+    # instance-owned file receipt. Rebuild it only after identity removal, and
+    # hot-reload only when the shared proxy is already running.
+    _refresh_caddy_routes_after_instance_delete()
 
     ok(f"Instance '{name}' deleted.")
 

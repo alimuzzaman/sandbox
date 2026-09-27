@@ -75,6 +75,45 @@ class _IsolatedInstanceTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
 
+class TestAutoHealWpUrl(unittest.TestCase):
+    def test_repairs_home_when_siteurl_already_matches_and_confirms_both(self):
+        expected = "https://fixture.tst"
+        options = {
+            "home": "https://fixture.tst:8288",
+            "siteurl": expected,
+        }
+        events = []
+
+        def wpcli(args, **_kwargs):
+            operation, option = args[1], args[2]
+            events.append((operation, option))
+            if operation == "get":
+                return _Result(0, stdout=options[option] + "\n")
+            if operation == "update":
+                options[option] = args[3]
+                return _Result(0)
+            self.fail(f"unexpected WP-CLI operation: {args!r}")
+
+        with mock.patch.object(_instances, "load_config", return_value={}), \
+             mock.patch.object(_instances, "resolve_instances", return_value={
+                 "fixture": {"wordpress_port": 8288},
+             }), \
+             mock.patch.object(_instances, "wpcli", side_effect=wpcli), \
+             mock.patch.object(_instances, "_write_ssl_muplugin"), \
+             mock.patch.object(_instances, "info"):
+            healed = _instances._auto_heal_wp_url(
+                "fixture", expected_url=expected,
+            )
+
+        self.assertTrue(healed)
+        self.assertEqual(options, {"home": expected, "siteurl": expected})
+        self.assertEqual(events, [
+            ("get", "home"), ("get", "siteurl"),
+            ("update", "home"), ("update", "siteurl"),
+            ("get", "home"), ("get", "siteurl"),
+        ])
+
+
 class TestWpCoreInstallState(_IsolatedInstanceTest):
     def test_down_records_stopped_only_after_success(self):
         for fails in (False, True):
@@ -559,6 +598,7 @@ class TestReadyEnsureInstallState(_IsolatedInstanceTest):
                     "load_config": {}, "_proxy_sudoers_installed": False,
                     "_wait_http": backend, "_wait_reachable": final,
                     "_wire_project_plugins": None, "_wire_project_themes": None,
+                    "_auto_heal_wp_url": None,
                     "site_url": "https://fixture.tst",
                 }
                 with contextlib.ExitStack() as stack:

@@ -207,6 +207,11 @@ A plugin repo carries a **`sandbox.config.json`** describing its stack:
 }
 ```
 
+Declared local sources are mounted read-only. When a plugin source has an
+existing `vendor/` symlink whose target is outside the current mounts, Sandbox
+adds that target as a read-only bind so Composer autoloading works in the
+container.
+
 (An existing **`.wp-env.json`** is read as a fallback and converted on
 `sandbox init`. Full schema: [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).)
 
@@ -861,6 +866,11 @@ Remote project status is read-only. If the selected remote workspace has no
 registered Sandbox instance, the command reports that state and points to
 `./sb instances --remote NAME --json` to inspect the remote inventory; it does
 not create or register an instance.
+
+For WordPress projects with `phpExtensions`, `sb up --instance NAME` verifies
+or rebuilds missing Sandbox-managed child images before starting the stack.
+Sandbox builds those child images locally instead of expecting the registry to
+host their generated tags.
 
 Run `./sb` with no args for the full list. `doctor` runs on the local controller and
 intentionally has no `--project-dir`, `--local`, or `--remote`; run it from the project

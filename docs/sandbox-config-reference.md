@@ -626,10 +626,14 @@ runtime WordPress tree (`runtime/wp-<instance>`), including its `wp-content`
 state, uploads, and cache directories; the shared download caches remain
 writable as well.
 
-During ensure and apply, Sandbox checks local plugin sources for a `vendor/`
-symlink whose target is missing or outside the generated Compose mounts. It
-prints a warning and leaves the link unchanged. Keep Composer dependencies
-inside a mounted plugin source root so the container can load them.
+For a declared local source with a `vendor/` symlink, Sandbox resolves an
+existing readable target and adds a separate read-only bind when no declared
+source mount already contains it. This keeps Composer autoload paths visible
+inside the container. If the target is missing, cannot be resolved, or remains
+outside the generated Compose mounts, Sandbox prints a warning and leaves the
+link unchanged. On an already-ready instance, a newly required target changes
+the source mount policy; `ensure` refuses with `instance_mount_drift` without
+mutation and directs the operator to `sb apply` to reconcile it.
 
 The local runtime also sets WordPress `FS_METHOD` to `direct` and repairs the
 parent `wp-content` directory during bootstrap. This prevents wp-admin and
@@ -739,6 +743,11 @@ neither GD nor Imagick is named. Sandbox pins official WordPress web and WP-CLI
 parents by registry digest, builds content-addressed child images below
 `$SANDBOX_HOME/runtime/build/php-extensions/`, and verifies the requirement in
 web, WP-CLI, bounded-exec, and PHPUnit planes.
+When `sb up --instance NAME` resumes an existing WordPress instance with
+`phpExtensions`, it verifies or rebuilds the child images from the persisted
+plan before starting Compose. If preparation fails, the command returns
+`php_extension_image_prepare_failed` without starting the stack; any image
+already built remains available for the next retry.
 
 During `sb migrate --apply`, automatic first-run migration, or `sb home <dir>`,
 the persisted extension requirement and digest metadata move with the other
@@ -846,13 +855,14 @@ Two special cases:
   project that needs scheduled events. The older
   `config.DISABLE_WP_CRON: false` spelling remains a compatibility alias when
   `wpCron` is omitted; if both spellings are present, they must describe the
-  same effective setting. On the default Apache and Nginx/FPM Compose servers,
-  do not add the same constant with `wp config set`: Sandbox already supplies
-  it through `WORDPRESS_CONFIG_EXTRA`, and a second literal can produce
-  duplicate-constant warnings. Change `wpCron` in the project config instead.
-  OpenLiteSpeed uses the runtime-specific literal sync described below.
-  Managed-native uses the same policy for its isolated five-minute scheduler
-  and never enables both triggers.
+  same effective setting. Set `wpCron.enabled` in `sandbox.config.json` and
+  reconcile it with `./sb apply`; do not manually add `DISABLE_WP_CRON` with
+  `wp config set`, which can write a duplicate constant into generated
+  `wp-config.php`. On the default Apache and Nginx/FPM Compose servers, Sandbox
+  supplies the constant through `WORDPRESS_CONFIG_EXTRA`. OpenLiteSpeed manages
+  its required literal writes through the runtime-specific sync described
+  below. Managed-native uses the same policy for its isolated five-minute
+  scheduler and never enables both triggers.
 - On a **litespeed** instance the constants are additionally written as
   literals via `wp config set` (lsphp runs via suExec and can't read the
   container env; the OLS image doesn't regenerate `wp-config.php`, so the

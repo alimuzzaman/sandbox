@@ -24,6 +24,7 @@ class ActivationHTTPApplication:
         self.catalog, self.service, self.resume = catalog, service, resume
         self._catalog_provider = catalog_provider
         self._catalog_lock = threading.RLock()
+        self._deny_catalog = ActivationCatalog(())
         self._register_catalog(catalog)
 
     def _register_catalog(self, catalog: ActivationCatalog) -> None:
@@ -59,10 +60,15 @@ class ActivationHTTPApplication:
             # credential-bearing route authorized.  Activation requests remain
             # a generic deny below; the scheduler pins on the same condition.
             with self._catalog_lock:
-                self._register_catalog(ActivationCatalog(()))
+                if self.catalog is not self._deny_catalog:
+                    self._register_catalog(self._deny_catalog)
             return False
         with self._catalog_lock:
-            self._register_catalog(catalog)
+            # The cached provider returns the same immutable object while all
+            # source metadata is unchanged. Avoid republishing each route
+            # policy on every asset request.
+            if catalog is not self.catalog:
+                self._register_catalog(catalog)
         return True
 
     @staticmethod

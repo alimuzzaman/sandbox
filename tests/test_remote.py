@@ -2693,7 +2693,10 @@ class TestStopRemoteMcpServer(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_stop_targets_only_the_proven_service_unit(self, mock_ssh_run):
         mock_ssh_run.side_effect = [
-            _completed(stdout="enabled=enabled\nactive=active\npid=123\nlinger=yes\nownership=proven\npid_ownership=proven\nlistener=expected\nauth=ok\n"),
+            _completed(stdout=(
+                "enabled=enabled\nactive=active\npid=123\nlinger=yes\nownership=proven\n"
+                "pid_ownership=proven\nlistener=expected\nauth=ok\n"
+                "probe_state=complete\nprobe_error=none\n")),
             _completed(returncode=0),
         ]
         remote = {"ssh": "ubuntu@1.2.3.4", "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174)}
@@ -2705,13 +2708,28 @@ class TestStopRemoteMcpServer(unittest.TestCase):
 
     @patch("sandbox.core._remote.ssh_run")
     def test_stop_refuses_unproven_ownership(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(stdout="enabled=not-found\nactive=inactive\npid=0\nlinger=no\n")
+        mock_ssh_run.return_value = _completed(stdout=(
+            "enabled=not-found\nactive=inactive\npid=0\nlinger=no\n"
+            "probe_state=complete\nprobe_error=none\n"))
         with self.assertRaisesRegex(RuntimeError, "ownership_unknown"):
+            sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
+        self.assertEqual(mock_ssh_run.call_count, 1)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_stop_reports_probe_timeout_without_attempting_mutation(self, mock_ssh_run):
+        mock_ssh_run.side_effect = subprocess.TimeoutExpired("ssh", 18)
+        with self.assertRaisesRegex(RuntimeError, "remote_service_probe_timeout"):
             sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
         self.assertEqual(mock_ssh_run.call_count, 1)
 
 
 class TestRemoteMcpServiceStatus(unittest.TestCase):
+    @staticmethod
+    def _complete_probe_output(stdout):
+        if "probe_state=" in stdout:
+            return stdout
+        return f"{stdout.rstrip()}\nprobe_state=complete\nprobe_error=none\n"
+
     def test_runtime_revision_sources_ignore_appledouble_sidecars(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -2744,7 +2762,9 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_status_proves_unit_metadata_listener_and_authenticated_route(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
-            stdout="enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\npid_ownership=proven\nlistener=expected\nauth=ok\nlegacy_pidfile=present\n")
+            stdout=self._complete_probe_output(
+                "enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\n"
+                "pid_ownership=proven\nlistener=expected\nauth=ok\nlegacy_pidfile=present\n"))
         record = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
         status = sr.remote_mcp_service_status({"ssh": "ubuntu@1.2.3.4", "mcp_service": record})
         self.assertEqual(status["ownership"], "proven")
@@ -2760,16 +2780,86 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertIn("ControlGroup", command)
         self.assertIn("/proc/$pid/cgroup", command)
         self.assertIn("urllib.request", command)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 2s systemctl --user is-enabled", command)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 3s systemctl --user show", command)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 2s loginctl show-user", command)
         self.assertIn("response.status in (200,204,400,405,406)", command)
         self.assertIn("exc.code in (200,204,400,405,406)", command)
         self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)
         self.assertNotIn("bearer_token", command)
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_status_returns_typed_unavailable_on_nonzero_ssh(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            returncode=255, stderr="private remote path and credential diagnostic",
+        )
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["probe_state"], "unavailable")
+        self.assertEqual(status["probe_error"], "remote_service_probe_transport_failed")
+        self.assertEqual(status["ownership"], "unknown")
+        self.assertNotIn("private remote path", json.dumps(status))
+        self.assertNotIn("credential diagnostic", json.dumps(status))
+        self.assertNotIn("registered-target", json.dumps(status))
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_returns_typed_unavailable_on_ssh_timeout(self, mock_ssh_run):
+        mock_ssh_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["ssh", "registered-target"], timeout=18,
+            output="enabled=enabled\n",
+        )
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["probe_state"], "unavailable")
+        self.assertEqual(status["probe_error"], "remote_service_probe_timeout")
+        self.assertEqual(status["ownership"], "unknown")
+        self.assertNotIn("registered-target", json.dumps(status))
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_keeps_partial_systemd_timeout_distinct_from_missing_service(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=(
+            "enabled=unknown\nactive=unknown\npid=unknown\nlinger=yes\n"
+            "probe_state=partial\nprobe_error=systemctl_probe_timeout\n"
+            "ownership=ambiguous\nremote_revision=unavailable\n"
+        ))
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["probe_state"], "partial")
+        self.assertEqual(status["probe_error"], "systemctl_probe_timeout")
+        self.assertEqual(status["ownership"], "unknown")
+        self.assertEqual(status["runtime_revision_state"], "unavailable")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_rejects_malformed_probe_state_and_error_output(self, mock_ssh_run):
+        remote = {
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        }
+        mock_ssh_run.return_value = _completed(stdout="enabled=enabled\n")
+        missing_state = sr.remote_mcp_service_status(remote)
+        self.assertEqual(missing_state["probe_state"], "unavailable")
+        self.assertEqual(missing_state["probe_error"], "remote_service_probe_output_invalid")
+
+        mock_ssh_run.return_value = _completed(stdout=(
+            "probe_state=partial\nprobe_error=token=private-value\n"
+        ))
+        invalid_error = sr.remote_mcp_service_status(remote)
+        self.assertEqual(invalid_error["probe_state"], "partial")
+        self.assertEqual(invalid_error["probe_error"], "remote_service_probe_unavailable")
+        self.assertNotIn("private-value", json.dumps(invalid_error))
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_status_reports_matching_local_and_installed_runtime_revisions(self, mock_ssh_run):
         local_revision = sr._remote_mcp_runtime_revision()
         mock_ssh_run.return_value = _completed(
-            stdout=f"enabled=enabled\nactive=active\nremote_revision={local_revision}\n"
+            stdout=self._complete_probe_output(
+                f"enabled=enabled\nactive=active\nremote_revision={local_revision}\n")
         )
         status = sr.remote_mcp_service_status({
             "ssh": "registered-target",
@@ -2806,7 +2896,8 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
             )
             self.assertEqual(probe.stdout.strip(), f"remote_revision={local_revision}")
             mock_ssh_run.return_value = _completed(
-                stdout=f"enabled=enabled\nactive=active\n{probe.stdout}"
+                stdout=self._complete_probe_output(
+                    f"enabled=enabled\nactive=active\n{probe.stdout}")
             )
             status = sr.remote_mcp_service_status(remote)
         self.assertEqual(status["installed_runtime_revision"], local_revision)
@@ -2817,7 +2908,8 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         local_revision = "a" * 24
         installed_revision = "b" * 24
         mock_ssh_run.return_value = _completed(
-            stdout=f"enabled=enabled\nactive=inactive\nownership=proven\nremote_revision={installed_revision}\n"
+            stdout=self._complete_probe_output(
+                f"enabled=enabled\nactive=inactive\nownership=proven\nremote_revision={installed_revision}\n")
         )
         with patch.object(sr, "_remote_mcp_runtime_revision", return_value=local_revision):
             record = sr.remote_mcp_service_record("127.0.0.1", 9174)
@@ -2830,12 +2922,14 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_status_distinguishes_unavailable_and_malformed_runtime_revision_evidence(self, mock_ssh_run):
         remote = {"ssh": "registered-target", "mcp_service": {}}
-        mock_ssh_run.return_value = _completed(stdout="enabled=not-found\nremote_revision=unavailable\n")
+        mock_ssh_run.return_value = _completed(stdout=self._complete_probe_output(
+            "enabled=not-found\nremote_revision=unavailable\n"))
         unavailable = sr.remote_mcp_service_status(remote)
         self.assertIsNone(unavailable["installed_runtime_revision"])
         self.assertEqual(unavailable["runtime_revision_state"], "unavailable")
 
-        mock_ssh_run.return_value = _completed(stdout="enabled=enabled\nremote_revision=unknown\n")
+        mock_ssh_run.return_value = _completed(stdout=self._complete_probe_output(
+            "enabled=enabled\nremote_revision=unknown\n"))
         unknown = sr.remote_mcp_service_status(remote)
         self.assertIsNone(unknown["installed_runtime_revision"])
         self.assertEqual(unknown["runtime_revision_state"], "unknown")
@@ -2843,7 +2937,8 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_status_rejects_non_hash_remote_revision_values(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
-            stdout="enabled=enabled\nremote_revision=not-a-revision\n"
+            stdout=self._complete_probe_output(
+                "enabled=enabled\nremote_revision=not-a-revision\n")
         )
         status = sr.remote_mcp_service_status({"ssh": "registered-target", "mcp_service": {}})
         self.assertIsNone(status["installed_runtime_revision"])
@@ -3066,8 +3161,78 @@ class TestRemoteDomainInventory(unittest.TestCase):
         self.assertTrue(all(item["ok"] for item in checks))
         self.assertIn("MCP reboot recovery", [item["label"] for item in checks])
 
+    @patch("sandbox.core._remote.remote_mcp_service_status")
+    @patch("sandbox.core._remote.check_reachable", return_value=True)
+    @patch("urllib.request.build_opener")
+    def test_doctor_reports_typed_incomplete_service_probe(self, opener, reachable, status):
+        class Response:
+            status = 405
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+        opener.return_value.open.return_value = Response()
+        status.return_value = {
+            "probe_state": "partial", "probe_error": "systemctl_probe_timeout",
+            "ownership": "unknown",
+        }
+        checks = sr.remote_doctor_checks({
+            "ssh": "ubuntu@example.test", "provisioned": True,
+            "control_transport": "https", "control_url": "https://control.example.test",
+            "bearer_token": "a" * 64,
+            "mcp_service": sr.remote_mcp_service_record(
+                "127.0.0.1", 9174, "https://control.example.test",
+            ),
+        })
+        service_check = next(item for item in checks
+                             if item["label"] == "MCP service status")
+        self.assertFalse(service_check["ok"])
+        self.assertIn("systemctl_probe_timeout", service_check["hint"])
+        self.assertNotIn("MCP service ownership", [item["label"] for item in checks])
+
 
 class TestRemoteServiceCommand(unittest.TestCase):
+    def test_status_transport_failure_is_degraded_and_nonzero(self):
+        args = types.SimpleNamespace(name="status", ssh_url="myvps", confirm=False)
+        status = {
+            "probe_state": "unavailable",
+            "probe_error": "remote_service_probe_transport_failed",
+            "ownership": "unknown",
+        }
+        with patch.object(remote_cmd.sr, "get_remote", return_value={"ssh": "registered-target"}), \
+             patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=status), \
+             redirect_stdout(StringIO()) as output, self.assertRaises(SystemExit) as raised:
+            remote_cmd._cmd_service(args, as_json=True)
+        self.assertEqual(raised.exception.code, 1)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "degraded")
+        self.assertEqual(payload["error"]["code"], "remote_service_probe_transport_failed")
+
+    def test_confirmed_migration_refuses_incomplete_probe_before_upload(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="https", control_url="https://sandbox.example.test",
+                    mcp_port=9174, bearer_token="a" * 64,
+                )
+                args = types.SimpleNamespace(
+                    name="migrate", ssh_url="myvps", confirm=True, upload_timeout=300,
+                )
+                incomplete = {
+                    "probe_state": "partial", "probe_error": "systemctl_probe_timeout",
+                    "ownership": "unknown",
+                }
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=incomplete), \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
+                     redirect_stdout(StringIO()) as output:
+                    remote_cmd._cmd_service(args, as_json=True)
+                upload.assert_not_called()
+                migrate.assert_not_called()
+                payload = json.loads(output.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], "systemctl_probe_timeout")
+
     def test_invalid_migration_upload_timeout_refuses_before_upload_or_migration(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
@@ -3244,13 +3409,40 @@ class TestRemoteServiceCommand(unittest.TestCase):
                     name="myvps", confirm=True, upload_timeout=300,
                 )
                 error = StringIO()
-                with patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status",
+                                  return_value={"probe_state": "complete"}), \
+                     patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
                      patch.object(remote_cmd, "_upload_runtime_source",
                                   side_effect=remote_cmd.RemoteRuntimeSourceIndeterminate(
                                       "publication state requires inspection")), \
                      redirect_stderr(error), self.assertRaises(SystemExit):
                     remote_cmd._cmd_up(args, as_json=True)
                 self.assertIn("remote_runtime_source_indeterminate", error.getvalue())
+
+    def test_confirmed_up_refuses_incomplete_probe_before_upload(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="https", control_host="sandbox.example.test",
+                    control_url="https://sandbox.example.test", mcp_port=9174,
+                    bearer_token="a" * 64,
+                )
+                args = types.SimpleNamespace(name="myvps", confirm=True, upload_timeout=300)
+                error = StringIO()
+                incomplete = {
+                    "probe_state": "partial", "probe_error": "systemctl_probe_timeout",
+                    "ownership": "unknown",
+                }
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status",
+                                  return_value=incomplete), \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
+                     redirect_stderr(error), self.assertRaises(SystemExit):
+                    remote_cmd._cmd_up(args, as_json=True)
+                upload.assert_not_called()
+                migrate.assert_not_called()
+                self.assertIn("systemctl_probe_timeout", error.getvalue())
 
     def test_confirmed_up_uses_the_verified_migration_path(self):
         with tempfile.TemporaryDirectory() as d:

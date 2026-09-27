@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hmac
+from pathlib import Path
 import re
+import threading
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
 from sandbox.config.instance_lifecycle import normalize_instance_lifecycle
 
@@ -61,6 +63,71 @@ class ActivationCatalog:
     def issues(self) -> tuple[str, ...]:
         """Non-secret, route-local metadata issues quarantined from the catalog."""
         return self._issues
+
+
+class CachedActivationCatalogProvider:
+    """Refresh a route catalog only when one of its source files changes.
+
+    Request authorization calls this provider for every activation request, so
+    the fast path checks only source metadata. Any failed or unstable refresh
+    invalidates the cache so old credentials cannot remain authorized.
+    """
+
+    def __init__(self, sources: tuple[Path, ...], build: Callable[[], ActivationCatalog]) -> None:
+        self._sources = tuple(Path(source) for source in sources)
+        self._build = build
+        self._lock = threading.RLock()
+        self._signature: tuple[tuple[object, ...], ...] | None = None
+        self._catalog: ActivationCatalog | None = None
+
+    @staticmethod
+    def _stat_signature(path: Path, *, follow_symlinks: bool) -> tuple[object, ...]:
+        try:
+            stat = path.stat() if follow_symlinks else path.lstat()
+        except FileNotFoundError:
+            return (str(path), "missing")
+        return (str(path), stat.st_dev, stat.st_ino, stat.st_mode, stat.st_size,
+                stat.st_mtime_ns, stat.st_ctime_ns)
+
+    def _source_signature(self) -> tuple[tuple[object, ...], ...]:
+        signature: list[tuple[object, ...]] = []
+        for source in self._sources:
+            # Track both a symlink and its target to notice atomic path swaps
+            # as well as edits to the file being read.
+            signature.append(self._stat_signature(source, follow_symlinks=False))
+            signature.append(self._stat_signature(source, follow_symlinks=True))
+        return tuple(signature)
+
+    def __call__(self) -> ActivationCatalog:
+        with self._lock:
+            for _attempt in range(2):
+                before = self._source_signature()
+                if self._catalog is not None and before == self._signature:
+                    return self._catalog
+
+                # Invalidate before rebuilding so parse/validation failures
+                # cannot leave a previous credential-bearing catalog active.
+                self._catalog = None
+                self._signature = None
+                try:
+                    catalog = self._build()
+                    if not isinstance(catalog, ActivationCatalog):
+                        raise ActivationCatalogError(
+                            "activation catalog builder returned an invalid catalog")
+                    after = self._source_signature()
+                except Exception:
+                    self._catalog = None
+                    self._signature = None
+                    raise
+
+                if before == after:
+                    self._catalog = catalog
+                    self._signature = after
+                    return catalog
+
+            self._catalog = None
+            self._signature = None
+            raise ActivationCatalogError("activation catalog sources changed during refresh")
 
 
 def build_catalog(records: Mapping[str, Mapping[str, object]],
@@ -122,4 +189,5 @@ def build_catalog(records: Mapping[str, Mapping[str, object]],
     return ActivationCatalog(tuple(routes), tuple(issues))
 
 
-__all__ = ["ActivationCatalog", "ActivationCatalogError", "ActivationRoute", "build_catalog"]
+__all__ = ["ActivationCatalog", "ActivationCatalogError", "ActivationRoute",
+           "CachedActivationCatalogProvider", "build_catalog"]

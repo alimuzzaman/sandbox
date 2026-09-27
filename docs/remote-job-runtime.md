@@ -44,14 +44,14 @@ development, and isolated labels for matrix cells:
 Resource samples are a separate bounded control-plane document retrieved with
 `job-metrics`; use `job-status` for the live health summary.
 
-### Submit helper source as a project file
+### Source files in remote jobs
 
-Remote job arguments are persisted and credential-like values are refused before
-source deployment. Keep real credentials out of both arguments and project files.
-For public helper code and synthetic fixtures, put the files under the project
-directory and pass their project-relative paths instead of embedding source in
-`python -c` or another argument. The exact staged working tree is bound to the
-job by its source commit and dirty digest.
+Remote `job-start` stages the exact project working tree, records its source
+commit and dirty-tree digest, and runs the command in the selected workspace.
+Keep public helper code and synthetic fixtures inside the project tree, then
+pass their project-relative paths and use `--cwd-relative` when a helper lives
+below the project root. Credential-like command values are refused. Keep real
+credentials out of both argv and every transferred project file.
 
 ```sh
 ./sb job-start --remote NAME --project-dir . --workspace pg-reopen-canary \
@@ -61,10 +61,8 @@ job by its source commit and dirty digest.
 ./sb job-output <job-id> --remote NAME --stream combined --max-bytes 65536
 ```
 
-The helper and fixture must be present in the submitted project tree. A file
-path in `argv` does not upload an external file; Sandbox stages and fingerprints
-the project working tree as a whole.
-
+The helper and fixture must already be in the submitted project tree; a path in
+argv does not upload an external file.
 ## Ordinary hosted apply admission
 
 Process observation uses a real boot-session identity. An active record written

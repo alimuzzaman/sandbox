@@ -809,6 +809,38 @@ def _wp_install_state_refusal() -> dict:
     }
 
 
+def _external_vendor_mount_targets(plugin_sources: list[str],
+                                  mounted_sources: list[str]) -> list[str]:
+    """Resolve declared source ``vendor`` links not covered by existing binds."""
+    mounted = []
+    for raw in mounted_sources:
+        try:
+            mounted.append(Path(raw).resolve())
+        except (OSError, RuntimeError):
+            continue
+
+    targets = []
+    for raw in plugin_sources:
+        try:
+            source = Path(raw).resolve()
+            vendor = source / "vendor"
+            if not vendor.is_symlink():
+                continue
+            target = vendor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise OSError(
+                "local plugin vendor symlink target is unavailable"
+            ) from None
+        if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
+            raise OSError(
+                "local plugin vendor symlink target is not a readable directory"
+            )
+        if any(target.is_relative_to(root) for root in mounted):
+            continue
+        targets.append(str(target))
+    return list(dict.fromkeys(targets))
+
+
 def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
                           ports: dict, server: str) -> dict:
     """Construct the sandbox.local.yml `instances.<name>` block from a project's
@@ -939,6 +971,7 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     root_p = Path(root)
     _extra: list[str] = []
     _vendor_sources: list[Path] = []
+    _plugin_sources: list[str] = []
     for _kind, _entries in (
             ("plugin", list(pconf.get("plugins") or [])),
             ("theme", list(pconf.get("themes") or []))):
@@ -954,24 +987,23 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
                 _src = _src.resolve()
             else:
                 continue
-            if _kind == "plugin" and _src.exists():
-                _vendor_sources.append(_src.resolve())
+            if _src.exists():
+                _plugin_sources.append(str(_src.resolve()))
+                if _kind == "plugin":
+                    _vendor_sources.append(_src.resolve())
             if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
                 _extra.append(str(_src))
-    for _src_raw in (pconf.get("mappings") or {}).values():
-        _src = Path(str(_src_raw)).expanduser()
-        if not _src.is_absolute():
-            _src = (root_p / _src).resolve()
-        _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
-    for _src_raw in (pconf.get("mappings_inactive") or {}).values():
-        _src = Path(str(_src_raw)).expanduser()
-        if not _src.is_absolute():
-            _src = (root_p / _src).resolve()
-        _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+    for _source_map in (pconf.get("mappings") or {},
+                        pconf.get("mappings_inactive") or {}):
+        for _src_raw in _source_map.values():
+            _src = Path(str(_src_raw)).expanduser()
+            if not _src.is_absolute():
+                _src = (root_p / _src).resolve()
+            _src = _src.resolve()
+            if _src.exists():
+                _plugin_sources.append(str(_src))
+                if not _src.is_relative_to(plugins_home_p):
+                    _extra.append(str(_src))
     # Spec 010: canonical plugin map — every LOCAL-path source (active, inactive,
     # or on-demand) needs a bind-mount so the symlink resolves / the on-demand
     # mu-plugin can read+zip it inside the container.
@@ -984,9 +1016,13 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
             _src = (root_p / _src).resolve()
         _src = _src.resolve()
         if _src.exists():
+            _plugin_sources.append(str(_src))
             _vendor_sources.append(_src)
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+            if not _src.is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
+    _extra.extend(_external_vendor_mount_targets(
+        _plugin_sources, [str(plugins_home_p), *_extra],
+    ))
     extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
     compose_mount_roots = [plugins_home_p, *(Path(path).resolve() for path in extra_mounts)]
     for _plugin_src in dict.fromkeys(_vendor_sources):
@@ -1052,6 +1088,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             raise OSError("plugins home is unavailable")
         root_path = Path(root)
         sources = [str(plugins_home)]
+        plugin_sources: list[str] = []
 
         def add_if_external(value: object) -> None:
             source = Path(str(value)).expanduser()
@@ -1064,6 +1101,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             # instance look safe against a weakened desired set.
             if not source.exists() or not os.access(source, os.R_OK):
                 raise OSError("declared local source is unavailable")
+            plugin_sources.append(str(source))
             if not source.is_relative_to(plugins_home):
                 sources.append(str(source))
 
@@ -1082,6 +1120,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             source = entry.get("source") or {}
             if source.get("kind") == "path" and source.get("value"):
                 add_if_external(source["value"])
+        sources.extend(_external_vendor_mount_targets(plugin_sources, sources))
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return None
     return list(dict.fromkeys(sources))
@@ -1177,19 +1216,43 @@ def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
     if not expected.startswith(("http://", "https://")):
         return False
 
-    current = wpcli(["option", "get", "siteurl"], instance=name,
-                    check=False, capture=True)
-    if (getattr(current, "stdout", "") or "").strip() == expected:
+    current = {}
+    for option in ("home", "siteurl"):
+        result = wpcli(["option", "get", option], instance=name,
+                       check=False, capture=True, timeout=15)
+        current[option] = (
+            (getattr(result, "stdout", "") or "").strip()
+            if getattr(result, "returncode", 1) in (0, None) else None
+        )
+    if all(value == expected for value in current.values()):
         return False
 
     if expected.startswith("https://"):
         _write_ssl_muplugin(name)
     else:
         _write_loopback_muplugin(name)
-    wpcli(["option", "update", "siteurl", expected], instance=name,
-          check=False)
-    wpcli(["option", "update", "home", expected], instance=name,
-          check=False)
+
+    failed = []
+    for option in ("home", "siteurl"):
+        result = wpcli(["option", "update", option, expected], instance=name,
+                       check=False, capture=True, timeout=15)
+        if getattr(result, "returncode", 1) not in (0, None):
+            failed.append(option)
+
+    if not failed:
+        for option in ("home", "siteurl"):
+            result = wpcli(["option", "get", option], instance=name,
+                           check=False, capture=True, timeout=15)
+            value = (getattr(result, "stdout", "") or "").strip()
+            if (getattr(result, "returncode", 1) not in (0, None)
+                    or value != expected):
+                failed.append(option)
+
+    if failed:
+        info(f"{name}: could not confirm WP home/siteurl URL repair; "
+             "the advertised-route check will determine readiness")
+        return False
+
     info(f"{name}: auto-healed WP url → {expected}")
     return True
 
@@ -1614,6 +1677,10 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
 
             final_route = resolve_instances(cfg)[name]
             _base_url = site_url(final_route)
+            # Plugin wiring and provider state can change the effective URL
+            # after the earlier install-time pass. Reconcile both WordPress
+            # URL options to the exact route we are about to accept.
+            _auto_heal_wp_url(name, expected_url=_base_url)
             if not _wait_reachable(final_route, require_application_success=True,
                                    canonical_url=_base_url):
                 raise sc.ConfigError(

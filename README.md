@@ -489,7 +489,11 @@ Inspect the retained job with `job-status`/`job-output`, then use
 `./sb delivery inspect` (or MCP `delivery_inspect`) for the joined outcome.
 The default query is recorded-only; `--observe` adds bounded current
 read-only evidence. `latest_attempt`, `latest_retained_complete_success`, and
-`current_observation` remain separate. See
+`current_observation` remain separate. For historical results, use the exact
+project root and request ID from the original job; sibling checkouts are
+different query scopes. `host status` and `host logs` show current state and a
+bounded log tail. If an operation selector misses while history has the
+attempt, use its retained request ID. See
 [`docs/delivery-outcomes.md`](docs/delivery-outcomes.md) for the closed route
 contract, exact incarnation/URL receipt rules, permanent guard limits, and
 validation status.

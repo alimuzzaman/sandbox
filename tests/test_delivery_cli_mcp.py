@@ -107,6 +107,17 @@ class TestDeliveryCliMcp(unittest.TestCase):
         self.assertIn(projection['history']['completeness'], {'missing', 'partial'})
         self.assertEqual(self.inventory(), before)
 
+    def test_missing_operation_selector_shows_the_retained_request_id_to_humans(self):
+        before = self.inventory()
+        process = self.run_child([str(ROOT / 'sb'), 'delivery', 'inspect',
+            '--project-dir', str(self.project), '--remote', 'fixture-remote',
+            '--label', 'default', '--operation-id', str(uuid.uuid4())])
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn('request fixture-b', process.stdout)
+        self.assertIn('Verify the original job\'s exact project_root, environment, remote, and request_id', process.stdout)
+        self.assertEqual(self.inventory(), before)
+
     def test_cli_cursor_continues_same_history_snapshot(self):
         first_process = self.cli('--limit', '1')
         self.assertEqual(first_process.returncode, 0, first_process.stderr)

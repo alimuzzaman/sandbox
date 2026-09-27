@@ -112,6 +112,8 @@ def attest_source_mounts(instance: str, server: str,
             return {"ok": False, "code": "instance_mount_state_unavailable"}
         identifiers = [item.strip() for item in (getattr(listed, "stdout", "") or "").splitlines()
                        if item.strip()]
+        if len(identifiers) == 0:
+            return {"ok": False, "code": "instance_runtime_stopped"}
         if len(identifiers) != 1:
             return {"ok": False, "code": "instance_mount_state_unavailable"}
         try:

@@ -1148,8 +1148,6 @@ class LocalResourceAdapter:
             image_owner = self._compose_owner(
                 (image.get("Config") or {}).get("Labels"),
             )
-            if not image_owner:
-                continue
             workspace_owner = self._workspace_owner_for(
                 workspace_ownership, image_owner, protected_projects,
             )
@@ -1158,30 +1156,43 @@ class LocalResourceAdapter:
             if isinstance(size, bool) or not isinstance(size, int) or size < 0:
                 size = None
             display = next(iter(image.get("RepoTags") or ()), locator)
-            classification = (
-                "active" if used or workspace_owner.active else
-                "retained" if workspace_owner.protected else
-                "unverified" if _is_unknown_workspace_owner(workspace_owner) else
-                "disposable_cache"
-            )
-            resources.append(ResourceObservation(
-                resource_id=_resource_id("image", locator),
-                kind="image", locator=locator, display_name=str(display),
-                owner_kind=workspace_owner.owner_kind,
-                owner_id=workspace_owner.owner_id,
-                classification=classification,
-                size_state="measured" if size is not None else "unavailable",
-                size_bytes=size,
-                reclaimable_bytes=(
-                    size or 0 if classification == "disposable_cache" else 0
-                ),
-                references=(
+            if not image_owner:
+                owner_kind = "unmanaged"
+                owner_id = None
+                classification = "active" if used else "unmanaged"
+                evidence = ("container_image",) if used else ("unmanaged_image",)
+                references = ("container_image",) if used else ()
+                reclaimable_bytes = 0
+            else:
+                owner_kind = workspace_owner.owner_kind
+                owner_id = workspace_owner.owner_id
+                classification = (
+                    "active" if used or workspace_owner.active else
+                    "retained" if workspace_owner.protected else
+                    "unverified" if _is_unknown_workspace_owner(workspace_owner) else
+                    "disposable_cache"
+                )
+                evidence = workspace_owner.evidence
+                references = (
                     (("container_image",) if used else ())
                     + (("workspace_active_reference",) if workspace_owner.active else ())
                     + workspace_owner.references if used or workspace_owner.active else
                     workspace_owner.references if workspace_owner.protected else ()
-                ),
-                evidence=workspace_owner.evidence,
+                )
+                reclaimable_bytes = (
+                    size or 0 if classification == "disposable_cache" else 0
+                )
+            resources.append(ResourceObservation(
+                resource_id=_resource_id("image", locator),
+                kind="image", locator=locator, display_name=str(display),
+                owner_kind=owner_kind,
+                owner_id=owner_id,
+                classification=classification,
+                size_state="measured" if size is not None else "unavailable",
+                size_bytes=size,
+                reclaimable_bytes=reclaimable_bytes,
+                references=references,
+                evidence=evidence,
             ))
         for record in inventory.get("build_cache", ()):
             locator = record.get("ID")

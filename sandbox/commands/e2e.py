@@ -339,7 +339,8 @@ def cmd_e2e(cfg, args) -> None:
         target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
             project_dir=root, local=bool(getattr(args, "local", False)),
             remote=getattr(args, "remote", None), workspace=getattr(args, "workspace", None),
-            required_capability="job.exec" if getattr(args, "remote", None) else None,
+            required_capability="job.exec" if not getattr(args, "local", False) else None,
+            allow_inferred_remote=False,
         ))
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")

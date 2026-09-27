@@ -624,7 +624,97 @@ class TestProjectConfig(unittest.TestCase):
             self.assertEqual(result["label"], "preview")
             self.assertEqual(result["health_path"], "/preview-health")
 
+    def test_generic_compose_preserves_and_normalizes_delivery_contract(self):
+        from sandbox.config.facade import resolve_project_config
+        from sandbox.config.delivery import DeliveryRouteError
+        from sandbox.delivery.routes import prepare_route_verification
 
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            (root / "sandbox.config.json").write_text(json.dumps({
+                "kind": "compose",
+                "compose": {
+                    "file": "compose.yaml",
+                    "service": "web",
+                    "internal_port": 80,
+                    "health_path": "/",
+                },
+                "delivery": {
+                    "schemaVersion": 1,
+                    "routes": {
+                        "checks": [
+                            {
+                                "path": "/health",
+                                "statuses": [200],
+                                "markers": [
+                                    {
+                                        "kind": "header_equals",
+                                        "field": "X-Application",
+                                        "expected": "demo",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+            }))
+
+            result = resolve_project_config(root, legacy_loader=mock.Mock())
+            self.assertEqual(result["kind"], "compose")
+            self.assertIn("delivery", result)
+            self.assertEqual(result["delivery"]["schemaVersion"], 1)
+            self.assertEqual(result["delivery"]["routes"]["checks"][0]["path"], "/health")
+            self.assertEqual(result["delivery"]["routes"]["deadlineSeconds"], 120)
+
+            # Verification that deploy/preview can prepare route verification with the resolved delivery contract
+            prepared = prepare_route_verification(
+                result["delivery"],
+                runtime_kind=result["kind"],
+                primary_hostname="demo.asb.bd",
+            )
+            self.assertEqual(prepared["hostnames"], ["demo.asb.bd"])
+            self.assertEqual(prepared["delivery"]["routes"]["checks"][0]["path"], "/health")
+
+    def test_generic_compose_omits_delivery_when_not_declared(self):
+        from sandbox.config.facade import resolve_project_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            (root / "sandbox.config.json").write_text(json.dumps({
+                "kind": "compose",
+                "compose": {
+                    "file": "compose.yaml",
+                    "service": "web",
+                    "internal_port": 80,
+                    "health_path": "/",
+                },
+            }))
+
+            result = resolve_project_config(root, legacy_loader=mock.Mock())
+            self.assertNotIn("delivery", result)
+
+    def test_generic_compose_rejects_invalid_delivery_contract(self):
+        from sandbox.config.facade import resolve_project_config
+        from sandbox.config.delivery import DeliveryRouteError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            (root / "sandbox.config.json").write_text(json.dumps({
+                "kind": "compose",
+                "compose": {
+                    "file": "compose.yaml",
+                    "service": "web",
+                    "internal_port": 80,
+                    "health_path": "/",
+                },
+                "delivery": {"schemaVersion": 999},
+            }))
+
+            with self.assertRaises(DeliveryRouteError):
+                resolve_project_config(root, legacy_loader=mock.Mock())
 
 
 if __name__ == "__main__":

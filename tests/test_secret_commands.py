@@ -285,6 +285,16 @@ class SecretCommandTests(unittest.TestCase):
                           "import os; print(os.environ['API_TOKEN'])")
             self.assertEqual(used.returncode, 0, used.stderr)
             self.assertIn("[REDACTED]", used.stdout)
+            used_default = invoke("run", "--source", "fixture", "--key", "API_TOKEN",
+                                  "--", sys.executable, "-c",
+                                  "import os; print('BOUND_DEFAULT=' + str('API_TOKEN' in os.environ and 'SANDBOX_SECRET' not in os.environ))")
+            self.assertEqual(used_default.returncode, 0, used_default.stderr)
+            self.assertIn("BOUND_DEFAULT=True", used_default.stdout)
+            used_custom = invoke("run", "--source", "fixture", "--key", "API_TOKEN",
+                                 "--destination", "CUSTOM_VAR", "--", sys.executable, "-c",
+                                 "import os; print('CUSTOM_VAR=' + str('CUSTOM_VAR' in os.environ))")
+            self.assertEqual(used_custom.returncode, 0, used_custom.stderr)
+            self.assertIn("CUSTOM_VAR=True", used_custom.stdout)
             updated = invoke("set", "--source", "fixture", "API_TOKEN", "--stdin", "--json",
                              input_text=replacement + "\n")
             self.assertEqual(updated.returncode, 0, updated.stderr)

@@ -907,6 +907,7 @@ class TestHostingManifest(unittest.TestCase):
             with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
                  patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
                  patch.object(hosting_cmd, "_cmd_host_sync") as sync, \
+                 patch.object(hosting_cmd, "_with_host_effect_lease", side_effect=lambda v, r, cb: cb(None)), \
                  patch.object(hosting_cmd.hosting, "desired_plan") as plan:
                 hosting_cmd.cmd_host(None, args)
 
@@ -1325,7 +1326,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertIn("--force-recreate --renew-anon-volumes --remove-orphans web worker", commands[0])
+        self.assertIn("--force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[0])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")
@@ -1356,7 +1357,7 @@ class TestHostingManifest(unittest.TestCase):
             if " up -d" in command or " run --rm " in command
         ))
         self.assertIn(
-            "up -d --no-build --force-recreate --renew-anon-volumes "
+            "up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes "
             "--remove-orphans web worker",
             next(command for command in commands if " up -d" in command),
         )
@@ -2714,6 +2715,33 @@ class TestHostingManifest(unittest.TestCase):
                 )
         status.assert_not_called()
 
+    def test_host_diagnose_parses_json_array_images_and_emits_initializers(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {}}
+        status = {
+            "project": "example-site", "environment": "production", "remote": "myvps",
+            "health": {"state": "ready"},
+            "services": [{"service": "web", "state": "running", "health": "healthy"}],
+            "initializers": [{"service": "migrate", "status": "foreign", "reason": "created_before_marker"}],
+        }
+        images_json_array = json.dumps([
+            {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
+        ])
+        with patch.object(hosting_cmd, "_host_runtime_status", return_value=status), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=4096), \
+             patch.object(hosting_cmd, "_remote_checked", return_value=images_json_array):
+            result = hosting_cmd._host_runtime_diagnose(
+                validated, {"provisioned": True}, "myvps", state,
+            )
+        self.assertEqual(result["images"], [
+            {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
+        ])
+        self.assertEqual(result["initializers"], [
+            {"service": "migrate", "status": "foreign", "reason": "created_before_marker"}
+        ])
+
     @patch("sandbox.commands.hosting.info")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_stale_buildkit_snapshot_recovers_with_a_no_cache_rebuild(self, remote_checked, _info):
@@ -2787,6 +2815,33 @@ class TestHostingManifest(unittest.TestCase):
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertIn("config --services", commands[0])
         self.assertIn("logs --no-color --tail 50 web", commands[1])
+
+    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
+    @patch("sandbox.commands.hosting._remote_checked", return_value="apply line 1\napply line 2\n")
+    def test_host_logs_apply_log_uses_guarded_remote_check(self, remote_checked, _resolve_home):
+        manifest = _manifest()
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+
+        args = types.SimpleNamespace(
+            action="logs", remote="myvps", lines=20, apply_log=True, json=True,
+            project_dir=None, environment=None,
+        )
+        entry = {"provisioned": True}
+        output_buf = io.StringIO()
+        with patch("sandbox.commands.hosting.hosting.validate_manifest", return_value=validated), \
+             patch("sandbox.commands.hosting.remote.get_remote", return_value=entry), \
+             patch("sandbox.commands.hosting.hosting.load_host_state", return_value={}), \
+             redirect_stdout(output_buf):
+            hosting_cmd.cmd_host({}, args)
+
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertEqual(len(commands), 1)
+        self.assertIn("if test -f", commands[0])
+        self.assertIn("then tail -n 20", commands[0])
+        data = json.loads(output_buf.getvalue())
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["output"], "apply line 1\napply line 2\n")
 
     def test_state_round_trip_is_atomic_and_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3503,6 +3558,57 @@ class TestHostingManifest(unittest.TestCase):
         fixture.update.assert_not_called()
         fixture.compose.assert_not_called()
 
+    def test_host_delivery_guidance_mints_runnable_command_without_placeholders(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        with patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="a" * 40):
+            argv = hosting_cmd._host_delivery_guidance(validated, "scaleway-sandbox")
+        joined = " ".join(argv)
+        self.assertNotIn("<original-request-id>", joined)
+        self.assertNotIn("<full-clean-HEAD>", joined)
+        self.assertIn("a" * 40, joined)
+        req_idx = argv.index("--request-id") + 1
+        self.assertTrue(argv[req_idx].startswith("deploy-"))
+
+    def test_host_status_and_diagnose_report_observed_revision_on_mismatch(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        expected = "a" * 40
+        observed = "b" * 40
+        classified = hosting_cmd._classify_host_observation(validated, {
+            "complete": True,
+            "configured_services": ["web"],
+            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
+            "revision_checks": [{
+                "service": "web", "key": "LENZORA_SOURCE_REVISION",
+                "observed": observed,
+            }],
+            "phases": [{"phase": "source_revision:web", "state": "complete"}],
+        }, expected)
+        self.assertEqual(classified["source_revision"]["checks"][0]["observed"], observed)
+        self.assertEqual(classified["observed_runtime_revision"], observed)
+
+    def test_host_retire_delivery_clears_host_state(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {target_key: {
+            "active_operation": "active-1",
+            "recovery_uncertainty": "uncertain-1",
+            "image_activation": {"active": "active-img"},
+        }}}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req", "execution_state": "interrupted", "evidence_completeness": "missing"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state") as mock_save:
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        record = state["hosts"][target_key]
+        self.assertIsNone(record["active_operation"])
+        self.assertIsNone(record["recovery_uncertainty"])
+        self.assertIsNone(record["image_activation"]["active"])
+        mock_save.assert_called_once_with(state)
+
 
 class _Response:
     def __init__(self, data):
@@ -4012,5 +4118,6 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
         reason = {"code": "unproven_staged_revision"}
         error = hosting_cmd.HostRuntimeApplyRefused(reason)
         self.assertIs(error.detail, reason)
+        self.assertEqual(error.code, "unproven_staged_revision")
         self.assertIn("unproven_staged_revision", str(error))
         self.assertIsInstance(error, RuntimeError)

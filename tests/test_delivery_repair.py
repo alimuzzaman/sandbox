@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from sandbox.application.job_service import JobService
-from sandbox.core import _instances, _remote
+from sandbox.core import _docker, _instances, _remote
 from sandbox.commands import instances_cmd
 from sandbox.jobs.listing import job_page, MAX_JOB_PAGE_BYTES
 from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -118,6 +118,23 @@ class InstanceReadinessRegressions(unittest.TestCase):
                     actual = _instances._wait_reachable({}, timeout=1, require_application_success=True)
                 self.assertEqual(actual, expected)
 
+    def test_final_route_accepts_localhost_redirect_when_port_dropped_or_matching_domain(self):
+        cases = [
+            ("http://localhost:8189/", 301, "http://localhost/", {"domain": "site.tst"}, True),
+            ("http://localhost:8189/", 301, "https://site.tst/", {"domain": "site.tst"}, True),
+            ("http://localhost:8189/", 301, "https://foreign.com/", {"domain": "site.tst"}, False),
+        ]
+        for url, code, location, inst_cfg, expected in cases:
+            with self.subTest(url=url, code=code, location=location):
+                response = types.SimpleNamespace(status=code, headers={"Location": location}, close=lambda: None)
+                opener = Mock()
+                opener.open.return_value = response
+                with patch("urllib.request.build_opener", return_value=opener), \
+                     patch.object(_instances, "site_url", return_value=url), \
+                     patch("time.sleep"):
+                    actual = _instances._wait_reachable(inst_cfg, timeout=1, require_application_success=True)
+                self.assertEqual(actual, expected)
+
     def test_backend_probe_does_not_enter_canonical_route(self):
         with patch.object(_instances, "_wait_reachable", return_value=True) as reachable:
             self.assertTrue(_instances._wait_http(8252, timeout=1))
@@ -130,6 +147,78 @@ class InstanceReadinessRegressions(unittest.TestCase):
             instances_cmd._print_ensure_json({"login_url": "https://owned.test/?sandbox_autologin=NONSECRET-SENTINEL"},
                                              reveal_login=True)
         self.assertNotIn("NONSECRET-SENTINEL", output.getvalue())
+
+    def test_preferred_port_honored_and_distinct_from_db_and_mailpit(self):
+        def next_free(base, used):
+            return next(port for port in range(base, base + 50) if port not in used)
+
+        with patch.object(_instances, "resolve_instances", return_value={}), \
+             patch.object(_instances, "_next_free_port", side_effect=next_free):
+            ports = _instances._pick_instance_ports(
+                {"runtime": {"wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125}},
+                preferred_port=8290,
+            )
+        self.assertEqual(ports["wordpress_port"], 8290)
+        self.assertEqual(len(set(ports.values())), 3)
+
+    def test_ensure_distinct_ports_repairs_intra_trio_collision(self):
+        def next_free(base, used):
+            return next(port for port in range(base, base + 50) if port not in used)
+
+        with patch.object(_instances, "_next_free_port", side_effect=next_free):
+            repaired = _instances._ensure_distinct_ports(
+                {"wordpress_port": 8274, "db_port": 3394, "mailpit_port": 8274},
+                used_by_others={8275},
+            )
+        self.assertEqual(len(set(repaired.values())), 3)
+        self.assertEqual(repaired["wordpress_port"], 8274)
+        self.assertNotIn(8275, repaired.values())
+
+    def test_reachability_rejects_mailpit_signatures(self):
+        # Server: Mailpit header
+        response_mailpit_header = types.SimpleNamespace(
+            status=200, headers={"Server": "Mailpit"}, read=lambda _n=1024: b"OK", close=lambda: None)
+        opener = Mock()
+        opener.open.return_value = response_mailpit_header
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch.object(_instances, "site_url", return_value="http://localhost:8274"):
+            self.assertFalse(_instances._wait_reachable({}, timeout=1))
+
+        # Body with <title>Mailpit</title>
+        response_mailpit_body = types.SimpleNamespace(
+            status=200, headers={"Server": "nginx"}, read=lambda _n=1024: b"<html><title>Mailpit</title></html>", close=lambda: None)
+        opener.open.return_value = response_mailpit_body
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch.object(_instances, "site_url", return_value="http://localhost:8274"):
+            self.assertFalse(_instances._wait_reachable({}, timeout=1))
+
+        # Valid WordPress response
+        response_wp = types.SimpleNamespace(
+            status=200, headers={"Server": "nginx", "X-Powered-By": "PHP/8.3"}, read=lambda _n=1024: b"<!DOCTYPE html><html>WordPress</html>", close=lambda: None)
+        opener.open.return_value = response_wp
+        with patch("urllib.request.build_opener", return_value=opener), \
+             patch.object(_instances, "site_url", return_value="http://localhost:8274"):
+            self.assertTrue(_instances._wait_reachable({}, timeout=1))
+
+    def test_instance_web_services_running_detects_missing_nginx(self):
+        # mailpit and wp running, but nginx not running
+        ps_out = json.dumps({"Service": "wp", "State": "running"}) + "\n" + \
+                 json.dumps({"Service": "mailpit", "State": "running"})
+        with patch.object(_instances, "compose", return_value=types.SimpleNamespace(stdout=ps_out)):
+            running, msg = _instances._instance_web_services_running("demo", "nginx")
+            self.assertFalse(running)
+            self.assertIn("nginx", msg)
+
+        # all running
+        ps_all = ps_out + "\n" + json.dumps({"Service": "nginx", "State": "running"})
+        with patch.object(_instances, "compose", return_value=types.SimpleNamespace(stdout=ps_all)):
+            running, msg = _instances._instance_web_services_running("demo", "nginx")
+            self.assertTrue(running)
+            self.assertEqual(msg, "")
+
+    def test_safe_alternatives_stop_points_to_instance_delete(self):
+        from sandbox.runtimes.wordpress import SAFE_ALTERNATIVES
+        self.assertEqual(SAFE_ALTERNATIVES["stop"], "Use instance delete for an explicit managed teardown.")
 
     def test_url_update_and_readback_use_exact_instance_for_all_four_commands(self):
         with patch.object(_remote, "list_remote_instances", return_value=[
@@ -146,6 +235,37 @@ class InstanceReadinessRegressions(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not uniquely registered"):
                 _remote.set_remote_instance_url({}, "/remote/project", "preview", "https://preview.test")
             run.assert_not_called()
+
+
+class StoppedInstanceAndExposureRegressions(unittest.TestCase):
+    def test_attest_source_mounts_stopped_when_containers_absent(self):
+        with patch.object(_docker, "run", return_value=types.SimpleNamespace(returncode=0, stdout="")):
+            attestation = _docker.attest_source_mounts("fixture", "nginx", ["/fixture/path"])
+        self.assertFalse(attestation["ok"])
+        self.assertEqual(attestation["code"], "instance_runtime_stopped")
+
+    def test_exposure_ensure_failure_checks_receipt_and_raises_specific_code(self):
+        from sandbox.delivery.exposure import ExposureAttempt
+        from tests.test_delivery_models import make_operation, make_target
+
+        attempt = object.__new__(ExposureAttempt)
+        attempt.operation = make_operation("exp-fail")
+        attempt.repository = Mock()
+        attempt.receipt = None
+        attempt.prepare_creation = Mock()
+        attempt.bind_creation = Mock()
+        sr = Mock()
+        sr.prepare_creation_context.return_value = {
+            "ok": True,
+            "creation_context": {"operation_id": "op", "request_id": "req"},
+        }
+        sr.ensure_remote_instance.return_value = {
+            "ok": False,
+            "error": {"code": "creation_request_conflict"},
+        }
+        sr.read_remote_creation_receipt.return_value = {"ok": False}
+        with self.assertRaisesRegex(ValueError, "creation_request_conflict"):
+            attempt.ensure({"name": "remote"}, make_target(), label="default", transport=sr)
 
 
 class RetireInterruptedDeliveryTests(unittest.TestCase):

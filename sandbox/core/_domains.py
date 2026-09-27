@@ -259,7 +259,8 @@ def _proxy_container_running() -> bool:
     return res.returncode == 0 and bool((res.stdout or "").strip())
 
 
-def _sandbox_proxy_active(domain: str, *, secure: bool = False) -> bool:
+def _sandbox_proxy_active(domain: str, *, secure: bool = False,
+                          timeout: float = 1.5, retry: bool = False) -> bool:
     """True when the proxy is running AND has a route for this domain — i.e.
     the selected http(s)://<domain> actually serves. Used by site_url()."""
     if not _caddyfile_has_route(domain):
@@ -282,7 +283,8 @@ def _sandbox_proxy_active(domain: str, *, secure: bool = False) -> bool:
 
 
 def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
-                                 timeout: float = 1.5) -> bool:
+                                 timeout: float = 1.5,
+                                 retry: bool = False) -> bool:
     """Return whether a request for ``domain`` is answered by Sandbox Caddy.
 
     This deliberately checks Caddy's ``Server``/``Via`` headers rather than
@@ -295,6 +297,7 @@ def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
     from urllib.request import (HTTPRedirectHandler, Request, build_opener,
                                 ProxyHandler)
     import ssl
+    import time
 
     scheme = "https" if secure else "http"
     request = Request(
@@ -313,25 +316,45 @@ def _sandbox_proxy_route_serving(domain: str, *, secure: bool = False,
         from urllib.request import HTTPSHandler
         handlers.append(HTTPSHandler(context=context))
     opener = build_opener(*handlers)
-    try:
-        response = opener.open(request, timeout=timeout)
-    except HTTPError as exc:
-        response = exc
-    except (OSError, ValueError):
-        return False
-    try:
-        server = str(response.headers.get("Server", "")).lower()
-        via = str(response.headers.get("Via", "")).lower()
-        # OrbStack's HTTPS interception also adds ``Via: 1.0 Caddy`` to its
-        # BaseHTTP response. Sandbox Caddy's reverse-proxy response is
-        # ``Via: 1.1 Caddy`` (or advertises itself as Server: Caddy), so keep
-        # the probe strict enough not to bless the foreign helper.
-        return "caddy" in server or via.startswith("1.1 caddy")
-    finally:
-        # urllib keeps the socket/file descriptor open until the response is
-        # garbage-collected.  Health checks run for every managed hostname at
-        # startup, so close both normal and HTTPError responses explicitly.
-        response.close()
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    backoff = 0.05
+    while True:
+        remaining = deadline - time.monotonic()
+        per_call_timeout = max(0.05, min(1.0, remaining)) if (timeout > 0 and retry) else min(1.0, max(0.05, float(timeout)))
+        response = None
+        try:
+            response = opener.open(request, timeout=per_call_timeout)
+        except HTTPError as exc:
+            response = exc
+        except (OSError, ValueError):
+            response = None
+
+        if response is not None:
+            try:
+                server = str(response.headers.get("Server", "")).lower()
+                via = str(response.headers.get("Via", "")).lower()
+                # OrbStack's HTTPS interception also adds ``Via: 1.0 Caddy`` to its
+                # BaseHTTP response. Sandbox Caddy's reverse-proxy response is
+                # ``Via: 1.1 Caddy`` (or advertises itself as Server: Caddy), so keep
+                # the probe strict enough not to bless the foreign helper.
+                if "caddy" in server or via.startswith("1.1 caddy"):
+                    return True
+                return False
+            finally:
+                # urllib keeps the socket/file descriptor open until the response is
+                # garbage-collected.  Health checks run for every managed hostname at
+                # startup, so close both normal and HTTPError responses explicitly.
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
+
+        if not retry or time.monotonic() >= deadline:
+            return False
+
+        sleep_time = min(backoff, max(0.01, deadline - time.monotonic()))
+        time.sleep(sleep_time)
+        backoff = min(0.5, backoff * 1.5)
 
 
 def sandbox_caddy_health(cfg: dict, *, domains=None) -> dict:
@@ -399,6 +422,7 @@ def sandbox_caddy_health(cfg: dict, *, domains=None) -> dict:
             serving = bool(running and readable is not False and configured and
                            _sandbox_proxy_route_serving(
                                dom, secure=secure, timeout=probe_timeout,
+                               retry=bool(requested is not None),
                            ))
         except Exception:
             return unavailable()
@@ -1402,6 +1426,8 @@ def _persist_composed_clean_urls(cfg: dict, lifecycle: dict) -> dict:
               instance=name, check=False)
         wpcli(["option", "update", "home", verified_url],
               instance=name, check=False)
+        if _multisite_mode(resolved[name]):
+            _update_multisite_domain(name, verified_url)
     return refreshed
 
 
@@ -1411,6 +1437,55 @@ def _site_host(inst_cfg: dict) -> str:
     siteurl's full netloc INCLUDING the port (e.g. 'localhost:8191')."""
     from urllib.parse import urlparse
     return urlparse(site_url(inst_cfg)).netloc or "localhost"
+
+
+def _update_multisite_domain(instance: str, verified_url: str) -> bool:
+    """Update the WordPress network domain using its declared table prefix.
+
+    This is limited to validated HTTP(S) authorities and a validated WP-CLI
+    prefix. A missing or unreadable prefix fails visibly instead of silently
+    leaving a multisite network pointed at a stale host.
+    """
+    from urllib.parse import urlsplit
+    import ipaddress
+
+    parsed = urlsplit(verified_url)
+    if parsed.scheme not in {"http", "https"} or parsed.username is not None \
+            or parsed.password is not None or not parsed.hostname:
+        raise ValueError("multisite URL authority is invalid")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("multisite URL port is invalid") from exc
+
+    hostname = parsed.hostname.lower()
+    if ":" in hostname:
+        try:
+            ipaddress.IPv6Address(hostname)
+        except ipaddress.AddressValueError as exc:
+            raise ValueError("multisite URL host is invalid") from exc
+        authority = f"[{hostname}]"
+    elif re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+            r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*", hostname):
+        authority = hostname
+    else:
+        raise ValueError("multisite URL host is invalid")
+    if port is not None:
+        authority = f"{authority}:{port}"
+
+    prefix_result = wpcli(["db", "prefix"], instance=instance,
+                          check=True, capture=True, timeout=15)
+    prefix = (getattr(prefix_result, "stdout", "") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", prefix):
+        raise ValueError("WordPress table prefix is invalid")
+
+    wpcli([
+        "db", "query",
+        f"UPDATE `{prefix}site` SET domain='{authority}'; "
+        f"UPDATE `{prefix}blogs` SET domain='{authority}' WHERE blog_id=1;",
+    ], instance=instance, check=True, capture=True, timeout=15)
+    return True
 
 
 def _ensure_proxy_up(cfg: dict) -> None:

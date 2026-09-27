@@ -277,7 +277,8 @@ def cmd_test(cfg, args) -> None:
                 config_file=getattr(args, "config_file", None),
                 remote=getattr(args, "remote", None),
                 workspace=(getattr(args, "workspace", None) or [None])[0],
-                required_capability="job.exec" if not _test_requests_explicit_local(args) else None,
+                required_capability="job.exec" if getattr(args, "remote", None) else None,
+                allow_inferred_remote=False,
             ))
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")
@@ -347,7 +348,8 @@ def cmd_test(cfg, args) -> None:
             remote=getattr(args, "remote", None), workspace=(
                 requested_workspaces[0]
                 if getattr(args, "mode", None) == "matrix" else None),
-            required_capability="job.exec",
+            required_capability="job.exec" if getattr(args, "remote", None) else None,
+            allow_inferred_remote=False,
         ))
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")

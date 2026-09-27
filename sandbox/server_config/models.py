@@ -1098,6 +1098,10 @@ def creation_intent_fields(pconf, *, project_identity, target_scope_digest, deli
     # environment values, plugin URLs, credentials or arbitrary extension data.
     from pathlib import Path
     safe = {key: pconf.get(key) for key in ('kind', 'server', 'phpVersion', 'wpVersion', 'service', 'internal_port', 'http_port', 'startup_timeout_seconds', 'recreate_on_ensure', 'multisite')}
+    if safe.get('startup_timeout_seconds') is not None:
+        safe['startup_timeout_seconds'] = float(safe['startup_timeout_seconds'])
+    if safe.get('recreate_on_ensure') is not None:
+        safe['recreate_on_ensure'] = bool(safe['recreate_on_ensure'])
     runtime = pconf.get('wordpressRuntime')
     if isinstance(runtime, Mapping):
         safe['wordpressRuntime'] = {key: runtime.get(key) for key in ('mode', 'adapter', 'explicit')}

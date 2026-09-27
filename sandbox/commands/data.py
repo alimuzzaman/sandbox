@@ -423,6 +423,9 @@ def cmd_clean(cfg, args) -> None:
         if ans != "y":
             return
     compose("down", "-v", instance=inst)
+    owner = _core().registry_find_instance(inst)
+    if owner and owner.get("root"):
+        _core().registry_put(owner["root"], label=owner.get("label", "default"), status="stopped")
     # The DB volume is gone, so any multisite network it held is gone too. The
     # marker lives in the host-bind-mounted wp-dir (which `down -v` does NOT
     # wipe), so without this a later `ensure` would boot with the MULTISITE

@@ -143,13 +143,21 @@ class TestWpCoreInstallState(_IsolatedInstanceTest):
             ([_Result(1, stdout="diagnostic")], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(1, stderr="database unavailable")],
              _instances._WP_INSTALL_STATE_UNAVAILABLE),
+            ([_Result(1, stderr="Warning: Undefined array key \"HTTP_HOST\"\n"), _Result(0, stdout="1\n")],
+             _instances._WP_INSTALL_STATE_UNINSTALLED),
+            ([_Result(1, stderr="Error: The site you have requested is not installed.\n"), _Result(0, stdout="1\n")],
+             _instances._WP_INSTALL_STATE_UNINSTALLED),
+            ([_Result(1, stderr="Container sandbox-fixture-wp Creating\n"), _Result(0, stdout="1\n")],
+             _instances._WP_INSTALL_STATE_UNINSTALLED),
+            ([_Result(1, stderr="Warning: Undefined array key \"HTTP_HOST\"\n"), _Result(1)],
+             _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(2)], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(-9)], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result("1")], _instances._WP_INSTALL_STATE_UNAVAILABLE),
             ([_Result(1), _Result(1)], _instances._WP_INSTALL_STATE_UNAVAILABLE),
         )
-        for results, expected in cases:
-            with self.subTest(returncode=results[0].returncode), \
+        for idx, (results, expected) in enumerate(cases):
+            with self.subTest(case=idx, returncode=results[0].returncode), \
                     mock.patch.object(_instances, "wpcli", side_effect=results) as wpcli:
                 self.assertEqual(_instances._wp_core_install_state("fixture"), expected)
             self.assertEqual(wpcli.call_args_list[0].args[0], ["core", "is-installed"])
@@ -610,6 +618,25 @@ class TestReadyEnsureInstallState(_IsolatedInstanceTest):
                     with self.assertRaises(_project_core.ConfigError):
                         _instances.ensure_instance({}, "/project")
                 self.assertEqual([call.kwargs.get("status") for call in state.registry_put.call_args_list], ["pending"])
+
+    def test_auto_heal_wp_url_updates_multisite_domain(self):
+        queries = []
+
+        def fake_wpcli(cmd, **kwargs):
+            if cmd[:2] == ["option", "get"]:
+                return _Result(0, "http://localhost:8088\n")
+            if cmd[:2] == ["db", "query"]:
+                queries.append(cmd[2])
+            return _Result(0, "")
+
+        with mock.patch.object(_instances, "wpcli", side_effect=fake_wpcli), \
+                mock.patch.object(_instances, "load_config", return_value={}), \
+                mock.patch.object(_instances, "resolve_instances", return_value={"test_inst": {"multisite": True}}):
+            healed = _instances._auto_heal_wp_url("test_inst", expected_url="https://test.tst")
+
+        self.assertTrue(healed)
+        self.assertTrue(any("UPDATE wp_site SET domain='test.tst'" in q for q in queries))
+        self.assertTrue(any("UPDATE wp_blogs SET domain='test.tst'" in q for q in queries))
 
 
 if __name__ == "__main__":

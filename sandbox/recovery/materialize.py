@@ -38,7 +38,7 @@ class MaterializationAdapter(Protocol):
     def observe(self, remote: str, plan: RecoveryPlan) -> SourceBinding: ...
 
     def capture(self, remote: str, artifact: ArtifactPlan, destination: Path,
-                binding: SourceBinding) -> tuple[Path, ...]:
+                binding: SourceBinding, *, backup_operation_id: str) -> tuple[Path, ...]:
         """Return native-format-validated files covering every declared source."""
         ...
 
@@ -50,6 +50,9 @@ class ScopedMaterializer:
 
     def publish(self, remote: str, plan: RecoveryPlan, capture, set_id: str,
                 profile_bindings: dict) -> dict:
+        from .capture import _valid_set_id
+        if not _valid_set_id(set_id) or len(set_id) > 128:
+            raise RecoveryError("recovery set id is invalid", "invalid_set_id")
         # Observe validates adapter capabilities and all declarations before capture.
         binding = self.adapter.observe(remote, plan)
         if not isinstance(binding, SourceBinding):
@@ -79,7 +82,8 @@ class ScopedMaterializer:
             for artifact in plan.artifacts:
                 destination = stage / artifact.artifact_id
                 destination.mkdir(mode=0o700)
-                paths = self.adapter.capture(remote, artifact, destination, binding)
+                paths = self.adapter.capture(
+                    remote, artifact, destination, binding, backup_operation_id=set_id)
                 if not isinstance(paths, tuple) or not paths:
                     raise RecoveryError("materialization profile has no artifacts", "incomplete_materialization")
                 try:
@@ -123,7 +127,8 @@ class ScopedMaterializer:
             return capture.publish_files(
                 set_id, files, profiles=plan.profiles, profile_bindings=profile_bindings,
                 provenance={"remote": binding.remote, "machine_identity": binding.machine_identity,
-                            "revision": binding.revision, "source_digest": binding.source_digest},
+                            "revision": binding.revision, "source_digest": binding.source_digest,
+                            "capture_contract_version": 2, "backup_operation_id": set_id},
             )
         finally:
             shutil.rmtree(stage)

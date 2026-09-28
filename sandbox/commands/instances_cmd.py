@@ -22,6 +22,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sandbox.core import (
     CONFIG_LOCAL, ROOT, RUNTIME_DIR, _cert_paths, _cleanup_herd_route, _core, _herd,
+    _proxy_container_running,
     _herd_tests_db, _hosts_edit, _local_yaml, _provision_test_harness,
     _valet_proxy_active, _write_local_yaml, active_project_file,
     collect_instance_rows, compose, compose_file, die, ensure_instance, ensure_pyyaml,
@@ -393,7 +394,8 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
         # URL nor token is copied into this public document.
         payload.pop("login_url_redacted", None)
         revealed = ""
-        if (reveal_login and isinstance(document, Mapping)):
+        if (reveal_login and not os.environ.get("SANDBOX_DURABLE_JOB_ID")
+                and isinstance(document, Mapping)):
             revealed = _autologin_url_to_reveal(document)
             if revealed:
                 payload["login_url"] = revealed
@@ -489,6 +491,40 @@ def cmd_focus(cfg, args) -> None:
     _write_abilities_context(inst)
     ok(f"Focused plugin: {args.slug}")
 
+def _creation_context_argument(args):
+    from sandbox.server_config.models import validate_creation_context
+    value = getattr(args, 'creation_context_json', None)
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value.encode()) > 8192:
+        raise ValueError('creation_context_invalid')
+    return validate_creation_context(json.loads(value))
+
+
+def cmd_creation_query(cfg, args):
+    """Predispatch pure ensure capability/preparation/receipt modes."""
+    from sandbox.application.context import creation_query
+    try:
+        raw = getattr(args, 'creation_prepare_json', None)
+        if raw is not None and (not isinstance(raw, str) or len(raw.encode()) > 4096):
+            raise ValueError('creation_context_invalid')
+        context = _creation_context_argument(args)
+        if getattr(args, 'creation_receipt', False) and context is None:
+            raise ValueError('creation_context_required')
+        result = creation_query(getattr(args, 'project_dir', None) or os.getcwd(),
+            label=getattr(args, 'label', None) or 'default', context=context,
+            expected_incarnation=getattr(args, 'expected_incarnation', None),
+            prepare=json.loads(raw) if raw is not None else None,
+            config_file=getattr(args, 'config_file', None),
+            capability_kind=getattr(args, 'creation_kind', None),
+            capability_runtime_mode=getattr(args, 'creation_runtime_mode', None) or 'compose')
+    except (ValueError, OSError) as exc:
+        result = {'ok': False, 'schema_version': 1, 'error': {'code': getattr(exc, 'code', 'creation_context_invalid')}}
+    print(json.dumps(result, sort_keys=True))
+    if not result.get('ok'):
+        raise SystemExit(1)
+
+
 def cmd_ensure(cfg, args) -> None:
     """`./sb ensure [--project-dir DIR]` — boot the instance for a project
     directory (create-if-missing) and print its URL. The MCP server's
@@ -521,9 +557,11 @@ def cmd_ensure(cfg, args) -> None:
             project_root=pd,
             operation="ensure",
             label=label or "default",
-            arguments={"create": create, "config_file": getattr(args, "config_file", None)},
+            arguments={"create": create, "config_file": getattr(args, "config_file", None),
+                       "creation_context": _creation_context_argument(args),
+                       "expected_incarnation": getattr(args, "expected_incarnation", None)},
         ))
-    except sc.ConfigError as e:
+    except (sc.ConfigError, ValueError) as e:
         message = str(e)
         if getattr(args, "json", False):
             _print_ensure_json({
@@ -542,7 +580,15 @@ def cmd_ensure(cfg, args) -> None:
             raise SystemExit(1)
         die(redact_text(result.message))
     entry = dict(result.data)
-    if not isinstance(entry, dict) or "instance" not in entry:
+    if entry.get('lookup_only'):
+        if getattr(args, 'json', False):
+            _print_ensure_json(entry)
+        else:
+            receipt = entry['creation_receipt']
+            print(f"instance '{receipt['instance_id']}': {receipt['relation']}; original ensure {receipt['completion']} (retained receipt; no replay)")
+        return
+    status = entry.get("status") if isinstance(entry, dict) else None
+    if not isinstance(entry, dict) or "instance" not in entry or entry.get("ok") is False or (status and status != "ready"):
         # A runtime that refuses returns its own typed result, not an instance
         # record; crashing on the missing key hid the actual reason from the
         # operator and printed a traceback instead.
@@ -550,12 +596,13 @@ def cmd_ensure(cfg, args) -> None:
         detail = (entry or {}).get("error") if isinstance(entry, dict) else None
         error = detail if isinstance(detail, dict) else None
         code = (reason.get("code") if isinstance(reason, dict) else reason) \
-            or (error.get("code") if error else None)
+            or (error.get("code") if error else None) \
+            or (entry.get("code") if isinstance(entry, dict) else None)
         # A runtime that succeeds without an instance record is not a failure.
         # Managed-native reports a backend and health instead of the Compose
         # instance entry, and printing "instance is not ready: ready" for a
         # working instance is worse than useless.
-        if isinstance(entry, dict) and entry.get("ok"):
+        if isinstance(entry, dict) and entry.get("ok") and (status == "ready" or status is None):
             if getattr(args, "json", False):
                 _print_ensure_json(
                     entry,
@@ -574,11 +621,14 @@ def cmd_ensure(cfg, args) -> None:
         # from any other, so emit the whole payload under --json and the
         # message plus the completed steps otherwise.
         if getattr(args, "json", False):
+            if status and status != "ready" and entry.get("ok") is not False:
+                entry = dict(entry, ok=False)
             _print_ensure_json(entry, compact=True)
+            raise SystemExit(1)
         message = (reason.get("message") if isinstance(reason, dict) else None) \
             or (error.get("message") if error else None)
         failed_after = reason.get("failed_after") if isinstance(reason, dict) else None
-        summary = f"instance is not ready: {code or detail or 'no reason reported'}"
+        summary = f"instance is not ready: {code or detail or status or 'no reason reported'}"
         if message and message != code:
             summary += f": {message}"
         if failed_after:
@@ -590,6 +640,8 @@ def cmd_ensure(cfg, args) -> None:
         # always a local instance -- the remote branch returned long before,
         # honouring --reveal-login on its own record.
         _print_ensure_json(entry, reveal_login=getattr(args, "reveal_login", False))
+        if entry.get("ok") is False or (status and status != "ready"):
+            raise SystemExit(1)
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
         print(f"  project: {entry['root']}")
@@ -824,6 +876,19 @@ def _cleanup_instance_routes(cfg, owner) -> None:
         info("removed owned scoped resolver bindings")
 
 
+def _refresh_caddy_routes_after_instance_delete() -> None:
+    """Rebuild generated routes from the post-delete registry state."""
+    try:
+        regen_caddyfile(load_config())
+        proxy_running = _proxy_container_running()
+        if proxy_running and not reload_proxy():
+            info("instance was deleted, but Sandbox Caddy did not apply the "
+                 "updated routes; run `./sb domains up` to retry")
+    except (OSError, RuntimeError, TypeError, ValueError):
+        info("instance was deleted, but Sandbox Caddy routes could not be "
+             "refreshed; run `./sb domains up` to retry")
+
+
 def _cleanup_native_owner(cfg, owner) -> bool:
     """Retain registry identity when conservative native cleanup is incomplete.
 
@@ -916,6 +981,7 @@ def cmd_instance(cfg, args) -> None:
             return
         _core().registry_remove(owner["root"], label=owner.get("label"))
         info(f"deregistered '{name}' after complete native cleanup")
+        _refresh_caddy_routes_after_instance_delete()
         ok(f"Native instance '{name}' deleted.")
         return
 
@@ -926,6 +992,7 @@ def cmd_instance(cfg, args) -> None:
         ))
         if isinstance(result, OperationError):
             die(result.message)
+        _refresh_caddy_routes_after_instance_delete()
         ok(f"Generic instance '{name}' deleted without removing project volumes.")
         return
 
@@ -974,7 +1041,7 @@ def cmd_instance(cfg, args) -> None:
         _cleanup_herd_route(name, wp_dir(name) if wp_dir(name).exists() else None)
     else:
         info(f"stopping + removing containers + volume for '{name}'")
-        compose("down", "-v", instance=name, check=False)
+        compose("down", "-v", instance=name, check=True)
 
     # 2. Remove WP install dir + snapshots (+ MCP pinned-PHP shims, if any)
     for path in (wp_dir(name), snapshots_dir(name),
@@ -1013,12 +1080,10 @@ def cmd_instance(cfg, args) -> None:
         sc.registry_remove(owner["root"], label=owner.get("label"))
         info(f"deregistered '{name}' from the instance registry")
 
-    # The receipt-owned ingress/resolver state was reconciled before identity
-    # deletion.  Preserve any unreceipted aggregate proxy, Valet, hosts, cert,
-    # or DNS artifact; compare-before-remove cannot attribute it safely.
-    dom = instances.get(name, {}).get("domain")
-    if dom:
-        info(f"preserved unreceipted legacy domain artifacts for {dom}")
+    # Caddy's aggregate config is derived from the registry rather than an
+    # instance-owned file receipt. Rebuild it only after identity removal, and
+    # hot-reload only when the shared proxy is already running.
+    _refresh_caddy_routes_after_instance_delete()
 
     ok(f"Instance '{name}' deleted.")
 
@@ -1047,7 +1112,10 @@ def cmd_instances(cfg, args) -> None:
                 )
         return
 
-    rows = collect_instance_rows(cfg)
+    # The global inventory is a registry view.  Runtime probing belongs to
+    # explicit lifecycle/status commands; keeping it out here makes this
+    # read-only command bounded even when Docker or local proxy DNS is down.
+    rows = collect_instance_rows(cfg, probe_runtime=False)
     project_dir = getattr(args, "project_dir", None)
     if project_dir:
         sc = _core()
@@ -1097,3 +1165,28 @@ register_specs((CommandSpec(
     help=("Initialize a project descriptor; explicit generic --type is "
           "review-only (run sb ensure next)"),
 ),))
+
+
+def cmd_creation_url(cfg, args):
+    """Covered URL writer; invoked before unrelated compatibility writers."""
+    from sandbox.core._instances import mutate_creation_url
+    try:
+        raw = getattr(args, 'creation_url_json', None)
+        if not isinstance(raw, str) or len(raw.encode()) > 4096:
+            raise ValueError('creation_context_invalid')
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or set(payload) != {'instance_id', 'url'}:
+            raise ValueError('creation_context_invalid')
+        context = _creation_context_argument(args)
+        if context is None:
+            raise ValueError('creation_context_required')
+        result = mutate_creation_url(getattr(args, 'project_dir', None) or os.getcwd(),
+            label=getattr(args, 'label', None) or 'default', creation_context=context,
+            expected_incarnation=getattr(args, 'expected_incarnation', None), **payload)
+        print(json.dumps(result, sort_keys=True))
+        if result['result_code'] != 'remote_instance_url_verified':
+            raise SystemExit(1)
+    except (ValueError, OSError) as exc:
+        print(json.dumps({'ok': False, 'schema_version': 1,
+                          'error': {'code': getattr(exc, 'code', 'creation_context_invalid')}}))
+        raise SystemExit(1)

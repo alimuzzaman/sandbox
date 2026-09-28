@@ -15,8 +15,6 @@ from sandbox.owned_storage.models import (
     AuthorityAdoptionBinding,
     AuthorityOwnedObject,
     CanonicalOperationRequest,
-    CleanupOutcome,
-    CleanupPhase,
     GenerationBinding,
     ObjectKind,
     ObjectLifecycle,
@@ -56,13 +54,13 @@ class OwnedStorageService:
 
         self.adapter.ensure_directory(self.staging_dir, 0o700)
         self.adapter.ensure_directory(self.objects_dir, 0o700)
-        self.adapter.ensure_directory(self.quarantine_dir, 0o700)
+        self.adapter.ensure_directory_beneath("quarantine", 0o700)
 
     def reconcile_startup(self) -> Dict[str, Any]:
-        """Reconcile in-flight or interrupted staging and quarantine operations."""
+        """Reconcile staging and only identity-journaled owned-storage cleanup."""
         reconciled_staging = 0
-        reconciled_quarantine = 0
         aborted_ops = 0
+        cleanup_diagnostics = []
 
         # 1. Staging directory reconciliation
         if self.staging_dir.exists():
@@ -87,65 +85,32 @@ class OwnedStorageService:
 
             self.adapter.fsync_directory(self.staging_dir)
 
-        # 2. Quarantine directory reconciliation
-        if self.quarantine_dir.exists():
-            for child in list(self.quarantine_dir.iterdir()):
-                if child.is_dir():
-                    clean_id = child.name
-                    intent = self.repository.get_cleanup_intent(clean_id)
-                    target = child / "target"
+        # 2. The owned-storage journal is the only authority for quarantine
+        # recovery. Unknown entries and legacy intents without captured inode
+        # evidence are reported and retained by this existing recovery path.
+        from sandbox.owned_storage.cleanup import OwnedStorageCleanupManager
 
-                    if intent is not None and intent.phase in (
-                        CleanupPhase.QUARANTINED,
-                        CleanupPhase.REMOVING,
-                        CleanupPhase.FINAL_REMOVE_INTENT,
-                    ):
-                        if target.exists():
-                            self.adapter.remove_tree_beneath(target)
-                            try:
-                                target.rmdir()
-                            except OSError:
-                                pass
-                        try:
-                            child.rmdir()
-                        except OSError:
-                            pass
-
-                        reconciled_quarantine += 1
-                        now = utc_now_iso()
-                        self.repository.update_cleanup_intent(
-                            clean_id,
-                            CleanupPhase.TERMINAL,
-                            outcome=CleanupOutcome.COMPLETED,
-                            observed_bytes=intent.estimated_bytes or 0,
-                            completed_at=now,
-                        )
-                        with self.repository.connect() as conn:
-                            conn.execute(
-                                "UPDATE authority_objects SET lifecycle = ?, removed_at = ? WHERE object_id = ?",
-                                (ObjectLifecycle.REMOVED.value, now, intent.object_id),
-                            )
-                    else:
-                        if target.exists():
-                            self.adapter.remove_tree_beneath(target)
-                            try:
-                                target.rmdir()
-                            except OSError:
-                                pass
-                        try:
-                            child.rmdir()
-                        except OSError:
-                            pass
-                        reconciled_quarantine += 1
-
-            self.adapter.fsync_directory(self.quarantine_dir)
+        cleanup_result = OwnedStorageCleanupManager(
+            self.storage_root, self.repository
+        ).reconcile_startup()
+        cleanup_diagnostics.extend(cleanup_result.get("cleanup_diagnostics", []))
+        reconciled_quarantine = cleanup_result.get("reconciled_quarantine_count", 0)
 
         # 3. Abort uncommitted in-flight operations recorded in DB
         with self.repository.connect() as conn:
             rows = conn.execute(
-                "SELECT operation_id FROM canonical_operations WHERE phase != 'terminal'",
+                "SELECT operation_id, operation_type FROM canonical_operations WHERE phase != 'terminal'",
             ).fetchall()
             for r in rows:
+                if r["operation_type"] == OperationType.CLEANUP.value:
+                    if self.repository.get_cleanup_intent_for_operation(r["operation_id"]) is None:
+                        cleanup_diagnostics.append(
+                            {
+                                "operation_id": r["operation_id"],
+                                "reason_code": "cleanup_intent_missing_retained",
+                            }
+                        )
+                    continue
                 self.repository.update_operation_phase(
                     r["operation_id"],
                     OperationPhase.TERMINAL,
@@ -160,6 +125,7 @@ class OwnedStorageService:
             "reconciled_staging_count": reconciled_staging,
             "reconciled_quarantine_count": reconciled_quarantine,
             "aborted_operations": aborted_ops,
+            "cleanup_diagnostics": cleanup_diagnostics,
         }
 
 
@@ -484,4 +450,3 @@ class OwnedStorageService:
             "binding_generation": binding.binding_generation,
             "already_active": False,
         }
-

@@ -33,7 +33,7 @@ from sandbox.core import (
     info, mcp_server_name, ok, plugins_dir,
     proxy_available, resolve_instances, run, save_local_app_password,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
-    runtime_health_lines, wp_dir, wpcli,
+    runtime_health_lines, wp_dir, wpcli, prepare_php_extension_runtime,
     php_extension_status,
 )
 
@@ -41,6 +41,7 @@ from sandbox.registry import register
 from sandbox.application.context import (
     preflight_instance_capability, runtime_service, wordpress_runtime_dependencies,
 )
+from sandbox.commands._output import suppress_stdout
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
@@ -284,7 +285,10 @@ def _compose_up(
             raise SystemExit(returncode)
         die(message, code=returncode)
 
-    detail = " ".join(output.split())[:500]
+    from sandbox.services.redaction import redact_text
+    detail = " ".join(redact_text(output).split())
+    if len(detail) > 500:
+        detail = detail[:200] + " ... " + detail[-295:]
     suffix = f": {detail}" if detail else ""
     if json_output:
         print(json.dumps({
@@ -306,6 +310,7 @@ def _emit_generic_up_failure(
     code: object,
     message: object,
     *,
+    runtime: str = "compose",
     mutated: bool = False,
     recovery: Mapping[str, object] | None = None,
     exit_code: object = None,
@@ -326,7 +331,7 @@ def _emit_generic_up_failure(
         "mutated": mutated,
         "command": "up",
         "instance": instance,
-        "runtime": "compose",
+        "runtime": runtime,
         "error": {"code": safe_code, "message": safe_message},
     }
     if recovery is not None and isinstance(recovery.get("command"), str):
@@ -349,12 +354,25 @@ def _emit_generic_up_failure(
     raise SystemExit(max(1, min(code_value, 255)) if code_value > 0 else 1)
 
 
+@contextmanager
+def _suppress_progress_stdout(json_output: bool):
+    """Keep helper progress out of the single-document JSON stdout contract."""
+    if not json_output:
+        yield
+        return
+    with suppress_stdout():
+        yield
+
+
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
     json_output = bool(getattr(args, "json", False))
     owner = _core().registry_find_instance(inst)
     if owner and owner.get("kind") == "compose":
-        result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "start", label=owner.get("label", "default")))
+        with _suppress_progress_stdout(json_output):
+            result = runtime_service(cfg).invoke(OperationRequest(
+                owner["root"], "start", label=owner.get("label", "default"),
+            ))
         if isinstance(result, OperationError):
             if json_output:
                 _emit_generic_up_failure(inst, result.code, result.message)
@@ -389,8 +407,9 @@ def cmd_up(cfg: dict, args) -> None:
         # Host-served by Herd — nothing to boot; Herd serves linked sites
         # whenever it's running.
         if wp_dir(inst).exists():
-            _write_host_runtime_muplugins(inst)
-            _remove_obsolete_builder_authoring_assets(inst)
+            with _suppress_progress_stdout(json_output):
+                _write_host_runtime_muplugins(inst)
+                _remove_obsolete_builder_authoring_assets(inst)
         url = site_url(inst_cfg)
         if json_output:
             print(json.dumps({
@@ -410,6 +429,22 @@ def cmd_up(cfg: dict, args) -> None:
     # (for example an old nginx service), so repeated setup cannot accumulate
     # orphan containers.
     services = _web_services(inst_cfg.get("server", "nginx"))
+    if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
+        # The generated child images are local Sandbox build artifacts, not
+        # registry images. Restore them from the persisted immutable plan
+        # before Compose sees the project or it may try to pull those tags.
+        try:
+            prepare_php_extension_runtime(inst_cfg, inst_cfg.get("server", "nginx"))
+        except (TypeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            message = f"PHP extension image preparation failed: {exc}"
+            if json_output:
+                _emit_generic_up_failure(
+                    inst, "php_extension_image_prepare_failed", message,
+                    runtime="wordpress", mutated=False,
+                )
+            from sandbox.services.redaction import redact_text
+            detail = " ".join(redact_text(str(exc)).split())[:500]
+            die(f"php_extension_image_prepare_failed: {detail}")
     if json_output:
         _compose_up(inst, services, quiet=True, json_output=True)
     else:
@@ -419,7 +454,8 @@ def cmd_up(cfg: dict, args) -> None:
         # allowed to run.  The probe is standalone PHP and does not touch the
         # database or uploads; a drift/missing/version error is therefore a
         # safe, actionable startup failure rather than a half-provisioned site.
-        extension_status = php_extension_status(inst_cfg, instance=inst)
+        with _suppress_progress_stdout(json_output):
+            extension_status = php_extension_status(inst_cfg, instance=inst)
         if extension_status and extension_status.get("drift", {}).get("state") != "ready":
             issues = extension_status.get("drift", {}).get("issues") or []
             detail = issues[0].get("message", "PHP extension planes are not verified") \
@@ -429,43 +465,44 @@ def cmd_up(cfg: dict, args) -> None:
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
     # shared runtime bind-mount, which exists for any provisioned instance.
     if wp_dir(inst).exists():
-        _prepare_mu_plugin_directory(inst)
-        _write_mail_muplugin(inst)
-        _write_loopback_muplugin(inst)
-        _write_dl_cache_muplugin(inst)
-        _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
-        _write_host_runtime_muplugins(inst)  # specs 003/007 — host-file runtime tools
-        _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
-        _remove_obsolete_builder_authoring_assets(inst)
-        # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
-        # explicit on/off survives recreate / db-reset (which wipes the WP option,
-        # default-on). Only touches wpcli when the mirror is explicitly set.
-        try:
-            from sandbox.core._provision import read_local_abilities_enabled
-            _ab = read_local_abilities_enabled(inst)
-            if _ab is not None:
-                wpcli(["option", "update", "sandbox_abilities_enabled", "1" if _ab else "0"],
-                      instance=inst, check=False)
-        except Exception:
-            pass
-        try:  # spec 004 — reap old background-job artifacts (>24h)
-            from sandbox.commands.jobs import prune_jobs
-            prune_jobs(inst)
-        except Exception:
-            pass
-        # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
-        # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
-        # Mint the token if it's missing so `up` self-heals an instance whose
-        # token was never created (or was dropped by an older apply, before the
-        # _build_instance_block preservation fix). Not on herd (no bridge yet).
-        if not _is_herd_instance(inst):
-            _tok = _bridge_token_for(inst)
-            if not _tok:
-                import secrets as _secrets
-                _tok = _secrets.token_hex(16)
-                save_local_bridge_token(_tok, instance=inst)
-            _write_snapshot_muplugin(inst, _tok)
-            _ensure_bridge_server()
+        with _suppress_progress_stdout(json_output):
+            _prepare_mu_plugin_directory(inst, capture=json_output)
+            _write_mail_muplugin(inst)
+            _write_loopback_muplugin(inst)
+            _write_dl_cache_muplugin(inst)
+            _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
+            _write_host_runtime_muplugins(inst)  # specs 003/007 — host-file runtime tools
+            _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
+            _remove_obsolete_builder_authoring_assets(inst)
+            # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
+            # explicit on/off survives recreate / db-reset (which wipes the WP option,
+            # default-on). Only touches wpcli when the mirror is explicitly set.
+            try:
+                from sandbox.core._provision import read_local_abilities_enabled
+                _ab = read_local_abilities_enabled(inst)
+                if _ab is not None:
+                    wpcli(["option", "update", "sandbox_abilities_enabled", "1" if _ab else "0"],
+                          instance=inst, check=False)
+            except Exception:
+                pass
+            try:  # spec 004 — reap old background-job artifacts (>24h)
+                from sandbox.commands.jobs import prune_jobs
+                prune_jobs(inst)
+            except Exception:
+                pass
+            # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
+            # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
+            # Mint the token if it's missing so `up` self-heals an instance whose
+            # token was never created (or was dropped by an older apply, before the
+            # _build_instance_block preservation fix). Not on herd (no bridge yet).
+            if not _is_herd_instance(inst):
+                _tok = _bridge_token_for(inst)
+                if not _tok:
+                    import secrets as _secrets
+                    _tok = _secrets.token_hex(16)
+                    save_local_bridge_token(_tok, instance=inst)
+                _write_snapshot_muplugin(inst, _tok)
+                _ensure_bridge_server()
     url = site_url(inst_cfg)
     mailpit_url = f"http://localhost:{inst_cfg['mailpit_port']}"
     if json_output:
@@ -482,7 +519,7 @@ def cmd_up(cfg: dict, args) -> None:
         ok(f"Mailpit:   {mailpit_url}")
 
 
-def _prepare_mu_plugin_directory(instance: str) -> None:
+def _prepare_mu_plugin_directory(instance: str, *, capture: bool = False) -> None:
     """Make the shared mu-plugin directory writable by host and container tools.
 
     Docker can create a fresh bind-mounted document root as ``www-data``. The
@@ -497,7 +534,7 @@ def _prepare_mu_plugin_directory(instance: str) -> None:
         "mkdir -p /var/www/html/wp-content/mu-plugins && "
         "chown -R www-data:www-data /var/www/html/wp-content/mu-plugins && "
         "chmod -R a+rwX /var/www/html/wp-content/mu-plugins",
-        instance=instance, check=True,
+        instance=instance, check=True, capture=capture,
     )
 
 def cmd_down(cfg, args) -> None:
@@ -513,7 +550,19 @@ def cmd_down(cfg, args) -> None:
              "runs). Remove entirely with: ./sb instance delete "
              f"{args.resolved_instance}")
         return
-    compose("down", instance=args.resolved_instance)
+    if owner and owner.get("root"):
+        with _core().project_lock(owner["root"]):
+            current = _core().registry_get(
+                owner["root"], label=owner.get("label", "default"))
+            if not current or current.get("instance") != args.resolved_instance:
+                die("instance ownership changed; retry after checking status")
+            compose("down", instance=args.resolved_instance)
+            # A successful down removes containers. Record that transition so
+            # ensure resumes the retained data instead of attesting absent mounts.
+            _core().registry_put(owner["root"],
+                                 label=owner.get("label", "default"), status="stopped")
+    else:
+        compose("down", instance=args.resolved_instance)
 
 def cmd_status(cfg, args) -> None:
     include_stats = bool(getattr(args, "stats", False))
@@ -530,8 +579,30 @@ def cmd_status(cfg, args) -> None:
         if getattr(args, "json", False):
             print(json.dumps(_public_status_json(remote_result), sort_keys=True))
         else:
-            print(f"{remote_result.get('label', getattr(args, 'workspace', 'default'))}: "
-                  f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
+            error = remote_result.get("error")
+            if (isinstance(error, Mapping)
+                    and error.get("code") == "remote_instance_unavailable"):
+                target = remote_result.get("target")
+                if not isinstance(target, Mapping):
+                    target = {}
+                workspace = (target.get("workspace")
+                             or getattr(args, "workspace", None) or "default")
+                remote_name = target.get("remote") or getattr(args, "remote", None)
+                remote_label = f" on {remote_name!r}" if remote_name else ""
+                print(
+                    f"Remote workspace {workspace!r}{remote_label}: unavailable "
+                    "(no registered Sandbox instance)."
+                )
+                if remote_name:
+                    print(
+                        "  Inspect registered instances with: ./sb instances "
+                        f"--remote {shlex.quote(str(remote_name))} --json"
+                    )
+            else:
+                label = (remote_result.get("label")
+                         or getattr(args, "workspace", None) or "default")
+                print(f"{label}: "
+                      f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
             if isinstance(remote_result.get("php_extensions"), Mapping):
                 public_extensions = _public_status_json(remote_result["php_extensions"])
                 if isinstance(public_extensions, Mapping):
@@ -1283,8 +1354,9 @@ def cmd_install(cfg, args) -> None:
         _remove_obsolete_builder_authoring_assets(inst)
 
     base = site_url(inst_cfg)  # https://<name>.<tld> when secured, else localhost:<port>
-    ok(f"Admin: {base}/wp-admin"
-       f"  •  Login: {base}/?sandbox_autologin={autologin_token}")
+    # Install also runs inside ensure and durable jobs. Credentials belong only
+    # in the explicitly authorized final ensure result, never progress output.
+    ok(f"Admin: {base}/wp-admin")
 
 
 def wp_is_installed(instance: str) -> bool:
@@ -1646,90 +1718,123 @@ def cmd_doctor(cfg, args) -> None:
     ok("All checks passed.")
 
 def cmd_smoke(cfg, args) -> None:
-    """Self-test: boot a temporary instance, verify WP + REST, tear down.
+    """Exercise real captured CLI startup, reuse, URL health, and data restart."""
+    import tempfile
+    import urllib.request
+    from urllib.parse import urlsplit
+    from sandbox.services.environment import compatible_subprocess_environment
 
-    Validates the full create-install-probe cycle without touching any
-    project instance. Takes ~60s on a cold Docker image, ~20s warm.
-    """
-    import tempfile, time as _t, urllib.request as _ur, urllib.error as _ue
-
-    print("\nSandbox smoke test")
-    print("══════════════════")
-    problems = 0
-
-    def _check(label: str, ok_: bool, hint: str = "") -> None:
-        nonlocal problems
-        mark = "✓" if ok_ else "✗"
-        line = f"  {mark} {label}"
-        if not ok_:
-            problems += 1
-            if hint:
-                line += f"\n      → {hint}"
-        print(line)
-
-    # 1. Boot a fresh instance from a throw-away project dir under $HOME
-    #    (the project-root allowlist rejects system temp dirs like /var/folders).
     smoke_base = Path.home() / ".sandbox" / "smoke"
     smoke_base.mkdir(parents=True, exist_ok=True)
-    tmpdir = Path(tempfile.mkdtemp(prefix="sb-smoke-", dir=smoke_base))
-    import json as _json
-    (tmpdir / "sandbox.config.json").write_text(
-        _json.dumps({"slug": "smoke-test", "plugins": []}))
+    project = Path(tempfile.mkdtemp(prefix="sb-smoke-", dir=smoke_base)).resolve()
+    (project / "sandbox.config.json").write_text(json.dumps({"slug": "smoke-test", "plugins": {}}))
+    environment = compatible_subprocess_environment({"SANDBOX_HOME": str(BASE)})
+    problems = []
+    instance = None
 
-    print(f"\nTemp project dir: {tmpdir}")
-    print("\nBoot:")
-    t0 = _t.time()
+    def check(label, passed, hint=""):
+        print(f"{'PASS' if passed else 'FAIL'} {label}" + (f": {hint}" if hint and not passed else ""), flush=True)
+        if not passed:
+            problems.append(label)
+
+    def cli(*argv, timeout=180):
+        # Exercise the same captured-output interface used by project scripts.
+        # Progress and credentials stay private; print only the checks below.
+        return subprocess.run([str(ROOT / 'sb'), *argv], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=environment, timeout=timeout, check=False)
+
+    def ensure():
+        result = cli('ensure', '--local', '--project-dir', str(project), '--json')
+        try:
+            entry = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise RuntimeError('ensure_response_invalid') from None
+        if result.returncode or not isinstance(entry, dict) or not entry.get('instance'):
+            error = entry.get('error') if isinstance(entry, dict) else None
+            code = error.get('code') if isinstance(error, dict) else None
+            raise RuntimeError(code if isinstance(code, str) and re.fullmatch(r'[a-z_]{1,80}', code)
+                else 'ensure_failed')
+        if str(entry.get('url', '')).startswith('http://localhost:'):
+            from sandbox.core._remote import redact_text
+            for line in result.stdout.splitlines():
+                if any(marker in line for marker in ('proxy is running but', 'proxy startup failed', 'proxy container did not start')):
+                    print('Startup route diagnostic: ' + redact_text(line)[:1200], flush=True)
+        return entry
+
+    def wp(*argv):
+        result = cli('wp', '--local', '--instance', instance, '--timeout', '30', '--', *argv, timeout=45)
+        if result.returncode:
+            raise RuntimeError('wordpress_cli_failed')
+        return result.stdout.strip()
+
+    def verify(entry, stage):
+        url = entry.get('url', '').rstrip('/')
+        check(stage + ': same instance', entry.get('instance') == instance)
+        check(stage + ': WordPress installed', wp('core', 'is-installed') == '')
+        for option in ('home', 'siteurl'):
+            check(stage + ': ' + option + ' matches advertised URL', wp('option', 'get', option).rstrip('/') == url)
+        check(stage + ': retained data', wp('option', 'get', 'sandbox_smoke_marker') == project.name)
+        # The default clean-URL path must work; localhost alone is not proof.
+        check(stage + ': clean URL advertised', bool(urlsplit(url).hostname)
+            and urlsplit(url).hostname not in {'localhost', '127.0.0.1', '::1'})
+        if urlsplit(url).hostname in {'localhost', '127.0.0.1', '::1'}:
+            from sandbox.core._domains import sandbox_caddy_health
+            from sandbox.core import load_config
+            route_health = sandbox_caddy_health(load_config(),
+                domains=(entry.get('domain') or instance + '.tst',))
+            print('Route health: ' + json.dumps(_public_status_json(route_health), sort_keys=True), flush=True)
+        rest_url = url + '/wp-json/?sandbox-smoke=1'
+        try:
+            with urllib.request.urlopen(rest_url, timeout=15) as response:
+                body = response.read(1024 * 1024 + 1)
+                payload = json.loads(body) if len(body) <= 1024 * 1024 else None
+                ready = response.status == 200 and isinstance(payload, dict) and 'namespaces' in payload
+        except Exception:
+            ready = False
+        check(stage + ': canonical REST with query string', ready)
+
+    print('Sandbox real WordPress lifecycle smoke', flush=True)
+    print('Disposable project: ' + str(project), flush=True)
+    stage = 'captured CLI startup'
     try:
-        entry = ensure_instance(cfg, str(tmpdir))
-        inst = entry["instance"]
-        port = entry["wordpress_port"]
-        elapsed = _t.time() - t0
-        _check(f"instance '{inst}' booted ({elapsed:.0f}s)", True)
-    except Exception as exc:
-        _check("boot", False, str(exc))
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        sys.exit(1)
-
-    print("\nWordPress:")
-    r = wpcli(["core", "is-installed"], instance=inst, check=False, capture=True)
-    _check("WP installed", r.returncode == 0,
-           hint="check `./sb logs` for install errors")
-
-    print("\nREST:")
-    rest_url = f"http://localhost:{port}/wp-json/"
-    try:
-        with _ur.urlopen(rest_url, timeout=8) as resp:
-            rest_ok = resp.status == 200
-    except Exception:
-        rest_ok = False
-    _check(f"GET {rest_url}", rest_ok,
-           hint="check pretty-permalinks / AllowOverride in the container")
-
-    print("\nTeardown:")
-    try:
-        compose("down", "-v", instance=inst, check=False)
-        for path in (wp_dir(inst), snapshots_dir(inst)):
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=True)
-        for path in (focus_file(inst), active_project_file(inst), compose_file(inst)):
-            if path.exists():
-                path.unlink()
-        local = _local_yaml()
-        if inst in (local.get("instances") or {}):
-            del local["instances"][inst]
-            if not local["instances"]:
-                del local["instances"]
-            _write_local_yaml(local)
-        _core().registry_remove(str(tmpdir))
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        _check(f"instance '{inst}' deleted", True)
-    except Exception as exc:
-        _check("cleanup", False, str(exc))
-
-    print()
+        entry = ensure(); instance = entry['instance']
+        check(stage, True)
+        saved = cli('snapshot', 'smoke-before-marker', '--instance', instance, '--db-only')
+        if saved.returncode:
+            raise RuntimeError('fixture_snapshot_failed')
+        wp('option', 'update', 'sandbox_smoke_marker', project.name)
+        verify(entry, 'fresh')
+        stage = 'repeated ensure'
+        verify(ensure(), 'reuse')
+        stage = 'restart with retained data'
+        stopped = cli('down', '--instance', instance)
+        if stopped.returncode:
+            raise RuntimeError('stop_failed')
+        verify(ensure(), 'restart')
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        code = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+        check(stage, False, code)
+    finally:
+        # Use the normal owner-aware deletion path, including route cleanup.
+        owner = _core().registry_get(str(project))
+        if owner:
+            owned_name = owner.get('instance')
+            owned = owner.get('root') == str(project) and isinstance(owned_name, str) and (
+                instance is None or owned_name == instance)
+            if owned:
+                result = cli('instance', 'delete', owned_name, '--local', '--yes')
+                cleaned = result.returncode == 0 and _core().registry_get(str(project)) is None
+            else:
+                cleaned = False
+        else:
+            cleaned = instance is None
+        check('owned fixture cleanup', cleaned)
+        if cleaned:
+            shutil.rmtree(project)
     if problems:
-        die(f"{problems} check(s) failed — smoke test red")
-    ok("Smoke test green.")
+        die(f"WordPress lifecycle smoke failed ({len(problems)} checks)")
+    ok('WordPress lifecycle smoke passed.')
 
 def cmd_update(cfg, args) -> None:
     """`git pull --ff-only` the project repo this instance tracks (per-project

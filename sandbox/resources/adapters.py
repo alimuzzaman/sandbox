@@ -331,8 +331,13 @@ class LocalResourceAdapter:
                 item.name == "cancellation" or item.kind == item.VAR_KEYWORD
                 for item in parameters
             )
+            self._runner_accepts_json_output = any(
+                item.name == "json_output" or item.kind == item.VAR_KEYWORD
+                for item in parameters
+            )
         except (TypeError, ValueError):
             self._runner_accepts_cancellation = False
+            self._runner_accepts_json_output = False
         self.registry_records = registry_records or (lambda: {})
         self.job_resource_records = job_resource_records or (
             lambda: {"jobs": [], "artifacts": []}
@@ -521,7 +526,7 @@ class LocalResourceAdapter:
             ))
         return updated
 
-    def _run(self, argv, timeout: float, cancellation=None):
+    def _run(self, argv, timeout: float, cancellation=None, *, json_output=False):
         command = tuple(str(item) for item in argv)
         if (
             cancellation is not None
@@ -533,6 +538,8 @@ class LocalResourceAdapter:
         kwargs = {"timeout": timeout}
         if cancellation is not None and self._runner_accepts_cancellation:
             kwargs["cancellation"] = cancellation
+        if json_output and self._runner_accepts_json_output:
+            kwargs["json_output"] = True
         return self.runner.run(command, **kwargs)
 
     def _du(self, path: Path, timeout: float, cancellation=None) -> tuple[str, int | None, str | None]:
@@ -554,21 +561,45 @@ class LocalResourceAdapter:
             return None
 
     def _docker_json(self, argv, timeout: float, cancellation=None):
-        result = self._run(("docker", *argv), timeout, cancellation)
+        result = self._run(
+            ("docker", *argv), timeout, cancellation, json_output=True,
+        )
         if result.returncode == 124:
             return None, "timed_out"
-        if result.returncode != 0:
-            return None, "unavailable"
         try:
-            return json.loads(result.stdout or "[]"), "complete"
+            payload = json.loads(result.stdout or "[]")
         except json.JSONDecodeError:
             return None, "unavailable"
+        if result.returncode == 0:
+            return payload, "complete"
+        # `docker inspect` exits non-zero when any single identifier is gone,
+        # but still emits the objects it did resolve. A container removed
+        # between `ps -aq` and this call must not discard its whole batch.
+        if payload:
+            return payload, "partial"
+        return None, "unavailable"
 
-    def _docker_inventory(self, deadline: float, cancellation=None) -> tuple[dict, tuple[dict, ...]]:
+    #: Overall probe budget the per-call engine bounds below were tuned against.
+    ENGINE_BASE_BUDGET_SECONDS = 15.0
+    #: Share of a larger probe budget the engine inventory may spend, so the
+    #: directory walk keeps at least the documented 90%.
+    ENGINE_BUDGET_SHARE = 0.10
+
+    @classmethod
+    def _engine_budget(cls, budget_seconds: float) -> float:
+        """Bound the engine inventory phase within the overall probe budget."""
+        budget = float(budget_seconds)
+        return min(budget, max(
+            cls.ENGINE_BASE_BUDGET_SECONDS, budget * cls.ENGINE_BUDGET_SHARE,
+        ))
+
+    def _docker_inventory(
+        self, deadline: float, cancellation=None, *, scale: float = 1.0,
+    ) -> tuple[dict, tuple[dict, ...]]:
         outcomes = []
 
         def remaining(limit: float) -> float:
-            return min(deadline - time.monotonic(), limit)
+            return min(deadline - time.monotonic(), limit * scale)
 
         def inspect_batches(prefix, identifiers, *, batch_size=32):
             """Inspect bounded batches and retain successful batches on failure."""
@@ -588,7 +619,9 @@ class LocalResourceAdapter:
                 states.append(state)
                 if isinstance(payload, list):
                     collected.extend(payload)
-                if state != "complete":
+                # A partial batch lost only the identifiers that vanished, so
+                # the remaining batches are still worth inspecting.
+                if state not in ("complete", "partial"):
                     break
             if states and all(item == "complete" for item in states):
                 return collected, "complete"
@@ -1115,8 +1148,6 @@ class LocalResourceAdapter:
             image_owner = self._compose_owner(
                 (image.get("Config") or {}).get("Labels"),
             )
-            if not image_owner:
-                continue
             workspace_owner = self._workspace_owner_for(
                 workspace_ownership, image_owner, protected_projects,
             )
@@ -1125,30 +1156,43 @@ class LocalResourceAdapter:
             if isinstance(size, bool) or not isinstance(size, int) or size < 0:
                 size = None
             display = next(iter(image.get("RepoTags") or ()), locator)
-            classification = (
-                "active" if used or workspace_owner.active else
-                "retained" if workspace_owner.protected else
-                "unverified" if _is_unknown_workspace_owner(workspace_owner) else
-                "disposable_cache"
-            )
-            resources.append(ResourceObservation(
-                resource_id=_resource_id("image", locator),
-                kind="image", locator=locator, display_name=str(display),
-                owner_kind=workspace_owner.owner_kind,
-                owner_id=workspace_owner.owner_id,
-                classification=classification,
-                size_state="measured" if size is not None else "unavailable",
-                size_bytes=size,
-                reclaimable_bytes=(
-                    size or 0 if classification == "disposable_cache" else 0
-                ),
-                references=(
+            if not image_owner:
+                owner_kind = "unmanaged"
+                owner_id = None
+                classification = "active" if used else "unmanaged"
+                evidence = ("container_image",) if used else ("unmanaged_image",)
+                references = ("container_image",) if used else ()
+                reclaimable_bytes = 0
+            else:
+                owner_kind = workspace_owner.owner_kind
+                owner_id = workspace_owner.owner_id
+                classification = (
+                    "active" if used or workspace_owner.active else
+                    "retained" if workspace_owner.protected else
+                    "unverified" if _is_unknown_workspace_owner(workspace_owner) else
+                    "disposable_cache"
+                )
+                evidence = workspace_owner.evidence
+                references = (
                     (("container_image",) if used else ())
                     + (("workspace_active_reference",) if workspace_owner.active else ())
                     + workspace_owner.references if used or workspace_owner.active else
                     workspace_owner.references if workspace_owner.protected else ()
-                ),
-                evidence=workspace_owner.evidence,
+                )
+                reclaimable_bytes = (
+                    size or 0 if classification == "disposable_cache" else 0
+                )
+            resources.append(ResourceObservation(
+                resource_id=_resource_id("image", locator),
+                kind="image", locator=locator, display_name=str(display),
+                owner_kind=owner_kind,
+                owner_id=owner_id,
+                classification=classification,
+                size_state="measured" if size is not None else "unavailable",
+                size_bytes=size,
+                reclaimable_bytes=reclaimable_bytes,
+                references=references,
+                evidence=evidence,
             ))
         for record in inventory.get("build_cache", ()):
             locator = record.get("ID")
@@ -1353,8 +1397,11 @@ class LocalResourceAdapter:
         protected_paths, protected_projects, job_records = self._ownership_index()
         if progress:
             progress("docker")
+        engine_budget = self._engine_budget(budget_seconds)
         inventory, docker_outcomes = self._docker_inventory(
-            deadline, request.cancellation,
+            min(deadline, time.monotonic() + engine_budget),
+            request.cancellation,
+            scale=max(1.0, engine_budget / self.ENGINE_BASE_BUDGET_SECONDS),
         )
 
         def terminal_snapshot(resources, outcomes, reason):

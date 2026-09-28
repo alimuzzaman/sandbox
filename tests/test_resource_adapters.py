@@ -188,6 +188,105 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertIsNone(worktree.size_bytes)
         self.assertEqual(worktree.reclaimable_bytes, 0)
 
+    def test_vanished_container_does_not_discard_its_inspect_batch(self):
+        """docker inspect exits 1 for a removed id but still returns the rest."""
+        container = {
+            "Id": "container-alive",
+            "Name": "/alive",
+            "SizeRw": 2048,
+            "State": {"Running": True},
+            "Config": {"Labels": {
+                "com.docker.compose.project": "sandbox-fixture",
+                "com.docker.compose.project.working_dir": "/srv/sandbox/fixture",
+            }},
+            "Mounts": [],
+        }
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response("container-alive\ncontainer-gone\n"),
+            ("docker", "inspect", "--size"): response(
+                json.dumps([container]), returncode=1,
+                stderr="error: no such object: container-gone",
+            ),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        snapshot = adapter.observe(thorough=True, budget_seconds=15)
+        outcome = next(
+            item for item in snapshot.category_outcomes
+            if item["category"] == "docker_containers"
+        )
+        self.assertEqual(outcome["status"], "partial")
+        self.assertTrue(any(
+            item.kind == "container" for item in snapshot.resources
+        ))
+
+    def test_unparseable_docker_output_is_still_unavailable(self):
+        """A non-zero exit with no usable payload must not look partial."""
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response("container-alive\n"),
+            ("docker", "inspect", "--size"): response(
+                "not json", returncode=1, stderr="daemon unreachable",
+            ),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        snapshot = adapter.observe(thorough=True, budget_seconds=15)
+        outcome = next(
+            item for item in snapshot.category_outcomes
+            if item["category"] == "docker_containers"
+        )
+        self.assertEqual(outcome["status"], "unavailable")
+
+    def test_engine_inventory_bounds_scale_with_the_probe_budget(self):
+        """A larger probe budget must widen the engine per-call bounds."""
+        runner = FakeRunner({
+            ("docker", "image", "ls", "-q"): response("sha256:one\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        adapter.observe(thorough=True, budget_seconds=1800)
+        image_ls = next(
+            timeout for command, timeout in runner.calls
+            if command == ("docker", "image", "ls", "-q")
+        )
+        image_inspect = next(
+            timeout for command, timeout in runner.calls
+            if command[:3] == ("docker", "image", "inspect")
+        )
+        # 10% of 1800s is 180s, i.e. 12x the 15s base the bounds were tuned for.
+        self.assertAlmostEqual(image_ls, 36.0, delta=1.0)
+        self.assertAlmostEqual(image_inspect, 60.0, delta=1.0)
+
+    def test_engine_inventory_bounds_are_unchanged_at_the_default_budget(self):
+        """The default budget keeps the original bounds, so nothing regresses."""
+        runner = FakeRunner({
+            ("docker", "image", "ls", "-q"): response("sha256:one\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        adapter.observe(thorough=True, budget_seconds=15)
+        image_ls = next(
+            timeout for command, timeout in runner.calls
+            if command == ("docker", "image", "ls", "-q")
+        )
+        image_inspect = next(
+            timeout for command, timeout in runner.calls
+            if command[:3] == ("docker", "image", "inspect")
+        )
+        self.assertAlmostEqual(image_ls, 3.0, delta=0.5)
+        self.assertAlmostEqual(image_inspect, 5.0, delta=0.5)
+
+    def test_engine_budget_never_starves_the_directory_walk(self):
+        """The engine phase is capped at its share of a generous budget."""
+        self.assertEqual(LocalResourceAdapter._engine_budget(15), 15.0)
+        self.assertEqual(LocalResourceAdapter._engine_budget(30), 15.0)
+        self.assertEqual(LocalResourceAdapter._engine_budget(1800), 180.0)
+        self.assertEqual(LocalResourceAdapter._engine_budget(5), 5.0)
+
     def test_deep_observation_attaches_bounded_partial_attribution(self):
         mount = str(self.home)
         runner = FakeRunner({
@@ -811,6 +910,35 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertEqual(item.size_bytes, 4096)
         self.assertEqual(item.classification, "unverified")
         self.assertEqual(item.reclaimable_bytes, 0)
+
+    def test_unlabelled_docker_images_are_emitted_as_unmanaged_resources(self):
+        image_record = {
+            "Id": "sha256:unlabelled123456",
+            "RepoTags": ["wordpress:cli"],
+            "Size": 68234237,
+            "Config": {"Labels": {}},
+        }
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response(""),
+            ("docker", "volume", "ls", "-q"): response(""),
+            ("docker", "network", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "-q"): response("sha256:unlabelled123456\n"),
+            ("docker", "image", "inspect", "sha256:unlabelled123456"): response(json.dumps([image_record])),
+            ("docker", "buildx", "du"): response(""),
+            ("du", "-sk"): response("1\t/path\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        resources = adapter.observe(thorough=True, budget_seconds=30).resources
+        image = next(r for r in resources if r.kind == "image")
+        self.assertEqual(image.owner_kind, "unmanaged")
+        self.assertIsNone(image.owner_id)
+        self.assertEqual(image.classification, "unmanaged")
+        self.assertEqual(image.display_name, "wordpress:cli")
+        self.assertEqual(image.size_bytes, 68234237)
+        self.assertEqual(image.reclaimable_bytes, 0)
+        self.assertIn("unmanaged_image", image.evidence)
 
     def test_only_expired_terminal_job_artifact_is_disposable(self):
         artifact = self.home / "runtime" / "jobs" / "job-1" / "artifacts" / "a1"

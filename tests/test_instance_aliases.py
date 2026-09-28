@@ -9,6 +9,7 @@ instance block that carries the declaration across an apply.
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -223,6 +224,51 @@ class TestAliasInstanceBlock(unittest.TestCase):
             previous={"domain": "demo.tst", "tld": "tst"})
         self.assertEqual(block["aliases"], ["cdn.tst"])
 
+    def test_declared_vendor_symlink_outside_compose_mounts_is_mounted(self):
+        import sandbox.core._instances as instances
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            plugins_home = base / "plugins-home"
+            plugin = base / "worktree" / "plugin"
+            vendor_target = base / "shared" / "vendor"
+            plugins_home.mkdir()
+            plugin.mkdir(parents=True)
+            vendor_target.mkdir(parents=True)
+            (vendor_target / "autoload.php").write_text("<?php\n")
+            (plugin / "vendor").symlink_to(vendor_target, target_is_directory=True)
+
+            diagnostic = StringIO()
+            with mock.patch.object(instances, "_local_yaml", return_value={}), \
+                    mock.patch.object(instances, "_plugins_home",
+                                      return_value=plugins_home), \
+                    mock.patch("sys.stderr", diagnostic):
+                block = instances._build_instance_block(
+                    {}, "demo", str(base / "project"),
+                    {"plugins": [str(plugin)]}, dict(self.PORTS), "nginx",
+                )
+
+            self.assertEqual(
+                block["extra_mounts"],
+                [str(plugin.resolve()), str(vendor_target.resolve())],
+            )
+            self.assertEqual(diagnostic.getvalue(), "")
+
+            (plugin / "vendor").unlink()
+            internal_target = plugin / "vendor-copy"
+            internal_target.mkdir()
+            (plugin / "vendor").symlink_to(internal_target, target_is_directory=True)
+            diagnostic = StringIO()
+            with mock.patch.object(instances, "_local_yaml", return_value={}), \
+                    mock.patch.object(instances, "_plugins_home",
+                                      return_value=plugins_home), \
+                    mock.patch("sys.stderr", diagnostic):
+                instances._build_instance_block(
+                    {}, "demo", str(base / "project"),
+                    {"plugins": [str(plugin)]}, dict(self.PORTS), "nginx",
+                )
+            self.assertEqual(diagnostic.getvalue(), "")
+
 
 class TestAliasCertificateSans(unittest.TestCase):
     def setUp(self):
@@ -234,7 +280,9 @@ class TestAliasCertificateSans(unittest.TestCase):
         instances = {"demo": {"domain": "demo.tst", "tld": "tst",
                               "wordpress_port": 8123,
                               "aliases": ["cdn.tst"]}}
-        with mock.patch.object(domains_core, "_ensure_url_proxy",
+        with mock.patch.object(domains_core, "_ca_trusted_macos", return_value=True), \
+             mock.patch.object(domains_core, "_adoption_selected", return_value=False), \
+             mock.patch.object(domains_core, "_ensure_url_proxy",
                                return_value=(True, None)), \
              mock.patch.object(domains_core, "_valid_domain",
                                side_effect=lambda d: d), \

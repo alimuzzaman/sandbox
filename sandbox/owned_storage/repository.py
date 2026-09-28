@@ -1,8 +1,12 @@
 """Private SQLite repository for owned storage authority."""
 
 import datetime
+import fcntl
+import hashlib
 import json
+import os
 import sqlite3
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -176,7 +180,14 @@ CREATE TABLE IF NOT EXISTS cleanup_intents (
     job_result_digest_after TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    request_digest TEXT,
+    source_relative_path TEXT,
+    quarantine_relative_path TEXT,
+    storage_root_identity_json TEXT,
+    source_parent_identity_json TEXT,
+    source_identity_json TEXT,
+    quarantine_container_identity_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS reclamation_previews (
@@ -230,9 +241,89 @@ class StorageAuthorityRepository:
         finally:
             conn.close()
 
+    @contextmanager
+    def cleanup_serialization_lock(self, *keys: str) -> Iterator[None]:
+        """Serialize cleanup and reference mutations across processes.
+
+        Lock files live beside the authority database, in a private directory,
+        and are intentionally retained: unlinking a lock file can split the
+        lock domain while another process still holds its old inode.
+        """
+        if not keys or any(not isinstance(key, str) or not key for key in keys):
+            raise StorageRepositoryError("Cleanup serialization lock key is invalid")
+
+        lock_dir = self.db_path.parent / f".{self.db_path.name}.cleanup-locks"
+        try:
+            lock_dir.mkdir(mode=0o700, exist_ok=True)
+            dir_fd = os.open(
+                lock_dir,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise StorageRepositoryError("Cleanup serialization lock directory is unavailable") from exc
+
+        lock_fds: list[int] = []
+        try:
+            directory_stat = os.fstat(dir_fd)
+            if (
+                not stat.S_ISDIR(directory_stat.st_mode)
+                or directory_stat.st_uid != os.geteuid()
+                or stat.S_IMODE(directory_stat.st_mode) & 0o077
+            ):
+                raise StorageRepositoryError("Cleanup serialization lock directory is unsafe")
+
+            lock_names = sorted(
+                {hashlib.sha256(key.encode("utf-8")).hexdigest() + ".lock" for key in keys}
+            )
+            for name in lock_names:
+                fd = os.open(
+                    name,
+                    os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=dir_fd,
+                )
+                lock_fds.append(fd)
+                lock_stat = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(lock_stat.st_mode)
+                    or lock_stat.st_uid != os.geteuid()
+                    or lock_stat.st_nlink != 1
+                    or stat.S_IMODE(lock_stat.st_mode) & 0o077
+                ):
+                    raise StorageRepositoryError("Cleanup serialization lock file is unsafe")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        except OSError as exc:
+            raise StorageRepositoryError("Cleanup serialization lock could not be acquired") from exc
+        finally:
+            for fd in reversed(lock_fds):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+            os.close(dir_fd)
+
     def _init_db(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(cleanup_intents)").fetchall()
+            }
+            additions = {
+                "request_digest": "TEXT",
+                "source_relative_path": "TEXT",
+                "quarantine_relative_path": "TEXT",
+                "storage_root_identity_json": "TEXT",
+                "source_parent_identity_json": "TEXT",
+                "source_identity_json": "TEXT",
+                "quarantine_container_identity_json": "TEXT",
+            }
+            for name, sql_type in additions.items():
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE cleanup_intents ADD COLUMN {name} {sql_type}"
+                    )
 
     def reserve_operation(
         self, op: CanonicalOperationRequest
@@ -292,6 +383,132 @@ class StorageAuthorityRepository:
                 ),
             )
             return True, op
+
+    def get_operation_by_request(
+        self,
+        operation_type: OperationType,
+        request_id: str,
+        remote_identity: str,
+        project_identity: str,
+    ) -> Optional[CanonicalOperationRequest]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM canonical_operations
+                WHERE remote_identity = ? AND project_identity = ?
+                    AND operation_type = ? AND request_id = ?
+                """,
+                (remote_identity, project_identity, operation_type.value, request_id),
+            ).fetchone()
+            return self._row_to_operation(row) if row else None
+
+    def get_operations_by_request_id(
+        self, operation_type: OperationType, request_id: str
+    ) -> List[CanonicalOperationRequest]:
+        """Find request-id reuse before object lookup can hide a target conflict."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM canonical_operations
+                WHERE operation_type = ? AND request_id = ?
+                ORDER BY remote_identity, project_identity
+                """,
+                (operation_type.value, request_id),
+            ).fetchall()
+            return [self._row_to_operation(row) for row in rows]
+
+    def reserve_cleanup_operation(
+        self,
+        op: CanonicalOperationRequest,
+        intent: CleanupIntent,
+    ) -> Tuple[bool, CanonicalOperationRequest, Optional[CleanupIntent]]:
+        lock_keys = [f"object:{intent.object_id}"]
+        if op.relationship_id:
+            lock_keys.append(f"selection:{op.relationship_id}")
+        with self.cleanup_serialization_lock(*lock_keys):
+            return self._reserve_cleanup_operation_locked(op, intent)
+
+    def _reserve_cleanup_operation_locked(
+        self,
+        op: CanonicalOperationRequest,
+        intent: CleanupIntent,
+    ) -> Tuple[bool, CanonicalOperationRequest, Optional[CleanupIntent]]:
+        """Commit a new cleanup operation and its immutable intent together."""
+        if op.operation_type != OperationType.CLEANUP:
+            raise StorageRepositoryError("Cleanup reservation requires a cleanup operation")
+        if intent.operation_id != op.operation_id or intent.request_digest != op.request_digest:
+            raise StorageRepositoryError("Cleanup intent does not match its canonical operation")
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM canonical_operations
+                WHERE remote_identity = ? AND project_identity = ?
+                    AND operation_type = ? AND request_id = ?
+                """,
+                (op.remote_identity, op.project_identity, op.operation_type.value, op.request_id),
+            ).fetchone()
+            if row is not None:
+                existing = self._row_to_operation(row)
+                if existing.request_digest != op.request_digest:
+                    raise StorageRepositoryConflictError(
+                        f"Request ID {op.request_id} replayed with different digest"
+                    )
+                rows = conn.execute(
+                    "SELECT * FROM cleanup_intents WHERE operation_id = ?",
+                    (existing.operation_id,),
+                ).fetchall()
+                if len(rows) > 1:
+                    raise StorageRepositoryError(
+                        "Canonical cleanup operation has multiple cleanup intents"
+                    )
+                existing_intent = self._row_to_cleanup_intent(rows[0]) if rows else None
+                return False, existing, existing_intent
+
+            conn.execute(
+                """
+                INSERT INTO canonical_operations (
+                    operation_id, operation_type, request_id, request_digest, authorization_id,
+                    controller_epoch, sequence, caller_identity_digest, remote_identity, project_identity,
+                    relationship_id, workspace_id, job_id, target_object_id, canonical_evidence_digest,
+                    qualification_admission_id, evidence_candidate_id, promotion_id, authority_binding_id,
+                    phase, outcome, reason_code, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._operation_values(op),
+            )
+            self._insert_cleanup_intent(conn, intent)
+            return True, op, intent
+
+    @staticmethod
+    def _operation_values(op: CanonicalOperationRequest) -> Tuple[Any, ...]:
+        return (
+            op.operation_id,
+            op.operation_type.value,
+            op.request_id,
+            op.request_digest,
+            op.authorization_id,
+            op.controller_epoch,
+            op.sequence,
+            op.caller_identity_digest,
+            op.remote_identity,
+            op.project_identity,
+            op.relationship_id,
+            op.workspace_id,
+            op.job_id,
+            op.target_object_id,
+            op.canonical_evidence_digest,
+            op.qualification_admission_id,
+            op.evidence_candidate_id,
+            op.promotion_id,
+            op.authority_binding_id,
+            op.phase.value,
+            op.outcome.value if op.outcome else None,
+            op.reason_code,
+            op.created_at,
+            op.updated_at,
+        )
 
     def update_operation_phase(
         self,
@@ -449,22 +666,43 @@ class StorageAuthorityRepository:
         )
 
     def set_current_selection(self, sel: RelationshipCurrentSelection) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO relationship_current_selections (
-                    relationship_id, object_id, generation_id, selection_generation, operation_id, changed_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sel.relationship_id,
-                    sel.object_id,
-                    sel.generation_id,
-                    sel.selection_generation,
-                    sel.operation_id,
-                    sel.changed_at,
-                ),
-            )
+        with self.cleanup_serialization_lock(f"selection:{sel.relationship_id}"):
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                pending_cleanup = conn.execute(
+                    """
+                    SELECT cleanup_id FROM cleanup_intents
+                    WHERE object_id = ? AND phase != ? LIMIT 1
+                    """,
+                    (sel.object_id, CleanupPhase.TERMINAL.value),
+                ).fetchone()
+                if pending_cleanup is not None:
+                    raise StorageRepositoryConflictError(
+                        "An object with a pending cleanup intent cannot become current"
+                    )
+                target = conn.execute(
+                    "SELECT lifecycle FROM authority_objects WHERE object_id = ?",
+                    (sel.object_id,),
+                ).fetchone()
+                if target is not None and target["lifecycle"] == ObjectLifecycle.REMOVED.value:
+                    raise StorageRepositoryConflictError(
+                        "A removed object cannot become the current selection"
+                    )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO relationship_current_selections (
+                        relationship_id, object_id, generation_id, selection_generation, operation_id, changed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sel.relationship_id,
+                        sel.object_id,
+                        sel.generation_id,
+                        sel.selection_generation,
+                        sel.operation_id,
+                        sel.changed_at,
+                    ),
+                )
 
     def get_current_selection(self, relationship_id: str) -> Optional[RelationshipCurrentSelection]:
         with self.connect() as conn:
@@ -600,55 +838,91 @@ class StorageAuthorityRepository:
 
     def save_cleanup_intent(self, intent: CleanupIntent) -> None:
         with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO cleanup_intents (
-                    cleanup_id, operation_id, preview_id, object_id,
-                    expected_object_evidence_digest, expected_reference_digest,
-                    final_entry_evidence_digest, phase, outcome, reason_code,
-                    estimated_bytes, observed_reclaimed_bytes,
-                    job_result_digest_before, job_result_digest_after,
-                    created_at, updated_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    intent.cleanup_id,
-                    intent.operation_id,
-                    intent.preview_id,
-                    intent.object_id,
-                    intent.expected_object_evidence_digest,
-                    intent.expected_reference_digest,
-                    intent.final_entry_evidence_digest,
-                    intent.phase.value,
-                    intent.outcome.value if intent.outcome else None,
-                    intent.reason_code,
-                    intent.estimated_bytes,
-                    intent.observed_reclaimed_bytes,
-                    intent.job_result_digest_before,
-                    intent.job_result_digest_after,
-                    intent.created_at,
-                    intent.updated_at,
-                    intent.completed_at,
-                ),
-            )
+            self._insert_cleanup_intent(conn, intent)
+
+    @staticmethod
+    def _insert_cleanup_intent(conn: sqlite3.Connection, intent: CleanupIntent) -> None:
+        conn.execute(
+            """
+            INSERT INTO cleanup_intents (
+                cleanup_id, operation_id, preview_id, object_id,
+                expected_object_evidence_digest, expected_reference_digest,
+                final_entry_evidence_digest, phase, outcome, reason_code,
+                estimated_bytes, observed_reclaimed_bytes,
+                job_result_digest_before, job_result_digest_after,
+                created_at, updated_at, completed_at, request_digest,
+                source_relative_path, quarantine_relative_path,
+                storage_root_identity_json, source_parent_identity_json,
+                source_identity_json, quarantine_container_identity_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                intent.cleanup_id,
+                intent.operation_id,
+                intent.preview_id,
+                intent.object_id,
+                intent.expected_object_evidence_digest,
+                intent.expected_reference_digest,
+                intent.final_entry_evidence_digest,
+                intent.phase.value,
+                intent.outcome.value if intent.outcome else None,
+                intent.reason_code,
+                intent.estimated_bytes,
+                intent.observed_reclaimed_bytes,
+                intent.job_result_digest_before,
+                intent.job_result_digest_after,
+                intent.created_at,
+                intent.updated_at,
+                intent.completed_at,
+                intent.request_digest,
+                intent.source_relative_path,
+                intent.quarantine_relative_path,
+                json.dumps(intent.storage_root_identity, sort_keys=True, separators=(",", ":"))
+                if intent.storage_root_identity is not None
+                else None,
+                json.dumps(intent.source_parent_identity, sort_keys=True, separators=(",", ":"))
+                if intent.source_parent_identity is not None
+                else None,
+                json.dumps(intent.source_identity, sort_keys=True, separators=(",", ":"))
+                if intent.source_identity is not None
+                else None,
+                json.dumps(
+                    intent.quarantine_container_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if intent.quarantine_container_identity is not None
+                else None,
+            ),
+        )
 
     def update_cleanup_intent(
         self,
         cleanup_id: str,
+        expected_phase: CleanupPhase,
         phase: CleanupPhase,
         outcome: Optional[CleanupOutcome] = None,
         reason_code: Optional[str] = None,
         observed_bytes: Optional[int] = None,
         completed_at: Optional[str] = None,
     ) -> None:
+        allowed_transitions = {
+            CleanupPhase.INTENT: {CleanupPhase.QUARANTINED},
+            CleanupPhase.QUARANTINED: {CleanupPhase.REMOVING},
+            CleanupPhase.REMOVING: {CleanupPhase.FINAL_REMOVE_INTENT},
+        }
+        if phase not in allowed_transitions.get(expected_phase, set()):
+            raise StorageRepositoryError(
+                f"Cleanup phase transition {expected_phase.value} -> {phase.value} is not allowed"
+            )
         with self.connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE cleanup_intents
                 SET phase = ?, outcome = COALESCE(?, outcome), reason_code = COALESCE(?, reason_code),
-                    observed_reclaimed_bytes = COALESCE(?, observed_reclaimed_bytes),
+                    observed_reclaimed_bytes = COALESCE(observed_reclaimed_bytes, ?),
                     completed_at = COALESCE(?, completed_at), updated_at = ?
-                WHERE cleanup_id = ?
+                WHERE cleanup_id = ? AND phase = ?
                 """,
                 (
                     phase.value,
@@ -658,8 +932,47 @@ class StorageAuthorityRepository:
                     completed_at,
                     completed_at or datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     cleanup_id,
+                    expected_phase.value,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise StorageRepositoryConflictError(
+                    f"Cleanup intent {cleanup_id} phase changed before transition"
+                )
+
+    def record_cleanup_observed_bytes(self, cleanup_id: str, observed_bytes: int) -> None:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE cleanup_intents
+                SET observed_reclaimed_bytes = ?, updated_at = ?
+                WHERE cleanup_id = ? AND observed_reclaimed_bytes IS NULL
+                """,
+                (
+                    observed_bytes,
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    cleanup_id,
+                ),
+            )
+            if cursor.rowcount not in (0, 1):
+                raise StorageRepositoryError(f"Cleanup intent {cleanup_id} could not record byte evidence")
+
+    def record_cleanup_diagnostic(self, cleanup_id: str, reason_code: str) -> None:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE cleanup_intents SET reason_code = ?, updated_at = ?
+                WHERE cleanup_id = ? AND phase != ?
+                """,
+                (
+                    reason_code,
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    cleanup_id,
+                    CleanupPhase.TERMINAL.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StorageRepositoryError(f"Active cleanup intent {cleanup_id} is missing")
 
     def get_cleanup_intent(self, cleanup_id: str) -> Optional[CleanupIntent]:
         with self.connect() as conn:
@@ -668,49 +981,184 @@ class StorageAuthorityRepository:
             ).fetchone()
             if not row:
                 return None
-            return CleanupIntent(
-                cleanup_id=row["cleanup_id"],
-                operation_id=row["operation_id"],
-                preview_id=row["preview_id"],
-                object_id=row["object_id"],
-                expected_object_evidence_digest=row["expected_object_evidence_digest"],
-                expected_reference_digest=row["expected_reference_digest"],
-                final_entry_evidence_digest=row["final_entry_evidence_digest"],
-                phase=CleanupPhase(row["phase"]),
-                outcome=CleanupOutcome(row["outcome"]) if row["outcome"] else None,
-                reason_code=row["reason_code"],
-                estimated_bytes=row["estimated_bytes"],
-                observed_reclaimed_bytes=row["observed_reclaimed_bytes"],
-                job_result_digest_before=row["job_result_digest_before"],
-                job_result_digest_after=row["job_result_digest_after"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                completed_at=row["completed_at"],
-            )
+            return self._row_to_cleanup_intent(row)
 
-    def save_lease(self, lease: MaterializationLease) -> None:
+    def get_cleanup_intent_for_operation(self, operation_id: str) -> Optional[CleanupIntent]:
         with self.connect() as conn:
-            conn.execute(
+            rows = conn.execute(
+                "SELECT * FROM cleanup_intents WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchall()
+            if len(rows) > 1:
+                raise StorageRepositoryError(
+                    "Canonical cleanup operation has multiple cleanup intents"
+                )
+            return self._row_to_cleanup_intent(rows[0]) if rows else None
+
+    def list_cleanup_intents(self, *, include_terminal: bool = False) -> List[CleanupIntent]:
+        with self.connect() as conn:
+            if include_terminal:
+                rows = conn.execute("SELECT * FROM cleanup_intents ORDER BY created_at, cleanup_id").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM cleanup_intents WHERE phase != ? ORDER BY created_at, cleanup_id",
+                    (CleanupPhase.TERMINAL.value,),
+                ).fetchall()
+            return [self._row_to_cleanup_intent(row) for row in rows]
+
+    @staticmethod
+    def _row_to_cleanup_intent(row: sqlite3.Row) -> CleanupIntent:
+        return CleanupIntent(
+            cleanup_id=row["cleanup_id"],
+            operation_id=row["operation_id"],
+            preview_id=row["preview_id"],
+            object_id=row["object_id"],
+            expected_object_evidence_digest=row["expected_object_evidence_digest"],
+            expected_reference_digest=row["expected_reference_digest"],
+            final_entry_evidence_digest=row["final_entry_evidence_digest"],
+            phase=CleanupPhase(row["phase"]),
+            outcome=CleanupOutcome(row["outcome"]) if row["outcome"] else None,
+            reason_code=row["reason_code"],
+            estimated_bytes=row["estimated_bytes"],
+            observed_reclaimed_bytes=row["observed_reclaimed_bytes"],
+            job_result_digest_before=row["job_result_digest_before"],
+            job_result_digest_after=row["job_result_digest_after"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            completed_at=row["completed_at"],
+            request_digest=row["request_digest"],
+            source_relative_path=row["source_relative_path"],
+            quarantine_relative_path=row["quarantine_relative_path"],
+            storage_root_identity=json.loads(row["storage_root_identity_json"])
+            if row["storage_root_identity_json"]
+            else None,
+            source_parent_identity=json.loads(row["source_parent_identity_json"])
+            if row["source_parent_identity_json"]
+            else None,
+            source_identity=json.loads(row["source_identity_json"])
+            if row["source_identity_json"]
+            else None,
+            quarantine_container_identity=json.loads(row["quarantine_container_identity_json"])
+            if row["quarantine_container_identity_json"]
+            else None,
+        )
+
+    def finalize_cleanup(
+        self,
+        *,
+        cleanup_id: str,
+        operation_id: str,
+        object_id: str,
+        observed_bytes: Optional[int],
+        completed_at: str,
+    ) -> None:
+        """Atomically publish completed filesystem cleanup across all three ledgers."""
+        with self.connect() as conn:
+            intent = conn.execute(
+                "SELECT operation_id, object_id, phase FROM cleanup_intents WHERE cleanup_id = ?",
+                (cleanup_id,),
+            ).fetchone()
+            if (
+                intent is None
+                or intent["operation_id"] != operation_id
+                or intent["object_id"] != object_id
+                or intent["phase"] != CleanupPhase.FINAL_REMOVE_INTENT.value
+            ):
+                raise StorageRepositoryError(
+                    "Cleanup finalization lacks matching final-remove intent"
+                )
+
+            intent_cursor = conn.execute(
                 """
-                INSERT OR REPLACE INTO materialization_leases (
-                    lease_id, object_id, job_id, workspace_id, lifecycle_generation,
-                    mount_identity_digest, state, opened_at, heartbeat_at, expires_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                UPDATE cleanup_intents SET phase = ?, outcome = ?, reason_code = NULL,
+                    observed_reclaimed_bytes = ?, completed_at = ?, updated_at = ?
+                WHERE cleanup_id = ? AND operation_id = ? AND phase = ?
                 """,
                 (
-                    lease.lease_id,
-                    lease.object_id,
-                    lease.job_id,
-                    lease.workspace_id,
-                    lease.lifecycle_generation,
-                    lease.mount_identity_digest,
-                    lease.state.value,
-                    lease.opened_at,
-                    lease.heartbeat_at,
-                    lease.expires_at,
-                    lease.closed_at,
+                    CleanupPhase.TERMINAL.value,
+                    CleanupOutcome.COMPLETED.value,
+                    observed_bytes,
+                    completed_at,
+                    completed_at,
+                    cleanup_id,
+                    operation_id,
+                    CleanupPhase.FINAL_REMOVE_INTENT.value,
                 ),
             )
+            object_cursor = conn.execute(
+                """
+                UPDATE authority_objects SET lifecycle = ?, removed_at = ?
+                WHERE object_id = ?
+                """,
+                (ObjectLifecycle.REMOVED.value, completed_at, object_id),
+            )
+            operation_cursor = conn.execute(
+                """
+                UPDATE canonical_operations SET phase = ?, outcome = ?, reason_code = NULL,
+                    updated_at = ?
+                WHERE operation_id = ? AND operation_type = ? AND phase != ?
+                """,
+                (
+                    OperationPhase.TERMINAL.value,
+                    OperationOutcome.COMPLETED.value,
+                    completed_at,
+                    operation_id,
+                    OperationType.CLEANUP.value,
+                    OperationPhase.TERMINAL.value,
+                ),
+            )
+            if intent_cursor.rowcount != 1 or object_cursor.rowcount != 1 or operation_cursor.rowcount != 1:
+                raise StorageRepositoryError("Cleanup finalization could not update matching ledgers")
+
+    def save_lease(self, lease: MaterializationLease) -> None:
+        with self.cleanup_serialization_lock(f"object:{lease.object_id}"):
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if lease.state not in (LeaseState.CLOSED, LeaseState.REVOKED):
+                    pending_cleanup = conn.execute(
+                        """
+                        SELECT cleanup_id FROM cleanup_intents
+                        WHERE object_id = ? AND phase != ? LIMIT 1
+                        """,
+                        (lease.object_id, CleanupPhase.TERMINAL.value),
+                    ).fetchone()
+                    if pending_cleanup is not None:
+                        raise StorageRepositoryConflictError(
+                            "An object with a pending cleanup intent cannot acquire a lease"
+                        )
+                target = conn.execute(
+                    "SELECT lifecycle FROM authority_objects WHERE object_id = ?",
+                    (lease.object_id,),
+                ).fetchone()
+                if (
+                    target is not None
+                    and target["lifecycle"] == ObjectLifecycle.REMOVED.value
+                    and lease.state not in (LeaseState.CLOSED, LeaseState.REVOKED)
+                ):
+                    raise StorageRepositoryConflictError(
+                        "A removed object cannot acquire an active materialization lease"
+                    )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO materialization_leases (
+                        lease_id, object_id, job_id, workspace_id, lifecycle_generation,
+                        mount_identity_digest, state, opened_at, heartbeat_at, expires_at, closed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        lease.lease_id,
+                        lease.object_id,
+                        lease.job_id,
+                        lease.workspace_id,
+                        lease.lifecycle_generation,
+                        lease.mount_identity_digest,
+                        lease.state.value,
+                        lease.opened_at,
+                        lease.heartbeat_at,
+                        lease.expires_at,
+                        lease.closed_at,
+                    ),
+                )
 
     def get_lease(self, lease_id: str) -> Optional[MaterializationLease]:
         with self.connect() as conn:
@@ -872,4 +1320,3 @@ class StorageAuthorityRepository:
         with self.connect() as conn:
             rows = conn.execute(query, (remote_identity, project_identity, max_limit)).fetchall()
         return [self._row_to_object(r) for r in rows]
-

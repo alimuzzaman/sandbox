@@ -17,6 +17,15 @@ from sandbox.jobs.models import (normalize_output_page_bytes,
 from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
 
 
+_CREDENTIAL_ARGV_REFUSAL = (
+    "remote job command contains credential-like material and was refused. Keep real "
+    "credentials out of argv and project files. For public helper source, save it under "
+    "the project directory and pass its project-relative file path (for example, "
+    "`python scripts/canary.py`); the submitted working tree is bound by its commit "
+    "and dirty digest."
+)
+
+
 class RemoteJobTransportError(RuntimeError):
     """Bounded, retryable failure from a remote job control operation."""
 
@@ -264,6 +273,15 @@ def _error_detail(payload: dict | None, result: object) -> str:
     job logs and makes a malformed page look like a usable diagnostic.  The
     controller's stderr remains a bounded diagnostic after redaction.
     """
+    output = getattr(result, "stdout", "")
+    if isinstance(output, str):
+        observed_bytes = len(output.encode("utf-8", errors="replace"))
+        if observed_bytes > _MAX_REMOTE_JSON_BYTES:
+            return (
+                f"response_too_large: {observed_bytes} bytes exceeds "
+                f"{_MAX_REMOTE_JSON_BYTES}; use a smaller job-list --limit "
+                "and continue with --cursor-job-id"
+            )
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict):
@@ -272,12 +290,29 @@ def _error_detail(payload: dict | None, result: object) -> str:
                 return _safe_remote_detail(message)
         elif isinstance(error, str) and error.strip():
             return _safe_remote_detail(error)
+        code = payload.get("code")
+        if isinstance(code, str) and code.strip():
+            return _safe_remote_detail(code)
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return _safe_remote_detail(message)
     detail = getattr(result, "stderr", "")
     if isinstance(detail, str) and detail.strip():
         safe = _safe_remote_detail(detail)
         if safe:
             return safe
-    return f"remote exit code {getattr(result, 'returncode', 1)}"
+    returncode = getattr(result, "returncode", 1)
+    if returncode == 0:
+        if not isinstance(output, str) or not output.strip():
+            return "remote command produced no output"
+        if payload is None:
+            return "remote command output contained no valid JSON"
+        if isinstance(payload, dict) and payload.get("ok") is not True:
+            status = payload.get("status")
+            if isinstance(status, str) and status.strip():
+                return f"remote status {status}"
+            return "remote command returned unsuccessful response"
+    return f"remote exit code {returncode}"
 
 
 def _require_submission_ack(payload: object, *, aggregate: bool = False,
@@ -455,9 +490,7 @@ class RemoteJobTransport:
         try:
             require_safe_argv(submission.argv)
         except ValueError:
-            raise RemoteJobTransportError(
-                "remote job command contains credential-like material"
-            ) from None
+            raise RemoteJobTransportError(_CREDENTIAL_ARGV_REFUSAL) from None
         if submission.sync_relationship_id is not None and self.sync_submit is None:
             raise RemoteJobTransportError(
                 "synchronized job execution is unavailable without an enforced source authority"
@@ -526,9 +559,7 @@ class RemoteJobTransport:
             try:
                 require_safe_argv(item.argv)
             except ValueError:
-                raise RemoteJobTransportError(
-                    "remote job command contains credential-like material"
-                ) from None
+                raise RemoteJobTransportError(_CREDENTIAL_ARGV_REFUSAL) from None
         first = submissions[0]
         if (first.target_kind != "remote" or not first.remote_name or
                 any(item.target_kind != "remote" or item.remote_name != first.remote_name or

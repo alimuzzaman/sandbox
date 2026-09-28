@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+from functools import wraps
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 from sandbox.core import *  # noqa: F401,F403
+from sandbox.core._config import ConfigParseError, ConfigWriteError
 
 from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
 from sandbox.application.context import preflight_instance_capability
@@ -60,28 +62,32 @@ class _KVAction(argparse.Action):
 
 
 
-def _implied_project_dir(instance: str | None, label: str | None):
-    """The project root a bare `apply` clearly meant, and where it came from.
+def _implied_project_target(instance: str | None, label: str | None):
+    """The exact project and registry label a bare `apply` clearly meant.
 
     A named instance is the strongest signal — the registry knows which project
-    owns it. Otherwise, standing inside a registered project means that project.
-    Returns (root, source) or (None, None) when neither applies, which keeps the
-    historical whole-sandbox behaviour for `./sb apply` run outside any project.
+    owns it and which label identifies it. Otherwise, standing inside a
+    registered project means that project. Returns (root, label, source) or
+    (None, None, None) when neither applies, which keeps the historical
+    whole-sandbox behaviour for `./sb apply` run outside any project.
     """
     sc = _core()
     if instance:
         entry = sc.registry_find_instance(instance) or {}
         root = entry.get("root")
-        if root and Path(root).is_dir():
-            return str(root), f"registered root of instance '{instance}'"
-        return None, None
+        target_label = entry.get("label")
+        if root and target_label and Path(root).is_dir():
+            return str(root), target_label, f"registered target of instance '{instance}'"
+        return None, None, None
     try:
         root = sc.find_project_root(Path.cwd())
     except Exception:
-        return None, None
-    if root and sc.registry_get(str(root), label=label):
-        return str(root), "current working directory"
-    return None, None
+        return None, None, None
+    entry = sc.registry_get(str(root), label=label) if root else None
+    target_label = entry.get("label") if entry else None
+    if root and target_label:
+        return str(root), target_label, "current working directory"
+    return None, None, None
 
 
 def _global_label_before_subcommand(argv: list[str]) -> str | None:
@@ -373,6 +379,21 @@ def _cli_version() -> str:
     return value or "unknown"
 
 
+def _config_parse_error_boundary(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (ConfigParseError, ConfigWriteError) as exc:
+            if "--json" in sys.argv[1:]:
+                print(json.dumps(exc.to_payload(), sort_keys=True))
+            else:
+                print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(2)
+    return wrapped
+
+
+@_config_parse_error_boundary
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -415,6 +436,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="With --project-dir: reconcile a project instance in place "
              "(no data loss). Without: alias for setup — re-apply sandbox.yml")
     ap.add_argument("--no-pick", action="store_true")
+    ap.add_argument("--creation-context-json", default=None,
+        help="closed nonsecret creation context bound to the original request")
+    ap.add_argument("--expected-incarnation", default=None,
+        help="refuse if the selected instance incarnation differs")
     ap.add_argument("--project-dir", dest="project_dir", default=None,
         help="reconcile this project's running instance with its current "
              "config (constants/plugins/themes/multisite) without dropping the DB")
@@ -723,6 +748,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="per-step timeout in seconds (default: 900)")
     ci_p.add_argument("--output-profile", default=None,
         help="durable retained-output presentation profile for remote jobs")
+    ci_p.add_argument("--runtime", choices=("sandbox", "none"), default="sandbox",
+        help="CI runtime mode: sandbox provisions a per-cell runtime (default); "
+             "none runs act without a WordPress/runtime instance")
     ci_p.add_argument("--json", action="store_true",
         help="print the plan/result as JSON (for the MCP server)")
     ci_p.add_argument("--async", dest="run_async", action="store_true",
@@ -774,6 +802,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "  ./sb remote service status NAME [--json]\n"
             "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
             "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
+            "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
             "  ./sb remote service stop NAME --confirm [--json]"
         ))
     remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh"],
@@ -800,9 +829,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--yes", action="store_true",
         help="accept the default HTTPS control-plane choice without prompting")
     remote_p.add_argument("--plan", action="store_true",
-        help="for `remote service migrate`: show the no-write service migration plan")
+        help="for protected remote service actions: show the no-write plan")
     remote_p.add_argument("--confirm", action="store_true",
-        help="allow a protected remote service or Docker-pool mutation")
+        help="required for every direct `remote ssh` command (including read-only "
+             "commands); also allow protected remote service or Docker-pool mutations")
     remote_p.add_argument("--recover-interrupted", action="store_true",
         help="for `remote docker-pool`: plan/recover only containers proven to have stopped during the latest interrupted transaction")
     remote_p.add_argument("--expected-running", type=int, default=None,
@@ -823,7 +853,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--processes", action="store_true",
         help="with service diagnostics, include a bounded read-only process/app snapshot")
     remote_p.add_argument("--command", default=None,
-        help="required with `remote ssh`: exact operator command to run directly over SSH")
+        help="required with `remote ssh`: exact operator command to run directly "
+             "over SSH; that command also requires `--confirm`")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
     remote_p.add_argument("--upload-timeout", dest="upload_timeout", type=int,
@@ -866,13 +897,17 @@ Per-project (each plugin carries its own sandbox.config.json):
         default=None, metavar="SECONDS",
         help="bounded remote-home preflight and Git push timeout for this deploy "
              "(1-3600 seconds; default 120)")
+    deploy_p.add_argument("--request-id", default=None,
+        help="stable delivery request identity; retained reuse never starts a new attempt")
+    deploy_p.add_argument("--verify-timeout", type=int, choices=range(10, 301),
+        metavar="10..300", default=None, help="aggregate public verification deadline in seconds")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "sync", "logs", "secrets", "login-url"])
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["provision", "verify", "activate", "adopt", "rollback", "recover"],
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
@@ -896,6 +931,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded number of recent hosted-service log lines (1-1000; --tail is an alias)")
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
+    host_p.add_argument("--initializer", default=None, metavar="SERVICE",
+        help="with diagnose, read-only proof for one declared compose.init_services entry")
     host_p.add_argument("--request-id", default=None,
         help="replay-safe host sync/recovery request identity")
     host_p.add_argument("--verified-plan", default=None, metavar="PATH",
@@ -908,17 +945,22 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--policy-authority-id", default=None)
     host_p.add_argument("--policy-revision", type=int, default=None)
     host_p.add_argument("--service-image-binding", action="append", default=None,
-        metavar="SERVICE=queue|web|worker")
+        metavar="SERVICE=database|queue|web|worker")
     host_p.add_argument("--activation-environment-binding", action="append", default=None,
-        metavar="queue|web|worker=ENVIRONMENT_VARIABLE")
+        metavar="database|queue|web|worker=ENVIRONMENT_VARIABLE")
     host_p.add_argument("--credential-source-reference", default=None,
         metavar="SOURCE/KEY")
     host_p.add_argument("--credential-expires-at", default=None, metavar="RFC3339")
+    host_p.add_argument("--use-installed-authority", action="store_true",
+        help="reuse the exact target-installed rollback authority for machine policy")
     host_p.add_argument("--rollback-public-key", default=None, metavar="PATH")
     host_p.add_argument("--rollback-authority-id", default=None)
     host_p.add_argument("--rollback-authority-revision", default=None)
     host_p.add_argument("--compose-provider-revision", default=None)
     host_p.add_argument("--snapshot-expires-at", type=int, default=None)
+    host_p.add_argument("--candidate-input-contract", choices=["candidate-v1", "candidate-v2"],
+        default="candidate-v1",
+        help="explicit activation-bundle private input contract; candidate-v2 prepares stopped-container secret files")
     host_p.add_argument("--grant-ttl-seconds", type=int, default=900)
     host_p.add_argument("--signed-receipt-directory", default=None, metavar="PATH",
         help="closed receipt, payload, and offline Sigstore bundle directory")
@@ -928,6 +970,19 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="finite proof-custody admission deadline for a new image activation acceptance")
     host_p.add_argument("--activation-transaction", default=None, metavar="DIGEST",
         help="exact active transaction digest for `host image recover`")
+    host_p.add_argument("--settlement-phase", default=None,
+        choices=["observe", "plan", "containment-plan", "containment-apply", "sign-approval", "sign-forward-approval", "install-approval", "install-forward-approval", "apply"],
+        help="separate incident review, installed approval, and settlement phases")
+    host_p.add_argument("--settlement-plan", default=None, metavar="PATH")
+    host_p.add_argument("--settlement-data-assessment", default=None, metavar="PATH")
+    host_p.add_argument("--settlement-approval", default=None, metavar="DIGEST")
+    host_p.add_argument("--approval-file", default=None, metavar="PATH")
+    host_p.add_argument("--approval-public-key", default=None, metavar="PATH")
+    host_p.add_argument("--settlement-forward-approval", default=None, metavar="DIGEST",
+        help="installed separate approval for this exact successor activation")
+    host_p.add_argument("--forward-review", default=None, metavar="PATH")
+    host_p.add_argument("--settlement-predecessor", default=None, metavar="DIGEST",
+        help="exact terminal settlement receipt for the successor activation")
     host_p.add_argument("--stage-status", action="store_true",
         help="read the exact Feature 050 request status without helper or credential access")
     host_p.add_argument("--reconcile", action="store_true",
@@ -966,6 +1021,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--base-domain", default="sandbox.asb.bd", help="Cloudflare-managed preview domain suffix")
     preview_p.add_argument("--ttl-hours", type=int, default=24, help="expiry for a created preview (default: 24)")
     preview_p.add_argument("--confirm", action="store_true", help="allow remote, DNS, and container mutation")
+    preview_p.add_argument("--request-id", default=None,
+        help="stable creation delivery request identity")
+    preview_p.add_argument("--verify-timeout", type=int, choices=range(10, 301),
+        metavar="10..300", default=None, help="aggregate public verification deadline in seconds")
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
@@ -1053,6 +1112,23 @@ Per-project (each plugin carries its own sandbox.config.json):
     ensure_target.add_argument("--local", action="store_true", help="force local execution")
     ensure_target.add_argument("--remote", help="ensure on a provisioned remote")
     en.add_argument("--workspace", dest="workspace", help="remote reusable workspace label")
+    en.add_argument("--creation-context-json", default=None,
+        help="closed nonsecret creation context bound to the original request")
+    en.add_argument("--expected-incarnation", default=None,
+        help="refuse if the selected instance incarnation differs")
+    creation_mode = en.add_mutually_exclusive_group()
+    creation_mode.add_argument("--creation-capability", action="store_true",
+        help="read controller creation capability without creating an instance")
+    creation_mode.add_argument("--creation-receipt", action="store_true",
+        help="read the original creation receipt without replaying ensure")
+    creation_mode.add_argument("--creation-prepare-json", default=None,
+        help="prepare bounded nonsecret creation intent without effects")
+    creation_mode.add_argument("--creation-url-json", default=None,
+        help="mutate home/siteurl under the original creation context and exact incarnation")
+    en.add_argument("--creation-kind", choices=("wordpress", "compose"), default=None,
+        help="runtime kind for a controller-only creation capability query")
+    en.add_argument("--creation-runtime-mode", choices=("compose",), default=None,
+        help="runtime mode for a controller-only creation capability query")
 
     ins = sub.add_parser("instance",
         help="Suspend/resume or delete a sandbox instance")
@@ -1257,6 +1333,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    # Feedback storage is independent of machine config and must remain usable
+    # when sandbox.local.yml itself needs recovery.
+    if args.cmd == "feedback":
+        COMMANDS["feedback"]({}, args)
+        return
+
     if getattr(args, "config_file", None) and not getattr(args, "project_dir", None):
         die("--config-file requires an explicit --project-dir", 2)
 
@@ -1314,6 +1396,13 @@ Per-project (each plugin carries its own sandbox.config.json):
             2,
         )
 
+    if args.cmd == "apply" and getattr(args, "project_dir", None) and _explicit_global_option(raw_argv, "--instance"):
+        die(
+            "apply accepts either --instance NAME or --project-dir DIR with "
+            "--label LABEL; do not combine both selectors.",
+            2,
+        )
+
     # `init` is project-routed and derives its target from --project-dir and
     # --label. A shared global --instance selector was otherwise accepted but
     # ignored by the initializer, which could scaffold/boot the controller cwd
@@ -1343,6 +1432,67 @@ Per-project (each plugin carries its own sandbox.config.json):
             2,
         )
 
+    # Pure diagnostic transports return before all legacy compatibility writers
+    # and instance selection; a missing local runtime/config is not an error.
+    if args.cmd == "delivery":
+        if _explicit_global_option(raw_argv, "--instance"):
+            die("delivery uses project-scoped trace or operation selectors; --instance is unsupported", 2)
+        from sandbox.commands.delivery import configure, cmd_delivery
+        from sandbox.delivery.context import build_delivery_service
+        from sandbox.delivery.trace_context import build_trace_service
+        configure(delivery_service_factory=build_delivery_service, trace_service_factory=build_trace_service)
+        cmd_delivery({}, args)
+        return
+
+    covered_creation = args.cmd in {"ensure", "apply"} and getattr(args, "creation_context_json", None) is not None
+    if covered_creation:
+        from sandbox.server_config.models import validate_creation_context
+        try:
+            raw_context = args.creation_context_json
+            if len(raw_context.encode("utf-8")) > 8192:
+                raise ValueError("creation_context_invalid")
+            validate_creation_context(json.loads(raw_context))
+        except (ValueError, TypeError, UnicodeError):
+            if getattr(args, "json", False):
+                print(json.dumps({"schema_version": 1, "ok": False, "error": {"code": "creation_context_invalid"}}))
+                raise SystemExit(2)
+            die("creation_context_invalid", 2)
+    if args.cmd == "ensure":
+        query_requested = bool(getattr(args, "creation_capability", False) or getattr(args, "creation_receipt", False) or getattr(args, "creation_prepare_json", None) is not None)
+        if (getattr(args, "creation_kind", None) is not None or getattr(args, "creation_runtime_mode", None) is not None) and not getattr(args, "creation_capability", False):
+            die("--creation-kind and --creation-runtime-mode require --creation-capability", 2)
+        if getattr(args, "creation_url_json", None) is not None:
+            if not covered_creation or not getattr(args, "expected_incarnation", None):
+                die("--creation-url-json requires --creation-context-json and --expected-incarnation", 2)
+            if getattr(args, "remote", None) or getattr(args, "workspace", None):
+                die("creation URL mutation runs on the executing controller; use its supported transport", 2)
+            try:
+                raw_url_mutation = args.creation_url_json
+                if len(raw_url_mutation.encode("utf-8")) > 4096:
+                    raise ValueError("creation_url_invalid")
+                url_mutation = json.loads(raw_url_mutation)
+                if type(url_mutation) is not dict or set(url_mutation) != {"instance_id", "url"}:
+                    raise ValueError("creation_url_invalid")
+            except (ValueError, TypeError, UnicodeError):
+                if getattr(args, "json", False):
+                    print(json.dumps({"schema_version": 1, "ok": False, "error": {"code": "creation_url_invalid"}}))
+                    raise SystemExit(2)
+                die("creation_url_invalid", 2)
+            # This is a mutation transport, not a query. The owner takes its
+            # project lock and checks the exact receipt/incarnation before each
+            # URL write and readback; the CLI must not run ensure first.
+            from sandbox.commands.instances_cmd import cmd_creation_url
+            cmd_creation_url({}, args)
+            return
+        if query_requested:
+            if getattr(args, "remote", None) or getattr(args, "workspace", None):
+                die("creation queries run on the executing controller; use its supported transport", 2)
+            if getattr(args, "creation_capability", False) and covered_creation:
+                die("--creation-capability cannot combine --creation-context-json", 2)
+            from sandbox.commands.instances_cmd import cmd_creation_query
+            cmd_creation_query({}, args)
+            return
+
     # Spec 009 upgrade path: before a normal command can touch the legacy
     # fallback, move it once when the selected base is genuinely empty.  The
     # helper re-execs this exact command after staging the data; explicit
@@ -1354,7 +1504,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     archive_plugin_check = (
         args.cmd == "plugin-check" and bool(getattr(args, "archive", None))
     )
-    predispatch_skip = archive_plugin_check or (
+    predispatch_skip = covered_creation or archive_plugin_check or (
         args.cmd == "wp" and bool(getattr(args, "remote", None))
     ) or bool(
         command_spec is not None
@@ -1464,11 +1614,22 @@ Per-project (each plugin carries its own sandbox.config.json):
     # silently re-applied the whole sandbox instead of reconciling X. Infer the
     # project the caller clearly meant, and say which one was chosen.
     if args.cmd == "apply" and not getattr(args, "project_dir", None):
-        implied, source = _implied_project_dir(explicit, cwd_label)
+        implied, implied_label, source = _implied_project_target(explicit, cwd_label)
         if implied:
+            requested_label = _explicit_global_label(raw_argv)
+            if explicit and requested_label and requested_label != implied_label:
+                die(
+                    f"instance '{explicit}' is registered as label '{implied_label}', "
+                    f"not '{requested_label}'; omit --label or use the matching label.",
+                    2,
+                )
             args.project_dir = implied
-            info(f"apply: reconciling the project at {implied} ({source}). "
-                 "Run `./sb setup` for the whole sandbox instead.")
+            args.label = implied_label
+            if not getattr(args, "json", False):
+                info(f"apply: reconciling the project at {implied} ({source}). "
+                     f"label '{implied_label}'. Run `./sb setup` for the whole sandbox instead.")
+    if args.cmd == "apply" and covered_creation and not getattr(args, "project_dir", None):
+        die("creation context requires a resolved project; use --project-dir", 2)
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
     # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):
@@ -1614,11 +1775,17 @@ Per-project (each plugin carries its own sandbox.config.json):
     bounded_resource_status = (
         args.cmd == "resources" and getattr(args, "action", None) == "status"
     )
+    # Global instance inventory is observational.  It must not download the
+    # shared wp-cli asset or regenerate Compose before it can report state;
+    # those writes can block on an unavailable network even when the registry
+    # query itself is local and read-only.
+    bounded_instance_inventory = args.cmd == "instances"
     # Project-routed ensure owns its ready-path attestation.  Pre-writing
     # Compose or the legacy environment here would mutate persistent state
     # before it can refuse a stale live mount set.
     ensure_attestation_gate = args.cmd == "ensure" and args.cmd in PROJECT_ROUTED
     if (not predispatch_skip and not bounded_resource_status and
+            not bounded_instance_inventory and
             args.cmd != "secrets" and not ensure_attestation_gate):
         if not auto_migration_finalized:
             write_compose_files(cfg)

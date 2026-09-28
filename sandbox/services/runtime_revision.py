@@ -8,6 +8,9 @@ def runtime_revision_sources(root: Path) -> tuple[Path, ...]:
     """Return the canonical staged CLI/control source surface."""
     root = Path(root)
     parts = [root / "VERSION", root / "sb"]
+    # Privileged helper installation is part of the shipped control-plane
+    # surface even though it is maintained under scripts/ rather than sandbox/.
+    parts.append(root / "scripts" / "provision_ci_cleanup_broker.py")
     for source_root in (root / "sandbox", root / "mcp" / "wp-server"):
         parts.extend(source_root.rglob("*.py"))
     return tuple(sorted(

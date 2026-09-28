@@ -121,6 +121,23 @@ class SharedRedactionTests(unittest.TestCase):
         self.assertEqual(redact_text(object()), REDACTION_FAILED)
         self.assertEqual(redact_url(object()), REDACTION_FAILED)
 
+    def test_json_embedded_environment_assignment_parses_cleanly(self):
+        data = json.dumps({"Config": {"Env": ["WORDPRESS_DB_PASSWORD=secret123", "SAFE_VAR=hello"]}})
+        redacted = redact_text(data)
+        parsed = json.loads(redacted)
+        self.assertEqual(parsed["Config"]["Env"][0], "WORDPRESS_DB_PASSWORD=[REDACTED]")
+        self.assertEqual(parsed["Config"]["Env"][1], "SAFE_VAR=hello")
+
+    def test_quoted_assignment_preserves_quotes(self):
+        self.assertEqual(
+            redact_text('export DB_PASSWORD="mysecret"'),
+            'export DB_PASSWORD="[REDACTED]"',
+        )
+        self.assertEqual(
+            redact_text("export DB_PASSWORD='mysecret'"),
+            "export DB_PASSWORD='[REDACTED]'",
+        )
+
 
 class SurfaceParityTests(unittest.TestCase):
     def test_names_and_counts_evidence_contains_no_fixture_value(self):

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-08T17:28:33.578256Z",
+  "source": "./sb feedback --json counts/list with --since",
+  "snapshot_generated_at": "2026-09-08T16:56:09.302196Z",
+  "since": "2026-09-08T16:56:09.302196Z",
+  "trust": "untrusted_data",
+  "counts": {
+    "reported": {
+      "count": 0,
+      "total": 748,
+      "reviewed": 0,
+      "unreviewed": 0,
+      "by_status": {
+        "blocked": 0,
+        "duplicate": 0,
+        "in_progress": 0,
+        "invalid": 0,
+        "not_applicable": 0,
+        "open": 0,
+        "resolved": 0,
+        "unreviewed": 0,
+        "verified": 0,
+        "wont_fix": 0
+      },
+      "by_severity": {
+        "critical": 0,
+        "high": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "by_category": {
+        "bug": 0,
+        "idea": 0,
+        "incident": 0,
+        "other": 0,
+        "usability": 0
+      }
+    },
+    "pages": 1,
+    "listed": 0,
+    "pagination_error": null
+  },
+  "new_core_records": []
+}

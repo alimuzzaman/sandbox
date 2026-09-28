@@ -1,0 +1,119 @@
+{
+  "scope": "Sanitized metadata only; no argv operands, environment, secrets, raw logs, or runtime/deployment claims.",
+  "review_target": "fd7d650f8bfbb1760d931e2484cc01fa0badf546",
+  "summary": {
+    "file": "tmp/deployment-review-attempts-20260908/summary.md",
+    "file_bytes": 2114,
+    "file_mtime_utc": "2026-09-08T17:16:59.849372Z",
+    "file_sha256": "sha256:8750540ab70d966425719999960279ac9d2bc6bfe74087dec156b751af031a79",
+    "reported_execution_window_utc": ["2026-09-08T17:14:00Z", "2026-09-08T17:17:00Z"],
+    "reported_source_assertions": {
+      "lenzora_clean_commit": "9021d63f7e93357230321a037a044023dc35664d",
+      "sandbox_clean_commit": "ef5a239dd1f4e443f63ecc546f373d70a50c6adc",
+      "controller_local_runtime_revision": "b1c44aad3fde1cf9f42d05a6",
+      "controller_installed_runtime_revision": "e0949074e80c469bcff36c12",
+      "all_six_exit_code": 1,
+      "all_six_before_image_selection_or_activation": true,
+      "new_build_or_deployment_job": false,
+      "controller_update": false,
+      "production_data_change": false,
+      "unfinished_schema_verifier_files_preserved_and_restored": true,
+      "unfinished_schema_verifier_hashes_matching": true,
+      "unfinished_schema_verifier_files_used": false
+    }
+  },
+  "attempts": [
+    {
+      "command": "pnpm deploy dev",
+      "environment": "development",
+      "log_file": "tmp/deployment-review-attempts-20260908/development.log",
+      "file_bytes": 72,
+      "file_mtime_utc": "2026-09-08T17:14:15.606581Z",
+      "file_sha256": "sha256:c4dd9d50b9f705ba0a509aec172cab2317afbee15a59706b3287a7b471874b3a",
+      "direct_error_code": "ERR_PNPM_NOTHING_TO_DEPLOY",
+      "direct_exit_code": null,
+      "summary_exit_code": 1,
+      "reached_phase": "pnpm built-in deploy resolution",
+      "not_reached": ["package script", "image selection", "activation"]
+    },
+    {
+      "command": "pnpm deploy prod",
+      "environment": "production",
+      "log_file": "tmp/deployment-review-attempts-20260908/production.log",
+      "file_bytes": 72,
+      "file_mtime_utc": "2026-09-08T17:14:33.356784Z",
+      "file_sha256": "sha256:c4dd9d50b9f705ba0a509aec172cab2317afbee15a59706b3287a7b471874b3a",
+      "direct_error_code": "ERR_PNPM_NOTHING_TO_DEPLOY",
+      "direct_exit_code": null,
+      "summary_exit_code": 1,
+      "reached_phase": "pnpm built-in deploy resolution",
+      "not_reached": ["package script", "image selection", "activation"]
+    },
+    {
+      "command": "pnpm run deploy dev",
+      "environment": "development",
+      "log_file": "tmp/deployment-review-attempts-20260908/development-script.log",
+      "file_bytes": 346,
+      "file_mtime_utc": "2026-09-08T17:14:55.317504Z",
+      "file_sha256": "sha256:50fde9b1a1387d85cdee7c37622f95c81bffa8c4b6e72f28eed14e79d8f9f25c",
+      "direct_error_code": "ERR_PNPM_UNSUPPORTED_ENGINE",
+      "expected_node": "24.18.0",
+      "observed_node": "v26.5.0",
+      "direct_exit_code": null,
+      "summary_exit_code": 1,
+      "reached_phase": "package engine gate",
+      "not_reached": ["package Node wrapper", "image selection", "activation"]
+    },
+    {
+      "command": "pnpm run deploy prod",
+      "environment": "production",
+      "log_file": "tmp/deployment-review-attempts-20260908/production-script.log",
+      "file_bytes": 346,
+      "file_mtime_utc": "2026-09-08T17:15:05.934272Z",
+      "file_sha256": "sha256:50fde9b1a1387d85cdee7c37622f95c81bffa8c4b6e72f28eed14e79d8f9f25c",
+      "direct_error_code": "ERR_PNPM_UNSUPPORTED_ENGINE",
+      "expected_node": "24.18.0",
+      "observed_node": "v26.5.0",
+      "direct_exit_code": null,
+      "summary_exit_code": 1,
+      "reached_phase": "package engine gate",
+      "not_reached": ["package Node wrapper", "image selection", "activation"]
+    },
+    {
+      "command": "bash scripts/run-with-repository-node.sh pnpm run deploy dev",
+      "environment": "development",
+      "log_file": "tmp/deployment-review-attempts-20260908/development-pinned-node.log",
+      "file_bytes": 331,
+      "file_mtime_utc": "2026-09-08T17:15:39.833452Z",
+      "file_sha256": "sha256:a46305ca14ccf085447361c893e0b86d40e442d5d7664baee28df21de7cd0c35",
+      "direct_error_code": "ELIFECYCLE",
+      "direct_exit_code": 1,
+      "summary_exit_code": 1,
+      "node": "v24.18.0",
+      "npm": "v11.16.0",
+      "reached_phase": "application deployment script Sandbox runtime-revision gate",
+      "not_reached": ["image selection", "activation"]
+    },
+    {
+      "command": "bash scripts/run-with-repository-node.sh pnpm run deploy prod",
+      "environment": "production",
+      "log_file": "tmp/deployment-review-attempts-20260908/production-pinned-node.log",
+      "file_bytes": 332,
+      "file_mtime_utc": "2026-09-08T17:15:57.456748Z",
+      "file_sha256": "sha256:0f36eb330cb67717f4d0d110934a07f822f03f2ce57b7ce7777637970ba0ac9b",
+      "direct_error_code": "ELIFECYCLE",
+      "direct_exit_code": 1,
+      "summary_exit_code": 1,
+      "node": "v24.18.0",
+      "npm": "v11.16.0",
+      "reached_phase": "application deployment script Sandbox runtime-revision gate",
+      "not_reached": ["image selection", "activation"]
+    }
+  ],
+  "evidence_limits": [
+    "First four logs have error markers but no explicit exit-code line.",
+    "No named log prints source revision hashes; clean checkout claims are summary-only.",
+    "No named log reaches image selection, activation, health, edge, public route, or production state.",
+    "The attempts show pre-effect refusals, not post-effect runtime/deployment failures."
+  ]
+}

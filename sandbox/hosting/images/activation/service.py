@@ -62,6 +62,9 @@ class ActivationService:
                        configuration_digest, init_data_contract_digest,
                        edge_required, target):
         state_before = self.repository.snapshot(target)
+        from .settlement_forward import required_predecessor
+        if required_predecessor(state_before) is not None:
+            return self._unaccepted(request, "authority_mismatch")
         current = state_before.get("current")
         previous = state_before.get("previous")
         rollback_target = (((previous or {}).get("generation_digest")

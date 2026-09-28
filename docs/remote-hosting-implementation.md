@@ -49,6 +49,22 @@ or production evidence.
 
 ## 1. Source deploy: make a current checkout available remotely
 
+A failed remote ensure retains partial instance state. Inventory differences,
+labels and returned names do not prove that the failing caller created a resource
+or that its child has stopped, so deploy/preview failure paths do not delete
+instance data automatically. Inspect the exact project and resume or explicitly
+retire the owned instance. URL updates require the ensured instance name, verify
+its project registration, select it explicitly in the nested local WP-CLI calls,
+and read back both `home` and `siteurl` before reporting completion.
+
+Initializer proof accepts exactly one full service/config hash and canonical
+64-hex SHA-256 image identity. It resolves the Compose model before hashing it,
+including env-file values and Compose's escaped-dollar serialization. That
+private model stays in a process pipe bounded to 8 MiB; identity outputs retain
+their smaller bounds. Project/service labels, creation epoch, terminal exit and
+no-replay checks remain mandatory. A valid proof on an existing runtime is not
+evidence that a fresh initializer ran exactly once.
+
 ```sh
 ./sb deploy --project-dir /path/to/project --remote NAME
 ./sb deploy --project-dir /path/to/project --remote NAME --ensure --expose
@@ -392,3 +408,19 @@ The in-memory selector carries only Compose files, project, public synthetic ima
 canonical sanitized render digest. The remote source rerun uses those exact overrides and rejects
 nonzero status, any stderr, malformed JSON, missing declared keys, or sanitized digest divergence before
 the values can enter the private child environment. The selector and activation state contain no values.
+
+### Initializer identity output formats
+
+Initializer replay checks normalize Compose `config --hash SERVICE` output
+(`SERVICE HASH` or a bare full SHA-256) and image IDs with or without the
+`sha256:` prefix before comparing them with Docker inspect. The service name,
+full 64-character digest, project, config label, creation epoch, and successful
+exit still have to match; abbreviated, malformed, ambiguous, or different IDs
+remain non-authorizing.
+
+Compose's hash subcommand skips service environment-file resolution. Initializer
+proof resolves the model first and passes it only through stdin to the hash
+subcommand. Compose's resolved serialization escapes dollar signs for this
+second parse; disabling interpolation would incorrectly hash doubled dollars. The
+resolved model is never logged or written to disk. Both commands must succeed;
+all identity, creation-time, and terminal-exit checks remain mandatory.

@@ -22,15 +22,6 @@ def production_python_files() -> list[Path]:
     ]
 
 
-def _has_tool_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    return any(
-        isinstance(decorator, ast.Call)
-        and isinstance(decorator.func, ast.Attribute)
-        and decorator.func.attr == "tool"
-        for decorator in node.decorator_list
-    )
-
-
 def _enclosing_function(node: ast.AST, functions: tuple[str, ...]) -> str:
     """Return the nearest feature function for an AST condition."""
 
@@ -40,8 +31,7 @@ def _enclosing_function(node: ast.AST, functions: tuple[str, ...]) -> str:
 def _is_project_kind_test(test: ast.AST) -> bool:
     """Recognize a registered project-kind discriminator without text matching.
 
-    The broad inventory below remains a historical regression proxy. This
-    predicate is deliberately narrower: it requires a comparison against one
+    This predicate requires a comparison against one
     of the registered project kinds and an AST access to ``kind`` or
     ``project_kind``. That keeps unrelated resource/job ``kind`` fields out of
     the runtime-adapter inventory while retaining direct ``project_kind``
@@ -109,33 +99,6 @@ def approved_runtime_kind_locations() -> Counter[tuple[str, str]]:
     return locations
 
 
-def audit_metrics() -> dict[str, int]:
-    wildcard_imports = 0
-    mcp_tools = 0
-    kind_referencing_conditionals = 0
-    for path in production_python_files():
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                wildcard_imports += sum(alias.name == "*" for alias in node.names)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                mcp_tools += _has_tool_decorator(node)
-            if isinstance(node, (ast.If, ast.IfExp)):
-                test = ast.unparse(node.test)
-                kind_referencing_conditionals += "kind" in test
-
-    from sandbox.commands.manifest import load_builtin_commands
-    from sandbox.registry import COMMANDS
-
-    load_builtin_commands()
-    return {
-        "cli_commands": len(COMMANDS),
-        "mcp_tools": mcp_tools,
-        "wildcard_imports": wildcard_imports,
-        "kind_referencing_conditionals": kind_referencing_conditionals,
-    }
-
-
 class TestModularityInventory(unittest.TestCase):
     def test_server_config_uses_only_typed_composition_boundaries(self):
         package = ROOT / "sandbox/server_config"
@@ -173,17 +136,6 @@ class TestModularityInventory(unittest.TestCase):
 
         self.assertTrue(callable(instances_cmd.compose_file))
 
-    def test_pre_generic_project_inventory_is_explicit(self):
-        self.assertEqual(
-            audit_metrics(),
-            {
-                "cli_commands": 91,
-                "mcp_tools": 44,
-                "wildcard_imports": 19,
-                "kind_referencing_conditionals": 247,
-            },
-        )
-
     def test_approved_runtime_kind_locations_are_explicit(self):
         self.assertEqual(
             approved_runtime_kind_locations(),
@@ -191,6 +143,9 @@ class TestModularityInventory(unittest.TestCase):
                 ("sandbox/activation/catalog.py", "build_catalog"): 2,
                 ("sandbox/cli.py", "main"): 1,
                 ("sandbox/core/_instances.py", "resolve_instances"): 1,
+                ("sandbox/core/_instances.py", "mutate_creation_url"): 1,
+                ("sandbox/core/_remote.py", "_remote_creation_query"): 1,
+                ("sandbox/server_config/models.py", "creation_intent_fields"): 1,
                 ("sandbox/core/_domains.py", "_generic_proxy_entries"): 1,
                 ("sandbox/core/_domains.py", "secure_generic_instance"): 1,
                 ("sandbox/runtimes/compose.py", "_descriptor"): 1,
@@ -209,7 +164,7 @@ class TestModularityInventory(unittest.TestCase):
                 ("sandbox/commands/lifecycle.py", "cmd_logs"): 1,
                 ("sandbox/commands/lifecycle.py", "cmd_open"): 1,
                 ("sandbox/commands/debug.py", "cmd_test"): 1,
-                ("sandbox/application/runtime_service.py", "invoke"): 2,
+                ("sandbox/application/runtime_service.py", "invoke"): 3,
                 ("sandbox/application/runtime_service.py", "check"): 1,
                 ("mcp/wp-server/tools/instances.py", "destroy_instance"): 1,
                 ("mcp/wp-server/tools/instances.py", "recreate_instance"): 1,

@@ -635,6 +635,12 @@ class RuntimeService:
         except (KeyError, OSError, TypeError, ValueError) as exc:
             return OperationError("invalid_descriptor", f"runtime descriptor is invalid: {exc}",
                                   requested_capability=request.operation)
+        if request.arguments.get('expected_incarnation') is not None and request.arguments.get('creation_context') is None:
+            return OperationError('creation_context_required', 'expected incarnation requires the original creation context', kind, request.operation)
+        if request.arguments.get('creation_context') is not None:
+            runtime = descriptor.get('wordpressRuntime') or {}
+            if kind not in {'wordpress', 'compose'} or runtime.get('mode', 'compose') != 'compose' or descriptor.get('server') == 'herd':
+                return OperationError('unsupported_capability', 'selected runtime does not support instance_creation_receipt_v1', kind, 'instance_creation_receipt_v1')
         if kind == "wordpress":
             spec, selection_error = self._runtime_selection_error(descriptor, request)
             if selection_error is not None:

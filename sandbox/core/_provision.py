@@ -80,6 +80,20 @@ def _write_ssl_muplugin(instance: str) -> None:
         "if ( ! empty( $_SERVER['HTTP_X_FORWARDED_HOST'] ) ) {\n"
         "    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];\n"
         "}\n"
+        "if ( ! empty( $_SERVER['HTTP_HOST'] ) && preg_match( '/:([0-9]+)$/', $_SERVER['HTTP_HOST'], $matches ) ) {\n"
+        "    $_SERVER['SERVER_PORT'] = (int) $matches[1];\n"
+        "}\n"
+        "add_filter( 'redirect_canonical', function( $redirect_url, $requested_url ) {\n"
+        "    if ( ! empty( $_SERVER['HTTP_HOST'] ) && preg_match( '/:([0-9]+)$/', $_SERVER['HTTP_HOST'], $matches ) ) {\n"
+        "        $port = $matches[1];\n"
+        "        $parts = wp_parse_url( $redirect_url );\n"
+        "        if ( is_array( $parts ) && ! empty( $parts['host'] ) && empty( $parts['port'] ) && in_array( $parts['host'], array( 'localhost', '127.0.0.1' ), true ) ) {\n"
+        "            $port_str = ':' . $port;\n"
+        "            $redirect_url = str_replace( $parts['host'], $parts['host'] . $port_str, $redirect_url );\n"
+        "        }\n"
+        "    }\n"
+        "    return $redirect_url;\n"
+        "}, 10, 2 );\n"
     )
 
 
@@ -120,17 +134,113 @@ def _write_mail_muplugin(instance: str) -> None:
 
 
 def _write_loopback_muplugin(instance: str) -> None:
-    """Route the exact Sandbox home origin through Docker's host gateway.
+    """Route the exact Sandbox home origin back through its own web service.
 
     WordPress may store either its published localhost URL or its clean
-    ``.tst`` hostname. The latter is resolved by the host proxy, not by the
-    instance network, so self-fetches must use the same host-gateway path while
-    retaining the original Host header and request scheme.
+    ``.tst`` hostname. Nginx-backed instances can reach their own web service
+    over the private Compose network; other server types retain the host-gateway
+    fallback.
     """
     mu_dir = _ensure_muplugins_dir(instance)
     (mu_dir / "00-sandbox-loopback.php").write_text(
         "<?php\n"
         "/* Sandbox: make the browser-facing Sandbox origin reachable from Docker. */\n"
+        "add_filter( 'pre_http_request', function( $pre, $parsed_args, $url ) {\n"
+        "    if ( false !== $pre || ! empty( $parsed_args['_sandbox_loopback'] ) ) {\n"
+        "        return $pre;\n"
+        "    }\n"
+        "    $home = wp_parse_url( home_url() );\n"
+        "    $site = wp_parse_url( site_url() );\n"
+        "    $dest = wp_parse_url( $url );\n"
+        "    if ( ( ! is_array( $home ) && ! is_array( $site ) ) || ! is_array( $dest ) ) {\n"
+        "        return $pre;\n"
+        "    }\n"
+        "    $home_host = strtolower( (string) ( $home['host'] ?? '' ) );\n"
+        "    $site_host = strtolower( (string) ( $site['host'] ?? '' ) );\n"
+        "    $dest_host = strtolower( (string) ( $dest['host'] ?? '' ) );\n"
+        "    $known_hosts = array_filter( array_unique( array( $home_host, $site_host ) ) );\n"
+        "    if ( empty( $known_hosts ) || empty( $dest_host ) ) {\n"
+        "        return $pre;\n"
+        "    }\n"
+        "    $is_self = false;\n"
+        "    foreach ( $known_hosts as $h ) {\n"
+        "        $is_sandbox = ( 'localhost' === $h || '127.0.0.1' === $h || (bool) preg_match( '/\\.(tst|test)$/i', $h ) );\n"
+        "        if ( $is_sandbox && ( $dest_host === $h || ( strlen( $dest_host ) > strlen( $h ) && substr( $dest_host, - strlen( '.' . $h ) ) === '.' . $h ) ) ) {\n"
+        "            $is_self = true;\n"
+        "            break;\n"
+        "        }\n"
+        "    }\n"
+        "    if ( ! $is_self ) {\n"
+        "        return $pre;\n"
+        "    }\n"
+        "    $web_host = gethostbyname( 'nginx' ) !== 'nginx' ? 'nginx'\n"
+        "        : ( gethostbyname( 'wp' ) !== 'wp' ? 'wp' : '127.0.0.1' );\n"
+        "    $current_url = $url;\n"
+        "    $max_redirects = isset( $parsed_args['redirection'] ) ? (int) $parsed_args['redirection'] : 5;\n"
+        "    $redirects_followed = 0;\n"
+        "\n"
+        "    while ( true ) {\n"
+        "        $cur_dest = wp_parse_url( $current_url );\n"
+        "        if ( ! is_array( $cur_dest ) ) {\n"
+        "            return $pre;\n"
+        "        }\n"
+        "        $cur_host = strtolower( (string) ( $cur_dest['host'] ?? '' ) );\n"
+        "        $cur_is_self = false;\n"
+        "        foreach ( $known_hosts as $h ) {\n"
+        "            if ( $cur_host === $h || ( strlen( $cur_host ) > strlen( $h ) && substr( $cur_host, - strlen( '.' . $h ) ) === '.' . $h ) ) {\n"
+        "                $cur_is_self = true;\n"
+        "                break;\n"
+        "            }\n"
+        "        }\n"
+        "        if ( ! $cur_is_self ) {\n"
+        "            $args = $parsed_args;\n"
+        "            $args['_sandbox_loopback'] = true;\n"
+        "            if ( $redirects_followed > 0 ) {\n"
+        "                $args['redirection'] = max( 0, $max_redirects - $redirects_followed );\n"
+        "            }\n"
+        "            return wp_remote_request( $current_url, $args );\n"
+        "        }\n"
+        "        $path = $cur_dest['path'] ?? '/';\n"
+        "        $query = isset( $cur_dest['query'] ) ? '?' . $cur_dest['query'] : '';\n"
+        "        $target_url = 'http://' . $web_host . $path . $query;\n"
+        "        $args = $parsed_args;\n"
+        "        $args['_sandbox_loopback'] = true;\n"
+        "        $args['redirection'] = 0;\n"
+        "        if ( ! isset( $args['headers'] ) || ! is_array( $args['headers'] ) ) {\n"
+        "            $args['headers'] = array();\n"
+        "        }\n"
+        "        $cur_host_header = ! empty( $cur_dest['port'] ) && ! in_array( (int) $cur_dest['port'], array( 80, 443 ), true )\n"
+        "            ? $cur_host . ':' . $cur_dest['port'] : $cur_host;\n"
+        "        $args['headers']['Host'] = $cur_host_header;\n"
+        "        $args['headers']['X-Forwarded-Host'] = $cur_host_header;\n"
+        "        $args['headers']['X-Forwarded-Proto'] = strtolower( (string) ( $cur_dest['scheme'] ?? 'https' ) );\n"
+        "        $response = wp_remote_request( $target_url, $args );\n"
+        "        if ( is_wp_error( $response ) ) {\n"
+        "            return $response;\n"
+        "        }\n"
+        "        $code = (int) wp_remote_retrieve_response_code( $response );\n"
+        "        if ( in_array( $code, array( 301, 302, 303, 307, 308 ), true ) && $redirects_followed < $max_redirects ) {\n"
+        "            $location = wp_remote_retrieve_header( $response, 'location' );\n"
+        "            if ( ! empty( $location ) ) {\n"
+        "                if ( ! preg_match( '#^https?://#i', $location ) ) {\n"
+        "                    $scheme = strtolower( (string) ( $cur_dest['scheme'] ?? 'https' ) );\n"
+        "                    $port_str = ! empty( $cur_dest['port'] ) && ! in_array( (int) $cur_dest['port'], array( 80, 443 ), true )\n"
+        "                        ? ':' . $cur_dest['port'] : '';\n"
+        "                    if ( '/' === $location[0] ) {\n"
+        "                        $location = $scheme . '://' . $cur_host . $port_str . $location;\n"
+        "                    } else {\n"
+        "                        $base = dirname( $path );\n"
+        "                        $location = $scheme . '://' . $cur_host . $port_str . '/' . ltrim( $base . '/' . $location, '/' );\n"
+        "                    }\n"
+        "                }\n"
+        "                $current_url = $location;\n"
+        "                $redirects_followed++;\n"
+        "                continue;\n"
+        "            }\n"
+        "        }\n"
+        "        return $response;\n"
+        "    }\n"
+        "}, 10, 3 );\n"
         "add_action( 'http_api_curl', function ( $handle, $request, $url ) {\n"
         "    $home = wp_parse_url( home_url() );\n"
         "    $dest = wp_parse_url( $url );\n"
@@ -147,12 +257,71 @@ def _write_loopback_muplugin(instance: str) -> None:
         "         || $home_port !== $dest_port ) {\n"
         "        return;\n"
         "    }\n"
+        "    $nginx = gethostbyname( 'nginx' );\n"
+        "    $headers = $request['headers'] ?? array();\n"
+        "    if ( filter_var( $nginx, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 )\n"
+        "         && is_iterable( $headers ) ) {\n"
+        "        $curl_headers = array();\n"
+        "        $can_route_to_nginx = true;\n"
+        "        foreach ( $headers as $name => $value ) {\n"
+        "            if ( is_int( $name ) ) {\n"
+        "                $header = (string) $value;\n"
+        "                if ( preg_match( '/^\\s*host\\s*:/i', $header ) ) {\n"
+        "                    $can_route_to_nginx = false;\n"
+        "                    break;\n"
+        "                }\n"
+        "                $curl_headers[] = $header;\n"
+        "                continue;\n"
+        "            }\n"
+        "            if ( 'host' === strtolower( (string) $name ) ) {\n"
+        "                $can_route_to_nginx = false;\n"
+        "                break;\n"
+        "            }\n"
+        "            if ( is_array( $value ) ) {\n"
+        "                foreach ( $value as $item ) {\n"
+        "                    if ( is_scalar( $item ) ) {\n"
+        "                        $curl_headers[] = $name . ': ' . $item;\n"
+        "                    }\n"
+        "                }\n"
+        "            } elseif ( is_scalar( $value ) ) {\n"
+        "                $curl_headers[] = $name . ': ' . $value;\n"
+        "            }\n"
+        "        }\n"
+        "        if ( $can_route_to_nginx ) {\n"
+        "            $host_header = $dest_host;\n"
+        "            if ( ! empty( $dest['port'] ) ) {\n"
+        "                $host_header .= ':' . (int) $dest['port'];\n"
+        "            }\n"
+        "            $curl_headers[] = 'Host: ' . $host_header;\n"
+        "            $request_target = $dest['path'] ?? '/';\n"
+        "            if ( ! empty( $dest['query'] ) ) {\n"
+        "                $request_target .= '?' . $dest['query'];\n"
+        "            }\n"
+        "            curl_setopt( $handle, CURLOPT_URL, 'http://nginx' . $request_target );\n"
+        "            curl_setopt( $handle, CURLOPT_HTTPHEADER, $curl_headers );\n"
+        "            return;\n"
+        "        }\n"
+        "    }\n"
         "    $gateway = gethostbyname( 'host.docker.internal' );\n"
         "    if ( 'host.docker.internal' === $gateway || ! filter_var( $gateway, FILTER_VALIDATE_IP ) ) {\n"
         "        return;\n"
         "    }\n"
         "    curl_setopt( $handle, CURLOPT_RESOLVE, array( $dest_host . ':' . $dest_port . ':' . $gateway ) );\n"
         "}, 10, 3 );\n"
+        "if ( ! empty( $_SERVER['HTTP_HOST'] ) && preg_match( '/:([0-9]+)$/', $_SERVER['HTTP_HOST'], $matches ) ) {\n"
+        "    $_SERVER['SERVER_PORT'] = (int) $matches[1];\n"
+        "}\n"
+        "add_filter( 'redirect_canonical', function( $redirect_url, $requested_url ) {\n"
+        "    if ( ! empty( $_SERVER['HTTP_HOST'] ) && preg_match( '/:([0-9]+)$/', $_SERVER['HTTP_HOST'], $matches ) ) {\n"
+        "        $port = $matches[1];\n"
+        "        $parts = wp_parse_url( $redirect_url );\n"
+        "        if ( is_array( $parts ) && ! empty( $parts['host'] ) && empty( $parts['port'] ) && in_array( $parts['host'], array( 'localhost', '127.0.0.1' ), true ) ) {\n"
+        "            $port_str = ':' . $port;\n"
+        "            $redirect_url = str_replace( $parts['host'], $parts['host'] . $port_str, $redirect_url );\n"
+        "        }\n"
+        "    }\n"
+        "    return $redirect_url;\n"
+        "}, 10, 2 );\n"
     )
 
 
@@ -832,15 +1001,9 @@ def save_local_app_password(app_pw: str, instance: str) -> None:
     Written to `instances.<name>.app_password` so each instance has its own
     secret without colliding. (Per-project model — there is no global key.)
     """
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["app_password"] = app_pw
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def save_local_abilities_enabled(enabled: bool, instance: str) -> None:
@@ -850,15 +1013,9 @@ def save_local_abilities_enabled(enabled: bool, instance: str) -> None:
     it lives in the DB and is wiped by a recreate / db-reset. Mirroring the choice
     to `instances.<name>.abilities_enabled` makes it durable so `up` can re-apply
     it. Written via the same per-instance pattern as the other secrets."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["abilities_enabled"] = bool(enabled)
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def read_local_abilities_enabled(instance: str):
@@ -866,12 +1023,11 @@ def read_local_abilities_enabled(instance: str):
     if not CONFIG_LOCAL.exists():
         return None
     try:
-        ensure_pyyaml()
-        import yaml
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+        local = _local_yaml()
         val = (local.get("instances", {}).get(instance, {}) or {}).get("abilities_enabled")
         return None if val is None else bool(val)
+    except ConfigParseError:
+        raise
     except Exception:
         return None
 
@@ -879,15 +1035,9 @@ def read_local_abilities_enabled(instance: str):
 def save_local_autologin_token(token: str, instance: str) -> None:
     """Persist the sandbox autologin token in sandbox.local.yml so it can be
     included in the ensure_instance return value as login_url."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["autologin_token"] = token
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def _autologin_mu_plugin(token: str) -> str:

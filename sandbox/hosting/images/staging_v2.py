@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from .plan_set import PlanSetContractError, VerifiedImagePlanSet
+from .plan_set import PlanSetContractError, VerifiedImagePlanSet, receipt_image_names
 from .staging_models import (
     HelperIdentity, MAX_PERSISTED_LEDGER_COUNTER, StagingContractError,
     StagingTarget, _closed, _digest, _local_image_id, _text, staging_digest,
@@ -186,6 +186,7 @@ class BatchObservation:
     target: StagingTarget
     images: tuple[BatchImageObservation, ...]
     observation_digest: str
+    receipt_schema_version: int = 1
 
     FIELDS: ClassVar[frozenset[str]] = frozenset({
         "target_epoch_start", "target_epoch_end", "daemon_epoch_start", "daemon_epoch_end",
@@ -196,8 +197,12 @@ class BatchObservation:
         for value in (self.target_epoch_start, self.target_epoch_end,
                       self.daemon_epoch_start, self.daemon_epoch_end):
             _text(value, identity=True)
-        if type(self.target) is not StagingTarget or len(self.images) != 3 \
-                or tuple(item.name for item in self.images) != ("queue", "web", "worker") \
+        try:
+            names = receipt_image_names(self.receipt_schema_version)
+        except PlanSetContractError:
+            raise StagingContractError("observation_invalid") from None
+        if type(self.target) is not StagingTarget or len(self.images) != len(names) \
+                or tuple(item.name for item in self.images) != names \
                 or self.target_epoch_start != self.target_epoch_end \
                 or self.daemon_epoch_start != self.daemon_epoch_end \
                 or self.target_epoch_start != self.target.machine_identity \
@@ -209,7 +214,8 @@ class BatchObservation:
             raise StagingContractError("observation_invalid")
 
     def body_mapping(self) -> dict[str, Any]:
-        return {"target_epoch_start": self.target_epoch_start,
+        return {**({"receipt_schema_version": 2} if self.receipt_schema_version == 2 else {}),
+                "target_epoch_start": self.target_epoch_start,
                 "target_epoch_end": self.target_epoch_end,
                 "daemon_epoch_start": self.daemon_epoch_start,
                 "daemon_epoch_end": self.daemon_epoch_end,
@@ -221,14 +227,19 @@ class BatchObservation:
 
     @classmethod
     def from_mapping(cls, value: object) -> "BatchObservation":
-        raw = _closed(value, cls.FIELDS)
+        fields = cls.FIELDS | ({"receipt_schema_version"} if type(value) is dict
+                               and "receipt_schema_version" in value else set())
+        raw = _closed(value, fields)
+        version = raw.get("receipt_schema_version", 1)
+        if "receipt_schema_version" in raw and (type(version) is not int or version != 2):
+            raise StagingContractError("observation_invalid")
         if type(raw["images"]) is not list:
             raise StagingContractError("observation_invalid")
         return cls(raw["target_epoch_start"], raw["target_epoch_end"],
                    raw["daemon_epoch_start"], raw["daemon_epoch_end"],
                    StagingTarget.from_mapping(raw["target"]),
                    tuple(BatchImageObservation.from_mapping(item) for item in raw["images"]),
-                   raw["observation_digest"])
+                   raw["observation_digest"], version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +297,7 @@ class StagedImageProofSet:
         observed = {item.name: item for item in self.observation.images}
         if plan.plan_set_digest != self.plan_set_digest \
                 or self.observation.target != self.target \
+                or self.observation.receipt_schema_version != plan.receipt.schema_version \
                 or set(expected) != set(observed):
             raise StagingContractError("proof_invalid")
         for name, image in expected.items():
@@ -332,7 +344,7 @@ class PullFailure:
     failure_class: str
 
     def __post_init__(self) -> None:
-        if self.image not in {"queue", "web", "worker"} \
+        if self.image not in {"database", "queue", "web", "worker"} \
                 or self.failure_class not in {
                     "denied", "not_found", "network", "timeout", "no_space", "daemon"}:
             raise StagingContractError()

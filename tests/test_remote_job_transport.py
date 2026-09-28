@@ -18,6 +18,31 @@ from sandbox.transports.remote_jobs import (
 
 
 class RemoteJobTransportTests(unittest.TestCase):
+    def test_credential_like_source_in_argv_gets_project_file_guidance_before_side_effects(self):
+        def unexpected(*_args, **_kwargs):
+            self.fail("credential-like argv must be rejected before remote access")
+
+        transport = RemoteJobTransport(
+            deploy=unexpected,
+            ssh_run=unexpected,
+            remote_lookup=unexpected,
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("python", "-c", "api_key=synthetic-fixture"), 60,
+            SourceIdentity("caller"), remote_name="vps",
+        )
+
+        for kind, submit in (
+            ("single", lambda: transport.submit(submission)),
+            ("matrix", lambda: transport.submit_many([submission])),
+        ):
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(
+                        RemoteJobTransportError, "project-relative file path") as caught:
+                    submit()
+                self.assertIn("commit and dirty digest", str(caught.exception))
+
     def test_deploy_only_submission_ignores_generation_authority(self):
         calls = []
         transport = RemoteJobTransport(
@@ -47,10 +72,28 @@ class RemoteJobTransportTests(unittest.TestCase):
                 transport, "_prepare_workspace", return_value="/srv/project-unit"):
             result = transport.submit(JobSubmission(
                 "test", "/project", "project:remote", "remote", "unit",
-                ("echo", "ok"), 60, SourceIdentity("caller"), remote_name="vps",
+                ("python3", "canary/reopen.py", "--fixture",
+                 "canary/fixtures/synthetic.json"),
+                60, SourceIdentity("caller"), remote_name="vps",
             ))
         self.assertTrue(result["ok"])
         self.assertEqual(calls, [])
+
+    def test_inline_helper_source_rejection_gives_safe_file_path_guidance(self):
+        transport = RemoteJobTransport(
+            deploy=lambda *_args, **_kwargs: self.fail("unsafe argv must stop before deploy"),
+            ssh_run=lambda *_args, **_kwargs: self.fail("unsafe argv must stop before SSH"),
+            remote_lookup=lambda *_args: self.fail("unsafe argv must stop before lookup"),
+        )
+        submission = JobSubmission(
+            "test", "/project", "project:remote", "remote", "unit",
+            ("python3", "-c", "api_key='synthetic-fixture'"), 60,
+            SourceIdentity("caller"), remote_name="vps",
+        )
+        with self.assertRaisesRegex(
+                RemoteJobTransportError,
+                "save it under the project directory and pass its project-relative file path"):
+            transport.submit(submission)
 
     def test_synchronized_submission_fails_closed_without_runtime_authority(self):
         calls = []

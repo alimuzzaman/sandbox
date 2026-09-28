@@ -98,6 +98,22 @@ class RemoteCIJobTests(unittest.TestCase):
         self.assertEqual(submission.execution_policy_provenance["execution_profile"], "workspace")
         self.assertIn("123", submission.argv)
 
+    def test_runtime_none_propagates_to_remote_ci_children(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workflow = root / "ci.yml"
+            workflow.write_text("jobs:\n  unit:\n    steps:\n      - run: echo unit\n")
+            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p",
+                                    {"identity": "project:ci"})
+            args = SimpleNamespace(timeout=60, label_prefix=None, matrix_filter={}, jobs=None,
+                                   allow_deploy=False, keep_on_fail=False, strict_provision=False,
+                                   accepted_differences=None, output_profile="smart",
+                                   runtime="none")
+            submission = _remote_ci_submissions(target, str(root), workflow,
+                                                _plan_workflow(workflow), args)[0]
+        self.assertIn("--runtime", submission.argv)
+        self.assertEqual(submission.argv[submission.argv.index("--runtime") + 1], "none")
+
     def test_remote_matrix_control_contains_explicit_child_plan(self):
         calls = []
         transport = RemoteJobTransport(
@@ -313,6 +329,19 @@ class RemoteCIJobTests(unittest.TestCase):
                 result = module.ci_run("/tmp/project", "ci.yml", local="cells" in report,
                                        remote=None if "cells" in report else "remote-1")
             self.assertEqual(result, report)
+
+    def test_mcp_runtime_none_forwards_without_wordpress_capability(self):
+        module = _load_mcp_ci_tool()
+        report = {"ok": True, "cells": [{"label": "local", "status": "passed"}]}
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(report) + "\n", stderr="")
+        with patch.object(module, "_require_project_capability",
+                          return_value={"ok": False, "error": "wordpress required"}), \
+                patch.object(module.subprocess, "run", return_value=completed) as run:
+            result = module.ci_run("/tmp/project", "ci.yml", local=True, runtime="none")
+        self.assertEqual(result, report)
+        command = run.call_args.args[0]
+        self.assertIn("--runtime", command)
+        self.assertEqual(command[command.index("--runtime") + 1], "none")
 
     def test_mcp_ci_docstring_describes_local_and_remote_async_shapes(self):
         module = _load_mcp_ci_tool()

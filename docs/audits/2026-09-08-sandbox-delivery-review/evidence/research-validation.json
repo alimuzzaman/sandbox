@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-09-08T17:54:39.618444+00:00",
+  "reviewed_source": "fd7d650f8bfbb1760d931e2484cc01fa0badf546",
+  "scope": "Artifact consistency only; manifest and this generated result excluded from input counts. No new product/runtime tests.",
+  "counts": {
+    "checked_files": 36,
+    "markdown_documents": 18,
+    "valid_local_links": 91,
+    "valid_json_documents": 16,
+    "parsed_python_programs": 2,
+    "valid_source_links": 39
+  },
+  "source_refs": [
+    "alimuzzaman/lenzora@9021d63f7e93357230321a037a044023dc35664d",
+    "alimuzzaman/sandbox@ef5a239dd1f4e443f63ecc546f373d70a50c6adc",
+    "alimuzzaman/sandbox@fd7d650f8bfbb1760d931e2484cc01fa0badf546"
+  ],
+  "feedback": {
+    "inventory": 748,
+    "detail_reads": 281,
+    "high_critical_detail_reads": 278,
+    "selected_medium_detail_reads": 3,
+    "detail_failures": 0
+  },
+  "numbered_findings": 16,
+  "errors": [],
+  "sensitive_pattern_candidates": [],
+  "staged_diff_check": {
+    "exit_code": 0,
+    "observed_at": "2026-09-08T17:55:44.847940+00:00"
+  }
+}

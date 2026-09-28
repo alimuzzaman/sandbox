@@ -445,7 +445,8 @@ def _act_binary() -> str | None:
 def _run_cell_with_act(entry: dict, spec: dict, root: Path,
                        patched_workflow_path: Path, secrets_path: Path,
                        allow_deploy: bool, timeout: int,
-                       extra_act_args: list[str] | None = None) -> dict:
+                       extra_act_args: list[str] | None = None,
+                       *, runtime: str = "sandbox") -> dict:
     """Execute one matrix cell's job via `act` against its own ephemeral
     sandbox instance. `act` handles the FULL step semantics (matrix, if:,
     needs, services:, composite/reusable actions) — this function's only job
@@ -474,14 +475,18 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
     than keep patching a mechanism with no evidence it ever helped."""
     cell = spec["cell"]
     job_id = spec["job_id"]
-    # WordPress compatibility records use ``wordpress_port``; generic Compose
-    # records expose the same host-reachable service as ``http_port``.
-    port = entry.get("wordpress_port") or entry.get("http_port")
-    # The instance's secured https://<name>.tst URL is a HOST-side proxy/DNS
-    # convenience — it does not resolve inside an arbitrary container. This
-    # WAS the actual bug behind the one observed HTTP 000 failure (mistaken,
-    # at the time, for a network-propagation race — see the note above).
-    url = f"http://host.docker.internal:{port}" if port else entry.get("url")
+    url = None
+    if runtime != "none":
+        # WordPress compatibility records use ``wordpress_port``; generic
+        # Compose records expose the same host-reachable service as
+        # ``http_port``.
+        port = entry.get("wordpress_port") or entry.get("http_port")
+        # The instance's secured https://<name>.tst URL is a HOST-side
+        # proxy/DNS convenience — it does not resolve inside an arbitrary
+        # container. This WAS the actual bug behind the one observed HTTP 000
+        # failure (mistaken, at the time, for a network-propagation race — see
+        # the note above).
+        url = f"http://host.docker.internal:{port}" if port else entry.get("url")
     act_bin = _act_binary()
     if not act_bin:
         return {"status": "failed",
@@ -503,8 +508,9 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
         cmd += ["--matrix", f"{k}:{v}"]
     for platform, image in _ACT_PLATFORM_MAP.items():
         cmd += ["-P", f"{platform}={image}"]
-    cmd += ["--env", f"WP_BASE_URL={url}",
-            "--env", f"SANDBOX_INSTANCE={entry.get('instance')}"]
+    if runtime != "none":
+        cmd += ["--env", f"WP_BASE_URL={url}",
+                "--env", f"SANDBOX_INSTANCE={entry.get('instance')}"]
     for k, v in cell.items():
         cmd += ["--env", f"MATRIX_{str(k).upper()}={v}"]
     cmd += (extra_act_args or [])
@@ -628,6 +634,8 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
             command = ["sb", "ci", "run", relative_workflow, "--project-dir", ".",
                        "--job", job["id"], "--label-prefix", label[:8],
                        "--timeout", str(timeout), "--json", "--local"]
+            if getattr(args, "runtime", "sandbox") == "none":
+                command += ["--runtime", "none"]
             if getattr(args, "allow_deploy", False):
                 command.append("--allow-deploy")
             if getattr(args, "keep_on_fail", False):
@@ -691,7 +699,7 @@ def _run_remote_ci(target, root: str, wf_path: Path, plan: dict, args, *, as_jso
 def cmd_ci(cfg, args) -> None:
     """`./sb ci plan <workflow.yml>` / `./sb ci run <workflow.yml> --project-dir DIR
     [--job ID ...] [--matrix-filter k=v ...] [--if-event NAME] [--label-prefix P]
-    [--concurrency N] [--allow-deploy] [--list-secrets] [--keep-on-fail]
+    [--concurrency N] [--runtime sandbox|none] [--allow-deploy] [--list-secrets] [--keep-on-fail]
     [--strict-provision] [--async] [--json]` — run a GitHub Actions workflow's
     job(s) locally via `act` (full GH-Actions-equivalent fidelity), fanned out
     one matrix cell per concurrent ephemeral sandbox instance (see
@@ -764,12 +772,21 @@ def cmd_ci(cfg, args) -> None:
         return
 
     # action == "run"
+    runtime = getattr(args, "runtime", "sandbox")
+    if runtime not in {"sandbox", "none"}:
+        die("CI runtime must be 'sandbox' or 'none'")
     pd = getattr(args, "project_dir", None) or os.getcwd()
-    try:
-        pconf = sc.load_project_config(pd)
-    except sc.ConfigError as e:
-        die(str(e))
-    root = pconf["root"]
+    pconf = None
+    if runtime == "none" and not getattr(args, "remote", None):
+        root = str(Path(pd).expanduser().resolve())
+        if not Path(root).is_dir():
+            die(f"project directory not found: {root}")
+    else:
+        try:
+            pconf = sc.load_project_config(pd)
+        except sc.ConfigError as e:
+            die(str(e))
+        root = pconf["root"]
 
     # Resolve the target before checking for a local act binary. A configured
     # remote is the recommended execution path and needs only the co-located
@@ -777,14 +794,16 @@ def cmd_ci(cfg, args) -> None:
     from sandbox.application.context import durable_job_dependencies
     from sandbox.application.target_service import TargetResolutionError
     from sandbox.jobs.models import TargetRequest
-    try:
-        target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
-            project_dir=root, local=bool(getattr(args, "local", False)),
-            remote=getattr(args, "remote", None), workspace=getattr(args, "workspace", None),
-            required_capability="job.exec" if not getattr(args, "local", False) else None,
-        ))
-    except TargetResolutionError as exc:
-        die(f"{exc.code}: {exc}")
+    target = None
+    if runtime != "none" or getattr(args, "remote", None):
+        try:
+            target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+                project_dir=root, local=bool(getattr(args, "local", False)),
+                remote=getattr(args, "remote", None), workspace=getattr(args, "workspace", None),
+                required_capability="job.exec" if not getattr(args, "local", False) else None,
+            ))
+        except TargetResolutionError as exc:
+            die(f"{exc.code}: {exc}")
     from sandbox.ci.workflow import WorkflowError, preflight
     try:
         gate = preflight(root, wf_path, selected_jobs=getattr(args, "jobs", None),
@@ -792,7 +811,7 @@ def cmd_ci(cfg, args) -> None:
                          safe_mode=not getattr(args, "allow_deploy", False))
     except WorkflowError as exc:
         die(str(exc))
-    if target.kind == "remote":
+    if target is not None and target.kind == "remote":
         blocking = gate["blocking"]
     else:
         # Preserve local act compatibility policy while preventing Sandbox's
@@ -805,12 +824,12 @@ def cmd_ci(cfg, args) -> None:
             print(json.dumps({"ok": False, "code": "ci_preflight_blocked",
                               "preflight": blocked_gate}, sort_keys=True))
         else:
-            if target.kind == "remote":
+            if target is not None and target.kind == "remote":
                 die("remote CI preflight blocked execution; use --accept-difference for each named difference")
             die("CI artifact preflight blocked execution; use literal paths, "
                 "if-no-files-found: error, or accept each named difference")
         return
-    if target.kind == "remote":
+    if target is not None and target.kind == "remote":
         _run_remote_ci(target, root, wf_path, plan, args, as_json=as_json)
         return
 
@@ -838,6 +857,8 @@ def cmd_ci(cfg, args) -> None:
             argv.append("--keep-on-fail")
         if getattr(args, "strict_provision", False):
             argv.append("--strict-provision")
+        if runtime == "none":
+            argv += ["--runtime", "none"]
         argv += ["--timeout", str(getattr(args, "timeout", None) or 900)]
         jid = launch_background_job(argv, cwd=ROOT)
         print(json.dumps({"ok": True, "job_id": jid}))
@@ -928,7 +949,13 @@ def cmd_ci(cfg, args) -> None:
     try:
         provision_instance = None
         teardown_instance = None
-        if pconf.get("kind") == "compose":
+        if runtime == "none":
+            # Keep the shared fan-out/result contract, but make the lifecycle
+            # explicitly inert. With no callbacks the helper falls back to
+            # ensure_instance, which would violate the runtime-free contract.
+            provision_instance = lambda _spec: {}
+            teardown_instance = lambda _entry: None
+        elif pconf.get("kind") == "compose":
             from sandbox.application.runtime_service import OperationError, OperationRequest
             from sandbox.application.context import runtime_service
 
@@ -951,7 +978,7 @@ def cmd_ci(cfg, args) -> None:
             cfg, root, specs,
             worker_fn=lambda entry, spec: _run_cell_with_act(
                 entry, spec, Path(root), patched_path, secrets_path,
-                allow_deploy, timeout),
+                allow_deploy, timeout, runtime=runtime),
             concurrency=concurrency, keep_on_fail=keep_on_fail,
             strict_provision=strict_provision, on_progress=_progress,
             provision_instance=provision_instance, teardown_instance=teardown_instance)

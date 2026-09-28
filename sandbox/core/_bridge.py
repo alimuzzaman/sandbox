@@ -17,15 +17,9 @@ from contextlib import redirect_stdout, redirect_stderr
 def save_local_bridge_token(token: str, instance: str) -> None:
     """Persist the per-instance snapshot-bridge token in sandbox.local.yml.
     The sb web bridge authenticates dashboard snapshot calls against it."""
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
+    local = _local_yaml()
     local.setdefault("instances", {}).setdefault(instance, {})["bridge_token"] = token
-    with CONFIG_LOCAL.open("w") as f:
-        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+    _write_local_yaml(local)
 
 
 def _write_snapshot_muplugin(instance: str, token: str) -> None:

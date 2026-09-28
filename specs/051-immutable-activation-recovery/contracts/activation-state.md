@@ -23,6 +23,23 @@ The record retains exactly current and nullable previous verified generations. A
 moves current to previous and discards the older previous. No secret value, credential,
 credential reference, arbitrary output, environment body, or temporary path is serializable.
 
+## Candidate-v2 private input compatibility
+
+`PrivateComposeInputSnapshotV2.input_contract` additionally admits `candidate-v2`
+only with a complete execution graph. Its snapshot digest includes this literal;
+the preparation identity and private configuration HMAC use distinct v2 input
+domains. Retained candidate-v1 and legacy snapshots retain their original hashes
+and decoding. A substituted contract fails the original snapshot digest.
+
+The graph's existing `created` event persists the initializer container ID before
+private archive preparation in `inspect`. The source mappings and exact metadata
+are bound through the snapshot configuration digest and step subject. Only an
+exact readback permits `inspected`, followed by durable `effect_entered` and
+start. Persistent graph replacement already saves `effect_entered` before any
+create or archive write. Any retained progress blocks automatic execution replay,
+including partial copies and lost acknowledgements. No new public secret bytes,
+paths, archive manifests, or unkeyed hashes enter state.
+
 Before proof validation, Feature 050 durably prepares a holder/deadline-bound proof lease;
 it immediately pins the full proof. The stage lock/pin stays held across forward acceptance.
 Forward acceptance atomically stores the activation-authority digest, accepted-proof-pin
@@ -35,6 +52,13 @@ is required before it exists.
 Edge is a transaction sub-request. Proven-not-entered may exact-resume. Acceptance-unknown
 first queries existing replay authority. Exact terminal receipt may promote only after
 fresh unchanged runtime observation. Possible delivery without receipt remains fenced.
+
+V2 writes the runtime observation, generation subject, and prepared edge sub-request in
+one atomic `edge_pending` transition. A crash before that write leaves `runtime_pending`;
+a crash after it cannot omit the edge requirement. Historical v2 `runtime_proven` records
+without a terminal edge receipt and retained candidate remain `recovery_conflict` after
+two observations, with no promotion or owner release. V1 optional-edge behavior remains
+unchanged.
 
 Activation recovery is a separate request type dispatched by `sb host image recover`.
 Under the same owner/CAS, 051 validates the first read-only Feature 048 observer value and

@@ -1,4 +1,6 @@
 import tempfile
+import hashlib
+from dataclasses import replace
 import unittest
 from pathlib import Path
 
@@ -22,6 +24,7 @@ def _profile(source_type="filesystem", sources=("host-manifest:site",)):
 
 
 class _Controller:
+    capture_contract_version = 2
     def __init__(self, *, coverage=None, native_format="tar"):
         self.coverage = coverage
         self.native_format = native_format
@@ -35,13 +38,16 @@ class _Controller:
         }
         return HostedObservation(binding, coverage)
 
-    def capture(self, remote, artifact, destination, binding, request_id):
+    def capture(self, remote, artifact, destination, binding, request_id, *, backup_operation_id):
         self.request_ids.append(request_id)
         path = destination / "capture.bin"
         path.write_bytes(b"native capture")
         return HostedCaptureReceipt(
             artifact.profile_id, artifact.artifact_id, request_id, (path,),
             tuple(artifact.sources), self.native_format,
+            capture_contract_version=2, backup_operation_id=backup_operation_id,
+            artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            started_at=1.0, completed_at=2.0,
         )
 
 
@@ -118,12 +124,36 @@ class TestHostedRecoveryMaterializer(unittest.TestCase):
         from sandbox.recovery.planner import build_plan
         artifact = build_plan(plan, ("site",)).artifacts[0]
         binding = SourceBinding("remote", "machine", "revision", "digest")
-        first = materializer._request_id("remote", artifact, binding)
-        second = materializer._request_id("remote", artifact, binding)
+        first = materializer._request_id("remote", artifact, binding, "set-a")
+        second = materializer._request_id("remote", artifact, binding, "set-a")
         self.assertEqual(first, second)
+        self.assertNotEqual(first, materializer._request_id("remote", artifact, binding, "set-b"))
         altered = _profile(sources=("host-manifest:other",))
         altered_artifact = build_plan(RecoveryCatalog(1, (altered,)), ("site",)).artifacts[0]
-        self.assertNotEqual(first, materializer._request_id("remote", altered_artifact, binding))
+        self.assertNotEqual(first, materializer._request_id("remote", altered_artifact, binding, "set-a"))
+
+    def test_old_controller_refused_before_observation(self):
+        controller = _Controller()
+        controller.capture_contract_version = 1
+        controller.observe = lambda *args: self.fail("unsupported controller was observed")
+        service, capture = self._service(controller)
+        result = service.create_materialized("set-a", ("site",), confirm=True, remote="remote")
+        self.assertEqual(result["error"]["code"], "unsupported_materialization")
+        self.assertFalse(hasattr(capture, "files"))
+
+    def test_receipt_identity_digest_and_times_fail_closed(self):
+        class InvalidController(_Controller):
+            def capture(inner, *args, **kwargs):
+                return replace(super(InvalidController, inner).capture(*args, **kwargs), **changes)
+
+        for changes in ({"backup_operation_id": "old-set"}, {"artifact_sha256": "bad"},
+                        {"capture_contract_version": 1}, {"started_at": float("nan")},
+                        {"completed_at": 0.5}):
+            with self.subTest(changes=changes):
+                service, capture = self._service(InvalidController())
+                result = service.create_materialized("set-a", ("site",), confirm=True, remote="remote")
+                self.assertEqual(result["error"]["code"], "invalid_materialization_receipt")
+                self.assertFalse(hasattr(capture, "files"))
 
 
 if __name__ == "__main__":

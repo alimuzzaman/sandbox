@@ -11,11 +11,11 @@ BUILTIN_TOOL_GROUPS = (
     "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
     "resources", "feedback",
     "abilities", "skills", "debug", "e2e", "ci", "asyncjobs", "secrets",
-    "plugin_check", "remote", "hermes", "recovery", "sync", "owned_storage",
+    "plugin_check", "remote", "hermes", "recovery", "sync", "owned_storage", "delivery",
 )
 
 DEFAULT_MCP_GROUPS = (
-    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources", "feedback", "sync", "owned_storage",
+    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources", "feedback", "sync", "owned_storage", "delivery",
 )
 
 # A scoped server advertises only tools useful to its declared runtime.  The
@@ -24,10 +24,10 @@ DEFAULT_MCP_GROUPS = (
 # `sb mcp --project-dir PROJECT` instead.
 WORDPRESS_PROJECT_GROUPS = (
     "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
-    "resources", "feedback", "sync", "owned_storage",
+    "resources", "feedback", "sync", "owned_storage", "delivery",
 )
 COMPOSE_PROJECT_GROUPS = (
-    "instances", "domains", "runtime", "jobs", "net", "remote", "resources", "feedback", "sync", "owned_storage",
+    "instances", "domains", "runtime", "jobs", "net", "remote", "resources", "feedback", "sync", "owned_storage", "delivery",
 )
 
 
@@ -66,11 +66,14 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
     "secrets": ("secret_service_factory",),
     "sync": ("sync_service",),
     "owned_storage": (),
+    "delivery": ("delivery_service_factory", "trace_service_factory"),
 }
 
 # Exact registration ownership and order, kept separate from implementation
 # imports so duplicate ownership fails before FastMCP is initialized.
 BUILTIN_TOOL_NAMES = {
+    "delivery": ("delivery_inspect", "delivery_trace_capabilities", "delivery_trace_start",
+                 "delivery_trace_record", "delivery_trace_owner_status", "delivery_trace_owner_record"),
     "instances": ("ensure_instance", "destroy_instance", "recreate_instance", "setup_domains", "secure_instance", "apply_config"),
     "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support", "ingress_status", "ingress_support", "ingress_plan", "ingress_cleanup", "ingress_reconcile", "ingress_reconsider", "ingress_apply"),
     "runtime": ("instance_status", "instance_logs", "instance_exec",

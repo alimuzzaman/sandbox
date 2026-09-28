@@ -413,11 +413,12 @@ def _cmd_service(args, as_json: bool) -> None:
     # single positional remote name, treat it as ``service status <name>``.
     # Mutating and diagnostic operations still require their explicit verb so
     # an incomplete command cannot silently change remote state.
-    if name is None and operation not in {None, "status", "diagnostics", "migrate", "stop", "capability"}:
+    if name is None and operation not in {
+            None, "status", "diagnostics", "migrate", "cleanup-broker", "stop", "capability"}:
         name = operation
         operation = "status"
-    if operation not in {"status", "diagnostics", "migrate", "stop", "capability"} or not name:
-        die("usage: ./sb remote service <status|diagnostics|migrate|stop|capability> <name> [--plan|--confirm]")
+    if operation not in {"status", "diagnostics", "migrate", "cleanup-broker", "stop", "capability"} or not name:
+        die("usage: ./sb remote service <status|diagnostics|migrate|cleanup-broker|stop|capability> <name> [--plan|--confirm]")
     if operation == "diagnostics" and _arg_true(args, "ssh"):
         die("--ssh diagnostics are no longer supported; use the authenticated remote service")
     if _arg_true(args, "processes") and operation != "diagnostics":
@@ -434,8 +435,17 @@ def _cmd_service(args, as_json: bool) -> None:
             payload = {"ok": True, "name": name, "status": "observed",
                        "data": cap, "error": None}
         elif operation == "status":
-            payload = {"ok": True, "name": name, "status": "observed",
-                       "data": sr.remote_mcp_service_status(entry), "error": None}
+            service = sr.remote_mcp_service_status(entry)
+            available = service.get("probe_state", "complete") == "complete"
+            payload = {
+                "ok": available, "name": name,
+                "status": "observed" if available else "degraded",
+                "data": service,
+                "error": None if available else {
+                    "code": service.get("probe_error") or "remote_service_probe_unavailable",
+                    "message": "bounded remote service evidence is incomplete; retry after SSH/systemd responds",
+                },
+            }
         elif operation == "diagnostics":
             diagnostics = sr.remote_diagnostics(
                 entry, include_processes=_arg_true(args, "processes")
@@ -456,6 +466,9 @@ def _cmd_service(args, as_json: bool) -> None:
             # foreign during a routine migration.
             public_url = entry.get("control_url") if transport == "https" else None
             observed = sr.remote_mcp_service_status(entry)
+            if confirmed and observed.get("probe_state", "complete") != "complete":
+                raise RuntimeError(
+                    observed.get("probe_error") or "remote_service_probe_unavailable")
             source_revision = None
             if confirmed:
                 source_revision = _local_git_revision()
@@ -477,6 +490,49 @@ def _cmd_service(args, as_json: bool) -> None:
             if confirmed:
                 sr.put_remote(name, mcp_service=plan["service"])
             payload = {"ok": True, "name": name, "status": plan["status"], "data": plan, "error": None}
+        elif operation == "cleanup-broker":
+            observed = sr.remote_mcp_service_status(entry)
+            plan = {
+                "status": "planned", "requires_confirm": True,
+                "runtime_revision_state": observed.get("runtime_revision_state"),
+                "steps": [
+                    "require the installed Sandbox runtime revision to match this CLI",
+                    "install the fixed root-owned CI cleanup helper and owner-scoped sudo rule",
+                    "pin the exact deploy, workspace-metadata, and CI artifact roots",
+                    "verify the helper capability without deleting data",
+                ],
+            }
+            if confirmed:
+                if observed.get("probe_state", "complete") != "complete":
+                    raise RuntimeError(
+                        observed.get("probe_error") or "remote_service_probe_unavailable")
+                if observed.get("runtime_revision_state") != "match":
+                    raise ValueError(
+                        "remote runtime revision does not match; run "
+                        f"`./sb remote service migrate {name} --confirm --json` first")
+                command = (
+                    "set -eu; runtime=$HOME/sandbox/sb-src; "
+                    "test -d \"$runtime\" && test ! -L \"$runtime\"; "
+                    "python3 \"$runtime/scripts/provision_ci_cleanup_broker.py\" "
+                    "--confirm --json"
+                )
+                try:
+                    result = sr.ssh_run(entry["ssh"], command, timeout=180)
+                except (subprocess.SubprocessError, OSError) as exc:
+                    raise RuntimeError("CI cleanup broker installation was interrupted") from exc
+                try:
+                    installed = json.loads((result.stdout or "").strip())
+                except (TypeError, ValueError):
+                    installed = {}
+                if result.returncode != 0 or installed.get("ok") is not True:
+                    diagnostic = sr._safe_remote_diagnostic(result, entry, limit=500)
+                    raise RuntimeError(
+                        "CI cleanup broker installation failed"
+                        + (f": {diagnostic}" if diagnostic else ""))
+                plan.update(installed)
+                plan["status"] = "installed"
+            payload = {"ok": True, "name": name,
+                       "status": plan["status"], "data": plan, "error": None}
         else:
             if not confirmed:
                 payload = {"ok": True, "name": name, "status": "planned",
@@ -489,12 +545,21 @@ def _cmd_service(args, as_json: bool) -> None:
             code = exc.code
         else:
             code = (str(exc) if str(exc) in {
-                "remote_service_ownership_unknown", "remote_service_rollback_indeterminate"}
+                "remote_service_ownership_unknown", "remote_service_rollback_indeterminate",
+                "remote_service_probe_timeout", "remote_service_probe_transport_failed",
+                "remote_service_probe_output_missing", "remote_service_probe_output_invalid",
+                "remote_service_probe_unavailable",
+                "systemd_unavailable", "timeout_command_unavailable",
+                "systemctl_probe_timeout", "systemctl_probe_unavailable",
+                "systemctl_probe_incomplete", "loginctl_probe_timeout",
+                "loginctl_probe_unavailable"}
                 else "remote_service_failed")
         payload = {"ok": False, "name": name, "status": "degraded", "data": {},
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
     if as_json:
         print(json.dumps(payload))
+        if operation == "status" and not payload["ok"]:
+            raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")
     else:
@@ -977,11 +1042,14 @@ def _cmd_up(args, as_json: bool) -> None:
             print(f"'{name}' MCP service start is planned; re-run with --confirm")
         return
     try:
+        observed = sr.remote_mcp_service_status(entry)
+        if observed.get("probe_state", "complete") != "complete":
+            raise RuntimeError(
+                observed.get("probe_error") or "remote_service_probe_unavailable")
         upload_timeout = _runtime_source_upload_timeout_arg(args)
         source_revision = _local_git_revision()
         staged_source = _upload_runtime_source(
             entry["ssh"], source_revision=source_revision, upload_timeout=upload_timeout)
-        observed = sr.remote_mcp_service_status(entry)
         if control_transport == "tailscale":
             tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)
             control_url = control_url or f"http://{tailscale_ip}:{port}"

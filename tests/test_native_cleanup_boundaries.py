@@ -6,6 +6,28 @@ from unittest import mock
 
 
 class TestNativeCleanupBoundaries(unittest.TestCase):
+    def test_failed_compose_delete_preserves_local_data_and_identity(self):
+        import subprocess
+        import sandbox.commands.instances_cmd as commands
+
+        owner = {"root": "/project", "label": "default", "instance": "fixture"}
+        core = SimpleNamespace(registry_find_instance=lambda _name: owner, registry_remove=mock.Mock())
+        def failed_down(*_args, **kwargs):
+            if kwargs.get("check"):
+                raise subprocess.CalledProcessError(1, "compose")
+            return SimpleNamespace(returncode=1)
+        with mock.patch.object(commands, "_core", return_value=core), \
+             mock.patch.object(commands, "resolve_instances", return_value={"fixture": {"server": "nginx"}}), \
+             mock.patch.object(commands, "_cleanup_instance_routes"), \
+             mock.patch.object(commands, "compose", side_effect=failed_down), \
+             mock.patch.object(commands.shutil, "rmtree") as remove, \
+             mock.patch.object(commands, "_write_local_yaml") as write:
+            with self.assertRaises(subprocess.CalledProcessError):
+                commands.cmd_instance({}, SimpleNamespace(action="delete", name="fixture", yes=True))
+        remove.assert_not_called()
+        write.assert_not_called()
+        core.registry_remove.assert_not_called()
+
     def request(self):
         from sandbox.runtimes.base import OperationRequest
         return OperationRequest("/project", "destroy", arguments={"database": {

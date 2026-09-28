@@ -26,6 +26,47 @@ _ACTIVATION_TARGET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+def validate_source_artifact(value: object, source_commit: str) -> dict:
+    """Validate an explicit mapping from submitted Git source to deployed tree."""
+    keys = {'schema_version', 'kind', 'root_relative', 'revision'}
+    if (not isinstance(value, dict) or set(value) != keys
+            or type(value['schema_version']) is not int or value['schema_version'] != 1
+            or not isinstance(source_commit, str)
+            or re.fullmatch(r'[0-9a-f]{40}', source_commit) is None
+            or not isinstance(value['revision'], str)
+            or re.fullmatch(r'[0-9a-f]{40}', value['revision']) is None):
+        raise ValueError('source_artifact_invalid')
+    root = value['root_relative']
+    if not isinstance(root, str):
+        raise ValueError('source_artifact_invalid')
+    from sandbox.services.redaction import redact_text
+    try:
+        size = len(root.encode('utf-8'))
+    except UnicodeError:
+        raise ValueError('source_artifact_invalid') from None
+    if (not 1 <= size <= 1024 or len(root.split('/')) > 64
+            or '\\' in root or any(ord(char) < 32 or ord(char) == 127 for char in root)
+            or redact_text(root) != root):
+        raise ValueError('source_artifact_invalid')
+    if value['kind'] == 'git_commit':
+        if root != '.' or value['revision'] != source_commit:
+            raise ValueError('source_artifact_invalid')
+    elif value['kind'] == 'git_subtree':
+        if any(part in {'', '.', '..'} for part in root.split('/')):
+            raise ValueError('source_artifact_invalid')
+    else:
+        raise ValueError('source_artifact_invalid')
+    return dict(value)
+
+
+def deployed_source_revision(source: Mapping) -> str | None:
+    """Legacy records stay identity mappings; never invent a historical subtree."""
+    commit = source.get('commit')
+    if 'artifact' not in source:
+        return commit
+    return validate_source_artifact(source['artifact'], commit)['revision']
+
+
 class RecoveryAction(str, Enum):
     OBSERVE_RECONCILE = "observe_reconcile"
     CONTINUE_EDGE = "continue_edge"

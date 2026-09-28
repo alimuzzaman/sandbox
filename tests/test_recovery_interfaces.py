@@ -1,9 +1,12 @@
+import json
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from io import StringIO
 from contextlib import redirect_stdout
+from pathlib import Path
 
 from sandbox.commands.recovery import cmd_recovery
 
@@ -12,7 +15,11 @@ class TestRecoveryInterfaces(unittest.TestCase):
     def _args(self, action, **extra):
         values = {"action": action, "remote": None, "profile": [], "backup_id": None,
                   "artifact": [], "keep_count": 1, "minimum_age_days": 0,
-                  "confirm": False, "scheduled": False, "json": True}
+                  "confirm": False, "scheduled": False, "json": True,
+                  "postgres_operation": None, "reopen_plan": None,
+                  "restore_plan": None, "source_binding": None, "target_volume": None,
+                  "request_id": None, "project_dir": None, "resume_capture": False,
+                  "destination": None}
         values.update(extra)
         return SimpleNamespace(**values)
 
@@ -146,6 +153,104 @@ class TestRecoveryInterfaces(unittest.TestCase):
         self.assertIn("set_id: set-1", rendered)
         self.assertIn("actions: verify, swap", rendered)
         self.assertIn("rollback: restore state", rendered)
+
+    def test_cli_reopen_restore_passes_original_plan_confirmation_and_exact_reopen_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            restore_plan = {
+                "remote": "scaleway-sandbox",
+                "profile": "lenzora-dev",
+                "native_request_id": "a" * 64,
+                "target": "sandbox-recovery-restore-" + "b" * 24,
+            }
+            reopen_plan = {"schema_version": 1, "generation": 1, "target": restore_plan["target"]}
+            restore_path = root / "restore-plan.json"
+            reopen_path = root / "reopen-plan.json"
+            restore_path.write_text(json.dumps(restore_plan))
+            reopen_path.write_text(json.dumps(reopen_plan))
+            restore_path.chmod(0o600)
+            reopen_path.chmod(0o600)
+
+            calls = []
+
+            class FakePostgres:
+                def __init__(self, *_args):
+                    pass
+
+                def restore(self, plan, **kwargs):
+                    calls.append((plan, kwargs))
+                    return {"code": "restore_reopened"}
+
+            service = SimpleNamespace(capture=object(), catalog=None)
+            args = self._args(
+                "postgres", remote="scaleway-sandbox", profile=["lenzora-dev"],
+                postgres_operation="reopen-restore", restore_plan=str(restore_path),
+                reopen_plan=str(reopen_path), confirm=True,
+            )
+            with patch("sandbox.commands.recovery.recovery_service", return_value=service), \
+                    patch("sandbox.recovery.postgres.PostgresRecovery", FakePostgres), \
+                    patch("sandbox.transports.remote_postgres_recovery.RegisteredPostgresRecoveryTransport",
+                          return_value=object()), redirect_stdout(StringIO()):
+                cmd_recovery(None, args)
+            self.assertEqual(calls, [(restore_plan, {
+                "confirm": True, "inspect": False, "verify": False,
+                "reopen": True, "reopen_plan": reopen_plan,
+            })])
+
+    def test_cli_reopen_restore_requires_plan_confirmation_and_matching_selectors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = {
+                "remote": "scaleway-sandbox", "profile": "lenzora-dev",
+                "native_request_id": "a" * 64,
+            }
+            restore_path = root / "restore.json"
+            reopen_path = root / "reopen.json"
+            restore_path.write_text(json.dumps(plan))
+            reopen_path.write_text(json.dumps({"generation": 1}))
+            restore_path.chmod(0o600)
+            reopen_path.chmod(0o600)
+            service = SimpleNamespace(capture=object(), catalog=None)
+
+            for options in (
+                {"restore_plan": None, "reopen_plan": str(reopen_path), "confirm": True},
+                {"restore_plan": str(restore_path), "reopen_plan": str(reopen_path), "confirm": False},
+                {"restore_plan": str(restore_path), "reopen_plan": str(reopen_path), "confirm": True,
+                 "remote": "other-remote"},
+                {"restore_plan": str(restore_path), "reopen_plan": str(reopen_path), "confirm": True,
+                 "profile": ["lenzora-prod"]},
+            ):
+                args = self._args("postgres", remote=options.pop("remote", "scaleway-sandbox"),
+                                  profile=options.pop("profile", ["lenzora-dev"]),
+                                  postgres_operation="reopen-restore", **options)
+                output = StringIO()
+                with self.subTest(options=options), patch("sandbox.commands.recovery.recovery_service",
+                        return_value=service), redirect_stdout(output), self.assertRaises(SystemExit):
+                    cmd_recovery(None, args)
+                payload = json.loads(output.getvalue())
+                self.assertFalse(payload["ok"])
+
+    def test_cli_reopen_plan_is_rejected_on_other_operations_before_transport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reopen_path = Path(directory) / "reopen.json"
+            reopen_path.write_text(json.dumps({"generation": 1}))
+            reopen_path.chmod(0o600)
+            service = SimpleNamespace(capture=object(), catalog=None)
+            for reopen_plan in (str(reopen_path), ""):
+                with self.subTest(reopen_plan=reopen_plan):
+                    args = self._args("postgres", postgres_operation="observe", remote="scaleway-sandbox",
+                                      profile=["lenzora-dev"], request_id="request-a",
+                                      reopen_plan=reopen_plan)
+                    transport = Mock()
+                    output = StringIO()
+                    with patch("sandbox.commands.recovery.recovery_service", return_value=service), \
+                            patch("sandbox.transports.remote_postgres_recovery.RegisteredPostgresRecoveryTransport",
+                                  return_value=transport), redirect_stdout(output), self.assertRaises(SystemExit):
+                        cmd_recovery(None, args)
+                    payload = json.loads(output.getvalue())
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error"]["code"], "request_invalid")
+                    transport.assert_not_called()
 
     def test_cli_schedule_human_output_shows_disabled_units(self):
         output = StringIO()

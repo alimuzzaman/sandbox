@@ -218,6 +218,37 @@ when it is 10% or more. Category outcomes that are not complete carry
 `measured_bytes`, `measured_count`, and `unmeasured_count`, so a partial
 category reports what it did measure rather than looking like an empty one.
 
+The engine inventory (containers, volumes, networks, images, build cache) runs
+before the directory walk and gets its own bounded phase: 10% of the probe
+budget, never less than the 15s default budget and never more than the budget
+itself. Each `docker` call inside that phase keeps its per-call bound scaled by
+the same factor, so a bigger `--budget` actually buys a slower engine more time
+instead of leaving the bounds pinned at their 15s-budget values. At the default
+budget the bounds are unchanged. This matters on a host with many images:
+`docker image inspect` over a batch of 32 takes over 5s there, so at the old
+fixed 5s bound `docker_images` timed out no matter how large `--budget` was.
+A category that still exhausts its share reports `timed_out` rather than
+silently returning zero.
+
+`docker inspect` exits non-zero when any single identifier has disappeared, yet
+it still emits the objects it did resolve. The engine inventory keeps that
+payload and reports the category as `partial`, because a container removed
+between `docker ps -aq` and the inspect call must not discard the rest of its
+batch, and the remaining batches are still inspected. A non-zero exit with no
+usable payload stays `unavailable`.
+
+Engine inventory reads request structural redaction from the bounded process
+runner. Text redaction rewrites a secret-shaped `NAME=VALUE` without regard for
+the quoting around it, so inside JSON it consumes the closing quote and leaves
+the document unparseable. Container inspect output is the case that hits this,
+because only it embeds process environment variables. The runner therefore
+parses the payload first, redacts every string inside the parsed structure, and
+re-serializes it compactly as UTF-8, so a payload that fits the byte bound does
+not fall back merely because JSON escaping or whitespace expanded it. A payload
+that is not usable JSON, or one that would exceed the output bound once
+re-serialized, still falls back to text redaction; `json_output` never widens
+what a caller can see, and malformed/over-limit inventory remains unavailable.
+
 Elevated measurement commands are bounded with `timeout` inside `sudo`: an
 unprivileged probe cannot signal a root child, and killing only the direct
 `sudo` process leaves the real worker holding the pipe and overruns the budget.

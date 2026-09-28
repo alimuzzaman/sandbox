@@ -4,7 +4,7 @@ extension:
   id: prd
   name: "Reviewed PRD Workflow"
   version: "0.1.0"
-  description: "Create a Terra-refined PRD and require an independent Sol High validation before specification."
+  description: "Create a refined PRD and require independent readiness validation before specification."
   category: process
   effect: read-write
   author: "Md. Alimuzzaman Alim"
@@ -23,7 +23,7 @@ provides:
       description: "Create or refine a product requirements draft and validate it for specification"
     - name: speckit.prd.validate
       file: commands/speckit.prd.validate.md
-      description: "Guard specification handoff until the active PRD has passed Sol High validation"
+      description: "Guard specification handoff until the active PRD has passed independent readiness validation"
 
 hooks:
   before_specify:

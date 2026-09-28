@@ -1,0 +1,357 @@
+{
+  "deployed_revision": null,
+  "edge": {
+    "state": "unknown"
+  },
+  "edge_cache_purge": null,
+  "environment": "production",
+  "generation": 0,
+  "health": {
+    "reason": "remote observation was partial",
+    "state": "unavailable"
+  },
+  "latest_recovery": null,
+  "observed_runtime_revision": null,
+  "ok": true,
+  "phases": [
+    {
+      "bytes": 6930,
+      "phase": "epoch_start",
+      "state": "complete",
+      "truncated": false
+    },
+    {
+      "bytes": 0,
+      "phase": "compose_config",
+      "state": "unavailable",
+      "truncated": false
+    },
+    {
+      "bytes": 48,
+      "phase": "source_git",
+      "state": "complete",
+      "truncated": false
+    },
+    {
+      "bytes": 0,
+      "phase": "compose_runtime",
+      "state": "unavailable",
+      "truncated": false
+    },
+    {
+      "bytes": 5973,
+      "phase": "compose_images",
+      "state": "complete",
+      "truncated": false
+    },
+    {
+      "bytes": 909,
+      "phase": "config_digests",
+      "state": "complete",
+      "truncated": false
+    },
+    {
+      "bytes": 6930,
+      "phase": "epoch_end",
+      "state": "complete",
+      "truncated": false
+    }
+  ],
+  "project": "lenzora",
+  "recorded_revision": null,
+  "remote": "scaleway-sandbox",
+  "requested_revision": null,
+  "runtime": {
+    "state": "unknown"
+  },
+  "services": [
+    {
+      "health": "unknown",
+      "service": "lenzora-web",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-db",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-job-queue",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-snapshot-batch-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-comparison-batch-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-monitor-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-website-health-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-agent-auth-cleanup-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-customer-data-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-product-events-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-transactional-delivery-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-notification-outbox-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-webhook-delivery-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-job-dispatcher",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-job-outbox-publisher",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-job-worker",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-job-reconciler",
+      "state": "unknown"
+    },
+    {
+      "health": "unknown",
+      "service": "lenzora-job-readiness-monitor",
+      "state": "unknown"
+    }
+  ],
+  "source_revision": {
+    "checks": [
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-web",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-db",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-job-queue",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-snapshot-batch-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-comparison-batch-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-monitor-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-website-health-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-agent-auth-cleanup-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-customer-data-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-product-events-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-transactional-delivery-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-notification-outbox-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-webhook-delivery-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-job-dispatcher",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-job-outbox-publisher",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-job-worker",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-job-reconciler",
+        "state": "missing"
+      },
+      {
+        "expected": null,
+        "key": "LENZORA_SOURCE_REVISION",
+        "provider": "pushed_commit_sha",
+        "service": "lenzora-job-readiness-monitor",
+        "state": "missing"
+      }
+    ],
+    "state": "degraded"
+  },
+  "staged_revision": null,
+  "state_record": "present",
+  "topology": {
+    "compose_services": [],
+    "declared_services": [
+      "lenzora-web",
+      "lenzora-db",
+      "lenzora-job-queue",
+      "lenzora-snapshot-batch-worker",
+      "lenzora-comparison-batch-worker",
+      "lenzora-monitor-worker",
+      "lenzora-website-health-worker",
+      "lenzora-agent-auth-cleanup-worker",
+      "lenzora-customer-data-worker",
+      "lenzora-product-events-worker",
+      "lenzora-transactional-delivery-worker",
+      "lenzora-notification-outbox-worker",
+      "lenzora-webhook-delivery-worker",
+      "lenzora-job-dispatcher",
+      "lenzora-job-outbox-publisher",
+      "lenzora-job-worker",
+      "lenzora-job-reconciler",
+      "lenzora-job-readiness-monitor"
+    ],
+    "missing_from_compose": [
+      "lenzora-agent-auth-cleanup-worker",
+      "lenzora-comparison-batch-worker",
+      "lenzora-customer-data-worker",
+      "lenzora-db",
+      "lenzora-job-dispatcher",
+      "lenzora-job-outbox-publisher",
+      "lenzora-job-queue",
+      "lenzora-job-readiness-monitor",
+      "lenzora-job-reconciler",
+      "lenzora-job-worker",
+      "lenzora-monitor-worker",
+      "lenzora-notification-outbox-worker",
+      "lenzora-product-events-worker",
+      "lenzora-snapshot-batch-worker",
+      "lenzora-transactional-delivery-worker",
+      "lenzora-web",
+      "lenzora-webhook-delivery-worker",
+      "lenzora-website-health-worker"
+    ],
+    "missing_from_runtime": [
+      "lenzora-agent-auth-cleanup-worker",
+      "lenzora-comparison-batch-worker",
+      "lenzora-customer-data-worker",
+      "lenzora-db",
+      "lenzora-job-dispatcher",
+      "lenzora-job-outbox-publisher",
+      "lenzora-job-queue",
+      "lenzora-job-readiness-monitor",
+      "lenzora-job-reconciler",
+      "lenzora-job-worker",
+      "lenzora-monitor-worker",
+      "lenzora-notification-outbox-worker",
+      "lenzora-product-events-worker",
+      "lenzora-snapshot-batch-worker",
+      "lenzora-transactional-delivery-worker",
+      "lenzora-web",
+      "lenzora-webhook-delivery-worker",
+      "lenzora-website-health-worker"
+    ],
+    "running_services": [],
+    "state": "degraded"
+  }
+}

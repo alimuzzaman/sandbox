@@ -45,6 +45,12 @@ def _inspect_run(mounts_by_service, *, unavailable=False, malformed=False,
 
 
 class TestSourceMountAttestation(unittest.TestCase):
+    def setUp(self):
+        # These cases own mount attestation; engine refusal has separate tests.
+        probe = mock.patch.object(_instances, "docker_daemon_preflight", return_value={"ok": True})
+        probe.start()
+        self.addCleanup(probe.stop)
+
     def _mounts(self, sources):
         # Reverse order and include a non-source bind to prove the source set is
         # canonical and order-independent without treating generated state as a source bind.
@@ -252,6 +258,78 @@ class TestSourceMountAttestation(unittest.TestCase):
             })
             self.assertEqual(policy, [str(plugins_home.resolve())])
 
+    def test_external_vendor_symlink_target_is_added_to_source_mount_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            plugin = root / "plugin"
+            plugins_home = Path(temporary) / "plugins-home"
+            vendor_target = Path(temporary) / "shared" / "vendor"
+            plugin.mkdir(parents=True)
+            plugins_home.mkdir()
+            vendor_target.mkdir(parents=True)
+            (plugin / "vendor").symlink_to(vendor_target, target_is_directory=True)
+            pconf = {"plugins": [str(plugin)]}
+            cfg = {"defaults": {"plugins_home": str(plugins_home)}}
+
+            policy = _instances._desired_source_mounts(cfg, str(root), pconf)
+            with mock.patch.object(_instances, "_plugins_home",
+                                   return_value=plugins_home), \
+                    mock.patch.object(_instances, "_local_yaml",
+                                      return_value={"instances": {}}):
+                block = _instances._build_instance_block(
+                    cfg, "fixture", str(root), pconf,
+                    {"wordpress_port": 8181, "db_port": 3307,
+                     "mailpit_port": 8026}, "nginx",
+                )
+
+            expected = [
+                str(plugins_home.resolve()),
+                str(plugin.resolve()),
+                str(vendor_target.resolve()),
+            ]
+            self.assertEqual(policy, expected)
+            self.assertEqual(block["extra_mounts"], expected[1:])
+
+    def test_vendor_symlink_target_covered_by_another_source_is_not_repeated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            plugin = root / "plugin"
+            shared = Path(temporary) / "shared"
+            plugins_home = Path(temporary) / "plugins-home"
+            vendor_target = shared / "vendor"
+            plugin.mkdir(parents=True)
+            plugins_home.mkdir()
+            vendor_target.mkdir(parents=True)
+            (plugin / "vendor").symlink_to(vendor_target, target_is_directory=True)
+
+            policy = _instances._desired_source_mounts(
+                {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
+                {"plugins": [str(plugin)],
+                 "mappings": {"wp-content/mu-plugins/helper": str(shared)}},
+            )
+
+            self.assertEqual(policy, [
+                str(plugins_home.resolve()), str(plugin.resolve()), str(shared.resolve()),
+            ])
+
+    def test_dangling_vendor_symlink_fails_mount_policy_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            plugin = root / "plugin"
+            plugins_home = Path(temporary) / "plugins-home"
+            plugin.mkdir(parents=True)
+            plugins_home.mkdir()
+            (plugin / "vendor").symlink_to(
+                Path(temporary) / "missing-vendor", target_is_directory=True,
+            )
+
+            policy = _instances._desired_source_mounts(
+                {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
+                {"plugins": [str(plugin)]},
+            )
+
+            self.assertIsNone(policy)
+
     def test_ready_ensure_attests_normally_with_remote_theme_archive(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -402,6 +480,29 @@ class TestApplyRuntimeDependencies(unittest.TestCase):
                         "required database service 'db' is missing.*"
                         "sb ensure --project-dir <project-dir> --label recovery"):
                     _instances.apply_config({}, str(root))
+
+    def test_build_instance_block_does_not_mount_arbitrary_nested_vendor_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            project_root = temp_path / "project"
+            project_root.mkdir()
+            vendor_dir = project_root / "vendor"
+            vendor_dir.mkdir()
+            external_target = temp_path / "external_pkg"
+            external_target.mkdir()
+            (vendor_dir / "my_pkg").symlink_to(external_target)
+
+            cfg = {"plugins_home": str(temp_path / "plugins_home")}
+            Path(cfg["plugins_home"]).mkdir()
+            pconf = {"plugins": [], "mappings": {"vendor": str(vendor_dir)}}
+
+            ports = {"wordpress_port": 8080, "db_port": 3306, "mailpit_port": 8025}
+            block = _instances._build_instance_block(
+                cfg, "test_inst", str(project_root), pconf, ports, "apache"
+            )
+            self.assertIn("extra_mounts", block)
+            self.assertIn(str(vendor_dir.resolve()), block["extra_mounts"])
+            self.assertNotIn(str(external_target.resolve()), block["extra_mounts"])
 
 
 if __name__ == "__main__":

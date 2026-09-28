@@ -23,12 +23,13 @@ class ActivationServiceV2:
     """
 
     def __init__(self, *, repository, runtime_adapter, edge_adapter,
-                 rollback_grant_verifier, clock=None) -> None:
+                 rollback_grant_verifier, settlement_approval_verifier=None, clock=None) -> None:
         self.repository = repository
         self.runtime_adapter = runtime_adapter
         self.runtime_observer = RuntimeObserverV2(runtime_adapter)
         self.edge_adapter = edge_adapter
         self.rollback_grant_verifier = rollback_grant_verifier
+        self.settlement_approval_verifier = settlement_approval_verifier
         self.clock = clock or time.time
 
     def execute(self, request: ActivationRequestV2, *, rollback_grant,
@@ -64,6 +65,13 @@ class ActivationServiceV2:
             state = self.repository.snapshot(target_key)
             if state.get("generation") != request.expected_generation:
                 raise ActivationContractError("generation_conflict")
+            from .settlement_forward import validate_forward_binding
+            forward = validate_forward_binding(state, request)
+            if forward is not None:
+                verifier = self.settlement_approval_verifier
+                if (verifier is None or not callable(getattr(verifier, "verify_forward", None))
+                        or verifier.verify_forward(forward, now=int(self.clock())) is not True):
+                    raise ActivationContractError("authority_mismatch")
             current = state.get("current")
             previous = state.get("previous")
             chosen = None
@@ -88,6 +96,8 @@ class ActivationServiceV2:
             if contract is not None and contract.graph is not None:
                 recovery_context.update(compose_snapshot=request.compose_snapshot.as_mapping(),
                                         compatibility_grant=grant.as_mapping())
+            if forward is not None:
+                recovery_context["settlement_forward"] = forward.as_mapping()
             status, transaction = self.repository.accept_v2(
                 request, proof_set_digest=request.proof_set["proof_digest"],
                 recovery_context=recovery_context,
@@ -172,6 +182,8 @@ class ActivationServiceV2:
                     adapter=self.runtime_adapter, persist=persist_graph)
                 execution_evidence = {"compose_snapshot": request.compose_snapshot.as_mapping(),
                     "compatibility_grant": grant.as_mapping(), "progress": progress.as_mapping()}
+                if forward is not None:
+                    execution_evidence["settlement_forward"] = forward.as_mapping()
             else:
                 self.repository.transition_v2(target_key, request, "runtime_pending",
                                               effect_entered=True,
@@ -208,12 +220,6 @@ class ActivationServiceV2:
                 "sandbox.hosting.images.activation-generation-subject.v2",
                 {key: (list(value) if isinstance(value, tuple) else value)
                  for key, value in base.items()})
-            self.repository.transition_v2(
-                target_key, request, "runtime_proven",
-                running_observation=observation, generation_subject={
-                    **{key: (list(value) if isinstance(value, tuple) else value)
-                       for key, value in base.items()},
-                    "generation_subject_digest": subject_digest})
             edge_prepared = {"schema_version": 2, "phase": "prepared",
                 "request_digest": request.request_digest,
                 "generation": request.expected_generation + 1,
@@ -221,8 +227,17 @@ class ActivationServiceV2:
                 "route_digest": edge_route_digest,
                 "observation_digest": observation["observation_digest"],
                 "terminal": False, "receipt_digest": None}
+            # Keep the runtime proof and the edge sub-request in one durable
+            # transition. A process death between separate runtime_proven and
+            # edge_pending writes would leave a v2 record that recovery could
+            # mistake for a promotable generation without an edge receipt.
             self.repository.transition_v2(
-                target_key, request, "edge_pending", edge_result=edge_prepared)
+                target_key, request, "edge_pending",
+                running_observation=observation, generation_subject={
+                    **{key: (list(value) if isinstance(value, tuple) else value)
+                       for key, value in base.items()},
+                    "generation_subject_digest": subject_digest},
+                edge_result=edge_prepared)
             # The provider adapter may perform several effects.  Give the
             # target owner a narrow callback so each zone transition is
             # durable before/after its POST.  Adapters without this optional

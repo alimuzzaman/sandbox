@@ -9,6 +9,9 @@ from sandbox.registry import register
 from sandbox.application.context import preflight_project_capability
 import sandbox.core._remote as sr
 import sandbox.core._proplugins as pro
+from sandbox.delivery.exposure import ExposureAttempt, ExposureReplay
+from sandbox.delivery.context import source_commit
+from sandbox.delivery.routes import prepare_route_verification, observe_routes
 
 
 _REMOTE_DEPLOY_CAPABILITIES = {
@@ -71,13 +74,11 @@ def _failed_ensure_cleanup(
     *,
     label: str = "default",
 ) -> str:
-    """Remove only a uniquely new instance after a failed remote ensure.
+    """Observe partial creation without treating inventory drift as ownership.
 
-    The remote CLI can register its instance before it emits a usable JSON
-    response. Cleanup therefore compares a read-only inventory captured before
-    ensure with a second inventory after failure. Never delete a baseline row,
-    and never guess when the inventory is unavailable or produces multiple
-    candidates.
+    Another caller can create the only new row while this ensure loses its
+    response. Neither the row's name nor its label proves creation authority
+    or that the original child has stopped. Retain it for reconciliation.
     """
     try:
         current = sr.list_remote_instances(entry, target)
@@ -96,36 +97,19 @@ def _failed_ensure_cleanup(
     ]
     if not candidates:
         return "remote instance cleanup found no new instance"
-    if len(candidates) != 1:
-        return "remote instance cleanup is unverified: multiple new instances matched"
-    try:
-        sr.delete_remote_instance(entry, candidates[0])
-    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
-        return "remote instance cleanup failed for the newly created instance"
-    return "remote instance cleanup removed the newly created instance"
+    return (
+        "remote instance state retained: creation ownership and terminal ensure "
+        "completion are unverified; inspect this project's remote instances "
+        "before resuming the same target"
+    )
 
 
-def _ensure_remote_instance_transactional(entry: dict, target: str) -> dict:
-    """Ensure the default remote instance without leaving an orphan on failure."""
-    try:
-        baseline = sr.list_remote_instances(entry, target)
-    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
-        raise RuntimeError(
-            "could not establish the remote instance baseline before ensure; "
-            "refusing remote mutation"
-        ) from exc
-    try:
-        instance = sr.ensure_remote_instance(entry, target)
-        if not isinstance(instance, dict):
-            raise RuntimeError("remote ensure did not return an instance object")
-        _require_instance_field(instance, "instance")
-        return instance
-    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
-        cleanup = _failed_ensure_cleanup(entry, target, baseline)
-        raise RuntimeError(f"{exc}; {cleanup}") from exc
+def _ensure_remote_instance_transactional(entry: dict, target: str, *, label='default',
+                                           attempt) -> dict:
+    return attempt.ensure(entry, target, label=label, transport=sr)
 
 
-def cmd_deploy(cfg, args) -> None:
+def _cmd_deploy(cfg, args) -> None:
     """`./sb deploy --project-dir DIR --remote NAME [--json]` -- push the local
     project's current state (committed HEAD + uncommitted changes, including
     untracked files) to a provisioned remote. See docs/remote-hosting.md."""
@@ -214,6 +198,14 @@ def cmd_deploy(cfg, args) -> None:
               f"`./sb remote provision {remote_name}` first", as_json,
               source_ref=source_ref)
 
+    attempt = None
+    instance = None
+    public_url = None
+    prepared_routes = None
+    delivery_summary = None
+    pushed_sha = None
+    applied = 0
+    label = getattr(args, 'label', None) or 'default'
     try:
         # Resolve and validate an immutable source before creating a remote
         # deploy repository.  A bad ref or dirty-tree combination therefore
@@ -235,6 +227,25 @@ def cmd_deploy(cfg, args) -> None:
             max_files=sr.DEPLOY_SNAPSHOT_MAX_FILES,
             max_bytes=sr.DEPLOY_SNAPSHOT_MAX_BYTES,
         )
+        covered = bool(getattr(args, 'ensure', False) or getattr(args, 'expose', False))
+        if covered:
+            capability_result = sr.remote_creation_capability(
+                entry, '.', label, kind=project_kind, runtime_mode='compose')
+            if capability_result.get('ok') is not True:
+                raise ValueError('unsupported_creation_capability')
+            commit = resolved_source or source_commit(root)
+            domain = getattr(args, 'domain', None) or sr.default_instance_domain(label, sr.deploy_target_slug(root))
+            declared = getattr(args, 'alias', None)
+            aliases = normalize_aliases(declared if isinstance(declared, (list, tuple)) else pconf.get('aliases'), primary=domain, strict=True)
+            if getattr(args, 'expose', False):
+                prepared_routes = prepare_route_verification(pconf.get('delivery'),
+                    runtime_kind=project_kind, primary_hostname=domain, aliases=aliases,
+                    application_commit=commit, verify_timeout=getattr(args, 'verify_timeout', None))
+            attempt = ExposureAttempt(pconf, remote_name, entry, label=label,
+                kind='deploy_exposure', commit=commit, dirty_digest=overlay_snapshot['identity'],
+                prepared=prepared_routes, request_id=getattr(args, 'request_id', None))
+            attempt.save(phase='source')
+            attempt.effect('source_publish', {'commit': commit}, 'unknown')
         target = sr.ensure_deploy_repo(
             entry, root, home_timeout=deploy_timeout
         )
@@ -244,7 +255,7 @@ def cmd_deploy(cfg, args) -> None:
         )
         pushed_sha = sr.push_commits(
             entry, root, target, branch,
-            source_ref=source_ref, resolved_sha=resolved_source,
+            source_ref=source_ref, resolved_sha=commit if covered else resolved_source,
             push_timeout=deploy_timeout,
             allow_detached=resolved_source is None and branch is None,
         )
@@ -269,6 +280,8 @@ def cmd_deploy(cfg, args) -> None:
                 untracked=[*descriptor_files, *include_paths],
                 overlay_snapshot=overlay_snapshot,
             )
+        if attempt is not None:
+            attempt.effect('source_publish', {'commit': commit})
         # Pro plugins are a HOST-level catalog, not project state: mirror them
         # before the instance boots so its On-Demand page lists the same slugs
         # the local machine offers. Fail-soft — a project deploy stays valid
@@ -283,10 +296,12 @@ def cmd_deploy(cfg, args) -> None:
         instance = None
         public_url = None
         if getattr(args, "ensure", False) or getattr(args, "expose", False):
-            instance = _ensure_remote_instance_transactional(entry, target)
+            instance = _ensure_remote_instance_transactional(entry, target, label=label, attempt=attempt)
             instance_name = _require_instance_field(instance, "instance")
             if is_wordpress:
-                reconciled = sr.reconcile_remote_instance(entry, target)
+                reconciled = sr.reconcile_remote_instance(entry, target, label,
+                    creation_context=attempt.context,
+                    expected_incarnation=attempt.receipt['instance_incarnation_id'])
                 reconciled_name = _require_instance_field(reconciled, "instance")
                 if reconciled_name != instance_name:
                     raise RuntimeError(
@@ -299,6 +314,7 @@ def cmd_deploy(cfg, args) -> None:
                     or sr.deploy_target_slug(root)
                 )
                 sr.activate_remote_plugin(entry, target, instance_name, plugin_slug)
+            attempt.evidence('runtime')
         if getattr(args, "expose", False):
             label = instance.get("label") or "default"
             domain = (
@@ -320,9 +336,13 @@ def cmd_deploy(cfg, args) -> None:
             if not isinstance(declared, (list, tuple)):
                 declared = pconf.get("aliases")
             aliases = normalize_aliases(declared, primary=domain, strict=True)
+            attempt.effect('route_primary', {'hostname': domain, 'incarnation': attempt.receipt['instance_incarnation_id']}, 'unknown')
             sr.configure_instance_https_route(entry, domain, port)
-            for alias in aliases:
+            attempt.effect('route_primary', {'hostname': domain, 'incarnation': attempt.receipt['instance_incarnation_id']})
+            for index, alias in enumerate(aliases):
+                attempt.effect('route_alias_' + str(index), {'hostname': alias, 'incarnation': attempt.receipt['instance_incarnation_id']}, 'unknown')
                 sr.configure_instance_https_route(entry, alias, port)
+                attempt.effect('route_alias_' + str(index), {'hostname': alias, 'incarnation': attempt.receipt['instance_incarnation_id']})
             # Routes are per-hostname files, so a renamed domain leaves the old
             # one serving. Report it always; only delete when asked, because
             # this reads the whole host and another checkout may own a route
@@ -344,7 +364,14 @@ def cmd_deploy(cfg, args) -> None:
                     sr.remove_instance_https_route(entry, host)
                     pruned.append(host)
             if is_wordpress:
-                sr.set_remote_instance_url(entry, target, public_url)
+                url_result = sr.set_remote_instance_url(entry, target, instance['instance'], public_url,
+                    label=label, creation_context=attempt.context,
+                    expected_incarnation=attempt.receipt['instance_incarnation_id'])
+                for option, status in url_result['writes'].items():
+                    attempt.effect('wordpress_url_' + option, {'incarnation': attempt.receipt['instance_incarnation_id']},
+                                   'configured' if status == 'succeeded' else 'unknown')
+                if url_result['result_code'] != 'remote_instance_url_verified':
+                    raise ValueError('remote_instance_url_incomplete')
             instance["url"] = public_url
             instance["aliases"] = aliases
             instance["alias_urls"] = [f"https://{a}" for a in aliases]
@@ -355,14 +382,39 @@ def cmd_deploy(cfg, args) -> None:
                     instance.get("login_url"), public_url
                 ) if instance.get("login_url") else ""
                 instance["admin_url"] = f"{public_url}/wp-admin/"
+            route_result = observe_routes(prepared_routes)
+            attempt.evidence('routes', result='passed' if route_result['result'] == 'verified' else 'failed',
+                             state='partial' if route_result['result'] == 'incomplete' else 'known',
+                             route_observation=route_result)
+            if route_result['result'] != 'verified':
+                raise ValueError('delivery_exposure_unverified')
+        if attempt is not None:
+            delivery_summary = attempt.finish(True)
+            if not delivery_summary['delivery_succeeded']:
+                raise ValueError('delivery_evidence_incomplete')
+    except ExposureReplay as replay:
+        payload = replay.response()
+        print(json.dumps(payload, sort_keys=True) if as_json else
+              'Original delivery ' + replay.operation_id + ': ' + replay.status)
+        if not payload['ok']:
+            raise SystemExit(1)
+        return
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
+        if attempt is not None and attempt.operation['finished_at'] is None:
+            try:
+                delivery_summary = attempt.finish(False, phase=attempt.operation['phase'])
+            except (RuntimeError, ValueError, OSError):
+                delivery_summary = {'operation_id': attempt.operation['operation_id'],
+                                    'reason': 'delivery_record_incomplete', 'delivery_succeeded': False}
         result = {"ok": False, "remote": remote_name,
                  "remote_selection": "explicit",
                  "source_ref": source_ref, "resolved_commit": None,
                  "source_mode": "immutable" if source_ref else None,
                  "error_code": _deploy_error_code(e, source_ref),
-                 "pushed_commit": None, "uncommitted_files_applied": 0,
-                 "instance": None, "url": None,
+                 "pushed_commit": pushed_sha, "uncommitted_files_applied": applied,
+                 "instance": {'instance': instance.get('instance')} if instance else None,
+                 "url": public_url, "delivery": delivery_summary,
+                 "effects": attempt.operation['effects'] if attempt else [],
             "error": sr.redact_ssh_connection(str(e), entry)}
         if as_json:
             print(json.dumps(result))
@@ -383,7 +435,7 @@ def cmd_deploy(cfg, args) -> None:
              "uncommitted_files_applied": applied, "instance": instance,
              "included_paths": include_paths,
              "pro_plugins": pro_plugins,
-             "url": public_url, "error": None}
+             "url": public_url, "error": None, "delivery": delivery_summary}
     if as_json:
         print(json.dumps(result))
     else:
@@ -419,6 +471,13 @@ def cmd_deploy(cfg, args) -> None:
             if source_ref is not None else "working tree"
         )
         ok(f"Deployed. {remote_name} now reflects {source_label} as of this command.")
+
+
+def cmd_deploy(cfg, args):
+    if getattr(args, 'ensure', False) or getattr(args, 'expose', False):
+        with sr.registered_remote_lock():
+            return _cmd_deploy(cfg, args)
+    return _cmd_deploy(cfg, args)
 
 
 register({'deploy': cmd_deploy})

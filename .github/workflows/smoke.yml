@@ -2,6 +2,17 @@ name: Smoke test
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'sandbox/core/_instances.py'
+      - 'sandbox/commands/lifecycle.py'
+      - 'sandbox/commands/instances_cmd.py'
+      - 'sandbox/runtimes/**'
+      - 'tools/proxy-helper.sh'
+      - '.github/workflows/smoke.yml'
+
+permissions:
+  contents: read
 
 jobs:
   smoke:

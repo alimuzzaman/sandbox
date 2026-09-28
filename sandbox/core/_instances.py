@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -169,7 +170,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
                if e.get("instance") and e.get("kind") != "compose"}
     except Exception:
         reg = {}
-    reg_names = set(reg) or set(instances or {})
+    reg_names = set(reg) | set(instances or {})
 
     def _cfg_for(name):
         entry = reg.get(name) or {}
@@ -218,7 +219,32 @@ def _next_free_port(start: int, used: set[int]) -> int:
         p += 1
 
 
-def _pick_instance_ports(cfg: dict) -> dict[str, int]:
+def _ensure_distinct_ports(ports: dict[str, int], used_by_others: set[int]) -> dict[str, int]:
+    """Ensure wordpress_port, db_port, and mailpit_port are mutually distinct
+    and do not collide with ports used by other instances."""
+    res = dict(ports)
+    claimed = set(used_by_others)
+    wp = res.get("wordpress_port", 8188)
+    if wp in claimed:
+        wp = _next_free_port(wp, claimed)
+    res["wordpress_port"] = wp
+    claimed.add(wp)
+
+    db = res.get("db_port", 3318)
+    if db in claimed:
+        db = _next_free_port(db, claimed)
+    res["db_port"] = db
+    claimed.add(db)
+
+    mp = res.get("mailpit_port", 8125)
+    if mp in claimed:
+        mp = _next_free_port(mp, claimed)
+    res["mailpit_port"] = mp
+    claimed.add(mp)
+    return res
+
+
+def _pick_instance_ports(cfg: dict, *, preferred_port: int | None = None) -> dict[str, int]:
     """Pick wordpress_port, db_port, mailpit_port for a new instance.
 
     Walks every defined instance's resolved config to collect ports
@@ -234,14 +260,15 @@ def _pick_instance_ports(cfg: dict) -> dict[str, int]:
     # the top-level runtime: block. The base itself is assignable now that there
     # is no `main` instance occupying it (start AT the base, not base+1).
     runtime = cfg.get("runtime", {}) or {}
-    base_wp = runtime.get("wordpress_port", 8188)
+    base_wp = preferred_port if preferred_port is not None else runtime.get("wordpress_port", 8188)
     base_db = runtime.get("db_port", 3318)
     base_mp = runtime.get("mailpit_port", 8125)
-    return {
-        "wordpress_port": _next_free_port(base_wp, used),
-        "db_port": _next_free_port(base_db, used),
-        "mailpit_port": _next_free_port(base_mp, used),
-    }
+    ports = {}
+    for key, base in (("wordpress_port", base_wp), ("db_port", base_db),
+                      ("mailpit_port", base_mp)):
+        ports[key] = _next_free_port(base, used)
+        used.add(ports[key])
+    return ports
 
 
 def _port_busy_by_other(port: int, own_project: str) -> bool:
@@ -265,7 +292,7 @@ def _port_busy_by_other(port: int, own_project: str) -> bool:
     return own_project not in names
 
 
-def _resolve_port_conflicts(cfg: dict) -> dict:
+def _resolve_port_conflicts(cfg: dict, *, instance_names: set[str] | None = None) -> dict:
     """Before booting, ensure each instance's ports are free (or already ours).
     If a port collides with another listener, bump the whole instance to a free
     trio and persist to sandbox.local.yml. Returns the (possibly reloaded) cfg.
@@ -277,15 +304,23 @@ def _resolve_port_conflicts(cfg: dict) -> dict:
     changed = False
     local = _local_yaml()
     for name, ic in instances.items():
+        if instance_names is not None and name not in instance_names:
+            continue
         proj = project_name(name)
         wp, db, mp = ic["wordpress_port"], ic["db_port"], ic["mailpit_port"]
-        conflict = (_port_busy_by_other(wp, proj)
+        conflict = (len({wp, db, mp}) != 3
+                    or _port_busy_by_other(wp, proj)
                     or _port_busy_by_other(db, proj)
                     or _port_busy_by_other(mp, proj))
         if not conflict:
             continue
         # Pick a fresh free trio (avoid all currently-claimed ports).
-        used.discard(wp); used.discard(db); used.discard(mp)
+        # A duplicate can also belong to another registered instance. Rebuild
+        # reservations without only this owner instead of discarding a shared
+        # value from the global set.
+        used = {other[key] for other_name, other in instances.items()
+                if other_name != name
+                for key in ("wordpress_port", "db_port", "mailpit_port")}
         new_wp = _next_free_port(max(wp, 8188), used); used.add(new_wp)
         new_db = _next_free_port(max(db, 3318), used); used.add(new_db)
         new_mp = _next_free_port(max(mp, 8125), used); used.add(new_mp)
@@ -294,6 +329,16 @@ def _resolve_port_conflicts(cfg: dict) -> dict:
         blk = local.setdefault("instances", {}).setdefault(name, {})
         blk["wordpress_port"], blk["db_port"], blk["mailpit_port"] = \
             new_wp, new_db, new_mp
+        instances[name] = dict(ic, wordpress_port=new_wp,
+                               db_port=new_db, mailpit_port=new_mp)
+        try:
+            sc = _core()
+            owner = sc.registry_find_instance(name)
+            if owner and owner.get("root"):
+                sc.registry_put(owner["root"], label=owner.get("label"),
+                                wordpress_port=new_wp, db_port=new_db, mailpit_port=new_mp)
+        except Exception:
+            pass
         changed = True
     if changed:
         _write_local_yaml(local)
@@ -605,19 +650,35 @@ def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
     return {"changed": True, "from": live, "to": now}
 
 
-def _wait_http(port: int, timeout: int = 30) -> bool:
-    import urllib.request
-    import time
-    for _ in range(timeout):
-        try:
-            urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
-            return True
-        except Exception:
-            time.sleep(1)
+def _is_mailpit_response(headers, body: bytes = b"") -> bool:
+    """True if response headers or body match Mailpit's signature."""
+    try:
+        if headers:
+            server = str(headers.get("Server") or "").lower()
+            if "mailpit" in server:
+                return True
+            if "mailpit" in str(headers.get("X-Server") or "").lower():
+                return True
+        if body and isinstance(body, (bytes, bytearray)):
+            body_lower = body.lower()
+            if b"<title>mailpit" in body_lower or b"axllent/mailpit" in body_lower:
+                return True
+    except Exception:
+        pass
     return False
 
 
-def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
+def _wait_http(port: int, timeout: int = 30) -> bool:
+    # WordPress can already redirect to its configured clean URL. Following
+    # that redirect mixes backend liveness with DNS/TLS and can reject a working
+    # backend before the owned route has been repaired. Final route acceptance
+    # is a separate gate after installation and URL reconciliation.
+    return _wait_reachable({"wordpress_port": port}, timeout=timeout, backend_only=True)
+
+
+def _wait_reachable(inst_cfg: dict, timeout: int = 30, *, backend_only: bool = False,
+                    require_application_success: bool = False,
+                    canonical_url: str | None = None) -> bool:
     """Wait for the instance's canonical URL without following redirects.
 
     ``site_url`` selects the real browser URL (including a secured proxy host)
@@ -633,12 +694,47 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
     import time
     import urllib.error
     import urllib.request
+    from urllib.parse import urljoin, urlsplit
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
 
-    url = site_url(inst_cfg)
+    if backend_only:
+        # A forward-auth wake must not probe through its own pending gate.
+        # Check the owned backend directly and never follow its redirects.
+        port = inst_cfg.get("http_port", inst_cfg.get("wordpress_port"))
+        if type(port) is not int or not 1 <= port <= 65535:
+            return False
+        url = f"http://localhost:{port}"
+    else:
+        url = canonical_url if canonical_url is not None else site_url(inst_cfg)
+
+    def acceptable(status, headers) -> bool:
+        if not require_application_success:
+            return 200 <= status < 500
+        if 200 <= status < 300:
+            return True
+        if 300 <= status < 400:
+            location = headers.get("Location") if headers is not None else None
+            if not location:
+                return False
+            try:
+                original = urlsplit(url)
+                destination = urlsplit(urljoin(url, location))
+            except ValueError:
+                return False
+            if (destination.scheme, destination.netloc) == (original.scheme, original.netloc):
+                return True
+            orig_host = original.hostname or ""
+            dest_host = destination.hostname or ""
+            if orig_host in ("localhost", "127.0.0.1"):
+                inst_domain = inst_cfg.get("domain") or ""
+                if dest_host in ("localhost", "127.0.0.1") or (inst_domain and dest_host == inst_domain):
+                    return True
+            return False
+        return False
+
     ctx = ssl._create_unverified_context()
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
@@ -652,7 +748,9 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
                 status = getattr(response, "status", None)
                 if status is None:
                     status = response.getcode()
-                if 200 <= status < 500:
+                headers = getattr(response, "headers", None)
+                body = response.read(1024) if hasattr(response, "read") else b""
+                if not _is_mailpit_response(headers, body) and acceptable(status, headers):
                     return True
             finally:
                 close = getattr(response, "close", None)
@@ -660,10 +758,13 @@ def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
                     close()
         except urllib.error.HTTPError as e:
             status = e.code
+            headers = e.headers
+            body = e.read(1024) if hasattr(e, "read") else b""
+            accepted = not _is_mailpit_response(headers, body) and acceptable(status, headers)
             close = getattr(e, "close", None)
             if close is not None:
                 close()
-            if 200 <= status < 500:
+            if accepted:
                 return True
         except Exception:
             pass
@@ -689,10 +790,16 @@ def _instance_reachable(entry: dict) -> bool:
             return False
         url = f"http://localhost:{port}"
     try:
-        urllib.request.urlopen(
+        resp = urllib.request.urlopen(
             url, timeout=3, context=ssl._create_unverified_context())
+        body = resp.read(1024) if hasattr(resp, "read") else b""
+        if _is_mailpit_response(resp.headers, body):
+            return False
         return True
     except urllib.error.HTTPError as e:
+        body = e.read(1024) if hasattr(e, "read") else b""
+        if _is_mailpit_response(e.headers, body):
+            return False
         return e.code < 500
     except Exception:
         return False
@@ -704,16 +811,51 @@ _WP_INSTALL_STATE_UNAVAILABLE = "unavailable"
 _WP_INSTALL_STATE_TIMEOUT = 15
 
 
+def _clean_wp_diagnostic_output(text: str) -> str:
+    """Strip known PHP runtime noise, compose lifecycle logs, and uninstalled notices."""
+    cleaned_lines = []
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        # PHP notices, warnings, deprecations
+        if trimmed.startswith((
+            "Warning:", "Notice:", "Deprecated:",
+            "PHP Warning:", "PHP Notice:", "PHP Deprecated:",
+        )):
+            continue
+        # Compose lifecycle output when running via one-shot wpcli
+        if trimmed.startswith((
+            "Container ", "Network ", "Volume ",
+            "Creating ", "Created ", "Starting ", "Started ",
+        )):
+            continue
+        # WP-CLI uninstalled site indications
+        lowered = trimmed.lower()
+        if any(marker in lowered for marker in (
+            "not installed",
+            "this does not seem to be a wordpress installation",
+            "wp core install",
+            "the used path is:",
+            "pass --path=",
+            "tables not found",
+            "doesn't exist",
+            "error: wordpress",
+        )):
+            continue
+        cleaned_lines.append(trimmed)
+    return "\n".join(cleaned_lines)
+
+
 def _wp_core_install_state(instance: str, *, timeout: float = _WP_INSTALL_STATE_TIMEOUT) -> str:
     """Classify a bounded, read-only WordPress install-state observation.
 
     A ready HTTP setup screen can be served before WordPress has initialized
     its database.  ``wp core is-installed`` is the authoritative first probe.
-    Its only resume-safe negative result is an empty ``rc=1`` response followed
-    by a successful, bounded ``SELECT 1`` database probe.  Diagnostics from
-    either command are deliberately not interpreted: transport failures,
-    malformed results, timeouts, and any output make the state unavailable so
-    callers can fail closed before a write-capable ensure step.
+    Its only resume-safe negative result is an empty or clean diagnostic ``rc=1``
+    response followed by a successful, bounded ``SELECT 1`` database probe.
+    Transport failures, malformed results, timeouts, or unexpected errors make
+    the state unavailable so callers can fail closed before a write-capable ensure step.
     """
     try:
         result = wpcli(
@@ -731,10 +873,15 @@ def _wp_core_install_state(instance: str, *, timeout: float = _WP_INSTALL_STATE_
         return _WP_INSTALL_STATE_UNAVAILABLE
     if returncode == 0:
         return _WP_INSTALL_STATE_INSTALLED
-    if returncode != 1 or stdout or stderr:
+    if returncode != 1:
         return _WP_INSTALL_STATE_UNAVAILABLE
 
-    # An empty negative result is not enough to authorize installation: it can
+    clean_stdout = _clean_wp_diagnostic_output(stdout)
+    clean_stderr = _clean_wp_diagnostic_output(stderr)
+    if clean_stdout or clean_stderr:
+        return _WP_INSTALL_STATE_UNAVAILABLE
+
+    # An empty or diagnostic negative result is not enough to authorize installation: it can
     # equally be an unavailable WP-CLI/database transport.  Route the query
     # through ``wp db`` (which deliberately skips the web-container CLI
     # preflight) and accept only a well-formed success result.
@@ -750,7 +897,7 @@ def _wp_core_install_state(instance: str, *, timeout: float = _WP_INSTALL_STATE_
     db_stderr = getattr(database, "stderr", None)
     if (isinstance(db_returncode, bool) or not isinstance(db_returncode, int) or
             not isinstance(db_stdout, str) or not isinstance(db_stderr, str) or
-            db_returncode != 0):
+            db_returncode != 0 or db_stdout.strip() != "1"):
         return _WP_INSTALL_STATE_UNAVAILABLE
     return _WP_INSTALL_STATE_UNINSTALLED
 
@@ -769,6 +916,38 @@ def _wp_install_state_refusal() -> dict:
             ),
         },
     }
+
+
+def _external_vendor_mount_targets(plugin_sources: list[str],
+                                  mounted_sources: list[str]) -> list[str]:
+    """Resolve declared source ``vendor`` links not covered by existing binds."""
+    mounted = []
+    for raw in mounted_sources:
+        try:
+            mounted.append(Path(raw).resolve())
+        except (OSError, RuntimeError):
+            continue
+
+    targets = []
+    for raw in plugin_sources:
+        try:
+            source = Path(raw).resolve()
+            vendor = source / "vendor"
+            if not vendor.is_symlink():
+                continue
+            target = vendor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise OSError(
+                "local plugin vendor symlink target is unavailable"
+            ) from None
+        if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
+            raise OSError(
+                "local plugin vendor symlink target is not a readable directory"
+            )
+        if any(target.is_relative_to(root) for root in mounted):
+            continue
+        targets.append(str(target))
+    return list(dict.fromkeys(targets))
 
 
 def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
@@ -900,34 +1079,40 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     plugins_home_p = _plugins_home(cfg).resolve()
     root_p = Path(root)
     _extra: list[str] = []
-    for _entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
-        if _entry == ".":
-            _src = root_p
-        elif (isinstance(_entry, str)
-              and not _remote_package_source(_entry)
-              and ("/" in _entry or _entry.startswith((".", "~")))):
-            _src = Path(_entry).expanduser()
+    _vendor_sources: list[Path] = []
+    _plugin_sources: list[str] = []
+    for _kind, _entries in (
+            ("plugin", list(pconf.get("plugins") or [])),
+            ("theme", list(pconf.get("themes") or []))):
+        for _entry in _entries:
+            if _entry == ".":
+                _src = root_p
+            elif (isinstance(_entry, str)
+                  and not _remote_package_source(_entry)
+                  and ("/" in _entry or _entry.startswith((".", "~")))):
+                _src = Path(_entry).expanduser()
+                if not _src.is_absolute():
+                    _src = (root_p / _entry).resolve()
+                _src = _src.resolve()
+            else:
+                continue
+            if _src.exists():
+                _plugin_sources.append(str(_src.resolve()))
+                if _kind == "plugin":
+                    _vendor_sources.append(_src.resolve())
+            if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
+    for _source_map in (pconf.get("mappings") or {},
+                        pconf.get("mappings_inactive") or {}):
+        for _src_raw in _source_map.values():
+            _src = Path(str(_src_raw)).expanduser()
             if not _src.is_absolute():
-                _src = (root_p / _entry).resolve()
+                _src = (root_p / _src).resolve()
             _src = _src.resolve()
-        else:
-            continue
-        if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
-    for _src_raw in (pconf.get("mappings") or {}).values():
-        _src = Path(str(_src_raw)).expanduser()
-        if not _src.is_absolute():
-            _src = (root_p / _src).resolve()
-        _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
-    for _src_raw in (pconf.get("mappings_inactive") or {}).values():
-        _src = Path(str(_src_raw)).expanduser()
-        if not _src.is_absolute():
-            _src = (root_p / _src).resolve()
-        _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+            if _src.exists():
+                _plugin_sources.append(str(_src))
+                if not _src.is_relative_to(plugins_home_p):
+                    _extra.append(str(_src))
     # Spec 010: canonical plugin map — every LOCAL-path source (active, inactive,
     # or on-demand) needs a bind-mount so the symlink resolves / the on-demand
     # mu-plugin can read+zip it inside the container.
@@ -939,9 +1124,42 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         if not _src.is_absolute():
             _src = (root_p / _src).resolve()
         _src = _src.resolve()
-        if _src.exists() and not _src.is_relative_to(plugins_home_p):
-            _extra.append(str(_src))
+        if _src.exists():
+            _plugin_sources.append(str(_src))
+            _vendor_sources.append(_src)
+            if not _src.is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
+    _extra.extend(_external_vendor_mount_targets(
+        _plugin_sources, [str(plugins_home_p), *_extra],
+    ))
     extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
+    compose_mount_roots = [plugins_home_p, *(Path(path).resolve() for path in extra_mounts)]
+    for _plugin_src in dict.fromkeys(_vendor_sources):
+        _vendor_link = _plugin_src / "vendor"
+        if not _vendor_link.is_symlink():
+            continue
+        try:
+            _vendor_target = _vendor_link.resolve()
+        except (OSError, RuntimeError):
+            _vendor_target = None
+        if (_vendor_target is not None and _vendor_target.exists() and
+                any(_vendor_target.is_relative_to(mount_root)
+                    for mount_root in compose_mount_roots)):
+            continue
+        if _vendor_target is None:
+            _target_detail = "cannot be resolved on the host"
+        elif not _vendor_target.exists():
+            _target_detail = f"points to missing host path {_vendor_target}"
+        else:
+            _target_detail = f"resolves to {_vendor_target}, outside the mounts"
+        print(
+            f"warning: plugin vendor symlink {_vendor_link} {_target_detail}; "
+            "its dependency target is unavailable from this instance's "
+            "Compose mounts, "
+            "so vendor/autoload.php may be unavailable in the container. "
+            "Keep vendor/ under a mounted plugin source root.",
+            file=sys.stderr,
+        )
     if extra_mounts:
         block["extra_mounts"] = extra_mounts
 
@@ -979,6 +1197,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             raise OSError("plugins home is unavailable")
         root_path = Path(root)
         sources = [str(plugins_home)]
+        plugin_sources: list[str] = []
 
         def add_if_external(value: object) -> None:
             source = Path(str(value)).expanduser()
@@ -991,6 +1210,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             # instance look safe against a weakened desired set.
             if not source.exists() or not os.access(source, os.R_OK):
                 raise OSError("declared local source is unavailable")
+            plugin_sources.append(str(source))
             if not source.is_relative_to(plugins_home):
                 sources.append(str(source))
 
@@ -1009,6 +1229,7 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
             source = entry.get("source") or {}
             if source.get("kind") == "path" and source.get("value"):
                 add_if_external(source["value"])
+        sources.extend(_external_vendor_mount_targets(plugin_sources, sources))
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return None
     return list(dict.fromkeys(sources))
@@ -1089,7 +1310,7 @@ def _mount_attestation_refusal(code: object, project_dir: str,
             "error": {"code": code, "message": message}}
 
 
-def _auto_heal_wp_url(name: str) -> bool:
+def _auto_heal_wp_url(name: str, *, expected_url: str | None = None) -> bool:
     """Reconcile WordPress with the currently reachable browser URL.
 
     The persisted clean hostname is not authoritative: a host ingress can be
@@ -1100,29 +1321,59 @@ def _auto_heal_wp_url(name: str) -> bool:
     """
     cfg = load_config()
     ic = resolve_instances(cfg).get(name) or {}
-    expected = site_url(ic)
+    expected = expected_url if expected_url is not None else site_url(
+        ic, timeout=5.0, retry=True)
     if not expected.startswith(("http://", "https://")):
         return False
 
-    current = wpcli(["option", "get", "siteurl"], instance=name,
-                    check=False, capture=True)
-    if (getattr(current, "stdout", "") or "").strip() == expected:
+    current = {}
+    for option in ("home", "siteurl"):
+        result = wpcli(["option", "get", option], instance=name,
+                       check=False, capture=True, timeout=15)
+        current[option] = (
+            (getattr(result, "stdout", "") or "").strip()
+            if getattr(result, "returncode", 1) in (0, None) else None
+        )
+    if all(value == expected for value in current.values()):
+        if _multisite_mode(ic):
+            _update_multisite_domain(name, expected)
         return False
 
     if expected.startswith("https://"):
         _write_ssl_muplugin(name)
     else:
         _write_loopback_muplugin(name)
-    wpcli(["option", "update", "siteurl", expected], instance=name,
-          check=False)
-    wpcli(["option", "update", "home", expected], instance=name,
-          check=False)
+
+    failed = []
+    for option in ("home", "siteurl"):
+        result = wpcli(["option", "update", option, expected], instance=name,
+                       check=False, capture=True, timeout=15)
+        if getattr(result, "returncode", 1) not in (0, None):
+            failed.append(option)
+
+    if not failed:
+        for option in ("home", "siteurl"):
+            result = wpcli(["option", "get", option], instance=name,
+                           check=False, capture=True, timeout=15)
+            value = (getattr(result, "stdout", "") or "").strip()
+            if (getattr(result, "returncode", 1) not in (0, None)
+                    or value != expected):
+                failed.append(option)
+
+    if failed:
+        info(f"{name}: could not confirm WP home/siteurl URL repair; "
+             "the advertised-route check will determine readiness")
+        return False
+
+    if _multisite_mode(ic):
+        _update_multisite_domain(name, expected)
+
     info(f"{name}: auto-healed WP url → {expected}")
     return True
 
 
 def _refresh_registered_url(sc, root: str, label: str, existing: dict,
-                            cfg: dict) -> dict:
+                            cfg: dict, *, expected_url: str | None = None) -> dict:
     """Re-record the instance URL from live state on the ready fast path.
 
     A clean URL can be assigned AFTER an instance was registered — `./sb domains
@@ -1136,7 +1387,8 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
     resolved = resolve_instances(cfg).get(name) if name else None
     if not resolved:
         return existing
-    fresh = site_url({k: v for k, v in resolved.items() if k != "url"})
+    fresh = expected_url if expected_url is not None else site_url(
+        {k: v for k, v in resolved.items() if k != "url"})
     if not fresh:
         return existing
     block = _local_yaml().get("instances", {}).get(name, {})
@@ -1166,10 +1418,62 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
 
 
 def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
+                    create: bool = False, php_version=None, wp_version=None,
+                    config_label=None, config_file=None, creation_context=None,
+                    expected_incarnation=None) -> dict:
+    """Ensure once; covered same-request calls return retained ownership only."""
+    kwargs = dict(label=label, create=create, php_version=php_version,
+                  wp_version=wp_version, config_label=config_label, config_file=config_file)
+    if creation_context is None:
+        return _ensure_instance_impl(cfg, project_dir, **kwargs)
+    from sandbox.server_config.creation_requests import (
+        finish_creation_fields, lookup_creation_receipt, validate_creation_context,
+    )
+    context = validate_creation_context(creation_context)
+    sc = _core()
+    root = sc.load_project_config(project_dir, label=config_label or label,
+                                  **({} if config_file is None else {'config_file': config_file}))['root']
+    attempt = {'selected': False}
+    try:
+        result = _ensure_instance_impl(cfg, project_dir, **kwargs,
+                                      creation_context=context,
+                                      expected_incarnation=expected_incarnation,
+                                      creation_attempt=attempt)
+    except Exception:
+        if not attempt['selected']:
+            raise
+        # A normal failure may complete the already committed relation. A kill
+        # or interrupted child stays pending; storage failures never mask it.
+        try:
+            with sc.project_lock(root):
+                record = sc.registry_get(root, label=label)
+                proof = lookup_creation_receipt(record, context, expected_incarnation)
+                if proof.get('ok') and proof['creation_receipt']['completion'] == 'pending':
+                    sc.registry_put(root, label=label,
+                        **finish_creation_fields(record, context, succeeded=False))
+        except Exception:
+            pass
+        raise
+    if result.get('lookup_only') or not attempt['selected']:
+        return result
+    with sc.project_lock(root):
+        record = sc.registry_get(root, label=label)
+        proof = lookup_creation_receipt(record, context, expected_incarnation)
+        if not proof.get('ok'):
+            return proof
+        record = sc.registry_put(root, label=label,
+            **finish_creation_fields(record, context, succeeded=result.get('ok') is not False))
+        receipt = lookup_creation_receipt(record, context, expected_incarnation)['creation_receipt']
+    return dict(result, creation_receipt=receipt)
+
+
+def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                     create: bool = False, php_version: str | None = None,
                     wp_version: str | None = None,
                     config_label: str | None = None,
-                    config_file: str | Path | None = None) -> dict:
+                    config_file: str | Path | None = None,
+                    creation_context=None, expected_incarnation=None,
+                    creation_attempt=None) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_install
     """Create-if-missing: boot a per-directory instance for the project at
     `project_dir`, keyed by its canonical root + `label` in the registry.
@@ -1223,6 +1527,29 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
     ready_install_state = None
     with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import (
+                validate_resolved_context, reserve_creation_request, scope_key,
+                request_key, lookup_creation_receipt, pending_receipts, replay_creation_result,
+                CreationRequestError,
+            )
+            creation_context = validate_resolved_context(
+                creation_context, pconf, label=label, create_allowed=bool(create),
+                config_label=config_label,
+            )
+            if (pconf.get('wordpressRuntime') or {}).get('mode', 'compose') != 'compose' or pconf.get('server') == 'herd':
+                raise CreationRequestError('unsupported_capability')
+            if expected_incarnation is not None and (existing or {}).get('instance_incarnation_id') != expected_incarnation:
+                raise CreationRequestError('instance_incarnation_changed')
+            guard = reserve_creation_request(scope_key(creation_context), request_key(creation_context), creation_context['operation_id'], creation_context['intent_digest'])
+            if guard['state'] == 'existing':
+                return replay_creation_result(existing, creation_context, expected_incarnation)
+            if existing:
+                if not existing.get('instance_incarnation_id'):
+                    raise CreationRequestError('instance_identity_legacy')
+                receipts = pending_receipts(existing, creation_context, existing['instance'], existing['instance_incarnation_id'], 'reused')
+                existing = sc.registry_put(root, label=label, creation_receipts=receipts)
+                creation_attempt['selected'] = True
         # Probe the Docker engine before the port allocator, local YAML, or
         # pending registry record can mutate state.  A stopped/unreachable
         # engine used to surface only after the first unbounded Compose call,
@@ -1277,7 +1604,10 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # ports before the ready fast path; otherwise ensure can report a
             # healthy HTTP container while the next compose up partially fails and
             # leaves WP's database network unusable.
-            cfg = _resolve_port_conflicts(cfg)
+            if creation_context is None:
+                cfg = _resolve_port_conflicts(
+                    cfg, instance_names={existing["instance"]}
+                    if existing and existing.get("instance") else set())
             resolved_existing = (
                 resolve_instances(cfg).get(existing.get("instance"))
                 if existing and existing.get("instance") else None
@@ -1305,8 +1635,21 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                     # before returning it; do not require the machine-wide
                     # `domains setup` path or assign names to unrelated records.
                     cfg = load_config()
-                _auto_heal_wp_url(existing["instance"])
-                return _refresh_registered_url(sc, root, label, existing, cfg)
+                route_cfg = resolve_instances(cfg).get(existing["instance"]) or existing
+                # Proxy availability can change between observations. Reconcile,
+                # prove and publish one selected URL within this ensure call.
+                advertised_url = site_url(route_cfg, timeout=5.0, retry=True)
+                _auto_heal_wp_url(existing["instance"], expected_url=advertised_url)
+                if not _wait_reachable(
+                        route_cfg, require_application_success=True,
+                        canonical_url=advertised_url):
+                    error = sc.ConfigError(
+                        f"instance_route_unavailable: '{existing['instance']}' did not "
+                        "answer successfully at its advertised URL; its state is retained.")
+                    error.code = "instance_route_unavailable"
+                    raise error
+                return _refresh_registered_url(sc, root, label, existing, cfg,
+                                               expected_url=advertised_url)
 
             if not existing and label != "default" and not create:
                 known = [e["label"] for e in sc.registry_list_for_root(root)]
@@ -1327,12 +1670,27 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                     "db_port": resolved["db_port"],
                     "mailpit_port": resolved["mailpit_port"],
                 }
+                preferred = pconf.get("port")
+                if preferred is not None and preferred != ports["wordpress_port"]:
+                    all_inst = resolve_instances(cfg)
+                    used_others = {
+                        inst[k] for oname, inst in all_inst.items() if oname != name
+                        for k in ("wordpress_port", "db_port", "mailpit_port")
+                    }
+                    ports["wordpress_port"] = _next_free_port(preferred, used_others)
             else:
                 taken = set(resolve_instances(cfg).keys())
                 taken |= {e.get("instance") for e in sc.registry_all().values()
                           if e.get("instance")}
                 name = _derive_instance_name(root, taken, label=label)
-                ports = _pick_instance_ports(cfg)
+                ports = _pick_instance_ports(cfg, preferred_port=pconf.get("port"))
+
+            all_inst = resolve_instances(cfg)
+            used_others = {
+                inst[k] for oname, inst in all_inst.items() if oname != name
+                for k in ("wordpress_port", "db_port", "mailpit_port")
+            }
+            ports = _ensure_distinct_ports(ports, used_others)
 
             # A truly new authoritative record receives one opaque incarnation.
             # Existing records preserve their exact projection.  In particular,
@@ -1347,6 +1705,13 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                  f"(WP={ports['wordpress_port']} server={server}"
                  f"{f' php={php_v}' if php_v else ''}{f' wp={wp_v}' if wp_v else ''})")
 
+            if creation_context is not None and not existing:
+                receipts = pending_receipts(None, creation_context, name, server_config_identity['instance_incarnation_id'], 'created')
+                existing = sc.registry_put(root, label=label, instance=name, status='pending',
+                    wordpress_port=ports['wordpress_port'], db_port=ports['db_port'],
+                    mailpit_port=ports['mailpit_port'], server=server,
+                    creation_receipts=receipts, **server_config_identity)
+                creation_attempt['selected'] = True
             block = _build_instance_block(cfg, name, root, pconf, ports, server)
 
             # Resolve, materialize, and build extension images before writing
@@ -1395,7 +1760,24 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # document root before WordPress can answer HTTP. Probe only after core
             # installation, otherwise the first ensure fails before repair starts.
             if server != "herd":
-                _wait_http(ports["wordpress_port"])
+                web_running, missing_msg = _instance_web_services_running(name, server)
+                if not web_running:
+                    raise sc.ConfigError(
+                        f"instance_backend_unavailable: '{name}' {missing_msg}; "
+                        "its pending state is retained. Retry "
+                        f"`./sb ensure --local --project-dir {shlex.quote(str(root))} --label {label}`.")
+                if not _wait_http(ports["wordpress_port"]):
+                    raise sc.ConfigError(
+                        f"instance_backend_unavailable: '{name}' did not answer HTTP "
+                        "after installation; its pending state is retained. Retry "
+                        f"`./sb ensure --local --project-dir {shlex.quote(str(root))} --label {label}`.")
+                # A fresh document root may not answer the proxy's route proof
+                # until installation completes. Retry the same owned route now.
+                if (_proxy_sudoers_installed()
+                        and (not secured or site_url(resolve_instances(cfg)[name], timeout=5.0, retry=True).startswith("http://localhost:"))
+                        and _secure_at_create(cfg, name)):
+                    secured = True
+                    cfg = load_config()
                 if block.get("php_extensions") is not None:
                     extension_status = php_extension_status(
                         resolve_instances(cfg)[name], instance=name,
@@ -1422,9 +1804,31 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 compose("up", "-d", "--force-recreate", "wp",
                         *(["nginx"] if server == "nginx" else []),
                         instance=name, check=False)
-                _wait_reachable(resolve_instances(cfg)[name])
+                if not _wait_reachable(resolve_instances(cfg)[name]):
+                    raise sc.ConfigError(
+                        f"instance_multisite_unavailable: '{name}' did not become "
+                        "reachable after recreation; its pending state is retained.")
             _wire_project_plugins(name, root, pconf, error_factory=sc.ConfigError)
             _wire_project_themes(name, root, pconf)
+
+            final_route = resolve_instances(cfg)[name]
+            _base_url = site_url(final_route)
+            # Plugin wiring and provider state can change the effective URL
+            # after the earlier install-time pass. Reconcile both WordPress
+            # URL options to the exact route we are about to accept.
+            _auto_heal_wp_url(name, expected_url=_base_url)
+            if not _wait_reachable(final_route, require_application_success=True,
+                                   canonical_url=_base_url):
+                _base_url = site_url(final_route, timeout=5.0, retry=True)
+                if secured:
+                    _auto_heal_wp_url(name, expected_url=_base_url)
+                if not _wait_reachable(final_route, require_application_success=True,
+                                       canonical_url=_base_url, timeout=10):
+                    error = sc.ConfigError(
+                        f"instance_route_unavailable: '{name}' did not answer at its "
+                        "advertised URL; its pending state is retained.")
+                    error.code = "instance_route_unavailable"
+                    raise error
 
             # Spec 008: a newly provisioned instance gets both restore points only
             # after its project plugins/themes are in their final installed state.
@@ -1440,7 +1844,6 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                           .get("autologin_token", ""))
             # Report the instance's real browser URL: its clean https://<name>.<tld>
             # when secured (herd, or secure-at-create above), else localhost:<port>.
-            _base_url = site_url(resolve_instances(cfg)[name])
             _login_url = f"{_base_url}/?sandbox_autologin={_autologin}" if _autologin else ""
 
             return sc.registry_put(
@@ -1465,7 +1868,8 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
 
 
 def apply_config(cfg: dict, project_dir: str, label: str | None = None,
-                 config_file: str | Path | None = None) -> dict:
+                 config_file: str | Path | None = None, creation_context=None,
+                 expected_incarnation=None) -> dict:
     """Reconcile a RUNNING instance with its project config — WITHOUT dropping
     the DB or uploads. This is the in-place counterpart to recreate_instance
     (which wipes data). Use it after editing sandbox.config.json (toggling
@@ -1505,6 +1909,15 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
                     f"pass label= to disambiguate.")
             raise sc.ConfigError(
                 f"no instance for {root} yet — run ensure_instance first.")
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import lookup_creation_receipt, CreationRequestError
+            if expected_incarnation is None:
+                raise CreationRequestError('instance_incarnation_required')
+            proof = lookup_creation_receipt(existing, creation_context, expected_incarnation)
+            if not proof.get('ok'):
+                raise CreationRequestError(proof['error']['code'])
+            if proof['creation_receipt']['completion'] != 'succeeded':
+                raise CreationRequestError('creation_request_unknown')
         name = existing["instance"]
         label = existing["label"]
         # Re-load with the RESOLVED label now known, so a per-label
@@ -1513,11 +1926,30 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
         pconf = sc.load_project_config(
             project_dir, label=label, **config_kwargs,
         )
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import validate_resolved_context
+            creation_context = validate_resolved_context(creation_context, pconf,
+                label=label, create_allowed=creation_context['intent_fields']['create_allowed'])
         ports = {
             "wordpress_port": existing["wordpress_port"],
             "db_port": existing["db_port"],
             "mailpit_port": existing["mailpit_port"],
         }
+        preferred = pconf.get("port")
+        if preferred is not None and preferred != ports["wordpress_port"]:
+            all_inst = resolve_instances(cfg)
+            used_others = {
+                inst[k] for oname, inst in all_inst.items() if oname != name
+                for k in ("wordpress_port", "db_port", "mailpit_port")
+            }
+            ports["wordpress_port"] = _next_free_port(preferred, used_others)
+
+        all_inst = resolve_instances(cfg)
+        used_others = {
+            inst[k] for oname, inst in all_inst.items() if oname != name
+            for k in ("wordpress_port", "db_port", "mailpit_port")
+        }
+        ports = _ensure_distinct_ports(ports, used_others)
         server = _valid_server(pconf.get("server") or existing.get("server")
                                or "nginx")
         _assert_apply_runtime_dependencies(
@@ -1536,6 +1968,9 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
         # 1. Rewrite the instance block from the current config, then resolve
         # and build opted-in extension images before persisting it. A failed
         # parent pull/build therefore cannot touch the running stack.
+        if creation_context is not None:
+            from sandbox.server_config.creation_requests import reserve_creation_reconcile
+            reserve_creation_reconcile(creation_context)
         block = _build_instance_block(cfg, name, root, pconf, ports, server)
         try:
             _prepared_extensions = prepare_php_extension_runtime(block, server)
@@ -1714,8 +2149,14 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
 
 def _instance_running(name: str) -> bool:
     """True if the instance's `wp` web container reports running."""
-    ps = compose("ps", "--format", "json", instance=name,
-                 check=False, capture=True)
+    # Inventory is observational.  A stopped/unreachable Docker daemon must
+    # not hang registry-wide commands such as `sb instances`; report the
+    # instance as not running and let the caller render the unavailable state.
+    try:
+        ps = compose("ps", "--format", "json", instance=name,
+                     check=False, capture=True, timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     for ln in (ps.stdout or "").splitlines():
         try:
             row = json.loads(ln)
@@ -1724,6 +2165,40 @@ def _instance_running(name: str) -> bool:
         if row.get("Service") == "wp" and row.get("State") == "running":
             return True
     return False
+
+
+def _instance_web_services_running(name: str, server: str = "nginx") -> tuple[bool, str]:
+    """True if the instance's web-facing containers report running.
+    Returns (True, '') if containers are running, or if container status
+    cannot be inspected. Returns (False, error_msg) if inspect succeeds
+    and shows required services are missing or exited."""
+    required = ["wp"]
+    if server == "nginx":
+        required.append("nginx")
+    ps = compose("ps", "--all", "--format", "json", instance=name, check=False, capture=True)
+    stdout = getattr(ps, "stdout", "") or ""
+    if not stdout.strip():
+        return True, ""
+    running = set()
+    states = {}
+    for ln in stdout.splitlines():
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue
+        svc = row.get("Service")
+        state = row.get("State")
+        if svc:
+            states[svc] = state
+            if state == "running":
+                running.add(svc)
+    if not states:
+        return True, ""
+    missing = [s for s in required if s not in running]
+    if missing:
+        details = [f"{s} ({states.get(s, 'not created')})" for s in missing]
+        return False, f"web service(s) not running: {', '.join(details)}"
+    return True, ""
 
 
 def _capture_apply_rollback_state(name: str, cfg: dict, existing: dict,
@@ -1888,3 +2363,110 @@ def registry_put(root, label="default", **fields) -> dict:
     """Compatibility facade for updating one typed registry record."""
     import sandbox_core as sc
     return sc.registry_put(root, label=label, **fields)
+
+
+def mutate_creation_url(project_dir, *, label, creation_context,
+                        expected_incarnation, instance_id, url):
+    """Write/read one authorized public URL under the exact owner project lock."""
+    from urllib.parse import urlsplit
+    from sandbox.server_config.models import validate_creation_context, creation_digest, validate_url_mutation_result
+    from sandbox.server_config.creation_requests import (
+        now, lookup_creation_receipt, validate_resolved_context, CreationRequestError,
+    )
+    context = validate_creation_context(creation_context)
+    if not isinstance(expected_incarnation, str) or not re.fullmatch(r'inc_[0-9a-f]{32}', expected_incarnation):
+        raise CreationRequestError('instance_incarnation_required')
+    if not isinstance(instance_id, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', instance_id):
+        raise CreationRequestError('creation_context_invalid')
+    if not isinstance(url, str) or len(url.encode()) > 2048 or any(ord(char) < 33 or ord(char) == 127 for char in url):
+        raise CreationRequestError('public_url_invalid')
+    parsed = urlsplit(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise CreationRequestError('public_url_invalid')
+    sc = _core()
+    pconf = sc.load_project_config(project_dir, label=label)
+    context = validate_resolved_context(context, pconf, label=label,
+        create_allowed=context['intent_fields']['create_allowed'])
+    if pconf.get('kind', 'wordpress') != 'wordpress' or pconf.get('server') == 'herd' or (pconf.get('wordpressRuntime') or {}).get('mode', 'compose') != 'compose':
+        raise CreationRequestError('unsupported_capability')
+    root = pconf['root']
+    result = {'operation_id': context['operation_id'], 'request_id': context['request_id'],
+        'target_digest': context['intent_fields']['target_scope_digest'],
+        'expected_incarnation': expected_incarnation, 'observed_incarnation': None,
+        'before_observed_at': None, 'writes': {'home': 'not_applicable', 'siteurl': 'not_applicable'},
+        'readback': {'home': None, 'siteurl': None}, 'finished_at': None,
+        'result_code': 'remote_instance_url_incomplete'}
+    with sc.project_lock(root):
+        def verify():
+            record = sc.registry_get(root, label=label)
+            proof = lookup_creation_receipt(record, context, expected_incarnation)
+            if not proof.get('ok'):
+                raise CreationRequestError(proof['error']['code'])
+            if proof['creation_receipt']['instance_id'] != instance_id:
+                raise CreationRequestError('instance_incarnation_changed')
+            if proof['creation_receipt']['completion'] != 'succeeded':
+                raise CreationRequestError('creation_request_unknown')
+            result['observed_incarnation'] = record['instance_incarnation_id']
+            result['before_observed_at'] = result['before_observed_at'] or now()
+        verify()
+        record = sc.registry_get(root, label=label)
+        retained = record.get('creation_url_results', [])
+        if not isinstance(retained, list) or len(retained) > 40:
+            raise CreationRequestError('creation_receipt_capacity')
+        url_digest = creation_digest(url)
+        for saved in retained:
+            if not isinstance(saved, dict) or len(json.dumps(saved).encode()) > 4096:
+                raise CreationRequestError('creation_request_unavailable')
+            if saved.get('operation_id') != context['operation_id']:
+                continue
+            if (saved.get('request_id') != context['request_id'] or
+                    saved.get('intent_digest') != context['intent_digest'] or
+                    saved.get('expected_incarnation') != expected_incarnation or
+                    saved.get('url_digest') != url_digest):
+                raise CreationRequestError('creation_request_conflict')
+            # Unknown pre-write reservation is a retained result too. Never
+            # replay a write after response loss or a controller interruption.
+            prior_result = validate_url_mutation_result(saved['result'])
+            if any(prior_result[key] != result[key] for key in ('operation_id', 'request_id', 'expected_incarnation', 'target_digest')):
+                raise CreationRequestError('creation_request_conflict')
+            return prior_result
+        if len(retained) >= 40:
+            raise CreationRequestError('creation_receipt_capacity')
+        reserved = {'operation_id': context['operation_id'], 'request_id': context['request_id'],
+                    'intent_digest': context['intent_digest'],
+                    'expected_incarnation': expected_incarnation, 'url_digest': url_digest,
+                    'result': dict(result, writes={'home': 'unknown', 'siteurl': 'unknown'},
+                                   finished_at=now())}
+        retained = [*retained, reserved]
+        sc.registry_put(root, label=label, creation_url_results=retained)
+        try:
+            for field in ('home', 'siteurl'):
+                verify()
+                result['writes'][field] = 'attempted'
+                response = wpcli(['option', 'update', field, url], instance=instance_id,
+                                 check=False, capture=True, timeout=20)
+                result['writes'][field] = 'succeeded' if response.returncode == 0 else 'failed'
+            for field in ('home', 'siteurl'):
+                verify()
+                response = wpcli(['option', 'get', field], instance=instance_id,
+                                 check=False, capture=True, timeout=20)
+                result['readback'][field] = response.returncode == 0 and (response.stdout or '').strip() == url
+            if all(value == 'succeeded' for value in result['writes'].values()) and all(result['readback'].values()):
+                result['result_code'] = 'remote_instance_url_verified'
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            if getattr(exc, 'code', str(exc)) == 'instance_incarnation_changed':
+                result['result_code'] = 'instance_incarnation_changed'
+            for field, value in result['writes'].items():
+                if value == 'attempted':
+                    result['writes'][field] = 'unknown'
+        result['finished_at'] = now()
+        # A failed final commit leaves the prior unknown result intact. It
+        # cannot authorize another attempt; callers retain partial evidence.
+        current = sc.registry_get(root, label=label)
+        if (current or {}).get('instance_incarnation_id') != expected_incarnation:
+            result['result_code'] = 'instance_incarnation_changed'
+            return result
+        result = validate_url_mutation_result(result)
+        reserved = dict(reserved, result=result)
+        sc.registry_put(root, label=label, creation_url_results=[*retained[:-1], reserved])
+    return result

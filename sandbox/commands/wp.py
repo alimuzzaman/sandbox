@@ -78,23 +78,6 @@ def _reject_redundant_wp_token(argv: list[str]) -> None:
             "No command was executed.")
 
 
-def _disable_help_pager(argv: list[str]) -> list[str]:
-    """Keep WP-CLI help noninteractive inside the container boundary.
-
-    The managed WordPress image does not promise a pager binary. Add WP-CLI's
-    explicit no-pager switch only for the help command, and preserve an
-    operator's explicit pager choice when one was supplied.
-    """
-    if not argv or "--no-pager" in argv or "--pager" in argv:
-        return list(argv)
-    for index, token in enumerate(argv):
-        if token == "help":
-            return [*argv, "--no-pager"]
-        if not isinstance(token, str) or not token.startswith("-"):
-            break
-    return list(argv)
-
-
 def _clean_eval_parse_diagnostic(argv: list[str], stdout: str, stderr: str) -> tuple[str, str]:
     """Remove only WP's duplicate generic wrapper around an eval parse error."""
     if not argv or argv[0] != "eval":
@@ -349,7 +332,6 @@ def cmd_wp(cfg, args) -> None:
     if not pt:
         die("usage: ./sb wp <wp-cli args>")
     _reject_redundant_wp_token(pt)
-    pt = _disable_help_pager(pt)
     allow_missing = bool(getattr(args, "allow_missing", False))
     plugin_partial = _plugin_deactivate_request(pt)
     if allow_missing and not (_is_option_get_probe(pt) or plugin_partial):

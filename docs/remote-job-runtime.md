@@ -8,6 +8,22 @@ child pipes.
 
 ## Normal operation
 
+`job-list --json` returns bounded summaries, not stored command, submission,
+environment, result, or output payloads. Use `job-status JOB` and `job-output JOB`
+for those detail surfaces. Each CLI/MCP page is capped at 512 KiB and carries
+`page.schema_version: 2`, `row_format: summary-v1`, `has_more`, `next_cursor`, and
+`completeness`. CLI continuation is `--cursor-job-id <page.next_cursor>`; MCP keeps
+its opaque `cursor`/`next_cursor` fields. A byte-limited page never consumes the
+first omitted row. An older controller's missing completeness metadata remains
+unknown. A response above the existing 1 MiB transport limit fails with a safe
+`response_too_large` diagnostic; use a smaller limit until that controller is
+updated through the supported lifecycle.
+
+Cancellation can be repeated while a job is cancelling. `job-cancel JOB --force`
+revalidates the original process identity and escalates to its owned group.
+A concurrent terminal transition returns its observed result without signaling a
+replacement process. A cancelling result still needs a terminal status observation.
+
 The examples use the repository launcher (`./sb`). From another checkout, use
 the installed `sb` command; the command surface and selectors are the same.
 
@@ -27,6 +43,95 @@ development, and isolated labels for matrix cells:
 `job-output --stream` is for retained `combined`, `stdout`, and `stderr` logs.
 Resource samples are a separate bounded control-plane document retrieved with
 `job-metrics`; use `job-status` for the live health summary.
+
+### Source files in remote jobs
+
+Remote `job-start` stages the exact project working tree, records its source
+commit and dirty-tree digest, and runs the command in the selected workspace.
+Keep public helper code and synthetic fixtures inside the project tree, then
+pass their project-relative paths and use `--cwd-relative` when a helper lives
+below the project root. Credential-like command values are refused. Keep real
+credentials out of both argv and every transferred project file.
+
+```sh
+./sb job-start --remote NAME --project-dir . --workspace pg-reopen-canary \
+  --timeout 300 --request-id pg-reopen-canary-1 --cwd-relative . -- \
+  python scripts/reopen_canary.py --fixture fixtures/reopen-canary.json
+./sb job-status <job-id> --remote NAME --json
+./sb job-output <job-id> --remote NAME --stream combined --max-bytes 65536
+```
+
+The helper and fixture must already be in the submitted project tree; a path in
+argv does not upload an external file.
+## Ordinary hosted apply admission
+
+Process observation uses a real boot-session identity. An active record written
+by an older client with a hostname-based identity remains unresolved when read
+by this version: a format mismatch cannot prove supervisor loss, release its
+workspace, authorize a signal, or create recovery authority. Missing/denied
+identity telemetry is also distinct from a proved absent PID. Terminal records
+are never rewritten to repair an earlier incorrect reconciliation.
+
+Status health is `unknown` when process ownership cannot be observed or its
+boot format is unsupported. A stale heartbeat from a still-owned supervisor
+does not make the job terminal. Status uses the classifier's explicit
+`supervisor_identity_valid` observation; an unavailable later probe cannot turn
+a stale heartbeat into proved ownership loss. Expired workspace/capacity leases remain held
+for nonterminal jobs; expiry alone cannot admit overlapping work. Terminal or
+missing-job leases can still be reaped by the lease owner.
+
+When validating a changed controller, use a separate `SANDBOX_HOME` for all
+job commands. Job service startup reconciles its whole ledger. Older clients
+must not share a ledger with newly running jobs that use an identity format
+they cannot interpret; complete those jobs or isolate the controllers first.
+
+Feature 054 makes a durable recovery context mandatory for ordinary
+`host apply`. The retained job must bind the application checkout, its full
+source commit, the original request ID, and the live child identity. Sandbox
+commits and reads back the existing recovery receipt before source transfer,
+initializer/runtime/route effects, or a generation advance. A delivery journal
+row is diagnostic history; it cannot replace that receipt.
+
+Use the application checkout as the job project and call the full absolute
+Sandbox executable in the child command:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+The application commit (`FULLHEAD`), Sandbox source/control revision, and
+installed controller runtime revision are separate facts. Do not start a job
+from the control checkout merely to obtain a job ID. A direct apply with only a
+request flag, or a legacy direct caller without a durable receipt, is fenced
+with `recovery_context_required` before effects.
+
+After submission, retain the original job ID and read terminal status and
+bounded output. If the response is lost or admission is interrupted, inspect
+the original request with `./sb delivery inspect`; do not submit a new request
+identity. A separately authorized continuation uses the existing `host
+recover` command and a distinct recovery request. Identity-only target proof
+may report partial optional telemetry, but required resource policy remains a
+separate gate.
+
+The W11 deployment trace uses the same executing Sandbox executable, controller,
+`SANDBOX_HOME`, and original control `--project-dir` for capability, start,
+record, owner-status, owner-record, and inspect. `--trace-request-id` resolves
+an invocation before its trace ID is known; `--trace-id` selects the retained
+trace, and `--mutation-id` is allowed only with that trace ID. Trace writers
+use immutable original IDs and monotonic readback; lost or ambiguous
+acknowledgements never justify a new job or workload request. Preflight command
+success, the main command result, and query-time joined deployment evidence are
+separate values. Candidate trace source and installed-controller capability
+remain pending verification.
+
+Phase-job `submission_digest` values are producer-recorded candidates that the
+native job owner independently recomputes from retained role and command
+identity; private argv and environment are excluded. The trace adds no new
+`job-status` surface: existing `job-status` reports lifecycle, while
+trace-owner-status reports publication receipts.
 
 If local `job-status` returns `job_not_found`, it has not inferred a remote.
 Run `./sb remote list`, then repeat the same observation with the explicit
@@ -162,13 +267,57 @@ check must prove no live recorded child/supervisor, residual child process group
 owned child cgroup, container mount, host mountpoint or bind source, resource binding,
 lease, or other active job. The exact filesystem identity is moved into a private
 owner-only cleanup root and emptied through its continuously open directory descriptor.
-On macOS/Linux the controller has no identity-conditional final unlink/rmdir API, so it
-retains the empty quarantine, marks cleanup failed/indeterminate, and retains the verified
-archive rather than exposing a check-then-path removal race. A private cleanup broker or
-equivalent ownership boundary inaccessible to the submitting UID is still required for
-automatic final reap. Workspace validation/materialization and
-durable job acceptance hold the same controller lock as terminal deletion, so a new
-accept cannot commit after the final active-job check. The same seam covers
+Linux remotes can enable final removal with the protected, owner-scoped cleanup broker:
+
+```sh
+./sb remote service cleanup-broker scaleway-sandbox --plan --json
+./sb remote service cleanup-broker scaleway-sandbox --confirm --json
+```
+
+The installed helper is root-owned and pinned to the exact deploy, workspace-metadata,
+and CI-artifact roots. The installer also creates a root-owned, mode-0700
+`operations/` directory beside quarantine state. Before moving a checkout, the
+controller stores an immutable cleanup intent with a fresh cleanup ID, job/workspace
+authority, checkout and wrapper identities, metadata identities/content digest, and
+pinned-root identities. The broker stores its own root-owned, mode-0600 journal under
+that operations directory and serializes every transition. Checkout and metadata have
+independent `prepared`, `quarantined`, `removing`, and `removed` phases; metadata tracks
+its file and directory separately. Recovery follows the journal's deterministic target
+and verifies the wrapper plus its exact `owned` child inode. A prepared operation whose
+protected object is absent refuses; only a durably armed `removing` phase can treat an
+absent target as completed deletion. Retries do not infer success from missing paths or
+reread original metadata after the intent is durable.
+
+Only after both broker phases are removed does the controller mark the workspace
+destroyed and acknowledge the broker receipt. The broker then compacts the active
+journal to a terminal tombstone that prevents cleanup-ID reuse. Tombstones do not
+expire in this protocol. The retained quota is capped at 512 IDs and 32 MiB; when it is
+full, new cleanup IDs are refused while existing IDs can finish. Operators must plan
+for this limit rather than deleting journal files or quarantine contents by hand.
+Cleanup success means the exact checkout and workspace metadata were removed, the
+controller marked that workspace destroyed, and the matching receipt was acknowledged;
+it is not proof that a remote broker installation or unrelated storage object was
+recovered. Separate owned-storage cleanup still uses its own authority and recovery
+rules. An interruption inside that manager's quarantine step is not repaired by this
+broker journal and remains indeterminate until its own recovery path succeeds.
+Owned-storage cleanup retries use stable request evidence, recheck canonical
+selection/lease references, and serialize filesystem effects across processes.
+Symlink descendants are unlinked as no-follow leaf entries; ambiguous journal or
+filesystem states remain retained for operator review.
+
+This protocol cannot reconstruct historical failures that have no durable controller
+intent and broker journal. An older no-journal quarantine is not adopted by scanning
+for a matching inode; absent historical evidence remains refused. Existing root
+permissions are preserved; owner-only workspace leaves and inode checks bound each
+operation. Installation refuses when those roots and `/var/lib` do not share a filesystem,
+because atomic quarantine moves cannot cross filesystem boundaries. The service runtime
+must first match the current committed CLI revision; install
+that source with the normal protected service migration when needed. Unsupported platforms
+retain and report cleanup failure. If a broker install is interrupted, inspect service
+status and the broker capability before retrying; do not remove its retained quarantine
+manually. Workspace validation/materialization and durable job acceptance hold the same
+controller lock as terminal deletion, so a new accept cannot commit after the final
+active-job check. The same seam covers
 `supervisor_launch_failed`. Retry restores from one retained archive capped at 512 MiB
 for both apparent input and compressed output, 100,000 entries, and a 1 GiB post-write
 free-space reserve; it does not accumulate a new archive per

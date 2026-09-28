@@ -6,7 +6,8 @@ import os
 from datetime import datetime, timezone
 
 from .models import Health, TERMINAL_LIFECYCLES, Lifecycle
-from .process import ProcessIdentity, capture_process_identity, verify_process_identity
+from .process import (ProcessIdentity, capture_process_identity, verify_process_identity,
+                      is_boot_session_identity, process_absence_proven)
 
 
 def _age(value: str | None, now: datetime) -> float | None:
@@ -32,9 +33,15 @@ def _observed_identity(process: dict, prefix: str) -> tuple[bool | None, str | N
     nonce = process.get("supervisor_nonce_hash")
     if not pid or not start or not boot or not nonce:
         return None, None
+    if not is_boot_session_identity(boot):
+        return None, f"recorded {prefix} boot identity is legacy or unavailable"
     observed = capture_process_identity(int(pid))
     if observed is None:
-        return False, f"recorded {prefix} PID is absent"
+        if process_absence_proven(int(pid)):
+            return False, f"recorded {prefix} PID is absent"
+        return None, f"recorded {prefix} identity cannot currently be observed"
+    if not is_boot_session_identity(observed.host_boot_id):
+        return None, f"observed {prefix} boot identity is unavailable"
     expected = ProcessIdentity(boot, int(pid), start, nonce,
                                process.get(f"{prefix}_pgid") if prefix == "child" else None)
     observed = ProcessIdentity(observed.host_boot_id, observed.pid, observed.start_identity,
@@ -51,6 +58,9 @@ def classify(snapshot: dict, *, now: datetime | None = None) -> tuple[Health, di
         return Health.UNREACHABLE, {"classified_at": now.isoformat(),
                                     "reasons": ["selected execution target is unreachable"]}
     process = snapshot.get("process") or {}
+    if process and not is_boot_session_identity(process.get('host_boot_id')):
+        return Health.UNKNOWN, {'classified_at': now.isoformat(),
+            'reasons': ['recorded boot identity is legacy or unavailable; ownership remains unresolved']}
     heartbeat = snapshot.get("heartbeat") or {}
     child_pid = process.get("child_pid")
     child_alive = False
@@ -63,6 +73,10 @@ def classify(snapshot: dict, *, now: datetime | None = None) -> tuple[Health, di
         child_identity, child_reason = _observed_identity(process, "child")
         if child_reason:
             identity_evidence["child"] = child_reason
+        if child_identity is None:
+            return Health.UNKNOWN, {'classified_at': now.isoformat(),
+                'identity': identity_evidence,
+                'reasons': ['child ownership cannot currently be proved or disproved']}
         if child_identity is False and child_alive:
             return Health.ORPHANED, {"classified_at": now.isoformat(), "child_alive": True,
                                      "identity": identity_evidence,
@@ -82,8 +96,12 @@ def classify(snapshot: dict, *, now: datetime | None = None) -> tuple[Health, di
         evidence["reasons"].append("job record explicitly reports an invalid ownership identity")
         return Health.ORPHANED, evidence
     supervisor_identity, supervisor_reason = _observed_identity(process, "supervisor")
+    evidence["supervisor_identity_valid"] = supervisor_identity
     if supervisor_reason:
         evidence["identity"]["supervisor"] = supervisor_reason
+    if supervisor_identity is None and process.get('supervisor_pid'):
+        evidence['reasons'].append('supervisor ownership cannot currently be proved or disproved')
+        return Health.UNKNOWN, evidence
     if supervisor_identity is False and child_alive:
         evidence["reasons"].append("supervisor identity is absent or no longer matches")
         return Health.SUPERVISOR_UNRESPONSIVE, evidence

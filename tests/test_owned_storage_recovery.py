@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.owned_storage.cleanup import CleanupExecutionError, OwnedStorageCleanupManager
 from sandbox.owned_storage.models import (
@@ -24,6 +25,7 @@ from sandbox.owned_storage.models import (
     OperationPhase,
     OperationType,
     PolicyMode,
+    RelationshipCurrentSelection,
 )
 from sandbox.owned_storage.protocol import (
     StorageProtocolError,
@@ -330,6 +332,120 @@ class TestOwnedStorageRecovery(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "request_id_conflict")
 
+    def test_cleanup_intent_refuses_new_current_selection_and_recovers(self):
+        generation_id = "gen_recovery_selected"
+        obj_dir = self.storage_root / "objects" / self.project_id / self.rel_id / generation_id
+        obj_dir.mkdir(parents=True)
+        (obj_dir / "data.bin").write_bytes(b"must remain current")
+        st = os.stat(obj_dir)
+        obj = AuthorityOwnedObject(
+            object_id="obj_recovery_selected",
+            object_kind=ObjectKind.SYNC_GENERATION,
+            remote_identity=self.remote_id,
+            project_identity=self.project_id,
+            relationship_id=self.rel_id,
+            workspace_id=self.ws_id,
+            job_id=None,
+            parent_object_id=None,
+            created_by_operation_id="op_generation_selected",
+            lifecycle=ObjectLifecycle.ACCEPTED,
+            policy_id="pol_1",
+            policy_generation=1,
+            qualification_admission_id=None,
+            evidence_candidate_id=None,
+            promotion_id="prom_1",
+            evidence_id="ev_selected",
+            authority_binding_id="bind_1",
+            retention_policy_digest="sha256:ret",
+            content_evidence={"generation_id": generation_id},
+            filesystem_identity={"inode": st.st_ino, "device": st.st_dev},
+            known_bytes=19,
+            created_at="2026-09-04T00:00:00Z",
+            accepted_at="2026-09-04T00:01:00Z",
+            removed_at=None,
+        )
+        self.repo.save_object(obj)
+
+        # Leave a durable INTENT with the source still present, as after a
+        # restartable interruption before the quarantine rename.
+        with patch.object(
+            self.cleanup_manager.adapter,
+            "rename_directory_noreplace_at",
+            side_effect=OSError("simulated interrupted rename"),
+        ):
+            with self.assertRaises(CleanupExecutionError):
+                self.cleanup_manager.cleanup_object(
+                    preview_id="prev_cleanup_selected",
+                    object_id=obj.object_id,
+                    request_id="req_cleanup_selected",
+                    confirm=True,
+                    expected_object_evidence_digest="sha256:selected-object",
+                    expected_reference_digest="sha256:selected-reference",
+                )
+
+        with self.assertRaises(StorageRepositoryConflictError):
+            self.repo.set_current_selection(
+                RelationshipCurrentSelection(
+                    relationship_id=self.rel_id,
+                    object_id=obj.object_id,
+                    generation_id=generation_id,
+                    selection_generation=1,
+                    operation_id="op_selection_changed",
+                    changed_at="2026-09-04T00:02:00Z",
+                )
+            )
+
+        recovered = self.cleanup_manager.reconcile_startup()
+        operation = self.repo.get_operation_by_request(
+            OperationType.CLEANUP, "req_cleanup_selected", self.remote_id, self.project_id
+        )
+        intent = self.repo.get_cleanup_intent_for_operation(operation.operation_id)
+        self.assertEqual(recovered["reconciled_quarantine_count"], 1)
+        self.assertFalse(obj_dir.exists())
+        self.assertFalse((self.storage_root / "quarantine" / intent.cleanup_id).exists())
+        self.assertEqual(intent.phase, CleanupPhase.TERMINAL)
+        self.assertNotIn("reference_active", {
+            diagnostic["reason_code"] for diagnostic in recovered["cleanup_diagnostics"]
+        })
+
+    def test_cleanup_phase_transition_rejects_stale_retry(self):
+        intent = CleanupIntent(
+            cleanup_id="clean_phase_cas",
+            operation_id="op_phase_cas",
+            preview_id="prev_phase_cas",
+            object_id="obj_phase_cas",
+            expected_object_evidence_digest="sha256:obj",
+            expected_reference_digest="sha256:ref",
+            final_entry_evidence_digest=None,
+            phase=CleanupPhase.INTENT,
+            outcome=None,
+            reason_code=None,
+            estimated_bytes=0,
+            observed_reclaimed_bytes=None,
+            job_result_digest_before=None,
+            job_result_digest_after=None,
+            created_at="2026-09-04T00:00:00Z",
+            updated_at="2026-09-04T00:00:00Z",
+        )
+        self.repo.save_cleanup_intent(intent)
+        self.repo.update_cleanup_intent(
+            intent.cleanup_id,
+            expected_phase=CleanupPhase.INTENT,
+            phase=CleanupPhase.QUARANTINED,
+        )
+
+        with self.assertRaises(StorageRepositoryConflictError):
+            self.repo.update_cleanup_intent(
+                intent.cleanup_id,
+                expected_phase=CleanupPhase.INTENT,
+                phase=CleanupPhase.QUARANTINED,
+            )
+
+        self.assertEqual(
+            self.repo.get_cleanup_intent(intent.cleanup_id).phase,
+            CleanupPhase.QUARANTINED,
+        )
+
     # --- T025: 100-trial simulated crash and interruption recovery suite ---
 
     def test_100_trial_crash_and_interruption_recovery(self):
@@ -413,13 +529,20 @@ class TestOwnedStorageRecovery(unittest.TestCase):
                 )
                 self.repo.save_cleanup_intent(intent)
 
-                # Run reconcile_startup
+                # This historical quarantine predates captured inode evidence.
+                # Recovery must retain it rather than infer deletion authority
+                # from the object row or the familiar path shape.
                 res = self.service.reconcile_startup()
-                self.assertFalse((self.storage_root / "quarantine" / clean_id).exists())
-                self.assertGreaterEqual(res.get("reconciled_quarantine_count", 0), 1)
+                self.assertTrue((self.storage_root / "quarantine" / clean_id).exists())
+                self.assertEqual(res.get("reconciled_quarantine_count", 0), 0)
+                self.assertIn(
+                    {"cleanup_id": clean_id, "reason_code": "historical_identity_missing"},
+                    res.get("cleanup_diagnostics", []),
+                )
 
                 updated_intent = self.repo.get_cleanup_intent(clean_id)
-                self.assertEqual(updated_intent.phase, CleanupPhase.TERMINAL)
+                self.assertEqual(updated_intent.phase, CleanupPhase.QUARANTINED)
+                self.assertEqual(updated_intent.reason_code, "historical_identity_missing")
 
 
 if __name__ == "__main__":

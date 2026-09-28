@@ -181,8 +181,22 @@ sys.stdout.write(json.dumps({"ok": True, "result": result}, separators=(",", ":"
 '''
 
 
+PUBLIC_ACTIVATION_DETAILS = frozenset({
+    "configuration_binding_unavailable", "compose_secret_unavailable",
+    "compose_secret_environment_conflict", "compose_environment_unavailable",
+    "compose_environment_unsafe", "compose_environment_changed",
+    "compose_daemon_mismatch", "compose_profile_invalid", "compose_profile_unavailable",
+    "compose_source_mismatch", "compose_source_refused", "compose_source_oversized",
+    "compose_source_malformed", "compose_config_failed", "compose_secret_changed",
+    "private_render_unavailable", "private_render_identity_mismatch",
+    "private_render_schema_mismatch",
+})
+
+
 class RemoteActivationError(RuntimeError):
-    pass
+    def __init__(self, code: str, *, detail_code: str | None = None):
+        super().__init__(code)
+        self.detail_code = detail_code if detail_code in PUBLIC_ACTIVATION_DETAILS else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,10 +329,15 @@ class RegisteredRemoteActivationTransport:
             result = self._invoke(tuple(argv), timeout_seconds=60,
                                   environment=render_environment,
                                   private_environment_source=source)
+            if result["returncode"] != 0 or result["terminated"] is not True:
+                fixed = result["stderr"].strip()
+                raise RemoteActivationError("topology_mismatch", detail_code=(
+                    fixed if fixed in PUBLIC_ACTIVATION_DETAILS else "private_render_unavailable"))
             try:
                 rendered = json.loads(result["stdout"])
             except (TypeError, json.JSONDecodeError):
-                raise RemoteActivationError("topology_mismatch") from None
+                raise RemoteActivationError("topology_mismatch",
+                    detail_code="private_render_schema_mismatch") from None
             return result, rendered
 
         result, rendered = render()
@@ -334,10 +353,11 @@ class RegisteredRemoteActivationTransport:
             raise RemoteActivationError("topology_mismatch")
         if set(services) != expected_services or \
                 render_digest != private_compose_snapshot["configuration_digest"]:
-            if snapshot.input_contract == "candidate-v1":
+            if snapshot.input_contract in ("candidate-v1", "candidate-v2"):
                 # Candidate preparation froze the complete profile selection.
                 # A changed digest cannot be repaired by discovering new input.
-                raise RemoteActivationError("topology_mismatch")
+                raise RemoteActivationError("topology_mismatch",
+                    detail_code="private_render_identity_mismatch")
             profile_argv = ["docker", "compose"]
             for path in compose_files:
                 profile_argv.extend(("--file", path))
@@ -388,8 +408,8 @@ class RegisteredRemoteActivationTransport:
                        for value in hashes.values())
                 or markers[0] is not False or markers[2] is not False
                 or (markers[1] is not False and not (markers[1] is True
-                    and snapshot.input_contract == "candidate-v1" and private_secrets is True))
-                or (private_secrets is not None and (snapshot.input_contract != "candidate-v1"
+                    and snapshot.input_contract in ("candidate-v1", "candidate-v2") and private_secrets is True))
+                or (private_secrets is not None and (snapshot.input_contract not in ("candidate-v1", "candidate-v2")
                     or type(private_secrets) is not bool))
                 or set(rendered) != {"services"}
                 or set(services) != expected_services
@@ -455,7 +475,7 @@ class RegisteredRemoteActivationTransport:
         source = {"kind": "compose_prepare_v2", "snapshot_id": snapshot_id,
                   "provider_revision": provider_revision, "target": target}
         if input_contract is not None:
-            if input_contract != "candidate-v1":
+            if input_contract not in ("candidate-v1", "candidate-v2"):
                 raise RemoteActivationError("topology_mismatch")
             source["input_contract"] = input_contract
         expected_services = set(selected_services if allowed_services is None
@@ -546,7 +566,7 @@ class RegisteredRemoteActivationTransport:
                     or row.get("pull_policy") not in {None, "never"} \
                     or row.get("platform") not in {None, "linux/amd64"}:
                 raise RemoteActivationError("topology_mismatch")
-        if input_contract == "candidate-v1":
+        if input_contract in ("candidate-v1", "candidate-v2"):
             self._prepared_execution_v2 = {"services": complete_services, "target": dict(target),
                 "snapshot_id": snapshot_id, "configuration_digest": digest}
         return digest
@@ -952,7 +972,7 @@ class RegisteredRemoteActivationTransport:
         selector = self._compose_selector_v2
         if (type(request) is not ActivationRequestV2 or not selector
                 or request.compose_snapshot.as_mapping() != selector.get("snapshot")
-                or request.compose_snapshot.input_contract != "candidate-v1"
+                or request.compose_snapshot.input_contract not in ("candidate-v1", "candidate-v2")
                 or request.compose_snapshot.init_contract is None
                 or request.compose_snapshot.init_contract.graph is None
                 or request.operation != "activate"):

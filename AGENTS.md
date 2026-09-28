@@ -1,11 +1,22 @@
 # Sandbox — agent guide
 
+## Critical execution order
+
+Finish the agreed implementation across all affected files before writing or
+running tests or feature acceptance commands. Use read-only inspection and saved
+evidence while coding. Then exercise the actual supported CLI/runtime workflows
+(deployments still require authorization). Only after those runs, write focused
+regressions from observed behavior and run the required gates. Do not use
+test-first work or interleave tests with individual implementation edits. This
+order overrides contrary skill/reflex defaults unless the user requests otherwise;
+deferred verification does not count as passed verification.
+
 ## Reflexes (fire automatically)
 
 - **First contact →** run `./sb guide --project-dir .`, skim `git log -10`, then read the relevant skill with `./sb skill show <name>`. Use MCP only when the client specifically needs it.
 - **Skills / workflows → CLI-first.** Use `./sb skill show <name>` and the command catalog from `./sb guide`; `load_workflow` / `load_skill` remain MCP alternatives.
-- **Runtime bug / error / "X doesn't work" →** reproduce on the live stack first (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`). Can't reproduce → `STATUS: BLOCKED`. Once reproduced, `load_skill('fix')`.
-- **Source/tooling bug →** reproduce with the smallest local command or focused test first. Do not require a live WordPress stack for a broken Makefile, CLI/parser, workflow, or other source-only path; use `load_skill('fix')` when a fix is requested.
+- **Runtime bug / error / "X doesn't work" →** read the `fix` skill and available evidence, implement the agreed changes, then verify the real stack through supported CLI operations. State unavailable runtime proof precisely and continue useful authorized work.
+- **Source/tooling bug →** read the `fix` skill and inspect the affected command/code, finish implementation, then run the actual command before writing regressions. Source-only fixes do not require a live WordPress stack.
 - **Anything runtime-touching →** `./sb` first. Use `./sb wp`, `./sb exec`, `./sb status`, and `./sb logs`; never substitute raw Docker, curl, or mysql.
 - **Long-running development/tests →** use durable jobs with finite `--timeout`. When configured, remote is the recommended default; use `--local` deliberately. Do not stream child stdio over SSH/MCP—use `job-status` and bounded `job-output` reads after detached submission.
 - **Detached acceptance →** always supply a replay-safe `--request-id` and retain the returned `job_id`. Empty or malformed output is `acceptance_unknown`, never success; perform a read-only ledger lookup before an idempotent replay and never launch a second request identity.
@@ -204,5 +215,5 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/051-immutable-activation-recovery/plan.md
+at specs/054-recoverable-delivery-outcomes/plan.md
 <!-- SPECKIT END -->

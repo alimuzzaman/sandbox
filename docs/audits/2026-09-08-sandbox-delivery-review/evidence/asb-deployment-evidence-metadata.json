@@ -1,0 +1,283 @@
+{
+  "scope": "Sanitized file-backed metadata only; no cookies, login tokens, config/env values, raw browser payloads, or auth-bearing URLs.",
+  "files": {
+    "blocks-production-apply.stderr": {
+      "path": "/tmp/asb-editor-validation/blocks-production-apply.stderr",
+      "bytes": 65,
+      "mtime_utc": "2026-09-08T16:43:40.483092Z",
+      "sha256": "sha256:6bde1a0bbaf49c2417f10b487c23ab8df2df1895e360c9f85c462bc17a36c5b1",
+      "evidence": {"refusal_marker": "initializer wp-init has foreign evidence; refusing replay", "exit_code_in_file": null}
+    },
+    "blocks-production-diagnose.json": {
+      "path": "/tmp/asb-editor-validation/blocks-production-diagnose.json",
+      "bytes": 3022,
+      "mtime_utc": "2026-09-08T16:44:15.290621Z",
+      "sha256": "sha256:43b748237833801a9fcfe36289fdf4fb4a671cb539cbb6e88afbc39c2cef1d36",
+      "evidence": {
+        "ok": true,
+        "requested_revision": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+        "staged_revision": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+        "recorded_revision": "4802dad20ab3852a7fe4e857186bf556b79dfa6a",
+        "deployed_revision": "4802dad20ab3852a7fe4e857186bf556b79dfa6a",
+        "observed_runtime_revision": null,
+        "generation": 9,
+        "source_revision_state": "degraded",
+        "source_revision_checks": {"count": 5, "mismatch_count": 5, "provider": "pushed_commit_sha", "key": "ASB_SOURCE_REVISION"},
+        "health_state": "ready",
+        "runtime_state": "pending",
+        "edge_state": "pending",
+        "service_counts": {"total": 5, "running": 5, "healthy": 5},
+        "topology_counts": {"declared": 5, "compose": 5, "running": 5, "missing_from_compose": 0, "missing_from_runtime": 0},
+        "image_state": "unknown",
+        "image_count": 0,
+        "phase_counts": {"total": 8, "complete": 8, "truncated": 0, "bytes_total": 36538},
+        "edge_cache_purge": null,
+        "latest_recovery": null
+      }
+    },
+    "production-blocks-browser.log": {
+      "path": "/tmp/asb-editor-validation/production-blocks-browser.log",
+      "bytes": 309,
+      "mtime_utc": "2026-09-08T16:44:26.985761Z",
+      "sha256": "sha256:095d645ea5daad634b84432de8fed44e9217a6469a3cc64b6bfae697e5bd850b",
+      "evidence": {
+        "supported_block_count": 6,
+        "bundle_matches_release": true,
+        "editor_status": 200,
+        "canvas_loaded": true,
+        "bootstrap": true,
+        "publication_available": true,
+        "review_available": true,
+        "page_errors": 0,
+        "terminal_marker": "PRODUCTION_EDITOR_AND_PUBLIC_INDEX_PASS",
+        "bundle_digest_present": false
+      }
+    }
+  },
+  "initializer_proof": {
+    "source_files": {
+      "all-initializer-proof.json": {
+        "path": "/tmp/asb-editor-validation/all-initializer-proof.json",
+        "bytes": 2469,
+        "mtime_utc": "2026-09-08T17:24:28.559855Z",
+        "sha256": "sha256:eee115218d6014b5cb4c8c9dbd5fad6f157df741c9c210b50d8f5ba01c34f1e0"
+      },
+      "all-initializer-resolved-hashes.json": {
+        "path": "/tmp/asb-editor-validation/all-initializer-resolved-hashes.json",
+        "bytes": 618,
+        "mtime_utc": "2026-09-08T17:25:45.106416Z",
+        "sha256": "sha256:c5e83e0acc920e3602f41c28531b6990e4d5cce07235f66605aff7420017f7e6"
+      }
+    },
+    "outer_records": {
+      "all-initializer-proof.json": {
+        "name": "scaleway-sandbox",
+        "ok": true,
+        "exit_code": 0,
+        "stderr_empty": true
+      },
+      "all-initializer-resolved-hashes.json": {
+        "name": "scaleway-sandbox",
+        "ok": true,
+        "exit_code": 0,
+        "stderr_empty": true
+      }
+    },
+    "counts": {
+      "initializers": 6,
+      "proof_hashes": 6,
+      "resolved_hashes": 6,
+      "status_records": 6,
+      "safe_records": 6,
+      "zero_exit_records": 6,
+      "proof_hash_label_matches": 5,
+      "resolved_hash_label_matches": 6
+    },
+    "checks": {
+      "initializer_names_equal": true,
+      "proof_hashes_equal_resolved_hashes": false,
+      "resolved_hashes_equal_status_labels": true,
+      "project_values_match_expected": true,
+      "service_values_match_initializer_names": true,
+      "timestamps_valid_utc": true,
+      "timestamps_strictly_increasing": true,
+      "status_exit_codes_zero": true
+    },
+    "project": "sandbox-host-amarsonar-bangla-production",
+    "rows": [
+      {
+        "initializer": "wp-permissions",
+        "proof_hash": "6f92561d5b075550970a41724b09d58ca8b8b7b6cf4684d48cc40b9700197d06",
+        "resolved_hash": "6f92561d5b075550970a41724b09d58ca8b8b7b6cf4684d48cc40b9700197d06",
+        "status_label_hash": "6f92561d5b075550970a41724b09d58ca8b8b7b6cf4684d48cc40b9700197d06",
+        "proof_label_match": true,
+        "resolved_label_match": true,
+        "timestamp_utc": "2026-09-08T16:41:57.822832485Z",
+        "image_digest": "sha256:eea0813c7c9ddb73375e1ff57096038244688cfabd796240982ee3aec6cf5c7d",
+        "service": "wp-permissions",
+        "status": "exited",
+        "exit_code": 0
+      },
+      {
+        "initializer": "wp-init",
+        "proof_hash": "98daab4f14f4a39c23b056f730d43328cd5aba155408ad6f72c59c5ef3b3a242",
+        "resolved_hash": "98daab4f14f4a39c23b056f730d43328cd5aba155408ad6f72c59c5ef3b3a242",
+        "status_label_hash": "98daab4f14f4a39c23b056f730d43328cd5aba155408ad6f72c59c5ef3b3a242",
+        "proof_label_match": true,
+        "resolved_label_match": true,
+        "timestamp_utc": "2026-09-08T16:41:58.157258494Z",
+        "image_digest": "sha256:eea0813c7c9ddb73375e1ff57096038244688cfabd796240982ee3aec6cf5c7d",
+        "service": "wp-init",
+        "status": "exited",
+        "exit_code": 0
+      },
+      {
+        "initializer": "db-backup-before-host-migration",
+        "proof_hash": "3e7e957dc8348465d92fe7210835f1076d4b9e1b2a1d83f614239b6e4a907dec",
+        "resolved_hash": "3e7e957dc8348465d92fe7210835f1076d4b9e1b2a1d83f614239b6e4a907dec",
+        "status_label_hash": "3e7e957dc8348465d92fe7210835f1076d4b9e1b2a1d83f614239b6e4a907dec",
+        "proof_label_match": true,
+        "resolved_label_match": true,
+        "timestamp_utc": "2026-09-08T16:41:58.429447659Z",
+        "image_digest": "sha256:67873d30a17f6a9c331f06363b2fa15f38abca415529966d67c84f87f82439fe",
+        "service": "db-backup-before-host-migration",
+        "status": "exited",
+        "exit_code": 0
+      },
+      {
+        "initializer": "catalog-host-migration",
+        "proof_hash": "646831d1bb1db7293a94d50b13c04f87d1f014a4a3a0bb33d99706d979743017",
+        "resolved_hash": "646831d1bb1db7293a94d50b13c04f87d1f014a4a3a0bb33d99706d979743017",
+        "status_label_hash": "646831d1bb1db7293a94d50b13c04f87d1f014a4a3a0bb33d99706d979743017",
+        "proof_label_match": true,
+        "resolved_label_match": true,
+        "timestamp_utc": "2026-09-08T16:41:58.780257750Z",
+        "image_digest": "sha256:eea0813c7c9ddb73375e1ff57096038244688cfabd796240982ee3aec6cf5c7d",
+        "service": "catalog-host-migration",
+        "status": "exited",
+        "exit_code": 0
+      },
+      {
+        "initializer": "db-backup-before-frontend-editor",
+        "proof_hash": "2b53dae8056035954c3c1eaa81c32675b794dccdad353cc009435840eb0c1909",
+        "resolved_hash": "2b53dae8056035954c3c1eaa81c32675b794dccdad353cc009435840eb0c1909",
+        "status_label_hash": "2b53dae8056035954c3c1eaa81c32675b794dccdad353cc009435840eb0c1909",
+        "proof_label_match": true,
+        "resolved_label_match": true,
+        "timestamp_utc": "2026-09-08T16:41:59.100351175Z",
+        "image_digest": "sha256:67873d30a17f6a9c331f06363b2fa15f38abca415529966d67c84f87f82439fe",
+        "service": "db-backup-before-frontend-editor",
+        "status": "exited",
+        "exit_code": 0
+      },
+      {
+        "initializer": "frontend-editor-migration",
+        "proof_hash": "028265d67a1a69ca1285e3b20173b58db41a2d482fe568bb3d2930255eb272d2",
+        "resolved_hash": "7447eff722f654cde87663f46b0ec2afaa6623fdaf4c7d5a06865a0e4a9ddc09",
+        "status_label_hash": "7447eff722f654cde87663f46b0ec2afaa6623fdaf4c7d5a06865a0e4a9ddc09",
+        "proof_label_match": false,
+        "resolved_label_match": true,
+        "timestamp_utc": "2026-09-08T16:41:59.502809813Z",
+        "image_digest": "sha256:eea0813c7c9ddb73375e1ff57096038244688cfabd796240982ee3aec6cf5c7d",
+        "service": "frontend-editor-migration",
+        "status": "exited",
+        "exit_code": 0
+      }
+    ]
+  },
+  "final_evidence": {
+    "source_files": {
+      "blocks-production-final-apply.json": {
+        "path": "/tmp/asb-editor-validation/blocks-production-final-apply.json",
+        "bytes": 393,
+        "mtime_utc": "2026-09-08T17:28:37.108068Z",
+        "sha256": "sha256:c5940398e84caee2bc82454b53a560354f08db5127c15563465d8e0107ffbcc8"
+      },
+      "blocks-production-final-status.json": {
+        "path": "/tmp/asb-editor-validation/blocks-production-final-status.json",
+        "bytes": 5035,
+        "mtime_utc": "2026-09-08T17:29:08.279287Z",
+        "sha256": "sha256:0897cafbaad992cdc24b4d168515a9e5a6bf9b167e220a57a8995dde45e86c0d"
+      },
+      "blocks-production-final-log.json": {
+        "path": "/tmp/asb-editor-validation/blocks-production-final-log.json",
+        "bytes": 12600,
+        "mtime_utc": "2026-09-08T17:29:13.688571Z",
+        "sha256": "sha256:68b38019a3b81e6a587e031143b27675cd33b214cb03f60cc377a46279fa8fd9"
+      },
+      "production-blocks-final-browser.log": {
+        "path": "/tmp/asb-editor-validation/production-blocks-final-browser.log",
+        "bytes": 309,
+        "mtime_utc": "2026-09-08T17:29:38.201441Z",
+        "sha256": "sha256:095d645ea5daad634b84432de8fed44e9217a6469a3cc64b6bfae697e5bd850b"
+      }
+    },
+    "apply": {
+      "ok": true,
+      "project": "amarsonar-bangla",
+      "environment": "production",
+      "remote": "scaleway-sandbox",
+      "remote_selection": "explicit",
+      "commit": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+      "source_revision_provider": "pushed_commit_sha",
+      "source_revision_resolved_at_apply": true
+    },
+    "status": {
+      "ok": true,
+      "state_record": "present",
+      "project": "amarsonar-bangla",
+      "environment": "production",
+      "remote": "scaleway-sandbox",
+      "generation": 10,
+      "requested_revision": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+      "staged_revision": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+      "recorded_revision": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+      "deployed_revision": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+      "observed_runtime_revision": "30b2ec2a9a3be65ed2fea95a217934842de3c3c1",
+      "runtime_state": "ready",
+      "health_state": "ready",
+      "edge_state": "ready",
+      "edge_cache_purge": null,
+      "latest_recovery": null,
+      "service_counts": {"total": 5, "running": 5, "healthy": 5},
+      "topology_counts": {"declared": 5, "compose": 5, "running": 5, "missing_from_compose": 0, "missing_from_runtime": 0},
+      "source_revision": {"state": "ready", "check_count": 5, "match_count": 5, "mismatch_count": 0, "key": "ASB_SOURCE_REVISION", "provider": "pushed_commit_sha"},
+      "phase_counts": {"total": 8, "complete": 8, "truncated": 0, "bytes_total": 40502},
+      "phase_names": ["epoch_start", "compose_config", "source_git", "compose_runtime", "compose_images", "config_digests", "source_revisions", "epoch_end"]
+    },
+    "final_log": {
+      "ok": true,
+      "exact_bundle_digest_present": false,
+      "initializer_proof_records_present": false
+    },
+    "browser": {
+      "supported_block_count": 6,
+      "bundle_matches_release": true,
+      "editor_status": 200,
+      "canvas_loaded": true,
+      "bootstrap": true,
+      "publication_available": true,
+      "review_available": true,
+      "page_errors": 0,
+      "terminal_marker": "PRODUCTION_EDITOR_AND_PUBLIC_INDEX_PASS",
+      "exact_bundle_digest_present": false
+    }
+  },
+  "owner_task_assertions": {
+    "format_fix_commit": "0942d14a2b79504f8bfd58f383ca29fd6d0c581d",
+    "requested_cherry_pick": "5bc35a2",
+    "cherry_pick_target": "fd7d650f8bfbb1760d931e2484cc01fa0badf546",
+    "reported_runtime_revision": "e0949074e80c469bcff36c12",
+    "reported_final_bundle_digest": "sha256:c04ce533b320f482591b85bbbb98444ae6a827f34c19eaa9f283fba53c0ff1ed",
+    "reported_installed_sandbox_runtime_revision": "bebe6ee03db17fb10c4c1b73",
+    "reported_foreign_wp_init_refusal": true,
+    "reported_compose_config_hash_reproduction": true,
+    "file_backed": false
+  },
+  "limits": [
+    "No supplied file contains a structured apply exit code.",
+    "No supplied file contains an exact bundle digest.",
+    "The browser marker is not a deployment receipt.",
+    "The files do not prove activation, observed runtime revision, edge change, or production deployment."
+  ]
+}

@@ -11,6 +11,7 @@ from .models import (
     MAX_PHASES, MAX_RECEIPT_BYTES, MAX_SERVICES, ActivationRecoveryObservation,
     ActivationTransitionProjection, RecoveryRequest, RecoveryAction, canonical_digest,
     validate_edge_intent, validate_observation, _ACTIVATION_TARGET_ID,
+    deployed_source_revision,
 )
 
 
@@ -183,6 +184,11 @@ def validate_job_binding(request: RecoveryRequest, job: object,
     source = operation.get("source")
     if not isinstance(source, dict) or source.get("clean") is not True:
         return "dirty_source"
+    try:
+        if exact_evidence.get('source_revision') != deployed_source_revision(source):
+            return 'binding_mismatch'
+    except (TypeError, ValueError):
+        return 'binding_mismatch'
     submitted_source = submission.get("source")
     if (not isinstance(submitted_source, dict) or
             submitted_source.get("identity") != source.get("identity") or
@@ -203,8 +209,11 @@ def validate_job_binding(request: RecoveryRequest, job: object,
         project_argument = (Path(str(submission.get("project_root") or "")) /
                             str(submission.get("cwd_relative") or ".") /
                             project_argument)
+    invocation_digest = operation.get('invocation_root_digest', operation.get('project_root_digest'))
+    if not isinstance(invocation_digest, str) or re.fullmatch(r'sha256:[0-9a-f]{64}', invocation_digest) is None:
+        return 'binding_mismatch'
     if ("sha256:" + hashlib.sha256(str(project_argument.resolve()).encode()).hexdigest()
-            != operation.get("project_root_digest")):
+            != invocation_digest):
         return "binding_mismatch"
     digest = operation.get("digest")
     unsigned = {key: value for key, value in operation.items() if key != "digest"}

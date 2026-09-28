@@ -422,19 +422,77 @@ uniquely new default instance. An unavailable or ambiguous inventory fails close
 leaves the remote unchanged or reports cleanup as unverified; Sandbox never guesses which
 pre-existing instance to delete.
 
+### Recoverable delivery and exposure outcomes
+
+Feature 054 adds a durable admission boundary to ordinary hosted apply. Use
+the application checkout as the durable job's `--project-dir`, bind its full
+application `HEAD`, and invoke the full absolute Sandbox executable as the
+child:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+The existing recovery receipt must be committed and read back before source,
+initializer, runtime, route, or generation effects. `host plan` only reports
+`recovery_eligibility`; `requires_submission` is not admission. A direct
+`host apply` with a request flag but no durable receipt, and older direct
+callers, are unsupported and fenced with `recovery_context_required` before
+effects. A valid authenticated target identity can remain usable with partial
+optional telemetry; required resource policy is checked separately.
+
+Inspect the original job with `job-status` and `job-output`, then query the
+joined result with `./sb delivery inspect`. Its default is recorded-only;
+`--observe` adds bounded current read-only evidence. It reports
+`latest_attempt`, `latest_retained_complete_success`, and current observation
+as separate values. A configured route, healthy container, accepted job, or
+receipt-only result does not establish public or production success. The
+application revision, Sandbox control revision, and installed controller
+revision remain separate evidence. Ordinary hosted evidence stays partial when
+the owner has no independently observed aggregate configuration digest, and
+legacy authority never fabricates historical success. See [recoverable delivery outcomes](delivery-outcomes.md)
+for selectors, retention, route proof, creation/incarnation, URL result, and
+permanent guard limits. Feature 054 validation is pending; no source names or
+local checks are a substitute for installed-controller or public acceptance.
+
+Covered deploy/preview ensure calls also require the owner-created
+`instance_creation_receipt_v1` relation bound to the exact project, label,
+request, intent digest, instance, and incarnation before dependent URL or
+exposure effects. A reused instance remains reused, and a lost response or
+failed startup remains unknown/pending. A retained URL result is returned on
+the same request without repeating `home`/`siteurl` writes; an incarnation
+change stops further writes.
+
+The early full-command trace is a separate diagnostic capability. Query it
+from the original application/control project with the same absolute Sandbox
+executable, controller, `SANDBOX_HOME`, and `--project-dir`; use
+`--trace-id`, `--trace-request-id`, or the trace-plus-`--mutation-id` selector
+described in [recoverable delivery outcomes](delivery-outcomes.md). Trace
+queries are recorded-only by default and never create a job, replay a
+deployment, or refresh history. Producer stage reports remain claims until
+native job, activation, runtime, and route owners independently match their
+exact identities. Capability/source and installed-controller verification is
+still pending.
+
 Host apply keeps bounded diagnostics at the SSH boundary. If a remote command times
 out, the CLI reports the timeout and a redacted tail of any partial output instead of
 discarding the captured stream; the remote command is not replayed automatically
 because its final state is unknown. During the 60-second loopback health window,
 Sandbox also emits a progress line every ten seconds with the last safe probe result.
-Use the host logs command for the declared service logs after a deployment:
+Use the host logs command for the declared runtime, background, and initializer
+services after a deployment:
 
 ```bash
 ./sb host logs --remote myvps --project-dir /path/to/site --environment production
 ```
 
-These diagnostics are bounded and are not a substitute for live-host acceptance or
-an unbounded log-follow mode.
+The command reads at most the requested tail for each service and redacts
+credential-shaped values. Failed one-shot initializer output appears when Compose
+retains that initializer's container. These diagnostics are not a substitute for
+live-host acceptance or an unbounded log-follow mode.
 
 #### Extra hostnames (`--alias`)
 
@@ -568,10 +626,12 @@ observed and reconciled or refused; a dirty one is refused unless a real source 
 requires full convergence. Missing observation alone never reruns Compose initializers.
 Source receipts persist `source_state_identity_version: 2`. At the same revision/config,
 legacy missing/unknown identity evidence and an unchanged known v2 dirty artifact refuse
-before target reset regardless of runtime/edge phase. A different known v2 dirty artifact
-is a real source change and takes full convergence. Only the historical unversioned v1
-empty-overlay digest is migrated as proven clean; changing a manifest from dirty-allowed
-to clean does not rewrite other prior evidence.
+before target reset regardless of runtime/edge phase. The refusal names the finite cause
+(`historical_source_proof_unavailable` or `unchanged_dirty_source`) while retaining the
+same public failure envelope. A different known v2 dirty artifact is a real source
+change and takes full convergence. Only the historical unversioned v1 empty-overlay
+digest is migrated as proven clean; changing a manifest from dirty-allowed to clean does
+not rewrite other prior evidence.
 Hosting bounds its source artifact to 4,096 files and 64 MiB. This is intentionally
 narrower than public `sb deploy --include`, whose existing 10,000-file/512 MiB admission
 contract is validated before any remote admission or mutation.
@@ -673,7 +733,10 @@ the remote command runs. Compose output is streamed without changing the machine
 JSON contract and is appended to a mode-0600 remote log at the path returned as
 `apply_log` in apply evidence. Read its bounded tail later with
 `./sb host logs --remote NAME --apply-log --lines 1000`; timeout errors retain the
-latest output tail rather than reducing a failed build to a bare timeout message.
+latest output tail rather than reducing a failed build to a bare timeout message. New
+entries label each logged phase and record UTC start/finish times plus the remote exit
+code. Older unlabelled entries are not upgraded into historical phase evidence. If the
+protected log is absent or unreadable, the command reports that condition directly.
 
 For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
@@ -696,6 +759,16 @@ topology drift and makes readiness `degraded`. Init jobs and undeclared dependen
 services are excluded from this long-lived topology comparison. Missing remote evidence
 is reported as
 `unavailable` or `degraded`; the command never mutates the host or prints secrets.
+
+To inspect one declared one-shot initializer without running it, add
+`--initializer SERVICE` to `host diagnose`. The bounded result reports the current
+initializer status and, for foreign evidence, a finite reason such as
+`config_hash_label_mismatch`, `container_image_identity_mismatch`, or
+`container_precedes_apply`. It returns no raw labels, image IDs, or environment values
+and does not wait for a running container to finish. This read-only observation does not
+reconcile old outcomes or authorize replay;
+failed, stale, or foreign evidence continues to block another initializer run. Selecting
+an initializer adds one separate bounded SSH observation to `host diagnose`.
 
 An environment may also protect its public origin with Basic Auth:
 
@@ -754,7 +827,10 @@ fail rather than silently omit a declared gate.
 client bypasses Basic Auth only when the request arrives through a Cloudflare proxy
 and its `CF-Connecting-IP` header exactly matches a declared address. Direct requests
 cannot spoof this bypass because Caddy also verifies the proxy source address against
-Cloudflare's published ranges.
+Cloudflare's published ranges. On served routes, Caddy removes `CF-Connecting-IP`
+from requests whose immediate peer is outside those ranges before forwarding to the
+application. Applications may use that header for client identity only on a
+Cloudflare-origin request; direct-origin requests reach them without it.
 
 `bypass_paths` is optional and allows unauthenticated `GET` requests to exact,
 non-root paths. It is intended for public discovery or health endpoints while the
@@ -928,12 +1004,24 @@ reference. Summary:
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name> [--deploy-timeout <seconds>]` | One-way, on-demand push of local state to the VPS with a bounded Git push budget |
 | `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
+| `./sb delivery inspect --project-dir <dir> --remote <name> (--environment <env> \| --label <label>) [--operation-id <id> \| --request-id <id>] [--observe] [--limit 1..50] [--cursor <token>] [--json]` | Read the executing controller's bounded delivery history; default is recorded-only, while `--observe` adds current read-only evidence |
 | `./sb wp --remote <name> --project-dir <dir> --timeout <seconds> -- <wp args...>` | Run bounded WP-CLI against that project's existing deployed WordPress instance through authenticated control HTTP; request/unit/live runtime digests and stable non-symlink deploy identity must match; host-file staging command families are refused; timeout or output overflow is nonzero unknown; no workspace creation, generic exec, SSH fallback, or automatic retry |
 
 MCP tool:
 `remote_deploy(project_dir: str, remote: str, ensure: bool = True, expose: bool = True, domain: str | None = None, plugin_slug: str | None = None) -> dict`.
 It mirrors `run_tests`/`run_plugin_check`'s calling convention and returns `instance`
 plus `url` when exposure succeeds.
+
+The current `remote_deploy` wrapper has the existing parameters shown above. The
+Feature 054 contract calls for equivalent optional request identity and
+verification-timeout fields in that wrapper; source integration for those MCP
+fields is still pending. Do not treat a documentation example as proof that an
+installed remote controller accepts them.
+
+The Feature 054 MCP diagnostic is `delivery_inspect(project_dir, remote,
+environment=None, label=None, operation_id=None, request_id=None,
+observe=False, limit=10, cursor=None)`. It shares the CLI serializer and
+returns `ok=true` when the query was serviced, not when delivery succeeded.
 
 `remote service status` checks the selected unit's non-secret ownership marker and
 runtime revision, expected bind/port, systemd activity/enablement, user linger, local
@@ -943,6 +1031,10 @@ selected unit declares a valid non-secret digest, and `runtime_revision_state`
 (`match`, `mismatch`, `unavailable`, or `unknown`). A configured service record is
 not treated as proof of the installed revision. It treats unavailable evidence as
 degraded; it never reads a credential into command arguments or output.
+The systemd and login-session calls are individually time-bounded. Status also reports
+`probe_state` (`complete`, `partial`, or `unavailable`) and a stable `probe_error`
+when the bounded SSH observation cannot finish. Confirmed service lifecycle changes
+refuse incomplete evidence before source upload or service mutation.
 
 When an older PID-file-managed MCP process is detected, confirmed migration proves that
 exact process's PID, working directory, bind, and port before handing it off. If the
@@ -1268,7 +1360,7 @@ stage codes. `broker_unavailable` therefore means lease preparation or source
 resolution failed; it is not used to hide a failure returned by the remote
 staging helper.
 For a v2 `pull_failed` result, `host stage` and `--stage-status` include only
-`pull_failure: {"image":"queue|web|worker","class":"denied|not_found|network|timeout|no_space|daemon"}`.
+`pull_failure: {"image":"database|queue|web|worker","class":"denied|not_found|network|timeout|no_space|daemon"}`.
 The helper uses bounded Docker output only to choose that class; raw stdout,
 stderr, registry detail, and credentials are never placed in the result or ledger.
 The wrapper does not open `/`: `ProtectControlGroups=yes` can deny that operation in the
@@ -1305,6 +1397,14 @@ envelope inside the 16-MiB ledger before effects, so a terminal commit cannot di
 capacity only after pulling.
 An exact replay of that owner returns `in_progress/accepted`, not `target_busy`. Read-only
 `--stage-status` reports the same authority without opening a credential source or helper.
+For a confirmed v2 stage retry, the CLI also recognizes an already successful request
+when policy provisioning has returned the ledger's advanced generation. It reconstructs
+the original accepted generation from the retained proof and requires exact plan, policy,
+target, request ID, and digest equality before returning that original result. It opens
+no broker or worker on this path. Changed authority, uncertain work, and expired proofs
+cannot use this generation correction. Do not generate a new request ID to evade a
+retained conflict. Both normal submission and close-only reconciliation hold the shared
+target mutation owner; refusal envelopes report the current ledger generation when known.
 Private reconciliation may resume only a proven pre-effect owner after exact unit, cgroup,
 workspace, and no-effect evidence. Effect-entered reconciliation is close-only: it can
 release the fence only after read-only proof that the exact unit is inactive or absent,
@@ -1504,3 +1604,83 @@ anything else stays unpromoted. Rollback also compares the retained prior Compos
 first runtime effect.
 
 Image staging samples the authenticated machine projection at both observation boundaries. A projection change fails closed even when the private raw machine epoch and Docker daemon remain stable; raw machine identity is never emitted.
+
+### Retained activation diagnostics
+
+`host image status --project-dir DIR --environment ENV --remote NAME --json`
+reads the local retained activation repository for the exact registered target.
+It reports generation and the active request/transaction digest, phase and effect
+flag under the shared owner. It needs no confirmation, plan, credential access
+or remote runtime call. `state_unavailable` is not an empty state. The outer state
+schema and active transaction schema are separate fields. This diagnostic does
+not establish runtime health, release custody, or authorize a deployment retry.
+Activation failures preserve fixed public result codes and may include an optional
+`detail_code` from a closed diagnostic list. Private dependency error text is
+never returned as a diagnostic.
+
+### Opt-in stopped-container file secrets
+
+`host image provision --provision-phase activation-bundle
+--candidate-input-contract candidate-v2` selects the new private input contract.
+The default remains `candidate-v1`; retained v1 candidates and recovery are unchanged.
+Candidate-v2 requires the explicit execution graph. It cannot use legacy replacement.
+
+The candidate still keeps captured source files owner-only. Its private Compose
+render uses generated environment source references, while Sandbox prepares the
+exact file bytes and declared UID/GID/mode in stopped containers through the
+bounded Docker archive channel. It verifies those files before start and during
+readiness. Files default to root/root and mode 0444, matching Compose. No source
+secret becomes a container environment variable. Read-only root filesystems,
+mounted `/run` or `/run/secrets` paths, symlinks, and conflicting private files
+refuse; Sandbox never weakens those settings or writes through such mounts.
+
+Initializer copying occurs only after the exact created container identity has
+been saved. A partial copy or lost acknowledgement remains fenced by the graph;
+replay does not recopy or restart it. A new contract has a different preparation
+identity and configuration HMAC. Explicit v1-to-v2 provisioning may replace only
+expired old admission authority, with no active owner; the old document remains
+archived. Selecting v2 does not settle an uncertain activation or authorize data
+reset, rollback, or deployment. Release and production use require review of this
+security-control change plus Linux and installed-controller acceptance.
+
+### Deployment preparation and operator handoff
+
+`host image authority --project-dir ... --environment ... --remote ... --json`
+returns only configured authority identity, revision and public-key digest.
+`host image provision --provision-phase machine-policy --use-installed-authority`
+reuses that exact target-installed authority. It conflicts with explicit rollback
+key/authority/provider fields and never chooses or generates another key.
+Activation-bundle provisioning now returns snapshot and grant expiry timestamps.
+
+`host image forward-review` takes the exact plan, staged proof, request ID and
+expected generation. It returns `not_required`, a native `approval_required`
+subject, or an installed cryptographically verified matching approval. It never
+signs. The deployment frontend can pause between a successful durable preparation
+job and an independently reserved activation job without generic job retry.
+
+Incident `host image settle` adds `containment-plan` and `containment-apply`.
+The confirmed apply binds the exact transaction, generation and container
+identities, disables their restart policies and stops them. Its plan retains the
+original restart policy; volumes, images and containers are not deleted. It does
+not kill unrelated host processes or claim settlement quiescence. A partial apply
+requires retained-request inspection, not a second identity.
+Read-only containment refusals distinguish paused/restarting containers, invalid
+container state, and missing process ownership through fixed codes. They expose
+no process command lines, inspected environment, or private binding material.
+
+`sign-approval` and `sign-forward-approval` are separate protected settlement
+phases. Both require `--confirm` and the exact reviewed inputs. They use the
+already installed public authority and SSH agent, sign distinct fixed namespaces,
+verify the signature, then install it in the existing approval store. The forward
+phase also takes `--forward-review` and `--settlement-data-assessment`. Neither
+phase is invoked automatically by deployment. These consequential authority
+changes require human review before release.
+
+Database and artifact preservation use the bounded [hosted data recovery](hosted-data-recovery.md)
+operations. Public interface additions require source gates and a supported remote
+service migration; verify installed/local runtime revision equality before use.
+
+`host image status --request-id ID` returns the exact retained terminal result,
+active status, unknown status, or retained-without-result marker through the
+activation owner. It never re-enters activation. A frontend can recover a lost
+committed reply even after its original admission deadline expires.

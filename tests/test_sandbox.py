@@ -246,6 +246,25 @@ class TestSiteUrl(unittest.TestCase):
                 "http://localhost:8214",
             )
 
+    def test_exact_clean_url_probe_waits_through_caddy_retry_window(self):
+        with mock.patch.object(domains_core, "_caddyfile_has_route",
+                               return_value=True), \
+             mock.patch.object(domains_core, "_proxy_container_running",
+                               return_value=True), \
+             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
+                               return_value=True) as serving:
+            self.assertEqual(
+                core.site_url({
+                    "url": "https://demo.tst",
+                    "domain": "demo.tst",
+                    "tld": "tst",
+                    "wordpress_port": 8214,
+                }),
+                "https://demo.tst",
+            )
+
+        self.assertEqual(serving.call_args.kwargs["timeout"], 9)
+
 
 class TestCanonicalReachability(unittest.TestCase):
     """Apply/rollback health probes use the canonical URL and no redirects."""
@@ -373,6 +392,34 @@ class TestCaddyBlocks(unittest.TestCase):
         self.assertNotIn("redir https://{host}{uri} 308", rendered)
         self.assertNotIn("\ntls /certs/example.tst.pem", rendered)
 
+    def test_proxy_and_forward_auth_blocks_have_bounded_retries(self):
+        with tempfile.TemporaryDirectory() as td:
+            cert = Path(td) / "secure.tst.pem"
+            key = Path(td) / "secure.tst-key.pem"
+            cert.write_text("cert")
+            key.write_text("key")
+            activation_route = mock.Mock(token="route-token", route_id="route-id")
+            with mock.patch.object(domains_core, "_cert_paths",
+                                   return_value=(cert, key)):
+                rendered_routes = (
+                    core._caddy_block("plain.tst", 8123),
+                    core._caddy_block("secure.tst", 8123, secure=True),
+                    core._caddy_block("activation.tst", 8766,
+                                      activation_route=activation_route),
+                )
+
+        self.assertIn("reverse_proxy host.docker.internal:8123", rendered_routes[0])
+        self.assertIn("forward_auth host.docker.internal:8766", rendered_routes[2])
+        for rendered in rendered_routes:
+            self.assertIn("lb_retries 2", rendered)
+            self.assertIn("lb_try_duration 8s", rendered)
+            self.assertIn("lb_try_interval 250ms", rendered)
+            self.assertIn(
+                "transport http {\n            dial_timeout 3s\n"
+                "            max_conns_per_host 64\n        }",
+                rendered,
+            )
+
     def test_regen_uses_registry_url_instead_of_stale_certificate(self):
         with tempfile.TemporaryDirectory() as td:
             proxy_dir = Path(td) / "proxy"
@@ -456,6 +503,49 @@ class TestProxyTransportHealth(unittest.TestCase):
             self.assertFalse(domains_core._sandbox_proxy_route_serving(
                 "demo.tst", secure=True))
 
+    def test_proxy_probe_retries_transient_oserror_until_success(self):
+        class Response:
+            headers = {"Server": "Caddy"}
+            def close(self): pass
+
+        attempts = 0
+        def fake_open(req, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionRefusedError("Connection refused")
+            return Response()
+
+        opener = mock.Mock()
+        opener.open = fake_open
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            self.assertTrue(domains_core._sandbox_proxy_route_serving(
+                "demo.tst", secure=True, timeout=1.0, retry=True))
+        self.assertEqual(attempts, 2)
+
+    def test_proxy_probe_times_out_on_persistent_oserror(self):
+        attempts = 0
+        def fake_open(req, timeout):
+            nonlocal attempts
+            attempts += 1
+            raise ConnectionRefusedError("Connection refused")
+
+        opener = mock.Mock()
+        opener.open = fake_open
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            self.assertFalse(domains_core._sandbox_proxy_route_serving(
+                "demo.tst", secure=True, timeout=0.1, retry=True))
+        self.assertGreater(attempts, 1)
+
+    def test_site_url_passes_timeout_to_proxy_active(self):
+        inst_cfg = {"domain": "demo.tst", "tld": "tst", "wordpress_port": 8080}
+        with mock.patch.object(domains_core, "_domain_is_secure", return_value=True), \
+             mock.patch.object(domains_core, "_sandbox_proxy_active", return_value=True) as active:
+            url = domains_core.site_url(inst_cfg, timeout=4.2, retry=True)
+            self.assertEqual(url, "https://demo.tst")
+            active.assert_called_once_with("demo.tst", secure=True, timeout=4.2, retry=True)
+
+
     def test_foreign_wildcard_response_blocks_clean_url_claim(self):
         with mock.patch.object(domains_core, "resolve_instances", return_value={
                 "demo": {"domain": "demo.tst", "tld": "tst"},
@@ -464,17 +554,22 @@ class TestProxyTransportHealth(unittest.TestCase):
             self.assertFalse(domains_core._proxy_transport_serving({}))
 
     def test_proxy_transport_failure_detail_preserves_listener_recovery_evidence(self):
-        with mock.patch.object(domains_core, "resolve_instances", return_value={
-                "demo": {"domain": "demo.tst", "tld": "tst"},
-            }), mock.patch.object(domains_core, "_generic_proxy_entries",
-                                  return_value=[]), \
-             mock.patch.object(domains_core, "_sandbox_proxy_route_serving",
-                               return_value=False), \
+        health = {
+            "ok": False, "state": "degraded", "mutated": False,
+            "reason": {"code": "sandbox_caddy_route_unreachable",
+                       "message": "Sandbox Caddy route probe failed for demo.tst."},
+            "container_running": True, "config_readable": True,
+            "routes": ({"hostname": "demo.tst", "secure": False,
+                        "configured": True, "serving": False},),
+            "scope": "managed",
+        }
+        with mock.patch.object(domains_core, "sandbox_caddy_health",
+                               side_effect=AssertionError("preobserved health must not re-probe")), \
              mock.patch.object(domains_core, "_published_listener_check", return_value={
                  "label": "proxy published on 127.0.0.77:80 but nginx owns 80",
                  "hint": "free the port or select an adopted ingress",
              }):
-            detail = domains_core._proxy_transport_failure_detail({})
+            detail = domains_core._proxy_transport_failure_detail({}, health=health)
         self.assertIn("demo.tst", detail)
         self.assertIn("nginx owns 80", detail)
         self.assertIn("select an adopted ingress", detail)
@@ -496,7 +591,8 @@ class TestProxyTransportHealth(unittest.TestCase):
     def test_no_declared_route_does_not_block_proxy_start(self):
         with mock.patch.object(domains_core, "resolve_instances", return_value={}), \
              mock.patch.object(domains_core, "_generic_proxy_entries",
-                               return_value=[]):
+                               return_value=[]), \
+             mock.patch.object(domains_core, "_proxy_container_running", return_value=False):
             self.assertTrue(domains_core._proxy_transport_serving({}))
 
     def test_explicit_route_health_ignores_unrelated_stale_routes(self):
@@ -536,7 +632,7 @@ class TestProxyTransportHealth(unittest.TestCase):
             )
 
         self.assertTrue(health["ok"])
-        self.assertEqual(serving.call_args.kwargs["timeout"], 5.0)
+        self.assertEqual(serving.call_args.kwargs["timeout"], 9)
 
     def test_exact_route_health_reason_is_shared_with_human_detail(self):
         observed = {
@@ -665,10 +761,13 @@ class TestProxyHealthChecks(unittest.TestCase):
             with mock.patch.object(domains_core, "PROXY_CADDYFILE", caddyfile), \
                  mock.patch.object(domains_core, "_proxy_container_running",
                                    return_value=running), \
-                 mock.patch.object(domains_core, "_caddyfile_readable_in_container",
-                                   return_value=readable), \
-                 mock.patch.object(domains_core, "resolve_instances",
-                                   return_value=cfg):
+             mock.patch.object(domains_core, "_caddyfile_readable_in_container",
+                               return_value=readable), \
+             mock.patch.object(domains_core, "_published_listener_check",
+                               return_value={"label": "published endpoints available",
+                                             "ok": True}), \
+             mock.patch.object(domains_core, "resolve_instances",
+                               return_value=cfg):
                 return domains_core.proxy_health_checks({})
 
     def test_missing_route_for_configured_domain_fails(self):

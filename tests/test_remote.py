@@ -22,7 +22,7 @@ import tempfile
 import types
 import unittest
 import urllib.error
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import ANY, call, patch, MagicMock
@@ -2693,7 +2693,10 @@ class TestStopRemoteMcpServer(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_stop_targets_only_the_proven_service_unit(self, mock_ssh_run):
         mock_ssh_run.side_effect = [
-            _completed(stdout="enabled=enabled\nactive=active\npid=123\nlinger=yes\nownership=proven\npid_ownership=proven\nlistener=expected\nauth=ok\n"),
+            _completed(stdout=(
+                "enabled=enabled\nactive=active\npid=123\nlinger=yes\nownership=proven\n"
+                "pid_ownership=proven\nlistener=expected\nauth=ok\n"
+                "probe_state=complete\nprobe_error=none\n")),
             _completed(returncode=0),
         ]
         remote = {"ssh": "ubuntu@1.2.3.4", "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174)}
@@ -2705,13 +2708,28 @@ class TestStopRemoteMcpServer(unittest.TestCase):
 
     @patch("sandbox.core._remote.ssh_run")
     def test_stop_refuses_unproven_ownership(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(stdout="enabled=not-found\nactive=inactive\npid=0\nlinger=no\n")
+        mock_ssh_run.return_value = _completed(stdout=(
+            "enabled=not-found\nactive=inactive\npid=0\nlinger=no\n"
+            "probe_state=complete\nprobe_error=none\n"))
         with self.assertRaisesRegex(RuntimeError, "ownership_unknown"):
+            sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
+        self.assertEqual(mock_ssh_run.call_count, 1)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_stop_reports_probe_timeout_without_attempting_mutation(self, mock_ssh_run):
+        mock_ssh_run.side_effect = subprocess.TimeoutExpired("ssh", 18)
+        with self.assertRaisesRegex(RuntimeError, "remote_service_probe_timeout"):
             sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
         self.assertEqual(mock_ssh_run.call_count, 1)
 
 
 class TestRemoteMcpServiceStatus(unittest.TestCase):
+    @staticmethod
+    def _complete_probe_output(stdout):
+        if "probe_state=" in stdout:
+            return stdout
+        return f"{stdout.rstrip()}\nprobe_state=complete\nprobe_error=none\n"
+
     def test_runtime_revision_sources_ignore_appledouble_sidecars(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -2737,13 +2755,16 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertIn("sb", relative)
         self.assertIn("sandbox/commands/jobs_runtime.py", relative)
         self.assertIn("sandbox/workspaces/repository.py", relative)
+        self.assertIn("scripts/provision_ci_cleanup_broker.py", relative)
         self.assertIn("mcp/wp-server/server.py", relative)
         self.assertFalse(any(".venv" in source for source in relative))
 
     @patch("sandbox.core._remote.ssh_run")
     def test_status_proves_unit_metadata_listener_and_authenticated_route(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
-            stdout="enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\npid_ownership=proven\nlistener=expected\nauth=ok\nlegacy_pidfile=present\n")
+            stdout=self._complete_probe_output(
+                "enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\n"
+                "pid_ownership=proven\nlistener=expected\nauth=ok\nlegacy_pidfile=present\n"))
         record = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
         status = sr.remote_mcp_service_status({"ssh": "ubuntu@1.2.3.4", "mcp_service": record})
         self.assertEqual(status["ownership"], "proven")
@@ -2759,16 +2780,86 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertIn("ControlGroup", command)
         self.assertIn("/proc/$pid/cgroup", command)
         self.assertIn("urllib.request", command)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 2s systemctl --user is-enabled", command)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 3s systemctl --user show", command)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 2s loginctl show-user", command)
         self.assertIn("response.status in (200,204,400,405,406)", command)
         self.assertIn("exc.code in (200,204,400,405,406)", command)
         self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)
         self.assertNotIn("bearer_token", command)
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_status_returns_typed_unavailable_on_nonzero_ssh(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            returncode=255, stderr="private remote path and credential diagnostic",
+        )
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["probe_state"], "unavailable")
+        self.assertEqual(status["probe_error"], "remote_service_probe_transport_failed")
+        self.assertEqual(status["ownership"], "unknown")
+        self.assertNotIn("private remote path", json.dumps(status))
+        self.assertNotIn("credential diagnostic", json.dumps(status))
+        self.assertNotIn("registered-target", json.dumps(status))
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_returns_typed_unavailable_on_ssh_timeout(self, mock_ssh_run):
+        mock_ssh_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["ssh", "registered-target"], timeout=18,
+            output="enabled=enabled\n",
+        )
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["probe_state"], "unavailable")
+        self.assertEqual(status["probe_error"], "remote_service_probe_timeout")
+        self.assertEqual(status["ownership"], "unknown")
+        self.assertNotIn("registered-target", json.dumps(status))
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_keeps_partial_systemd_timeout_distinct_from_missing_service(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=(
+            "enabled=unknown\nactive=unknown\npid=unknown\nlinger=yes\n"
+            "probe_state=partial\nprobe_error=systemctl_probe_timeout\n"
+            "ownership=ambiguous\nremote_revision=unavailable\n"
+        ))
+        status = sr.remote_mcp_service_status({
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        })
+        self.assertEqual(status["probe_state"], "partial")
+        self.assertEqual(status["probe_error"], "systemctl_probe_timeout")
+        self.assertEqual(status["ownership"], "unknown")
+        self.assertEqual(status["runtime_revision_state"], "unavailable")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_rejects_malformed_probe_state_and_error_output(self, mock_ssh_run):
+        remote = {
+            "ssh": "registered-target",
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174),
+        }
+        mock_ssh_run.return_value = _completed(stdout="enabled=enabled\n")
+        missing_state = sr.remote_mcp_service_status(remote)
+        self.assertEqual(missing_state["probe_state"], "unavailable")
+        self.assertEqual(missing_state["probe_error"], "remote_service_probe_output_invalid")
+
+        mock_ssh_run.return_value = _completed(stdout=(
+            "probe_state=partial\nprobe_error=token=private-value\n"
+        ))
+        invalid_error = sr.remote_mcp_service_status(remote)
+        self.assertEqual(invalid_error["probe_state"], "partial")
+        self.assertEqual(invalid_error["probe_error"], "remote_service_probe_unavailable")
+        self.assertNotIn("private-value", json.dumps(invalid_error))
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_status_reports_matching_local_and_installed_runtime_revisions(self, mock_ssh_run):
         local_revision = sr._remote_mcp_runtime_revision()
         mock_ssh_run.return_value = _completed(
-            stdout=f"enabled=enabled\nactive=active\nremote_revision={local_revision}\n"
+            stdout=self._complete_probe_output(
+                f"enabled=enabled\nactive=active\nremote_revision={local_revision}\n")
         )
         status = sr.remote_mcp_service_status({
             "ssh": "registered-target",
@@ -2805,7 +2896,8 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
             )
             self.assertEqual(probe.stdout.strip(), f"remote_revision={local_revision}")
             mock_ssh_run.return_value = _completed(
-                stdout=f"enabled=enabled\nactive=active\n{probe.stdout}"
+                stdout=self._complete_probe_output(
+                    f"enabled=enabled\nactive=active\n{probe.stdout}")
             )
             status = sr.remote_mcp_service_status(remote)
         self.assertEqual(status["installed_runtime_revision"], local_revision)
@@ -2816,7 +2908,8 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         local_revision = "a" * 24
         installed_revision = "b" * 24
         mock_ssh_run.return_value = _completed(
-            stdout=f"enabled=enabled\nactive=inactive\nownership=proven\nremote_revision={installed_revision}\n"
+            stdout=self._complete_probe_output(
+                f"enabled=enabled\nactive=inactive\nownership=proven\nremote_revision={installed_revision}\n")
         )
         with patch.object(sr, "_remote_mcp_runtime_revision", return_value=local_revision):
             record = sr.remote_mcp_service_record("127.0.0.1", 9174)
@@ -2829,12 +2922,14 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_status_distinguishes_unavailable_and_malformed_runtime_revision_evidence(self, mock_ssh_run):
         remote = {"ssh": "registered-target", "mcp_service": {}}
-        mock_ssh_run.return_value = _completed(stdout="enabled=not-found\nremote_revision=unavailable\n")
+        mock_ssh_run.return_value = _completed(stdout=self._complete_probe_output(
+            "enabled=not-found\nremote_revision=unavailable\n"))
         unavailable = sr.remote_mcp_service_status(remote)
         self.assertIsNone(unavailable["installed_runtime_revision"])
         self.assertEqual(unavailable["runtime_revision_state"], "unavailable")
 
-        mock_ssh_run.return_value = _completed(stdout="enabled=enabled\nremote_revision=unknown\n")
+        mock_ssh_run.return_value = _completed(stdout=self._complete_probe_output(
+            "enabled=enabled\nremote_revision=unknown\n"))
         unknown = sr.remote_mcp_service_status(remote)
         self.assertIsNone(unknown["installed_runtime_revision"])
         self.assertEqual(unknown["runtime_revision_state"], "unknown")
@@ -2842,7 +2937,8 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_status_rejects_non_hash_remote_revision_values(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
-            stdout="enabled=enabled\nremote_revision=not-a-revision\n"
+            stdout=self._complete_probe_output(
+                "enabled=enabled\nremote_revision=not-a-revision\n")
         )
         status = sr.remote_mcp_service_status({"ssh": "registered-target", "mcp_service": {}})
         self.assertIsNone(status["installed_runtime_revision"])
@@ -3065,8 +3161,78 @@ class TestRemoteDomainInventory(unittest.TestCase):
         self.assertTrue(all(item["ok"] for item in checks))
         self.assertIn("MCP reboot recovery", [item["label"] for item in checks])
 
+    @patch("sandbox.core._remote.remote_mcp_service_status")
+    @patch("sandbox.core._remote.check_reachable", return_value=True)
+    @patch("urllib.request.build_opener")
+    def test_doctor_reports_typed_incomplete_service_probe(self, opener, reachable, status):
+        class Response:
+            status = 405
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+        opener.return_value.open.return_value = Response()
+        status.return_value = {
+            "probe_state": "partial", "probe_error": "systemctl_probe_timeout",
+            "ownership": "unknown",
+        }
+        checks = sr.remote_doctor_checks({
+            "ssh": "ubuntu@example.test", "provisioned": True,
+            "control_transport": "https", "control_url": "https://control.example.test",
+            "bearer_token": "a" * 64,
+            "mcp_service": sr.remote_mcp_service_record(
+                "127.0.0.1", 9174, "https://control.example.test",
+            ),
+        })
+        service_check = next(item for item in checks
+                             if item["label"] == "MCP service status")
+        self.assertFalse(service_check["ok"])
+        self.assertIn("systemctl_probe_timeout", service_check["hint"])
+        self.assertNotIn("MCP service ownership", [item["label"] for item in checks])
+
 
 class TestRemoteServiceCommand(unittest.TestCase):
+    def test_status_transport_failure_is_degraded_and_nonzero(self):
+        args = types.SimpleNamespace(name="status", ssh_url="myvps", confirm=False)
+        status = {
+            "probe_state": "unavailable",
+            "probe_error": "remote_service_probe_transport_failed",
+            "ownership": "unknown",
+        }
+        with patch.object(remote_cmd.sr, "get_remote", return_value={"ssh": "registered-target"}), \
+             patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=status), \
+             redirect_stdout(StringIO()) as output, self.assertRaises(SystemExit) as raised:
+            remote_cmd._cmd_service(args, as_json=True)
+        self.assertEqual(raised.exception.code, 1)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "degraded")
+        self.assertEqual(payload["error"]["code"], "remote_service_probe_transport_failed")
+
+    def test_confirmed_migration_refuses_incomplete_probe_before_upload(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="https", control_url="https://sandbox.example.test",
+                    mcp_port=9174, bearer_token="a" * 64,
+                )
+                args = types.SimpleNamespace(
+                    name="migrate", ssh_url="myvps", confirm=True, upload_timeout=300,
+                )
+                incomplete = {
+                    "probe_state": "partial", "probe_error": "systemctl_probe_timeout",
+                    "ownership": "unknown",
+                }
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=incomplete), \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
+                     redirect_stdout(StringIO()) as output:
+                    remote_cmd._cmd_service(args, as_json=True)
+                upload.assert_not_called()
+                migrate.assert_not_called()
+                payload = json.loads(output.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], "systemctl_probe_timeout")
+
     def test_invalid_migration_upload_timeout_refuses_before_upload_or_migration(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
@@ -3243,13 +3409,40 @@ class TestRemoteServiceCommand(unittest.TestCase):
                     name="myvps", confirm=True, upload_timeout=300,
                 )
                 error = StringIO()
-                with patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status",
+                                  return_value={"probe_state": "complete"}), \
+                     patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
                      patch.object(remote_cmd, "_upload_runtime_source",
                                   side_effect=remote_cmd.RemoteRuntimeSourceIndeterminate(
                                       "publication state requires inspection")), \
                      redirect_stderr(error), self.assertRaises(SystemExit):
                     remote_cmd._cmd_up(args, as_json=True)
                 self.assertIn("remote_runtime_source_indeterminate", error.getvalue())
+
+    def test_confirmed_up_refuses_incomplete_probe_before_upload(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="https", control_host="sandbox.example.test",
+                    control_url="https://sandbox.example.test", mcp_port=9174,
+                    bearer_token="a" * 64,
+                )
+                args = types.SimpleNamespace(name="myvps", confirm=True, upload_timeout=300)
+                error = StringIO()
+                incomplete = {
+                    "probe_state": "partial", "probe_error": "systemctl_probe_timeout",
+                    "ownership": "unknown",
+                }
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status",
+                                  return_value=incomplete), \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
+                     redirect_stderr(error), self.assertRaises(SystemExit):
+                    remote_cmd._cmd_up(args, as_json=True)
+                upload.assert_not_called()
+                migrate.assert_not_called()
+                self.assertIn("systemctl_probe_timeout", error.getvalue())
 
     def test_confirmed_up_uses_the_verified_migration_path(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3356,6 +3549,164 @@ class TestRejectHerdProjects(unittest.TestCase):
 
 
 class TestDeployEnsureExpose(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="deploy-exposure-")
+        self.addCleanup(directory.cleanup)
+        patcher = patch.object(sr, "RUNTIME_DIR", Path(directory.name) / "runtime")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _exposure_args(self, root, **overrides):
+        values = dict(
+            project_dir=str(root), remote="myvps", json=True,
+            ensure=True, expose=True, domain="default-demo.sandbox.asb.bd",
+            plugin_slug="demo", label="default", request_id=None,
+            source_ref=None, ref=None, instance=None, include=None,
+            alias=None, prune_routes=False, pro_plugins=False,
+            deploy_timeout=None, verify_timeout=None,
+        )
+        values.update(overrides)
+        return types.SimpleNamespace(**values)
+
+    @contextmanager
+    def _exposure_owners(self, root, *, kind="wordpress"):
+        """Keep the real attempt, receipt joins, store, and route aggregator."""
+        from sandbox.delivery import exposure, routes
+        from sandbox.delivery.models import canonical_digest, now
+        from sandbox.server_config.models import (
+            creation_digest, validate_creation_context, validate_creation_receipt,
+            validate_url_mutation_result,
+        )
+
+        owners = types.SimpleNamespace(context=None, receipt=None)
+        incarnation = "inc_" + "1" * 32
+
+        def prepare(_entry, target, label, *, operation_id, request_id,
+                    delivery_intent_digest, target_scope_digest, create_allowed):
+            self.assertEqual(target, "/remote/demo")
+            self.assertEqual(label, "default")
+            self.assertTrue(create_allowed)
+            fields = {
+                "schema_version": 1, "delivery_intent_digest": delivery_intent_digest,
+                "target_scope_digest": target_scope_digest,
+                "project_identity": "remote-demo",
+                "project_root_digest": creation_digest(target), "label": label,
+                "instance_config_digest": "sha256:" + "e" * 64,
+                "create_allowed": create_allowed,
+            }
+            owners.context = validate_creation_context({
+                "schema_version": 1, "operation_id": operation_id,
+                "request_id": request_id, "job_id": None,
+                "intent_digest": creation_digest(fields), "intent_fields": fields,
+                **{key: fields[key] for key in (
+                    "project_identity", "project_root_digest", "label")},
+            })
+            stamp = now()
+            owners.receipt = validate_creation_receipt({
+                **{key: owners.context[key] for key in (
+                    "schema_version", "operation_id", "request_id", "job_id",
+                    "intent_digest", "project_identity", "project_root_digest", "label")},
+                "instance_id": "demo", "instance_incarnation_id": incarnation,
+                "relation": "reused", "owner_commit_at": stamp,
+                "completion": "succeeded", "completed_at": stamp, "result_code": None,
+            })
+            return {"ok": True, "schema_version": 1,
+                    "creation_context": owners.context}
+
+        def receipt(_entry, target, label, *, creation_context):
+            self.assertEqual(target, "/remote/demo")
+            self.assertEqual(label, "default")
+            self.assertEqual(creation_context, owners.context)
+            return {"ok": True, "schema_version": 1,
+                    "creation_receipt": owners.receipt, "instance": "demo",
+                    "instance_incarnation_id": incarnation, "lookup_only": True}
+
+        def set_url(_entry, target, instance, url, *, label, creation_context,
+                    expected_incarnation):
+            self.assertEqual((target, instance, label), ("/remote/demo", "demo", "default"))
+            self.assertEqual(creation_context, owners.context)
+            self.assertEqual(expected_incarnation, incarnation)
+            self.assertTrue(url.startswith("https://"))
+            return validate_url_mutation_result({
+                "operation_id": creation_context["operation_id"],
+                "request_id": creation_context["request_id"],
+                "target_digest": creation_context["intent_fields"]["target_scope_digest"],
+                "expected_incarnation": incarnation, "observed_incarnation": incarnation,
+                "before_observed_at": now(), "finished_at": now(),
+                "writes": {"home": "succeeded", "siteurl": "succeeded"},
+                "readback": {"home": True, "siteurl": True},
+                "result_code": "remote_instance_url_verified",
+            })
+
+        class RouteProcess:
+            """Synthetic worker output; observe_routes still validates and joins it."""
+            returncode = 0
+
+            def __init__(self, argv, **_kwargs):
+                self.args = argv
+                self.stdin, self.stdout = io.BytesIO(), io.BytesIO()
+
+            def communicate(self, payload, timeout):
+                contract = json.loads(payload)["contract"]
+                stamp = now()
+                hosts = []
+                for hostname in contract["hostnames"]:
+                    checks = [{
+                        "path": check["path"], "result": "passed", "attempts": 1,
+                        "started_at": stamp, "finished_at": stamp,
+                        "origin": "https://" + hostname,
+                        "status": check["statuses"][0], "query_preserved": True,
+                        "http_upgrade": True, "tls": "passed", "redirect_count": 0,
+                        "marker_digests": [canonical_digest(marker)
+                                           for marker in check["markers"]],
+                    } for check in contract["delivery"]["routes"]["checks"]]
+                    hosts.append({
+                        "hostname": hostname,
+                        "dns": {"result": "passed", "observed_at": stamp,
+                                "address_count": 1, "address_digest": "sha256:" + "f" * 64},
+                        "checks": checks, "release_identity": {"state": "unsupported"},
+                    })
+                return json.dumps({"hosts": hosts}).encode(), b""
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        # Shadow only the route module's subprocess reference. Patching the
+        # shared subprocess.Popen would also intercept the local Git reader.
+        route_transport = types.SimpleNamespace(
+            Popen=RouteProcess, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        )
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(exposure, "RUNTIME_DIR", root / "delivery-home" / "runtime"))
+            stack.enter_context(patch.object(deploy_cmd, "source_commit", return_value="a" * 40))
+            stack.enter_context(patch.object(sr, "resolve_sandbox_home", return_value="/srv/sandbox"))
+            stack.enter_context(patch("sandbox.resources.context.authenticated_target_identity",
+                return_value={"schema_version": 1, "target_identity": "b" * 24,
+                              "evidence_state": "known", "observed_at": now()}))
+            owners.capability = stack.enter_context(patch.object(sr, "remote_creation_capability",
+                return_value={"ok": True, "schema_version": 1,
+                              "capabilities": ["instance_creation_receipt_v1"],
+                              "kind": kind, "scope": "controller_support"}))
+            owners.prepare = stack.enter_context(patch.object(sr, "prepare_creation_context", side_effect=prepare))
+            owners.read = stack.enter_context(patch.object(sr, "read_remote_creation_receipt", side_effect=receipt))
+            owners.set_url = stack.enter_context(patch.object(sr, "set_remote_instance_url", side_effect=set_url))
+            stack.enter_context(patch.object(routes, "subprocess", route_transport))
+            for name in ("ssh_run", "ssh_stream", "remote_host_memory_request"):
+                stack.enter_context(patch.object(sr, name,
+                    side_effect=AssertionError("unexpected remote transport in exposure fixture")))
+            yield owners
+
+    def _creation_attempt(self, root, entry):
+        return deploy_cmd.ExposureAttempt(
+            {"root": str(root), "kind": "wordpress"}, "myvps", entry,
+            label="default", kind="deploy_exposure", commit="a" * 40,
+            dirty_digest=None, prepared=None, request_id="fixture-ensure",
+        )
+
     def test_deploy_forwards_explicit_push_timeout(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -3562,14 +3913,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
             )
             with _patched_config_local(root / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
-                args = MagicMock()
-                args.project_dir = str(root)
-                args.remote = "myvps"
-                args.json = True
-                args.ensure = True
-                args.expose = True
-                args.domain = "default-demo.sandbox.asb.bd"
-                args.plugin_slug = "demo"
+                args = self._exposure_args(root)
                 inst = {
                     "instance": "demo",
                     "label": "default",
@@ -3578,11 +3922,12 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     "login_url": "http://localhost:8188/?sandbox_autologin=abc123",
                 }
                 sc = deploy_cmd._core()
-                with patch.object(sc, "load_project_config",
+                with self._exposure_owners(root) as owners, \
+                     patch.object(sc, "load_project_config",
                                   return_value={"root": str(root), "slug": "demo"}), \
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
-                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "push_commits", return_value="a" * 40), \
                      patch.object(sr, "update_target_to", return_value=0) as mock_overlay, \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
@@ -3591,11 +3936,11 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "activate_remote_plugin") as mock_activate, \
                      patch.object(sr, "configure_instance_https_route") as mock_route, \
                      patch.object(sr, "instance_route_hosts", return_value=[]), \
-                     patch.object(sr, "set_remote_instance_url") as mock_url, \
                      patch("builtins.print") as mock_print:
                     deploy_cmd.cmd_deploy(None, args)
                 result = json.loads(mock_print.call_args[0][0])
                 self.assertTrue(result["ok"])
+                self.assertTrue(result["delivery"]["delivery_succeeded"])
                 self.assertEqual(result["url"], "https://default-demo.sandbox.asb.bd")
                 self.assertEqual(result["instance"]["admin_url"],
                                  "https://default-demo.sandbox.asb.bd/wp-admin/")
@@ -3603,15 +3948,20 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     result["instance"]["login_url"],
                     "https://default-demo.sandbox.asb.bd/?sandbox_autologin=abc123",
                 )
-                mock_ensure.assert_called_once_with(sr.get_remote("myvps"), "/remote/demo")
+                mock_ensure.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo", "default",
+                    creation_context=owners.context,
+                )
                 mock_overlay.assert_called_once_with(
-                    sr.get_remote("myvps"), "/remote/demo", "abc123",
+                    sr.get_remote("myvps"), "/remote/demo", "a" * 40,
                     project_root=root, diff_text="",
                     untracked=["sandbox.config.json"],
                     overlay_snapshot=ANY,
                 )
                 mock_apply.assert_called_once_with(
-                    sr.get_remote("myvps"), "/remote/demo"
+                    sr.get_remote("myvps"), "/remote/demo", "default",
+                    creation_context=owners.context,
+                    expected_incarnation=owners.receipt["instance_incarnation_id"],
                 )
                 mock_activate.assert_called_once_with(
                     sr.get_remote("myvps"), "/remote/demo", "demo", "demo"
@@ -3619,52 +3969,88 @@ class TestDeployEnsureExpose(unittest.TestCase):
                 mock_route.assert_called_once_with(
                     sr.get_remote("myvps"), "default-demo.sandbox.asb.bd", 8188
                 )
-                mock_url.assert_called_once_with(
-                    sr.get_remote("myvps"), "/remote/demo",
-                    "https://default-demo.sandbox.asb.bd"
+                owners.set_url.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo", "demo",
+                    "https://default-demo.sandbox.asb.bd", label="default",
+                    creation_context=owners.context,
+                    expected_incarnation=owners.receipt["instance_incarnation_id"],
                 )
 
-    def test_failed_remote_ensure_removes_only_new_default_instance(self):
+    def test_failed_remote_ensure_retains_resources_without_creation_receipt(self):
         entry = {"ssh": "ubuntu@example.test", "provisioned": True}
-        baseline = [{"name": "existing", "label": "default"}]
-        after_failure = [
-            *baseline,
-            {"name": "orphan", "label": "default"},
-        ]
-        with patch.object(sr, "list_remote_instances",
-                          side_effect=[baseline, after_failure]), \
-             patch.object(sr, "ensure_remote_instance",
-                          side_effect=RuntimeError("remote ensure timed out")), \
-             patch.object(sr, "delete_remote_instance") as delete:
-            with self.assertRaisesRegex(
-                    RuntimeError, "cleanup removed the newly created instance"):
-                deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
-        delete.assert_called_once_with(entry, "orphan")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self._exposure_owners(root) as owners, \
+                 patch.object(sr, "list_remote_instances") as inventory, \
+                 patch.object(sr, "ensure_remote_instance",
+                              side_effect=RuntimeError("remote ensure timed out")) as ensure, \
+                 patch.object(sr, "delete_remote_instance") as delete:
+                owners.read.side_effect = None
+                owners.read.return_value = {"ok": False, "schema_version": 1,
+                                            "error": {"code": "creation_request_unknown"}}
+                attempt = self._creation_attempt(root, entry)
+                with self.assertRaisesRegex(RuntimeError, "remote ensure timed out"):
+                    deploy_cmd._ensure_remote_instance_transactional(
+                        entry, "/remote/demo", attempt=attempt)
+                summary = attempt.finish(False)
+                self.assertFalse(summary["delivery_succeeded"])
+                self.assertEqual(attempt.operation["execution_state"], "unknown")
+                self.assertEqual(attempt.operation["creation"]["result"], "pending")
+                ensure.assert_called_once_with(
+                    entry, "/remote/demo", "default", creation_context=owners.context)
+                owners.read.assert_called_once_with(
+                    entry, "/remote/demo", "default", creation_context=owners.context)
+                inventory.assert_not_called()
+                delete.assert_not_called()
 
-    def test_failed_remote_ensure_does_not_guess_when_multiple_instances_are_new(self):
+    def test_remote_ensure_retains_resources_when_creation_receipt_is_foreign(self):
         entry = {"ssh": "ubuntu@example.test", "provisioned": True}
-        with patch.object(sr, "list_remote_instances",
-                          side_effect=[[], [
-                              {"name": "orphan-a", "label": "default"},
-                              {"name": "orphan-b", "label": "default"},
-                          ]]), \
-             patch.object(sr, "ensure_remote_instance",
-                          side_effect=RuntimeError("remote ensure failed")), \
-             patch.object(sr, "delete_remote_instance") as delete:
-            with self.assertRaisesRegex(
-                    RuntimeError, "multiple new instances matched"):
-                deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
-        delete.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self._exposure_owners(root) as owners, \
+                 patch.object(sr, "list_remote_instances") as inventory, \
+                 patch.object(sr, "ensure_remote_instance", return_value={"instance": "demo"}) as ensure, \
+                 patch.object(sr, "delete_remote_instance") as delete:
+                read_original = owners.read.side_effect
 
-    def test_failed_remote_ensure_refuses_mutation_without_baseline(self):
+                def foreign_receipt(*args, **kwargs):
+                    result = read_original(*args, **kwargs)
+                    result["creation_receipt"] = dict(
+                        result["creation_receipt"], request_id="foreign-request")
+                    return result
+
+                owners.read.side_effect = foreign_receipt
+                attempt = self._creation_attempt(root, entry)
+                with self.assertRaisesRegex(ValueError, "required_evidence_missing"):
+                    deploy_cmd._ensure_remote_instance_transactional(
+                        entry, "/remote/demo", attempt=attempt)
+                self.assertFalse(attempt.finish(False)["delivery_succeeded"])
+                self.assertEqual(attempt.operation["creation"]["state"], "conflicting")
+                ensure.assert_called_once()
+                owners.read.assert_called_once()
+                inventory.assert_not_called()
+                delete.assert_not_called()
+
+    def test_remote_ensure_refuses_mutation_without_creation_context(self):
         entry = {"ssh": "ubuntu@example.test", "provisioned": True}
-        with patch.object(sr, "list_remote_instances",
-                          side_effect=RuntimeError("inventory unavailable")), \
-             patch.object(sr, "ensure_remote_instance") as ensure:
-            with self.assertRaisesRegex(
-                    RuntimeError, "refusing remote mutation"):
-                deploy_cmd._ensure_remote_instance_transactional(entry, "/remote/demo")
-        ensure.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self._exposure_owners(root) as owners, \
+                 patch.object(sr, "list_remote_instances") as inventory, \
+                 patch.object(sr, "ensure_remote_instance") as ensure, \
+                 patch.object(sr, "delete_remote_instance") as delete:
+                owners.prepare.side_effect = None
+                owners.prepare.return_value = {"ok": False, "schema_version": 1,
+                                               "error": {"code": "creation_request_unknown"}}
+                attempt = self._creation_attempt(root, entry)
+                with self.assertRaisesRegex(ValueError, "creation_context_unavailable"):
+                    deploy_cmd._ensure_remote_instance_transactional(
+                        entry, "/remote/demo", attempt=attempt)
+                self.assertFalse(attempt.finish(False)["delivery_succeeded"])
+                owners.read.assert_not_called()
+                ensure.assert_not_called()
+                inventory.assert_not_called()
+                delete.assert_not_called()
 
     def test_source_ref_still_transfers_ignored_primary_descriptor(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3705,27 +4091,18 @@ class TestDeployEnsureExpose(unittest.TestCase):
             )
             with _patched_config_local(root / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
-                args = MagicMock()
-                args.project_dir = str(root)
-                args.remote = "myvps"
-                args.json = True
-                args.ensure = True
-                args.expose = True
-                args.domain = "default-demo.sandbox.asb.bd"
-                args.plugin_slug = "demo"
-                args.alias = alias_arg
-                args.prune_routes = prune
-                args.pro_plugins = False
+                args = self._exposure_args(root, alias=alias_arg, prune_routes=prune)
                 inst = {"instance": "demo", "label": "default",
                         "wordpress_port": 8188, "url": "http://localhost:8188"}
                 pconf = {"root": str(root), "slug": "demo"}
                 if project_aliases is not None:
                     pconf["aliases"] = project_aliases
                 sc = deploy_cmd._core()
-                with patch.object(sc, "load_project_config", return_value=pconf), \
+                with self._exposure_owners(root), \
+                     patch.object(sc, "load_project_config", return_value=pconf), \
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
-                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "push_commits", return_value="a" * 40), \
                      patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
@@ -3736,10 +4113,10 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "instance_route_hosts",
                                   return_value=list(existing_routes)), \
                      patch.object(sr, "remove_instance_https_route") as remove, \
-                     patch.object(sr, "set_remote_instance_url"), \
                      patch("builtins.print") as mock_print:
                     deploy_cmd.cmd_deploy(None, args)
                 result = json.loads(mock_print.call_args[0][0])
+                self.assertTrue(result["delivery"]["delivery_succeeded"])
                 routed = [c.args[1] for c in route.call_args_list]
                 removed = [c.args[1] for c in remove.call_args_list]
                 return result, routed, removed
@@ -3793,25 +4170,16 @@ class TestDeployEnsureExpose(unittest.TestCase):
             (root / ".git").mkdir()
             with _patched_config_local(root / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
-                args = MagicMock()
-                args.project_dir = str(root)
-                args.remote = "myvps"
-                args.json = True
-                args.ensure = True
-                args.expose = True
-                args.domain = "default-demo.sandbox.asb.bd"
-                args.plugin_slug = "demo"
-                args.alias = []
-                args.prune_routes = False
-                args.pro_plugins = False
+                args = self._exposure_args(root, alias=[])
                 inst = {"instance": "demo", "label": "default",
                         "wordpress_port": 8188, "url": "http://localhost:8188"}
                 sc = deploy_cmd._core()
-                with patch.object(sc, "load_project_config",
+                with self._exposure_owners(root), \
+                     patch.object(sc, "load_project_config",
                                   return_value={"root": str(root), "slug": "demo"}), \
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
-                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "push_commits", return_value="a" * 40), \
                      patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
@@ -3821,11 +4189,11 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "configure_instance_https_route"), \
                      patch.object(sr, "instance_route_hosts",
                                   side_effect=RuntimeError("ssh died")), \
-                     patch.object(sr, "set_remote_instance_url"), \
                      patch("builtins.print") as mock_print:
                     deploy_cmd.cmd_deploy(None, args)
                 result = json.loads(mock_print.call_args[0][0])
         self.assertTrue(result["ok"])
+        self.assertTrue(result["delivery"]["delivery_succeeded"])
         self.assertEqual(result["url"], "https://default-demo.sandbox.asb.bd")
         self.assertEqual(result["instance"]["stale_routes"], [])
 
@@ -3835,30 +4203,29 @@ class TestDeployEnsureExpose(unittest.TestCase):
             (root / ".git").mkdir()
             with _patched_config_local(root / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
-                args = MagicMock()
-                args.project_dir = str(root)
-                args.remote = "myvps"
-                args.json = True
-                args.ensure = True
-                args.expose = True
-                args.domain = "default-demo.sandbox.asb.bd"
-                args.plugin_slug = "demo"
+                args = self._exposure_args(root)
                 sc = deploy_cmd._core()
-                with patch.object(sc, "load_project_config",
+                with self._exposure_owners(root), \
+                     patch.object(sc, "load_project_config",
                                   return_value={"root": str(root), "slug": "demo"}), \
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
-                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "push_commits", return_value="a" * 40), \
                      patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value={"status": "ready"}), \
+                     patch.object(sr, "reconcile_remote_instance") as reconcile, \
+                     patch.object(sr, "configure_instance_https_route") as route, \
                      patch("builtins.print") as mock_print:
                     with self.assertRaises(SystemExit):
                         deploy_cmd.cmd_deploy(None, args)
                 result = json.loads(mock_print.call_args[0][0])
                 self.assertFalse(result["ok"])
-                self.assertIn("remote ensure returned no 'instance'", result["error"])
+                self.assertEqual(result["error"], "instance_incarnation_changed")
+                self.assertFalse(result["delivery"]["delivery_succeeded"])
+                reconcile.assert_not_called()
+                route.assert_not_called()
 
     def test_generic_deploy_can_ensure_and_expose_without_wordpress_calls(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3866,35 +4233,41 @@ class TestDeployEnsureExpose(unittest.TestCase):
             (root / ".git").mkdir()
             with _patched_config_local(root / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
-                args = MagicMock(project_dir=str(root), remote="myvps", json=True,
-                                 ensure=True, expose=True,
-                                 domain="app.example.com", plugin_slug=None)
+                args = self._exposure_args(root, domain="app.example.com", plugin_slug=None)
                 instance = {"instance": "demo", "label": "default", "kind": "compose",
                             "http_port": 4321, "url": "http://127.0.0.1:4321"}
                 sc = deploy_cmd._core()
-                with patch.object(sc, "load_project_config", return_value={
-                    "root": str(root), "kind": "compose"}), \
+                delivery = {"schemaVersion": 1, "routes": {"checks": [{
+                    "path": "/health", "statuses": [200],
+                    "markers": [{"kind": "header_equals", "field": "X-Application",
+                                 "expected": "demo"}],
+                }]}}
+                with self._exposure_owners(root, kind="compose") as owners, \
+                     patch.object(sc, "load_project_config", return_value={
+                         "root": str(root), "kind": "compose", "delivery": delivery}), \
                      patch("sandbox.commands.deploy.preflight_project_capability", return_value=None), \
                      patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
                      patch.object(sr, "current_branch", return_value="main"), \
-                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "push_commits", return_value="a" * 40), \
                      patch.object(sr, "update_target_to", return_value=0), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "list_remote_instances", return_value=[]), \
                      patch.object(sr, "ensure_remote_instance", return_value=instance), \
                      patch.object(sr, "activate_remote_plugin") as activate, \
-                     patch.object(sr, "set_remote_instance_url") as set_url, \
+                     patch.object(sr, "reconcile_remote_instance") as reconcile, \
                      patch.object(sr, "configure_instance_https_route") as route, \
                      patch.object(sr, "instance_route_hosts", return_value=[]), \
                      patch("builtins.print") as printed:
                     deploy_cmd.cmd_deploy(None, args)
                 result = json.loads(printed.call_args[0][0])
                 self.assertTrue(result["ok"])
+                self.assertTrue(result["delivery"]["delivery_succeeded"])
                 self.assertEqual(result["url"], "https://app.example.com")
                 self.assertEqual(result["instance"]["url"], "https://app.example.com")
                 route.assert_called_once_with(sr.get_remote("myvps"), "app.example.com", 4321)
                 activate.assert_not_called()
-                set_url.assert_not_called()
+                reconcile.assert_not_called()
+                owners.set_url.assert_not_called()
 
     def test_generic_plugin_slug_is_rejected_before_remote_mutation(self):
         with tempfile.TemporaryDirectory() as d:

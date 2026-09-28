@@ -89,6 +89,12 @@ def _compose_service(root, process):
         ),
         registry,
     )
+    def artifact_dir(runtime_id):
+        path = root / "runtime" / runtime_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    adapter._artifact_dir = artifact_dir
     adapters = AdapterRegistry()
     adapters.register("compose", adapter, kinds=("compose",), owner="tests")
     service = RuntimeService(
@@ -148,7 +154,7 @@ class TestStateFreshness(unittest.TestCase):
             second = service.invoke(OperationRequest(str(root), "status"))
 
             self.assertEqual(first.data["status"], "ready")
-            self.assertEqual(second.data["status"], "ready")
+            self.assertEqual(second.data["status"], "stopped")
             self.assertIn('"running"', first.data["compose"])
             self.assertIn('"exited"', second.data["compose"])
             self.assertTrue(first.data["state_current"])

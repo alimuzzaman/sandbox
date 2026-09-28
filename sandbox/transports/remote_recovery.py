@@ -15,12 +15,13 @@ import re
 import shlex
 import tarfile
 import tempfile
+import time
 from typing import Callable
 
 from sandbox.recovery.database import DatabaseCapture
 from sandbox.recovery.errors import RecoveryError
 from sandbox.recovery.filesystem import validate_archive
-from sandbox.recovery.hosted import HostedCaptureReceipt, HostedObservation
+from sandbox.recovery.hosted import HostedCaptureReceipt, HostedObservation, HostedRecoveryMaterializer
 from sandbox.recovery.materialize import SourceBinding
 from sandbox.recovery.models import ArtifactPlan, RecoveryPlan
 
@@ -70,6 +71,8 @@ class _RemoteState:
 
 class RegisteredRemoteRecoveryController:
     """Capture one reviewed hosted production declaration over registered SSH."""
+
+    capture_contract_version = 2
 
     def __init__(self, *, remote_lookup: Callable | None = None,
                  ssh_run: Callable | None = None, ssh_process: Callable | None = None,
@@ -229,21 +232,47 @@ class RegisteredRemoteRecoveryController:
                         seen.add(name)
 
     def _capture_wordpress(self, state: _RemoteState, destination: Path,
-                           request_id: str) -> Path:
+                           request_id: str, backup_operation_id: str,
+                           operation_key: str) -> tuple[Path, dict]:
         database_password = self._environment.get("SANDBOX_RECOVERY_DB_PASSWORD")
         if not isinstance(database_password, str) or not database_password:
             raise RecoveryError("database credential is not available", "missing_database_credential")
         home = self._resolve_home(state.entry)
         root = f"{home}/runtime/recovery-controller"
-        script = r'''import pathlib, subprocess, sys, tarfile, tempfile
+        script = r'''import fcntl, hashlib, json, os, pathlib, subprocess, sys, tarfile, tempfile, time
 root = pathlib.Path(sys.argv[1]); output = pathlib.Path(sys.argv[2])
+request_id, operation_id, operation_key, source_digest = sys.argv[3:7]
 root.mkdir(mode=0o700, parents=True, exist_ok=True)
-if root.is_symlink() or not root.is_dir(): raise SystemExit(7)
+if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.geteuid(): raise SystemExit(7)
 root.chmod(0o700)
-if output.is_symlink(): raise SystemExit(7)
+lock = os.open(root / (operation_key + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+fcntl.flock(lock, fcntl.LOCK_EX)
+binding = root / (operation_key + '.binding.json')
+expected = {'schema_version': 2, 'request_id': request_id, 'backup_operation_id': operation_id,
+            'source_digest': source_digest}
+if binding.is_symlink(): raise SystemExit(7)
+if binding.exists():
+    if binding.stat().st_size > 4096 or json.loads(binding.read_text()) != expected: raise SystemExit(8)
+else:
+    with binding.open('x') as stream:
+        os.chmod(binding, 0o600); json.dump(expected, stream, sort_keys=True)
+        stream.flush(); os.fsync(stream.fileno())
+receipt_path = output.with_suffix('.receipt.json')
+if output.is_symlink() or receipt_path.is_symlink(): raise SystemExit(7)
+def digest(path):
+    value = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''): value.update(chunk)
+    return value.hexdigest()
 if output.exists():
-    if not output.is_file() or output.stat().st_size == 0: raise SystemExit(7)
+    if (not output.is_file() or output.stat().st_size == 0 or not receipt_path.is_file()
+            or receipt_path.stat().st_size > 4096): raise SystemExit(7)
+    receipt = json.loads(receipt_path.read_text())
+    if (any(receipt.get(key) != value for key, value in expected.items())
+            or receipt.get('artifact_sha256') != digest(output)): raise SystemExit(7)
     sys.stdout.buffer.write(output.read_bytes()); raise SystemExit(0)
+if receipt_path.exists(): raise SystemExit(7)
+started_at = time.time()
 with tempfile.TemporaryDirectory(prefix="capture-", dir=str(root)) as work:
     work = pathlib.Path(work); database = work / "database.sql"; wordpress_tar = work / "wordpress.tar"
     # The password is supplied on stdin by the local brokered child and never
@@ -276,32 +305,67 @@ with tempfile.TemporaryDirectory(prefix="capture-", dir=str(root)) as work:
     import hashlib
     if hashlib.sha256(check_tar.read_bytes()).digest() != hashlib.sha256(wordpress_tar.read_bytes()).digest():
         raise SystemExit(6)
-    temporary = output.with_name(output.name + ".pending")
+    temporary = work / 'archive.pending'
     with tarfile.open(temporary, "w") as archive:
         archive.add(database, arcname="database.sql", recursive=False)
         archive.add(wordpress_tar, arcname="wordpress.tar", recursive=False)
-    temporary.replace(output); output.chmod(0o600)
+    temporary.chmod(0o600)
+    with temporary.open('rb') as stream: os.fsync(stream.fileno())
+    temporary.replace(output)
+    receipt = dict(expected, artifact_sha256=digest(output), started_at=started_at, completed_at=time.time())
+    pending_receipt = work / 'receipt.pending'
+    with pending_receipt.open('x') as stream:
+        os.chmod(pending_receipt, 0o600); json.dump(receipt, stream, sort_keys=True)
+        stream.flush(); os.fsync(stream.fileno())
+    pending_receipt.replace(receipt_path)
 sys.stdout.buffer.write(output.read_bytes())'''
         command = "python3 -c " + shlex.quote(script) + " " + " ".join(shlex.quote(value) for value in (
-            root, f"{root}/{request_id}.tar"))
+            root, f"{root}/{request_id}.tar", request_id, backup_operation_id,
+            operation_key, state.source_digest))
         result = self._ssh_process(state.entry, command,
                                    input_data=(database_password + "\n").encode(), timeout=3600)
         payload, code = _completed_ok(result)
         if code != 0 or not payload:
             raise RecoveryError("remote WordPress capture failed", "remote_capture_failed")
-        return self._write_private(destination / "amarsonar-bangla.tar", payload)
+        receipt_program = (
+            "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
+            "assert not p.is_symlink() and p.is_file() and p.stat().st_size <= 4096; "
+            "sys.stdout.write(p.read_text())"
+        )
+        receipt_result = self._ssh_run(state.entry, shlex.join([
+            "python3", "-c", receipt_program, f"{root}/{request_id}.receipt.json",
+        ]), timeout=15)
+        receipt_bytes, receipt_code = _completed_ok(receipt_result)
+        try:
+            receipt = json.loads(receipt_bytes) if receipt_code == 0 and len(receipt_bytes) <= 4096 else None
+        except (TypeError, ValueError):
+            receipt = None
+        if (not isinstance(receipt, dict) or receipt.get("schema_version") != 2
+                or receipt.get("request_id") != request_id
+                or receipt.get("backup_operation_id") != backup_operation_id
+                or receipt.get("source_digest") != state.source_digest
+                or receipt.get("artifact_sha256") != hashlib.sha256(payload).hexdigest()):
+            raise RecoveryError("remote capture receipt is unavailable", "invalid_materialization_receipt")
+        return self._write_private(destination / "amarsonar-bangla.tar", payload), receipt
 
     def capture(self, remote: str, artifact: ArtifactPlan, destination: Path,
-                binding: SourceBinding, request_id: str) -> HostedCaptureReceipt:
+                binding: SourceBinding, request_id: str, *,
+                backup_operation_id: str) -> HostedCaptureReceipt:
+        from sandbox.recovery.capture import _valid_set_id
         if (not isinstance(request_id, str) or not re.fullmatch(r"recovery-[0-9a-f]{64}", request_id)
-                or binding.remote != remote):
+                or binding.remote != remote or not _valid_set_id(backup_operation_id)
+                or len(backup_operation_id) > 128
+                or request_id != HostedRecoveryMaterializer._request_id(
+                    remote, artifact, binding, backup_operation_id)):
             raise RecoveryError("recovery controller request is invalid", "invalid_materialization_receipt")
         state = self._state(remote)
         if binding != SourceBinding(remote, state.machine_identity, state.revision, state.source_digest):
             raise RecoveryError("remote recovery source changed", "source_changed")
         if artifact.profile_id == "control-plane":
+            started_at = time.time()
             safe = {
                 "schema_version": 1, "sources": list(artifact.sources),
+                "capture_contract_version": 2, "backup_operation_id": backup_operation_id,
                 "remote": remote, "machine_identity": state.machine_identity,
                 "runtime_revision": state.revision,
                 "source_digest": state.source_digest,
@@ -311,14 +375,24 @@ sys.stdout.buffer.write(output.read_bytes())'''
             path = self._write_private(destination / "control-plane-declarations.json",
                                        (json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n").encode())
             return HostedCaptureReceipt(artifact.profile_id, artifact.artifact_id, request_id,
-                                        (path,), tuple(artifact.sources), "declarations")
+                (path,), tuple(artifact.sources), "declarations",
+                capture_contract_version=2, backup_operation_id=backup_operation_id,
+                artifact_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                started_at=started_at, completed_at=time.time())
         if artifact.profile_id != "amarsonar-bangla-prod" or artifact.source_type != "filesystem":
             raise RecoveryError("recovery profile is not supported by the hosted controller",
                                 "unsupported_materialization")
-        path = self._capture_wordpress(state, destination, request_id)
+        operation_key = "operation-" + _safe_json_digest({
+            "schema_version": 2, "remote": remote, "backup_operation_id": backup_operation_id,
+            "profile_id": artifact.profile_id, "artifact_id": artifact.artifact_id,
+        }).removeprefix("sha256:")
+        path, receipt = self._capture_wordpress(
+            state, destination, request_id, backup_operation_id, operation_key)
         self._validate_combined_archive(path)
         return HostedCaptureReceipt(artifact.profile_id, artifact.artifact_id, request_id,
-                                    (path,), tuple(artifact.sources), "tar")
+            (path,), tuple(artifact.sources), "tar", capture_contract_version=2,
+            backup_operation_id=backup_operation_id, artifact_sha256=receipt["artifact_sha256"],
+            started_at=receipt.get("started_at"), completed_at=receipt.get("completed_at"))
 
 
 __all__ = ["RegisteredRemoteRecoveryController"]

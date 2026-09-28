@@ -1,0 +1,373 @@
+"""Source-bound encrypted PostgreSQL capture and isolated restore drills.
+
+Publication reuses StagingCaptureCoordinator; native formats use DatabaseCapture.
+Only the explicitly installed non-secret source descriptor selects a live source.
+"""
+from __future__ import annotations
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tarfile
+import tempfile
+
+from sandbox.hosting.images.provisioning import install_owner_only_json, _read_owner_only_json, _owned_directory
+from sandbox.hosting.images.plan_set import read_stable_file
+from .database import DatabaseCapture
+from .errors import RecoveryError
+from .integrity import sha256_file
+from .postgres_contract import recovery_source, digest
+from .restore import verify_manifest
+from .postgres_helper import observation_matches, validate_schema_proof, _validate_capture_evidence
+
+
+def _load_json_bytes(data):
+    """Decode bounded recovery evidence independently of image service limits."""
+    def invalid():
+        raise RecoveryError('PostgreSQL evidence is invalid', 'observation_invalid')
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value: invalid()
+            value[key] = item
+        return value
+    if type(data) is not bytes or not data or len(data) > 1024 * 1024:
+        invalid()
+    try:
+        value = json.loads(data.decode('utf-8'), object_pairs_hook=pairs,
+                           parse_constant=lambda _: invalid())
+        remaining = 100000
+        def check(item, depth=0):
+            nonlocal remaining
+            remaining -= 1
+            if depth > 32 or remaining < 0: invalid()
+            if type(item) in (dict, list):
+                if len(item) > 10000: invalid()
+                for child in (item.values() if type(item) is dict else item):
+                    check(child, depth + 1)
+            elif item is not None and type(item) not in (str, int, bool):
+                invalid()
+        check(value)
+        if type(value) is not dict: invalid()
+        return value
+    except (UnicodeError, ValueError, RecursionError):
+        invalid()
+
+
+def _reopen_binding_matches(plan, reopen_plan, source_digest):
+    if type(reopen_plan) is not dict: return False
+    return not (reopen_plan.get('native_request_id') != plan['native_request_id']
+        or reopen_plan.get('source_digest') != source_digest
+        or reopen_plan.get('target') != plan['target']
+        or type(reopen_plan.get('container_id')) is not str
+        or not re.fullmatch(r'[a-f0-9]{64}', reopen_plan['container_id'])
+        or type(reopen_plan.get('plan_digest')) is not str
+        or not re.fullmatch(r'sha256:[a-f0-9]{64}', reopen_plan['plan_digest'])
+        or type(reopen_plan.get('generation')) is not int
+        or not 0 <= reopen_plan['generation'] < 16)
+
+
+def _native_archive_digest(manifest):
+    artifacts = manifest.get('artifacts')
+    if (type(artifacts) is not list or len(artifacts) != 1 or type(artifacts[0]) is not dict
+            or artifacts[0].get('name') != 'native-capture.tar'
+            or type(artifacts[0].get('sha256')) is not str
+            or not re.fullmatch(r'[a-f0-9]{64}', artifacts[0]['sha256'])):
+        raise RecoveryError('native capture binding is unavailable', 'restore_verification_failed')
+    return 'sha256:' + artifacts[0]['sha256']
+
+
+def _validate_database_receipt(receipt, source, manifest, native_request_id, *, target_volume=None):
+    evidence = manifest.get('provenance', {}).get('observation')
+    target = 'sandbox-recovery-restore-' + native_request_id[:24]
+    database = 'lenzora' if target_volume is not None else source.database
+    role = 'lenzora' if target_volume is not None else source.role
+    try:
+        if (not re.fullmatch(r'[a-f0-9]{64}', native_request_id)
+                or type(receipt) is not dict or receipt.get('ok') is not True
+                or receipt.get('code') != 'restore_verified' or receipt.get('target') != target
+                or receipt.get('volume') != (target_volume or target + '-data')
+                or receipt.get('target_database') != database or receipt.get('target_role') != role
+                or type(evidence) is not dict or evidence.get('source_digest') != source.source_digest
+                or receipt.get('source_database_identity') != evidence.get('database_identity')
+                or receipt.get('dump_digest') != evidence.get('dump_digest')):
+            raise ValueError('restore_verification_failed')
+        actual = receipt.get('observation')
+        _validate_capture_evidence(evidence)
+        if type(actual) is not dict: raise ValueError('restore_verification_failed')
+        _validate_capture_evidence({**actual, 'dump_digest': evidence['dump_digest']})
+        proof = receipt.get('schema_verification')
+        if proof is None:
+            if not all(observation_matches(evidence, actual, renamed_database=target_volume is not None).values()):
+                raise ValueError('restore_verification_failed')
+        else:
+            validate_schema_proof(proof, source.as_mapping(), evidence, actual,
+                _native_archive_digest(manifest), native_request_id, database, role)
+    except (ValueError, KeyError, TypeError):
+        raise RecoveryError('restore evidence does not verify its backup', 'restore_verification_failed') from None
+    return receipt
+
+
+class PostgresRecovery:
+    def __init__(self, root: Path, transport, capture, catalog):
+        self.root, self.transport, self.capture, self.catalog = root, transport, capture, catalog
+        _owned_directory(root, create=True)
+
+    def _source_path(self, remote, profile):
+        if not isinstance(remote, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', remote):
+            raise RecoveryError('remote selector is invalid', 'source_binding_invalid')
+        if profile not in {'lenzora-dev', 'lenzora-prod', 'lenzora-prod-legacy', 'lenzora-prod-storage'}:
+            raise RecoveryError('PostgreSQL profile is unsupported', 'source_binding_invalid')
+        return self.root / 'sources' / f'{remote}-{profile}.json'
+
+    def register(self, source, *, confirm=False):
+        source = recovery_source(source)
+        if not confirm: return {'code': 'registration_planned', 'source': source.as_mapping(), 'source_digest': source.source_digest}
+        disposition = install_owner_only_json(self._source_path(source.remote, source.profile), source.as_mapping())
+        return {'code': disposition, 'source_digest': source.source_digest}
+
+    def source(self, remote, profile):
+        return recovery_source(_read_owner_only_json(self._source_path(remote, profile)))
+
+    def _request(self, source, operation, request_id, extra=None):
+        if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', request_id):
+            raise RecoveryError('replay-safe request ID is required', 'request_invalid')
+        body = {'source_digest': source.source_digest, 'operation': operation, 'request_id': request_id, 'extra': extra}
+        # Public request identity owns an immutable operation body locally too.
+        install_owner_only_json(self.root / 'requests' / (hashlib.sha256(request_id.encode()).hexdigest() + '.json'), body)
+        return digest(body)[7:]
+
+    def observe(self, remote, profile, request_id, binding=None):
+        source = self.source(remote, profile) if binding is None else recovery_source(binding)
+        if source.remote != remote or source.profile != profile:
+            raise RecoveryError('source selectors differ', 'source_binding_invalid')
+        identity = self._request(source, 'observe', request_id)
+        value = _load_json_bytes(self.transport.invoke(source, 'observe', identity))
+        if type(value) is not dict or value.get('ok') is not True or value.get('code') != 'observed':
+            raise RecoveryError('observation is unavailable', 'observation_invalid')
+        return {**value, 'source_digest': source.source_digest}
+
+    def status(self, remote, profile, request_id):
+        source = self.source(remote, profile)
+        if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', request_id):
+            raise RecoveryError('request ID is invalid', 'request_invalid')
+        body = _read_owner_only_json(self.root / 'requests' / (hashlib.sha256(request_id.encode()).hexdigest() + '.json'))
+        if body is None or body.get('source_digest') != source.source_digest or body.get('request_id') != request_id:
+            raise RecoveryError('retained request does not match source', 'request_invalid')
+        value = _load_json_bytes(self.transport.invoke(source, 'status', digest(body)[7:]))
+        if value.get('ok') is not True or value.get('source_digest') != source.source_digest:
+            raise RecoveryError('retained status is unavailable', 'acceptance_unknown')
+        return value
+
+    @staticmethod
+    def _unpack_capture(archive, destination, storage=False):
+        with tarfile.open(archive, 'r') as bundle:
+            members = bundle.getmembers()
+            names = ['evidence.json', 'storage.tar'] if storage else ['database.dump', 'evidence.json']
+            if sorted(member.name for member in members) != names or any(
+                    not member.isfile() or member.size < 1 or member.size > 512 * 1024 * 1024 for member in members):
+                raise RecoveryError('PostgreSQL capture is invalid', 'capture_invalid')
+            for member in members:
+                path = destination / member.name
+                with path.open('xb') as output:
+                    os.chmod(path, 0o600)
+                    handle = bundle.extractfile(member)
+                    import shutil
+                    shutil.copyfileobj(handle, output)
+        if not storage: DatabaseCapture._validate_format('postgresql', destination / 'database.dump')
+        evidence = _load_json_bytes(read_stable_file(destination / 'evidence.json', 1024 * 1024, owner_only=True))
+        if evidence.get('archive_digest' if storage else 'dump_digest') != 'sha256:' + sha256_file(destination / ('storage.tar' if storage else 'database.dump')):
+            raise RecoveryError('PostgreSQL capture digest differs', 'capture_invalid')
+        return evidence
+
+    def create(self, remote, profile, request_id, backup_id, *, confirm=False, resume=False):
+        if not confirm: raise RecoveryError('capture requires confirmation', 'confirmation_required')
+        if self.capture is None: raise RecoveryError('encrypted recovery is not configured', 'recovery_not_configured')
+        source = self.source(remote, profile)
+        if resume and profile != 'lenzora-dev':
+            raise RecoveryError('only local development capture can resume', 'request_invalid')
+        identity = self._request(source, 'capture', request_id, backup_id)
+        receipt_path = self.root / 'captures' / (identity + '.json')
+        retained = _read_owner_only_json(receipt_path)
+        if retained is not None:
+            verify_manifest(self.capture.drive, backup_id)
+            return retained
+        if resume:
+            status = self.status(remote, profile, request_id)
+            if status.get('code') != 'retained_without_result' or status.get('operation') != 'capture':
+                raise RecoveryError('capture is not resumable', 'acceptance_unknown')
+        material_root = self.capture.materialization_root
+        if material_root is None: raise RecoveryError('owned materialization is unavailable', 'recovery_not_configured')
+        _owned_directory(material_root, create=True)
+        with tempfile.TemporaryDirectory(prefix='postgres-', dir=material_root) as temporary:
+            work = Path(temporary)
+            archive = work / 'capture.tar'
+            options = {'resume_capture': True} if resume else {}
+            payload = self.transport.invoke(source, 'capture', identity, **options)
+            with archive.open('xb') as handle:
+                os.chmod(archive, 0o600); handle.write(payload)
+            evidence = self._unpack_capture(archive, work, storage=profile == 'lenzora-prod-storage')
+            if evidence.get('source_digest') != source.source_digest:
+                raise RecoveryError('capture source changed', 'source_changed')
+            if profile != 'lenzora-prod-storage':
+                try: _validate_capture_evidence(evidence)
+                except (ValueError, KeyError, TypeError):
+                    raise RecoveryError('capture observation is invalid', 'capture_invalid') from None
+            manifest = self.capture.publish_files(backup_id, {'native-capture.tar': archive}, profiles=(profile,),
+                provenance={'source_digest': source.source_digest, 'observation': evidence},
+                profile_bindings={profile: {'dependencies': [], 'restore_target': 'isolated-postgresql-volume',
+                    'allowed_roots': ['registered-postgresql-source']}})
+            verify_manifest(self.capture.drive, backup_id)
+            destination = getattr(self.capture.drive, 'destination', None)
+            if destination is not None:
+                install_owner_only_json(self.root / 'channels' / f'{remote}-{profile}.json',
+                    {'schema_version': 1, 'source_digest': source.source_digest, 'destination': destination})
+            result = {'code': 'captured', 'backup_id': backup_id, 'source_digest': source.source_digest,
+                'ciphertext_digest': 'sha256:' + manifest['ciphertext_sha256'], 'evidence': evidence}
+            install_owner_only_json(receipt_path, result)
+            return result
+
+    def readiness(self, remote, profile, target_volume):
+        source = self.source(remote, profile)
+        if self.capture is not None:
+            drive = self.capture.drive
+        else:
+            # Readiness verifies published ciphertext; it never decrypts and
+            # must not require delivering the encryption passphrase again.
+            channel = _read_owner_only_json(self.root / 'channels' / f'{remote}-{profile}.json')
+            if (type(channel) is not dict or set(channel) != {'schema_version', 'source_digest', 'destination'}
+                    or channel['schema_version'] != 1 or channel['source_digest'] != source.source_digest):
+                raise RecoveryError('verified recovery channel is unavailable', 'recovery_not_configured')
+            from .drive import RcloneDrive
+            from sandbox.services.process import BoundedProcessRunner
+            drive = RcloneDrive(BoundedProcessRunner(), channel['destination'])
+        directory = self.root / 'restores'
+        if not directory.exists(): raise RecoveryError('a verified restore drill is required', 'restore_verification_required')
+        _owned_directory(directory, create=False)
+        paths = list(directory.glob('*.json'))
+        if len(paths) > 200: raise RecoveryError('restore history requires review', 'restore_verification_required')
+        candidates = []
+        for path in paths:
+            receipt = _read_owner_only_json(path)
+            if receipt.get('source_digest') != source.source_digest: continue
+            if profile == 'lenzora-prod-legacy':
+                if receipt.get('production_transfer') is not True or receipt.get('volume') != target_volume: continue
+            elif source.volume != target_volume: continue
+            manifest = verify_manifest(drive, receipt['backup_id'])
+            evidence = manifest.get('provenance', {}).get('observation')
+            if (not isinstance(evidence, dict) or evidence.get('source_digest') != source.source_digest
+                    or receipt.get('dump_digest', receipt.get('archive_digest')) != evidence.get('dump_digest', evidence.get('archive_digest'))):
+                raise RecoveryError('restore proof no longer binds its backup', 'restore_verification_required')
+            if profile != 'lenzora-prod-storage':
+                _validate_database_receipt(receipt, source, manifest, path.stem,
+                    target_volume=target_volume if profile == 'lenzora-prod-legacy' else None)
+            candidates.append((int(evidence.get('captured_at', 0)), receipt, evidence))
+        if not candidates: raise RecoveryError('a matching verified restore is required', 'restore_verification_required')
+        _, receipt, evidence = max(candidates, key=lambda item: (item[0], item[1]['backup_id']))
+        return {'code': 'data_ready', 'profile': profile, 'volume': target_volume,
+            'source_digest': source.source_digest, 'backup_id': receipt['backup_id'],
+            'restore_plan_digest': receipt['plan_digest'], 'major': evidence.get('major'),
+            'production_transfer': receipt.get('production_transfer', False)}
+
+    def restore_plan(self, remote, profile, request_id, backup_id, target_volume=None):
+        if self.capture is None: raise RecoveryError('encrypted recovery is not configured', 'recovery_not_configured')
+        source = self.source(remote, profile)
+        manifest = verify_manifest(self.capture.drive, backup_id)
+        if manifest.get('profiles') != [profile] or manifest.get('provenance', {}).get('source_digest') != source.source_digest:
+            raise RecoveryError('backup does not match registered source', 'source_changed')
+        evidence = manifest.get('provenance', {}).get('observation')
+        if not isinstance(evidence, dict): raise RecoveryError('backup observation is unavailable', 'capture_invalid')
+        if target_volume is not None and (profile != 'lenzora-prod-legacy' or target_volume != 'sandbox-host-lenzora-production_lenzora-postgres-data'):
+            raise RecoveryError('production transfer target is invalid', 'restore_plan_changed')
+        identity = self._request(source, 'restore', request_id, {'backup_id': backup_id, 'ciphertext_digest': manifest['ciphertext_sha256'], 'target_volume': target_volume})
+        body = {'schema_version': 1, 'remote': remote, 'profile': profile, 'request_id': request_id,
+            'native_request_id': identity, 'backup_id': backup_id, 'source_digest': source.source_digest,
+            'ciphertext_digest': manifest['ciphertext_sha256'], 'target': 'sandbox-recovery-restore-' + identity[:24],
+            'source_major': evidence.get('major'), 'target_volume': target_volume,
+            'target_database': 'lenzora' if target_volume is not None else getattr(source, 'database', None),
+            'target_role': 'lenzora' if target_volume is not None else getattr(source, 'role', None), 'active_database_overwrite': False, 'published_ports': []}
+        return {**body, 'plan_digest': digest(body)}
+
+    def restore(self, plan, *, confirm=False, inspect=False, verify=False, reopen=False, reopen_plan=None):
+        if (any(type(value) is not bool for value in (inspect, verify, reopen))
+                or sum((inspect, verify, reopen)) > 1
+                or (reopen and (type(reopen_plan) is not dict or not reopen_plan))
+                or (not reopen and reopen_plan is not None)):
+            raise RecoveryError('restore operation is ambiguous', 'request_invalid')
+        if not confirm and not inspect: raise RecoveryError('restore drill requires confirmation', 'confirmation_required')
+        if (inspect or verify or reopen) and (plan.get('profile') != 'lenzora-dev' or plan.get('target_volume') is not None):
+            raise RecoveryError('inspection is only for an isolated development restore', 'request_invalid')
+        source = self.source(plan['remote'], plan['profile'])
+        if reopen and source.credential_reference is not None:
+            raise RecoveryError('reopen is only for local development data', 'request_invalid')
+        expected = self.restore_plan(plan['remote'], plan['profile'], plan['request_id'], plan['backup_id'], plan['target_volume'])
+        if plan != expected: raise RecoveryError('restore plan changed', 'restore_plan_changed')
+        if reopen and not _reopen_binding_matches(plan, reopen_plan, source.source_digest):
+            raise RecoveryError('stopped target plan does not match restore', 'reopen_plan_changed')
+        receipt_path = self.root / 'restores' / (plan['native_request_id'] + '.json')
+        retained = _read_owner_only_json(receipt_path)
+        manifest = verify_manifest(self.capture.drive, plan['backup_id'])
+        if retained is not None:
+            if reopen: raise RecoveryError('restore is already verified', 'request_invalid')
+            if plan['profile'] != 'lenzora-prod-storage':
+                _validate_database_receipt(retained, source, manifest, plan['native_request_id'],
+                    target_volume=plan['target_volume'])
+            return retained
+        with tempfile.TemporaryDirectory(prefix='postgres-restore-', dir=self.root) as temporary:
+            work = Path(temporary); ciphertext = work / 'ciphertext'; plaintext = work / 'archive.tar'
+            self.capture.drive.get_file(manifest['ciphertext_object'], ciphertext)
+            if sha256_file(ciphertext) != manifest['ciphertext_sha256']: raise RecoveryError('ciphertext changed', 'capture_invalid')
+            self.capture.crypto.decrypt_file(ciphertext, plaintext)
+            if sha256_file(plaintext) != manifest['plaintext_sha256']: raise RecoveryError('plaintext changed', 'capture_invalid')
+            with tarfile.open(plaintext, 'r') as bundle:
+                members = bundle.getmembers()
+                if len(members) != 1 or members[0].name != 'native-capture.tar' or not members[0].isfile() or members[0].size > 512 * 1024 * 1024:
+                    raise RecoveryError('recovery archive is invalid', 'capture_invalid')
+                archive = bundle.extractfile(members[0]).read()
+            if 'sha256:' + hashlib.sha256(archive).hexdigest() != _native_archive_digest(manifest):
+                raise RecoveryError('native capture digest differs', 'capture_invalid')
+            operation = 'reopen-restore' if reopen else 'verify-restore' if verify else 'inspect-restore' if inspect else 'restore'
+            arguments = {'archive': archive, 'target_volume': plan['target_volume']}
+            if reopen: arguments['reopen_plan'] = reopen_plan
+            result = _load_json_bytes(self.transport.invoke(source, operation, plan['native_request_id'], **arguments))
+            if result.get('ok') is False:
+                code = result.get('code')
+                if code not in {'restore_target_changed', 'restore_target_stopped', 'restore_target_busy',
+                        'schema_evidence_invalid', 'schema_reference_changed', 'schema_reference_cleanup_failed',
+                        'schema_reference_source_unavailable', 'schema_reference_pending', 'schema_reference_unavailable',
+                        'source_schema_changed',
+                        'restore_data_invalid', 'reopen_plan_changed', 'reopen_pending', 'reopen_history_invalid',
+                        'restore_database_unavailable', 'restore_verification_failed', 'request_invalid',
+                        'archive_changed', 'source_changed', 'path_unsafe'}:
+                    code = 'acceptance_unknown'
+                raise RecoveryError('retained restore requires inspection', code)
+            if reopen:
+                if (result.get('ok') is not True or result.get('code') != 'restore_reopened'
+                        or result.get('target') != plan['target'] or result.get('database_available') is not True
+                        or result.get('container_id') != reopen_plan['container_id']
+                        or result.get('reopen_plan_digest') != reopen_plan['plan_digest']
+                        or type(result.get('reopen_generation')) is not int
+                        or result['reopen_generation'] != reopen_plan['generation']):
+                    raise RecoveryError('reopen evidence is unavailable', 'restore_verification_failed')
+                return result
+            if inspect:
+                if result.get('code') == 'restore_target_stopped' and (
+                        result.get('database_available') is not False or result.get('all_match') is not False
+                        or not _reopen_binding_matches(plan, result.get('reopen_plan'), source.source_digest)
+                        or result.get('container_id') != result['reopen_plan']['container_id']):
+                    raise RecoveryError('stopped restore evidence is unavailable', 'restore_verification_failed')
+                if result.get('ok') is not True or result.get('code') not in {'restore_inspected', 'restore_verified', 'restore_target_stopped'} or result.get('target') != plan['target']:
+                    raise RecoveryError('restore inspection is unavailable', 'restore_verification_failed')
+                return result
+            if not result.get('ok') or result.get('code') not in {'restore_verified', 'storage_restore_verified'} or result.get('target') != plan['target']:
+                raise RecoveryError('restore evidence is incomplete', 'restore_verification_failed')
+            if plan['profile'] != 'lenzora-prod-storage':
+                if result.get('target_database') != plan['target_database'] or result.get('target_role') != plan['target_role']:
+                    raise RecoveryError('restored database destination differs', 'restore_verification_failed')
+                _validate_database_receipt(result, source, manifest, plan['native_request_id'],
+                    target_volume=plan['target_volume'])
+            result.update(plan_digest=plan['plan_digest'], backup_id=plan['backup_id'], source_digest=source.source_digest,
+                production_transfer=plan['target_volume'] is not None)
+            install_owner_only_json(receipt_path, result)
+            return result

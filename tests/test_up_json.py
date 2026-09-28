@@ -31,9 +31,14 @@ class TestUpJson(unittest.TestCase):
                 registry_find_instance=lambda _name: owner)), \
              patch.object(lifecycle, "runtime_service") as runtime, \
              contextlib.redirect_stdout(output):
-            runtime.return_value.invoke.return_value = result
+            def invoke_with_progress(*_args):
+                print("runtime progress")
+                return result
+
+            runtime.return_value.invoke.side_effect = invoke_with_progress
             lifecycle.cmd_up({}, args)
 
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload, {
             "command": "up",

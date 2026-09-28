@@ -17,6 +17,15 @@ import sandbox.core._instances as instances  # noqa: E402
 from sandbox.runtimes.base import OperationResult  # noqa: E402
 
 
+def _run_install_capture_stdout(args):
+    output = io.StringIO()
+    with patch("secrets.token_hex", side_effect=[
+            "install-login-sentinel", "snapshot-token-sentinel",
+    ]), contextlib.redirect_stdout(output):
+        lifecycle.cmd_install({}, args)
+    return output.getvalue()
+
+
 class TestWordPressCoreDownload(unittest.TestCase):
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")
@@ -117,7 +126,11 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 patch.object(lifecycle, "_write_ondemand_muplugin"), \
                 patch.object(lifecycle, "_write_licensing_muplugin"), \
                 patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"):
-            lifecycle.cmd_install({}, args)
+            output = _run_install_capture_stdout(args)
+
+        self.assertIn("Admin: http://localhost:8188/wp-admin", output)
+        self.assertNotIn("install-login-sentinel", output)
+        self.assertNotIn("sandbox_autologin=", output)
 
         compose.assert_called_once_with(
             "exec", "-T", "wp", "chown", "-R", "1000:1000",
@@ -177,8 +190,15 @@ class TestMuPluginDirectoryPreparation(unittest.TestCase):
             "mkdir -p /var/www/html/wp-content/mu-plugins && "
             "chown -R www-data:www-data /var/www/html/wp-content/mu-plugins && "
             "chmod -R a+rwX /var/www/html/wp-content/mu-plugins",
-            instance="preview-demo", check=True,
+            instance="preview-demo", check=True, capture=False,
         )
+
+    @patch("sandbox.commands.lifecycle.compose")
+    @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=False)
+    def test_json_setup_captures_compose_banner(self, _is_herd, compose):
+        lifecycle._prepare_mu_plugin_directory("preview-demo", capture=True)
+
+        self.assertTrue(compose.call_args.kwargs["capture"])
 
     @patch("sandbox.commands.lifecycle.compose")
     @patch("sandbox.commands.lifecycle._is_herd_instance", return_value=True)
@@ -208,7 +228,7 @@ class TestBoundedLogs(unittest.TestCase):
 
 
 class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
-    def test_loopback_muplugin_preserves_url_and_routes_curl_via_host_gateway(self):
+    def test_loopback_muplugin_prefers_internal_nginx_and_keeps_gateway_fallback(self):
         import sandbox.core._provision as provision
 
         with tempfile.TemporaryDirectory() as directory, \
@@ -217,8 +237,15 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
             provision._write_loopback_muplugin("preview-demo")
 
             rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
+            self.assertIn("gethostbyname( 'nginx' )", rendered)
+            self.assertIn("CURLOPT_URL, 'http://nginx' . $request_target", rendered)
+            self.assertIn("CURLOPT_HTTPHEADER, $curl_headers", rendered)
+            self.assertIn("'Host: ' . $host_header", rendered)
+            self.assertIn("$request_target .= '?' . $dest['query'];", rendered)
+            self.assertLess(rendered.index("CURLOPT_URL"),
+                            rendered.index("gethostbyname( 'host.docker.internal' )"))
             self.assertIn("CURLOPT_RESOLVE", rendered)
-            self.assertIn("host.docker.internal", rendered)
+            self.assertIn("gethostbyname( 'host.docker.internal' )", rendered)
             self.assertIn("$home_host !== $dest_host", rendered)
             self.assertNotIn("update_option", rendered)
 
@@ -235,6 +262,23 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
         self.assertIn("$dest_host . ':' . $dest_port", rendered)
         self.assertIn("$home_host !== $dest_host", rendered)
         self.assertIn("$home_port !== $dest_port", rendered)
+
+    def test_loopback_muplugin_intercepts_pre_http_request_and_routes_internally(self):
+        import sandbox.core._provision as provision
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(provision, "_ensure_muplugins_dir",
+                             return_value=Path(directory)):
+            provision._write_loopback_muplugin("preview-demo")
+
+            rendered = (Path(directory) / "00-sandbox-loopback.php").read_text()
+        self.assertIn("pre_http_request", rendered)
+        self.assertIn("_sandbox_loopback", rendered)
+        self.assertIn("X-Forwarded-Proto", rendered)
+        self.assertIn("X-Forwarded-Host", rendered)
+        self.assertIn("$home_port !== $dest_port", rendered)
+        self.assertIn("wp_remote_request", rendered)
+        self.assertIn("$redirects_followed < $max_redirects", rendered)
 
     def test_shared_reconciler_writes_abilities_and_debug_plugins(self):
         import sandbox.core._provision as provision
@@ -312,6 +356,71 @@ class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
         ]])
         self.assertEqual(events.count("host-plugins"), 1)
         self.assertLess(events.index("prepare"), events.index("host-plugins"))
+
+
+class TestUpPhpExtensionImages(unittest.TestCase):
+    def test_up_prepares_child_images_before_compose_start(self):
+        events = []
+        runtime = {
+            "server": "nginx", "php_extensions": {"extensions": {"gd": True}},
+            "wordpress_port": 8188, "mailpit_port": 8025,
+        }
+        args = SimpleNamespace(resolved_instance="fixture", json=True)
+        fake_core = SimpleNamespace(registry_find_instance=lambda _instance: None)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(lifecycle, "_core", return_value=fake_core), \
+                patch.object(lifecycle, "resolve_instances", return_value={"fixture": runtime}), \
+                patch.object(lifecycle, "_web_services", return_value=("db", "wp", "nginx")), \
+                patch.object(lifecycle, "prepare_php_extension_runtime",
+                             side_effect=lambda config, server: events.append(("prepare", config, server))), \
+                patch.object(lifecycle, "_compose_up",
+                             side_effect=lambda *a, **k: events.append(("compose", a[0], a[1]))), \
+                patch.object(lifecycle, "compose") as compose, \
+                patch.object(lifecycle, "php_extension_status",
+                             return_value={"drift": {"state": "ready"}}), \
+                patch.object(lifecycle, "wp_dir", return_value=Path(directory)), \
+                patch.object(lifecycle, "_is_herd_instance", side_effect=[False, True]), \
+                patch.object(lifecycle, "_write_mail_muplugin"), \
+                patch.object(lifecycle, "_write_loopback_muplugin"), \
+                patch.object(lifecycle, "_write_dl_cache_muplugin"), \
+                patch.object(lifecycle, "_write_ondemand_muplugin"), \
+                patch.object(lifecycle, "_write_host_runtime_muplugins"), \
+                patch.object(lifecycle, "_write_licensing_muplugin"), \
+                patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"), \
+                patch("sandbox.core._provision.read_local_abilities_enabled", return_value=None), \
+                patch("sandbox.commands.jobs.prune_jobs"), \
+                patch.object(lifecycle, "site_url", return_value="http://fixture.test"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            lifecycle.cmd_up({}, args)
+
+        self.assertEqual(events[0], ("prepare", runtime, "nginx"))
+        self.assertEqual(events[1], ("compose", "fixture", ("db", "wp", "nginx")))
+        self.assertTrue(compose.call_args.kwargs["capture"])
+        self.assertTrue(json.loads(output.getvalue())["ok"])
+
+    def test_up_fails_with_typed_json_before_compose_when_image_preparation_fails(self):
+        runtime = {
+            "server": "nginx", "php_extensions": {"extensions": {"gd": True}},
+            "wordpress_port": 8188, "mailpit_port": 8025,
+        }
+        args = SimpleNamespace(resolved_instance="fixture", json=True)
+        fake_core = SimpleNamespace(registry_find_instance=lambda _instance: None)
+        with patch.object(lifecycle, "_core", return_value=fake_core), \
+                patch.object(lifecycle, "resolve_instances", return_value={"fixture": runtime}), \
+                patch.object(lifecycle, "prepare_php_extension_runtime",
+                             side_effect=ValueError("child image unavailable")), \
+                patch.object(lifecycle, "_compose_up") as compose_up, \
+                contextlib.redirect_stdout(io.StringIO()) as output, \
+                self.assertRaises(SystemExit) as raised:
+            lifecycle.cmd_up({}, args)
+
+        self.assertEqual(raised.exception.code, 1)
+        compose_up.assert_not_called()
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(payload["runtime"], "wordpress")
+        self.assertEqual(payload["error"]["code"], "php_extension_image_prepare_failed")
 
 
 class TestDoctorJson(unittest.TestCase):

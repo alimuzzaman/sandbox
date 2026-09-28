@@ -10,6 +10,10 @@
 .mcp.json
 .mcp.json.bak
 sandbox.local.yml
+sandbox.local.yml.bak
+sandbox.local.yml.lock
+.sandbox.local.yml.*.tmp
+.sandbox.local.yml.bak.*.tmp
 .hermes/
 
 # Codex-managed linked worktrees and local Sandbox runtime state.

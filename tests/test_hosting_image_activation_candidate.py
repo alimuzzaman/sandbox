@@ -13,6 +13,12 @@ from tests.subprocess_support import run_test_process, synthetic_environment
 
 class CandidateInputTests(unittest.TestCase):
     def test_full_lenzora_candidate_crosses_fixed_preparation_and_transport(self):
+        self._full_lenzora_candidate("candidate-v1")
+
+    def test_candidate_v2_crosses_private_preparation_hydration_and_transport(self):
+        self._full_lenzora_candidate("candidate-v2")
+
+    def _full_lenzora_candidate(self, input_contract):
         from sandbox.hosting.images.activation import private_inputs
         from sandbox.hosting.images.activation.v2_models import PrivateComposeInputSnapshotV2
         from sandbox.commands.hosting import _host_image_argv_runner
@@ -47,6 +53,7 @@ class CandidateInputTests(unittest.TestCase):
                 "environment": "WORKER_TOKEN=" + fixture["environment"]["WORKER_TOKEN"] + "\n",
                 "compose_override": "{}",
                 "render_contract": {"project_name": "fixture", "image_environment": image_environment,
+                    "input_contract": input_contract,
                     "captured_environment": fixture["environment"],
                     "configuration_key": base64.b64encode(b"k" * 32).decode(),
                     "expected_services": sorted(fixture["compose"]["services"])}}
@@ -63,9 +70,10 @@ class CandidateInputTests(unittest.TestCase):
                 result = run_test_process(shlex.split(command), env=synthetic_environment(closed),
                     input=kwargs.get("input_data"), text=True, capture_output=True)
                 results.append(result)
+                self.assertEqual(result.returncode, 0, result.stderr)
                 return result
             provider = {"snapshot_id": "compose-snapshot/full-candidate", "provider_revision": "fixture-v2",
-                "input_contract": "candidate-v1", "target": TARGET, "compose_files": (str(candidate / "effective.json"),),
+                "input_contract": input_contract, "target": TARGET, "compose_files": (str(candidate / "effective.json"),),
                 "project_name": "fixture", "project_directory": str(candidate), "environment_file": str(candidate / "environment.env")}
             with patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh), \
                     patch("sandbox.transports.remote_hosting_activation.CLOSED_ENVIRONMENT", closed):
@@ -75,7 +83,7 @@ class CandidateInputTests(unittest.TestCase):
                     "selected_services": fixture["persistent_services"], "allowed_services": tuple(sorted(effective["services"])),
                     "service_image_bindings": bindings, "environment_bindings": image_environment}
                 digest = transport.prepare_compose_snapshot_v2(**arguments, target=TARGET,
-                    snapshot_id=provider["snapshot_id"], provider_revision=provider["provider_revision"], input_contract="candidate-v1")
+                    snapshot_id=provider["snapshot_id"], provider_revision=provider["provider_revision"], input_contract=input_contract)
                 contract = transport.prepared_init_contract_v2(plan=plan, initializer_order=fixture["initializer_order"])
                 self.assertEqual(contract.graph.prerequisite_groups, (("lenzora-job-queue",),))
                 self.assertEqual(contract.graph.initializer_order, fixture["initializer_order"])
@@ -83,7 +91,7 @@ class CandidateInputTests(unittest.TestCase):
                 snapshot = PrivateComposeInputSnapshotV2.create(snapshot_id=provider["snapshot_id"],
                     provider_revision=provider["provider_revision"], target=TARGET, plan_set_digest=plan.plan_set_digest,
                     selected_services=fixture["persistent_services"], configuration_digest=digest,
-                    expires_at=4_000_000_000, input_contract="candidate-v1", init_contract=contract)
+                    expires_at=4_000_000_000, input_contract=input_contract, init_contract=contract)
                 provider.update(snapshot_digest=snapshot.snapshot_digest, render_digest=digest)
                 rendered = transport.render_topology_v2(**arguments, topology_digest="sha256:" + "a" * 64,
                                                         private_compose_snapshot=snapshot.as_mapping())

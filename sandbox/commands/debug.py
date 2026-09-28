@@ -277,7 +277,8 @@ def cmd_test(cfg, args) -> None:
                 config_file=getattr(args, "config_file", None),
                 remote=getattr(args, "remote", None),
                 workspace=(getattr(args, "workspace", None) or [None])[0],
-                required_capability="job.exec" if not _test_requests_explicit_local(args) else None,
+                required_capability="job.exec" if getattr(args, "remote", None) else None,
+                allow_inferred_remote=False,
             ))
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")
@@ -347,7 +348,8 @@ def cmd_test(cfg, args) -> None:
             remote=getattr(args, "remote", None), workspace=(
                 requested_workspaces[0]
                 if getattr(args, "mode", None) == "matrix" else None),
-            required_capability="job.exec",
+            required_capability="job.exec" if getattr(args, "remote", None) else None,
+            allow_inferred_remote=False,
         ))
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")
@@ -516,16 +518,20 @@ def cmd_selftest(cfg, args) -> None:
     plugin. Uses the .cli-venv python (PyYAML available); falls back to the
     current interpreter."""
     import subprocess
+    import tempfile
     from sandbox.services.environment import compatible_subprocess_environment
     py = CLI_VENV / "bin" / "python"
     py = str(py) if py.exists() else sys.executable
-    rc = subprocess.run(
-        [py, "-m", "unittest", "discover", "-s", str(ROOT / "tests"), "-v"],
-        cwd=str(ROOT),
-        env=compatible_subprocess_environment({"PYTHONUTF8": "1"}),
-        timeout=1800,
-        shell=False,
-    ).returncode
+    with tempfile.TemporaryDirectory(prefix="sandbox-selftest-") as test_home:
+        rc = subprocess.run(
+            [py, "-m", "unittest", "discover", "-s", str(ROOT / "tests"), "-v"],
+            cwd=str(ROOT),
+            env=compatible_subprocess_environment({
+                "PYTHONUTF8": "1", "PYTHONPATH": str(ROOT), "SANDBOX_HOME": test_home,
+            }),
+            timeout=1800,
+            shell=False,
+        ).returncode
     if rc != 0:
         die("selftest: FAILED")
     ok("selftest: passed")

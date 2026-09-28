@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from unittest.mock import patch
 
 
 class TestDomainDestroyOrdering(unittest.TestCase):
@@ -27,6 +28,48 @@ class TestDomainDestroyOrdering(unittest.TestCase):
         )
         self.assertIn("DeletedRegistry", source)
         self.assertIn("service.cleanup", source)
+
+    def test_instance_delete_refreshes_caddy_after_registry_removal(self):
+        from sandbox.commands.instances_cmd import cmd_instance
+
+        source = inspect.getsource(cmd_instance)
+        registry_removal = source.rindex("sc.registry_remove(owner[\"root\"]")
+        route_refresh = source.index(
+            "_refresh_caddy_routes_after_instance_delete()", registry_removal,
+        )
+        success = source.index("ok(f\"Instance '{name}' deleted.\")")
+        self.assertLess(registry_removal, route_refresh)
+        self.assertLess(route_refresh, success)
+        self.assertNotIn("preserved unreceipted legacy domain artifacts", source)
+
+    def test_caddy_refresh_uses_current_config_without_starting_stopped_proxy(self):
+        from sandbox.commands import instances_cmd
+
+        current_config = {"instances": {"other": {"domain": "other.tst"}}}
+        with patch.object(instances_cmd, "load_config", return_value=current_config), \
+                patch.object(instances_cmd, "regen_caddyfile") as regenerate, \
+                patch.object(instances_cmd, "_proxy_container_running",
+                             return_value=False) as running, \
+                patch.object(instances_cmd, "reload_proxy") as reload_proxy:
+            instances_cmd._refresh_caddy_routes_after_instance_delete()
+
+        regenerate.assert_called_once_with(current_config)
+        running.assert_called_once_with()
+        reload_proxy.assert_not_called()
+
+    def test_caddy_refresh_reports_live_reload_failure_with_recovery_command(self):
+        from sandbox.commands import instances_cmd
+
+        with patch.object(instances_cmd, "load_config", return_value={}), \
+                patch.object(instances_cmd, "regen_caddyfile"), \
+                patch.object(instances_cmd, "_proxy_container_running",
+                             return_value=True), \
+                patch.object(instances_cmd, "reload_proxy", return_value=False), \
+                patch.object(instances_cmd, "info") as info:
+            instances_cmd._refresh_caddy_routes_after_instance_delete()
+
+        info.assert_called_once()
+        self.assertIn("./sb domains up", info.call_args.args[0])
 
 
 if __name__ == "__main__":

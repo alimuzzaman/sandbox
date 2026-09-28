@@ -128,6 +128,32 @@ def host_memory_status(remote: str, *, budget_seconds: float = 15):
     return _build_host_memory_service(remote).status(budget_seconds)
 
 
+def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) -> dict:
+    """Read authenticated identity without creating a telemetry repository.
+
+    Partial telemetry is not an identity failure or a resource-policy approval.
+    The adapter validates the service marker, revision and entire status schema.
+    """
+    import re
+    from sandbox.core import _remote
+    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
+
+    record = _remote.get_remote(remote)
+    if not isinstance(record, dict):
+        raise ValueError("recovery_target_identity_unavailable")
+    if (record.get("mcp_service") or {}).get("runtime_revision") != _remote._remote_mcp_runtime_revision():
+        raise RemoteProtocolError("remote_runtime_revision_mismatch", "controller revision does not match")
+    adapter = HostMemoryRemote(remote, record, _remote.remote_host_memory_request)
+    value = adapter.call("host_memory_status", budget_seconds=budget_seconds)
+    identity = value.get("target_identity")
+    if (value.get("evidence_state") not in {"known", "partial", "unmanaged"}
+            or not isinstance(identity, str)
+            or re.fullmatch(r"[0-9a-f]{24}", identity) is None):
+        raise ValueError("recovery_target_identity_unavailable")
+    return {"schema_version": 1, "target_identity": identity,
+            "evidence_state": value["evidence_state"], "observed_at": value["observed_at"]}
+
+
 def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
     """Return Feature 046's immutable read-only governance projection only."""
     service = _build_host_memory_service(remote)

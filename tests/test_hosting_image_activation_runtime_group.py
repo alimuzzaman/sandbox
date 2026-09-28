@@ -40,9 +40,17 @@ class RuntimeGroupTests(unittest.TestCase):
             else:
                 self.fail(argv)
             return subprocess.CompletedProcess(argv, 0, out, b"")
+        def graph_port(_environment, _timeout):
+            import time
+            deadline = time.monotonic() + _timeout
+            def command(argv, **_kwargs):
+                if time.monotonic() >= deadline:
+                    raise ValueError("graph_deadline_exceeded")
+                return run(argv).stdout
+            return command, deadline
         args = dict(source=source, document=fixture["document"], environment={"PATH": "/synthetic/bin"},
                     configuration_key=b"k" * 32, timeout_seconds=60)
-        with patch("subprocess.run", side_effect=run), patch("time.sleep"):
+        with patch("sandbox.hosting.images.activation.private_graph.graph_command_port", side_effect=graph_port), patch("time.sleep"):
             execute_private_graph(**args)
             source["action"] = "ready"
             receipt = execute_private_graph(**args)
@@ -57,7 +65,7 @@ class RuntimeGroupTests(unittest.TestCase):
 
         inspections.clear()
         tick = [0]
-        with patch("subprocess.run", side_effect=run), patch("time.monotonic", side_effect=lambda: tick[0]), patch("time.sleep", side_effect=lambda seconds: tick.__setitem__(0, 61)):
+        with patch("sandbox.hosting.images.activation.private_graph.graph_command_port", side_effect=graph_port), patch("time.monotonic", side_effect=lambda: tick[0]), patch("time.sleep", side_effect=lambda seconds: tick.__setitem__(0, 61)):
             with self.assertRaises(ValueError):
                 execute_private_graph(**args)
         self.assertEqual(len([argv for argv in calls if "up" in argv]), 1)
@@ -65,6 +73,6 @@ class RuntimeGroupTests(unittest.TestCase):
         source["action"] = "replace"
         fixture["image"]["Id"] = "sha256:" + "f" * 64
         calls.clear()
-        with patch("subprocess.run", side_effect=run), self.assertRaises(ValueError):
+        with patch("sandbox.hosting.images.activation.private_graph.graph_command_port", side_effect=graph_port), self.assertRaises(ValueError):
             execute_private_graph(**args)
         self.assertFalse(any("up" in argv for argv in calls))

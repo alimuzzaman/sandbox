@@ -34,6 +34,21 @@ def _load_mcp_jobs_tool():
 
 
 class JobCliTests(unittest.TestCase):
+    def test_mcp_old_page_is_unknown_and_cursor_remains_opaque(self):
+        import base64
+        tool = _load_mcp_jobs_tool()
+        row = {"job_id": "a" * 32, "command_json": "must-not-appear"}
+        transport = SimpleNamespace(list=lambda *args, **kwargs: {"jobs": [row]})
+        with patch.object(tool, "_remote_transport", return_value=transport):
+            result = tool.job_list(remote="fixture", limit=10)
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(result["has_more"])
+        self.assertEqual(result["page"]["completeness"], "unknown")
+        self.assertNotIn("command_json", result["jobs"][0])
+        cursor = result["next_cursor"]
+        decoded = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        self.assertEqual(decoded, {"job_id": "a" * 32})
+
     def test_output_parser_retains_invalid_wait_for_stable_json_error(self):
         parser = __import__("argparse").ArgumentParser()
         configure_output_parser(parser)
@@ -223,7 +238,10 @@ class JobCliTests(unittest.TestCase):
             "workspace": "unit",
             "active_only": False,
         })])
-        self.assertEqual(json.loads(output.getvalue()), {"jobs": [], "ok": True})
+        response = json.loads(output.getvalue())
+        self.assertEqual(response["jobs"], [])
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["page"]["completeness"], "unknown")
 
     def test_job_list_rejects_a_malformed_controller_project_identity(self):
         parser = __import__("argparse").ArgumentParser()

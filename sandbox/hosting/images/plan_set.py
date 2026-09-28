@@ -26,11 +26,19 @@ from .models import TargetScope, canonical_digest, canonical_json
 MAX_V2_DOCUMENT_BYTES = 128 * 1024
 MAX_V2_BUNDLE_BYTES = 1024 * 1024
 MAX_V2_BUNDLE_SET_BYTES = 5 * 1024 * 1024
+MAX_LOCAL_DATABASE_BUNDLE_SET_BYTES = 6 * 1024 * 1024
 MAX_SIGSTORE_BUNDLE_DEPTH = 16
 MAX_SIGSTORE_BUNDLE_NODES = 16 * 1024
 MAX_SIGSTORE_BUNDLE_KEY_BYTES = 256
 MAX_SIGSTORE_BUNDLE_STRING_BYTES = 256 * 1024
 IMAGE_NAMES = ("queue", "web", "worker")
+LOCAL_DATABASE_IMAGE_NAMES = ("database", *IMAGE_NAMES)
+
+
+def receipt_image_names(version: int) -> tuple[str, ...]:
+    if type(version) is not int or version not in (1, 2):
+        raise PlanSetContractError("receipt_mismatch")
+    return IMAGE_NAMES if version == 1 else LOCAL_DATABASE_IMAGE_NAMES
 OCI_MEDIA_TYPES = frozenset({
     "application/vnd.oci.image.manifest.v1+json",
     "application/vnd.docker.distribution.manifest.v2+json",
@@ -233,6 +241,7 @@ class MachineImagePlanSetPolicy:
     activation_environment_bindings: tuple[tuple[str, str], ...]
     signature_mode: str
     policy_digest: str
+    receipt_schema_version: int = 1
 
     FIELDS: ClassVar[frozenset[str]] = frozenset({
         "schema_version", "authority_id", "policy_revision", "target_scope",
@@ -258,6 +267,11 @@ class MachineImagePlanSetPolicy:
                 or self.workflow.ref != self.source_ref or self.workflow.sha != self.source_revision
                 or self.signature_mode != SIGNATURE_MODE):
             raise PlanSetContractError("policy_mismatch")
+        names = receipt_image_names(self.receipt_schema_version)
+        if self.receipt_schema_version == 2 and self.source_ref != {
+                "development": "refs/heads/dev", "production": "refs/heads/main"
+                }.get(self.target_scope.environment):
+            raise PlanSetContractError("policy_mismatch")
         persistent = self._services(self.persistent_services, non_empty=True)
         one_shot = self._services(self.one_shot_services, non_empty=False)
         if persistent != self.persistent_services or one_shot != self.one_shot_services \
@@ -269,20 +283,20 @@ class MachineImagePlanSetPolicy:
             raise PlanSetContractError("policy_mismatch")
         if {service for service, _ in bindings} != set(persistent + one_shot):
             raise PlanSetContractError("policy_mismatch")
-        if {image for _, image in bindings} != set(IMAGE_NAMES):
+        if {image for _, image in bindings} != set(names):
             raise PlanSetContractError("policy_mismatch")
         for service, image in bindings:
             _text(service, pattern=_SERVICE)
-            if image not in IMAGE_NAMES:
+            if image not in names:
                 raise PlanSetContractError("policy_mismatch")
         activation = tuple(sorted(self.activation_environment_bindings))
         if (activation != self.activation_environment_bindings
                 or len(activation) != len(set(activation))
-                or {image for image, _ in activation} != set(IMAGE_NAMES)
+                or {image for image, _ in activation} != set(names)
                 or len({variable for _, variable in activation}) != len(activation)):
             raise PlanSetContractError("policy_mismatch")
         for image, variable in activation:
-            if image not in IMAGE_NAMES:
+            if image not in names:
                 raise PlanSetContractError("policy_mismatch")
             _text(variable, pattern=_ENVIRONMENT_VARIABLE)
         if self.policy_digest != canonical_digest(
@@ -299,7 +313,8 @@ class MachineImagePlanSetPolicy:
         return result
 
     def identity_mapping(self) -> dict[str, Any]:
-        return {"schema_version": 2, "authority_id": self.authority_id,
+        return {**({"receipt_schema_version": 2} if self.receipt_schema_version == 2 else {}),
+                "schema_version": 2, "authority_id": self.authority_id,
                 "policy_revision": self.policy_revision, "target_scope": self.target_scope.as_mapping(),
                 "approved_receipt_digest": self.approved_receipt_digest,
                 "source_repository": self.source_repository, "source_ref": self.source_ref,
@@ -319,7 +334,13 @@ class MachineImagePlanSetPolicy:
 
     @classmethod
     def from_mapping(cls, value: object) -> "MachineImagePlanSetPolicy":
-        raw = _closed(value, cls.FIELDS)
+        fields = cls.FIELDS | ({"receipt_schema_version"} if type(value) is dict
+                               and "receipt_schema_version" in value else set())
+        raw = _closed(value, fields)
+        version = raw.get("receipt_schema_version", 1)
+        if "receipt_schema_version" in raw and (type(version) is not int or version != 2):
+            raise PlanSetContractError("policy_mismatch")
+        names = receipt_image_names(version)
         bindings = raw["service_image_bindings"]
         if type(bindings) is not list or len(bindings) > 64:
             raise PlanSetContractError("policy_mismatch")
@@ -328,7 +349,7 @@ class MachineImagePlanSetPolicy:
             row = _closed(item, frozenset({"service", "image"}))
             pairs.append((row["service"], row["image"]))
         activation_raw = raw["activation_environment_bindings"]
-        if type(activation_raw) is not list or len(activation_raw) != len(IMAGE_NAMES):
+        if type(activation_raw) is not list or len(activation_raw) != len(names):
             raise PlanSetContractError("policy_mismatch")
         activation = []
         for item in activation_raw:
@@ -340,7 +361,7 @@ class MachineImagePlanSetPolicy:
                    raw["platform"], WorkflowIdentityV2.from_mapping(raw["workflow"]),
                    cls._services(raw["persistent_services"], non_empty=True),
                    cls._services(raw["one_shot_services"], non_empty=False), tuple(sorted(pairs)),
-                   tuple(sorted(activation)), raw["signature_mode"], raw["policy_digest"])
+                   tuple(sorted(activation)), raw["signature_mode"], raw["policy_digest"], version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +382,7 @@ class HostedImageV2:
     })
 
     def __post_init__(self) -> None:
-        if self.name not in IMAGE_NAMES or _REPOSITORY.fullmatch(self.repository) is None:
+        if self.name not in LOCAL_DATABASE_IMAGE_NAMES or _REPOSITORY.fullmatch(self.repository) is None:
             raise PlanSetContractError("receipt_mismatch")
         for value in (self.manifest_digest, self.config_digest,
                       self.signature_payload_digest, self.signature_bundle_digest):
@@ -393,6 +414,8 @@ class HostedProductionReceiptV1:
     workflow: WorkflowIdentityV2
     images: tuple[HostedImageV2, ...]
 
+    schema_version: ClassVar[int] = 1
+
     FIELDS: ClassVar[frozenset[str]] = frozenset({
         "schema_version", "target", "platform", "source_sha", "source_ref",
         "sentry_sha", "workflow", "images",
@@ -417,6 +440,34 @@ class HostedProductionReceiptV1:
             raise PlanSetContractError("receipt_mismatch")
         return cls(raw["target"], raw["platform"], raw["source_sha"], raw["source_ref"],
                    raw["sentry_sha"], workflow, images)
+
+
+@dataclass(frozen=True, slots=True)
+class HostedLocalDatabaseReceiptV2(HostedProductionReceiptV1):
+    schema_version: ClassVar[int] = 2
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "HostedLocalDatabaseReceiptV2":
+        raw = _closed(value, cls.FIELDS)
+        if (type(raw["schema_version"]) is not int or raw["schema_version"] != 2
+                or raw["target"] not in ("development", "production")
+                or raw["source_ref"] != {"development": "refs/heads/dev",
+                    "production": "refs/heads/main"}[raw["target"]]
+                or type(raw["images"]) is not list or len(raw["images"]) != 4):
+            raise PlanSetContractError("receipt_mismatch")
+        images = tuple(HostedImageV2.from_mapping(item) for item in raw["images"])
+        if tuple(image.name for image in images) != LOCAL_DATABASE_IMAGE_NAMES:
+            raise PlanSetContractError("receipt_mismatch")
+        legacy = HostedProductionReceiptV1.from_mapping({**raw, "schema_version": 1,
+            "target": "production", "images": raw["images"][1:]})
+        return cls(raw["target"], legacy.platform, legacy.source_sha, legacy.source_ref,
+                   legacy.sentry_sha, legacy.workflow, images)
+
+
+def decode_hosted_image_receipt(value: object) -> HostedProductionReceiptV1:
+    if type(value) is dict and type(value.get("schema_version")) is int and value["schema_version"] == 2:
+        return HostedLocalDatabaseReceiptV2.from_mapping(value)
+    return HostedProductionReceiptV1.from_mapping(value)
 
 
 class OfflineSignatureVerifier(Protocol):
@@ -481,7 +532,9 @@ class VerifiedImagePlanSet:
                     "policy_revision": self.policy.policy_revision,
                     "policy_digest": self.policy.policy_digest,
                     "target_scope": self.policy.target_scope.as_mapping()},
-                "receipt": {"payload_digest": self.receipt_digest,
+                "receipt": {**({"schema_version": 2, "target": self.receipt.target}
+                    if self.receipt.schema_version == 2 else {}),
+                    "payload_digest": self.receipt_digest,
                     "source_repository": self.receipt.workflow.repository,
                     "source_ref": self.receipt.source_ref,
                     "source_revision": self.receipt.source_sha,
@@ -510,8 +563,13 @@ class VerifiedImagePlanSet:
             raise PlanSetContractError("plan_set_invalid")
         authority = _closed(raw["authority"], frozenset({
             "authority_id", "policy_revision", "policy_digest", "target_scope"}))
-        receipt_claim = _closed(raw["receipt"], frozenset({
-            "payload_digest", "source_repository", "source_ref", "source_revision", "workflow"}))
+        receipt_fields = frozenset({"payload_digest", "source_repository", "source_ref", "source_revision", "workflow"})
+        if type(raw["receipt"]) is dict and "schema_version" in raw["receipt"]:
+            receipt_fields |= {"schema_version", "target"}
+        receipt_claim = _closed(raw["receipt"], receipt_fields)
+        version = receipt_claim.get("schema_version", 1)
+        if "schema_version" in receipt_claim and (type(version) is not int or version != 2):
+            raise PlanSetContractError("plan_set_invalid")
         signature = _closed(raw["signature"], frozenset({
             "mode", "receipt_bundle_digest", "receipt_verified", "all_image_payloads_verified"}))
         bindings_raw = raw["service_image_bindings"]
@@ -541,13 +599,17 @@ class VerifiedImagePlanSet:
             "service_image_bindings": [{"service": s, "image": i} for s, i in sorted(pairs)],
             "activation_environment_bindings": activation_raw,
             "signature_mode": signature["mode"]}
+        if version == 2:
+            policy_identity["receipt_schema_version"] = 2
         policy = MachineImagePlanSetPolicy.from_mapping({**policy_identity,
             "policy_digest": authority["policy_digest"]})
-        receipt_mapping = {"schema_version": 1, "target": "production", "platform": "linux/amd64",
+        receipt_mapping = {"schema_version": version, "target": receipt_claim.get("target", "production"), "platform": "linux/amd64",
             "source_sha": receipt_claim["source_revision"], "source_ref": receipt_claim["source_ref"],
             "sentry_sha": receipt_claim["source_revision"], "workflow": workflow.as_mapping(),
             "images": raw["images"]}
-        receipt = HostedProductionReceiptV1.from_mapping(receipt_mapping)
+        receipt = decode_hosted_image_receipt(receipt_mapping)
+        if version == 2 and receipt.target != policy.target_scope.environment:
+            raise PlanSetContractError("policy_mismatch")
         if signature["receipt_verified"] is not True or signature["all_image_payloads_verified"] is not True:
             raise PlanSetContractError("plan_set_invalid")
         plan = cls.create(policy, receipt_claim["payload_digest"], receipt,
@@ -639,7 +701,7 @@ def verify_release_bundle(policy_mapping: object, directory: Path,
         os.close(directory_fd)
         raise PlanSetContractError()
     expected = {"receipt.json", "receipt.sha256", "receipt.bundle"}
-    expected.update(f"{name}.{suffix}" for name in IMAGE_NAMES for suffix in ("payload.json", "bundle"))
+    expected.update(f"{name}.{suffix}" for name in receipt_image_names(policy.receipt_schema_version) for suffix in ("payload.json", "bundle"))
     try:
         if set(os.listdir(directory_fd)) != expected:
             raise PlanSetContractError()
@@ -658,7 +720,9 @@ def verify_release_bundle(policy_mapping: object, directory: Path,
             finally:
                 os.close(fd)
             total_bytes += len(data)
-            if total_bytes > MAX_V2_BUNDLE_SET_BYTES:
+            maximum_total = (MAX_LOCAL_DATABASE_BUNDLE_SET_BYTES
+                if policy.receipt_schema_version == 2 else MAX_V2_BUNDLE_SET_BYTES)
+            if total_bytes > maximum_total:
                 raise PlanSetContractError("input_too_large")
             return data
 
@@ -668,7 +732,10 @@ def verify_release_bundle(policy_mapping: object, directory: Path,
         receipt_digest = _sha256(receipt_bytes)
         if checksum != expected_checksum or receipt_digest != policy.approved_receipt_digest:
             raise PlanSetContractError("receipt_mismatch")
-        receipt = HostedProductionReceiptV1.from_mapping(_load_json_bytes(receipt_bytes))
+        receipt = decode_hosted_image_receipt(_load_json_bytes(receipt_bytes))
+        if (receipt.schema_version != policy.receipt_schema_version
+                or (receipt.schema_version == 2 and receipt.target != policy.target_scope.environment)):
+            raise PlanSetContractError("policy_mismatch")
         if (receipt.workflow != policy.workflow or receipt.source_sha != policy.source_revision
                 or receipt.source_ref != policy.source_ref or receipt.platform != policy.platform):
             raise PlanSetContractError("policy_mismatch")

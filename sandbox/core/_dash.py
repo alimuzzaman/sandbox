@@ -58,7 +58,7 @@ def runtime_health_lines(data: dict | None) -> tuple[str, ...]:
     return tuple(lines)
 
 
-def collect_instance_rows(cfg: dict) -> list[dict]:
+def collect_instance_rows(cfg: dict, *, probe_runtime: bool = True) -> list[dict]:
     """Per-instance view-model shared by `cmd_instances` (static print) and the
     `dashboard` TUI, so the two never drift. One dict per instance with status,
     URLs, server, MCP server name, project, and focus.
@@ -73,11 +73,14 @@ def collect_instance_rows(cfg: dict) -> list[dict]:
         owner = sc.registry_find_instance(name)
         project = Path(owner["root"]).name if owner and owner.get("root") else "—"
         label = owner.get("label", "default") if owner else "—"
-        _base = site_url(inst_cfg)
+        # Inventory is read-only and may span many stale projects.  Do not
+        # perform one network health probe per domain while rendering it; the
+        # persisted URL or localhost fallback is enough for this observation.
+        _base = site_url(inst_cfg, probe=False)
         _token = local_cfg.get("instances", {}).get(name, {}).get("autologin_token", "")
         rows.append({
             "name": name,
-            "running": _instance_running(name),
+            "running": _instance_running(name) if probe_runtime else False,
             "wordpress_port": inst_cfg["wordpress_port"],
             "mailpit_port": inst_cfg["mailpit_port"],
             "url": _base,

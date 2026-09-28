@@ -79,6 +79,36 @@ class HostRecoveryPolicyTests(unittest.TestCase):
         self.assertIsNone(refusal)
         self.assertTrue(evidence["evidence_id"].startswith("sha256:"))
 
+    def test_nested_artifact_keeps_job_source_and_sibling_invocation_separate(self):
+        from pathlib import Path
+        self.operation["source"]["artifact"] = {
+            "schema_version": 1, "kind": "git_subtree", "root_relative": "site",
+            "revision": "b" * 40}
+        self.evidence["source_revision"] = "b" * 40
+        selector = str(Path("/synthetic/config").resolve())
+        self.operation["invocation_root_digest"] = "sha256:" + hashlib.sha256(selector.encode()).hexdigest()
+        self.job["submission"]["argv"][4] = selector
+        self.operation["digest"] = canonical_digest({key: value for key, value in self.operation.items() if key != "digest"})
+        self.assertIsNone(validate_job_binding(self.request, self.job, self.operation))
+        wrong_job = copy.deepcopy(self.job)
+        wrong_job["submission"]["source"]["commit"] = "b" * 40
+        self.assertEqual(validate_job_binding(self.request, wrong_job, self.operation), "binding_mismatch")
+        wrong_selector = copy.deepcopy(self.job)
+        wrong_selector["submission"]["argv"][4] = "/different/config"
+        self.assertEqual(validate_job_binding(self.request, wrong_selector, self.operation), "binding_mismatch")
+        wrong_runtime = copy.deepcopy(self.operation)
+        wrong_runtime["evidence"]["source_revision"] = "a" * 40
+        wrong_runtime["digest"] = canonical_digest({key: value for key, value in wrong_runtime.items() if key != "digest"})
+        self.assertEqual(validate_job_binding(self.request, self.job, wrong_runtime), "binding_mismatch")
+        legacy = copy.deepcopy(self.operation)
+        del legacy["source"]["artifact"]
+        del legacy["invocation_root_digest"]
+        legacy["evidence"]["source_revision"] = "a" * 40
+        legacy["digest"] = canonical_digest({key: value for key, value in legacy.items() if key != "digest"})
+        self.assertEqual(validate_job_binding(self.request, self.job, legacy), "binding_mismatch")
+        self.job["submission"]["argv"][4] = "/project"
+        self.assertIsNone(validate_job_binding(self.request, self.job, legacy))
+
     def test_legacy_job_refuses_before_observation(self):
         self.job["submission"] = None
         self.assertEqual(validate_job_binding(self.request, self.job, self.operation),

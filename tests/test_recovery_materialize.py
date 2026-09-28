@@ -22,7 +22,8 @@ class TestScopedMaterialization(unittest.TestCase):
                 return SourceBinding(remote, "machine", "revision",
                                      "changed" if mode == "changed" and self.observations > 1 else "source")
 
-            def capture(self, remote, artifact, destination, binding):
+            def capture(self, remote, artifact, destination, binding, *, backup_operation_id):
+                assert backup_operation_id == "set"
                 if mode == "missing":
                     return ()
                 path = destination / "validated.tar"
@@ -85,7 +86,8 @@ class TestScopedMaterialization(unittest.TestCase):
         class Adapter:
             def observe(self, remote, plan):
                 return SourceBinding(remote, "machine", "revision", "source")
-            def capture(self, remote, artifact, destination, binding):
+            def capture(self, remote, artifact, destination, binding, *, backup_operation_id):
+                assert backup_operation_id == "set"
                 path = destination / "validated.tar"
                 path.write_bytes(b"validated")
                 return (path,)

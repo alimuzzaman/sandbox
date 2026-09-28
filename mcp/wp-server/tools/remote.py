@@ -32,7 +32,9 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
                   plugin_slug: str | None = None,
                   pro_plugins: bool = True,
                   aliases: list[str] | None = None,
-                  prune_routes: bool = False) -> dict:
+                  prune_routes: bool = False,
+                  request_id: str | None = None,
+                  verify_timeout: int | None = None) -> dict:
     """Deploy the local project's current state (committed HEAD + uncommitted
     changes, including untracked files) to a registered, provisioned remote VPS
     target on demand. One-way, on-demand only — never a continuous sync; the
@@ -67,6 +69,8 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
       default — the inventory covers the whole host, so a route may belong to a
       checkout this project's config cannot see. Stale routes are reported as
       instance.stale_routes either way.
+    request_id: stable delivery request identity; repeated requests are lookup-only.
+    verify_timeout: shared public-route verification budget, 10 to 300 seconds.
 
     Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url,
     pro_plugins, error}.
@@ -80,6 +84,10 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
         return capability_error
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "deploy", "--project-dir", project_dir, "--remote", remote, "--json"]
+    if request_id is not None:
+        cmd.extend(["--request-id", request_id])
+    if verify_timeout is not None:
+        cmd.extend(["--verify-timeout", str(verify_timeout)])
     if ensure:
         cmd.append("--ensure")
     if expose:

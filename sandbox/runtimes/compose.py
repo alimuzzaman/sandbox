@@ -105,7 +105,7 @@ class ComposeAdapter:
         self.dependencies = dependencies
         self.registry = registry
         self.timeout = timeout
-        self.capabilities = frozenset({
+        self.capabilities = frozenset({"instance_creation_receipt_v1",
             "ensure", "status", "start", "stop", "resume", "suspend", "logs",
             "exec", "apply", "destroy", "open",
         })
@@ -192,17 +192,17 @@ class ComposeAdapter:
             raise ValueError("Compose health path is invalid")
         if "http_port" in descriptor and descriptor["http_port"] is not None and not _valid_port(descriptor["http_port"]):
             raise ValueError("Compose HTTP port is invalid")
-        startup_timeout = descriptor.get("startup_timeout_seconds", self.timeout)
-        if "startup_timeout_seconds" in descriptor and (
+        startup_timeout = descriptor.get("startup_timeout_seconds")
+        if startup_timeout is not None and (
                 isinstance(startup_timeout, bool) or not isinstance(startup_timeout, (int, float))
                 or not math.isfinite(startup_timeout) or not 30 <= startup_timeout <= 3600):
             raise ValueError("Compose startup timeout is invalid")
-        recreate_on_ensure = descriptor.get("recreate_on_ensure", False)
-        if not isinstance(recreate_on_ensure, bool):
+        recreate_on_ensure = descriptor.get("recreate_on_ensure")
+        if recreate_on_ensure is not None and not isinstance(recreate_on_ensure, bool):
             raise ValueError("Compose recreate-on-ensure setting is invalid")
         lifecycle = normalize_instance_lifecycle(descriptor.get("instanceLifecycle"))
         return {**descriptor, "root": str(root), "compose_file": str(compose_file),
-                "startup_timeout_seconds": float(startup_timeout),
+                "startup_timeout_seconds": float(startup_timeout) if startup_timeout is not None else None,
                 "recreate_on_ensure": recreate_on_ensure,
                 "instanceLifecycle": lifecycle}
 
@@ -275,7 +275,69 @@ class ComposeAdapter:
         return float(value)
 
     def invoke(self, request: OperationRequest) -> OperationResult:
+        context = request.arguments.get('creation_context')
+        if context is None:
+            return self._invoke_impl(request)
+        from sandbox.server_config.creation_requests import (
+            validate_resolved_context, reserve_creation_request, scope_key,
+            request_key, lookup_creation_receipt, finish_creation_fields, replay_creation_result,
+        )
+        from sandbox.core._paths import RUNTIME_DIR
         descriptor = self._descriptor(request)
+        from sandbox.server_config.models import validate_creation_context
+        context = validate_creation_context(context)
+        context = validate_resolved_context(context, descriptor, label=request.label,
+            create_allowed=(bool(request.arguments.get('create', False))
+                            if request.operation == 'ensure' else context['intent_fields']['create_allowed']))
+        with self.registry.project_lock(descriptor['root']):
+            record = self._record(request)
+            expected = request.arguments.get('expected_incarnation')
+            if expected is not None and (record or {}).get('instance_incarnation_id') != expected:
+                raise ValueError('instance_incarnation_changed')
+            if request.operation == 'ensure':
+                guard = reserve_creation_request(scope_key(context), request_key(context), context['operation_id'], context['intent_digest'])
+                if guard['state'] == 'existing':
+                    proof = replay_creation_result(record, context, expected)
+                    return OperationResult(proof.get('ok', False), request.operation, descriptor['root'], 'compose', proof)
+            else:
+                proof = lookup_creation_receipt(record, context, expected)
+                if expected is None or not proof.get('ok'):
+                    raise ValueError('creation_request_unknown')
+                if proof['creation_receipt']['completion'] != 'succeeded':
+                    raise ValueError('creation_request_unknown')
+                from sandbox.server_config.creation_requests import reserve_creation_reconcile
+                reserve_creation_reconcile(context)
+            try:
+                with self.registry.project_lock(RUNTIME_DIR / '.instance-ports'):
+                    result = self._invoke_impl(request, descriptor=descriptor)
+            except Exception:
+                if request.operation == 'ensure':
+                    try:
+                        record = self._record(request)
+                        proof = lookup_creation_receipt(record, context, expected)
+                        if proof.get('ok') and proof['creation_receipt']['completion'] == 'pending':
+                            self.registry.registry_put(descriptor['root'], label=request.label,
+                                **finish_creation_fields(record, context, succeeded=False))
+                    except Exception:
+                        pass
+                raise
+            if request.operation != 'ensure':
+                return result
+            record = self._record(request)
+            proof = lookup_creation_receipt(record, context, expected)
+            if not proof.get('ok'):
+                return OperationResult(False, request.operation, descriptor['root'], 'compose', proof)
+            record = self.registry.registry_put(descriptor['root'], label=request.label,
+                **finish_creation_fields(record, context, succeeded=result.ok))
+            receipt = lookup_creation_receipt(record, context, expected)['creation_receipt']
+            return OperationResult(result.ok, result.operation, result.project_root,
+                result.project_kind, dict(result.data, creation_receipt=receipt))
+
+    def _invoke_impl(self, request: OperationRequest, *, descriptor: dict[str, Any] | None = None) -> OperationResult:
+        # Covered creation consumes the descriptor whose intent was validated.
+        # Reloading here could execute changed configuration under the old receipt.
+        if descriptor is None:
+            descriptor = self._descriptor(request)
         op = request.operation
         record = self._record(request)
         registry_records = tuple(self.registry.registry_all().values())
@@ -314,6 +376,17 @@ class ComposeAdapter:
                     "registered Compose workspace family does not match its source"
                 )
         http_port = int(record.get("http_port")) if record and record.get("http_port") else self._record_port(descriptor, runtime_id)
+        if op == 'ensure' and request.arguments.get('creation_context') is not None:
+            import secrets
+            from sandbox.server_config.creation_requests import pending_receipts
+            context = request.arguments['creation_context']
+            incarnation = (record or {}).get('instance_incarnation_id') or 'inc_' + secrets.token_hex(16)
+            receipts = pending_receipts(record, context, runtime_id, incarnation,
+                                        'reused' if record else 'created')
+            record = self.registry.registry_put(descriptor['root'], label=request.label,
+                instance=runtime_id, kind='compose', status='pending',
+                http_port=http_port, instance_incarnation_id=incarnation,
+                creation_receipts=receipts)
         overlay = self._overlay(descriptor, runtime_id, http_port)
         project_args = ["--project-name", f"sandbox-{runtime_id}", "--project-directory", descriptor["root"], "--file", descriptor["compose_file"], "--file", str(overlay)]
         service = descriptor["service"]
@@ -328,16 +401,17 @@ class ComposeAdapter:
             if config.returncode != 0 or service not in config.stdout.split():
                 raise ValueError(f"declared Compose service {service!r} was not found")
             up = ["docker", "compose", *project_args, "up", "-d"]
-            if descriptor["recreate_on_ensure"]:
+            if descriptor.get("recreate_on_ensure"):
                 up.append("--force-recreate")
             started = self.dependencies.process.run([*up, service], cwd=descriptor["root"], timeout=self.timeout)
             if started.returncode != 0:
                 raise RuntimeError(started.stderr or "Compose failed to start")
             url = f"http://127.0.0.1:{http_port}"
-            deadline = time.monotonic() + descriptor["startup_timeout_seconds"]
+            startup_timeout = descriptor.get("startup_timeout_seconds")
+            deadline = time.monotonic() + (float(startup_timeout) if startup_timeout is not None else self.timeout)
             while time.monotonic() < deadline:
                 if self.dependencies.http.probe(url + descriptor["health_path"], timeout=2):
-                    data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": url, "health_path": descriptor["health_path"], "framework": descriptor.get("framework"), "status": "ready", "instanceLifecycle": descriptor["instanceLifecycle"], "lifecycleState": "ready"}
+                    data = {**(record or {}), "instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": url, "health_path": descriptor["health_path"], "framework": descriptor.get("framework"), "status": "ready", "instanceLifecycle": descriptor["instanceLifecycle"], "lifecycleState": "ready"}
                     stored = {key: value for key, value in data.items() if key != "root"}
                     self.registry.registry_put(descriptor["root"], **stored)
                     return OperationResult(True, op, descriptor["root"], "compose", data)
@@ -352,37 +426,55 @@ class ComposeAdapter:
 
         if op == "status":
             result = self.dependencies.process.run(["docker", "compose", *project_args, "ps", "--format", "json"], cwd=descriptor["root"], timeout=30)
-            compose_output = result.stdout[-10000:]
+            raw_output = result.stdout or ""
+            compose_output = raw_output[-10000:]
             states = []
-            for line in compose_output.splitlines():
+            malformed = (getattr(result, "stdout_truncated", False) is True
+                         or len(raw_output.encode("utf-8")) > 1024 * 1024)
+            if raw_output.strip() and not malformed:
                 try:
-                    item = json.loads(line)
+                    # Compose versions emit either one array or JSON rows.
+                    decoded = json.loads(raw_output)
+                    states = decoded if isinstance(decoded, list) else [decoded]
                 except (TypeError, ValueError):
-                    continue
-                if isinstance(item, dict):
-                    states.append(item)
-            service_state = next(
-                (item.get("State") for item in states
-                 if item.get("Service") == service),
-                None,
-            )
-            if result.returncode != 0:
+                    try:
+                        states = [json.loads(line) for line in raw_output.splitlines()
+                                  if line.strip()]
+                    except (TypeError, ValueError):
+                        malformed = True
+                malformed = malformed or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("Service"), str)
+                    or not isinstance(item.get("State"), str)
+                    for item in states
+                )
+            matching = [] if malformed else [
+                item for item in states if item["Service"] == service
+            ]
+            health_state = "unknown"
+            if result.returncode != 0 or malformed or len(matching) > 1:
                 status = "error"
-            elif service_state is None:
-                # Preserve the historical ready result for older Compose
-                # implementations that return non-JSON output, while an
-                # explicit service row is authoritative when available.
-                status = "ready" if not states else "stopped"
+            elif not matching:
+                status = "stopped"
+            elif matching[0]["State"] != "running":
+                status = "stopped"
+            elif matching[0].get("Health") in {"unhealthy", "starting"}:
+                status = "unhealthy"
+                health_state = matching[0]["Health"]
             else:
-                status = "ready" if service_state == "running" else "stopped"
+                healthy = self.dependencies.http.probe(
+                    f"http://127.0.0.1:{http_port}" + descriptor["health_path"], timeout=2
+                )
+                health_state = "healthy" if healthy else "unhealthy"
+                status = "ready" if healthy else "unhealthy"
             lifecycle_state = (
                 "ready" if status == "ready" else
                 "asleep" if status == "stopped" and descriptor["instanceLifecycle"]["mode"] == "idle_stop" else
                 "stopped" if status == "stopped" else
                 "error"
             )
-            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": status, "lifecycleState": lifecycle_state, "instanceLifecycle": descriptor["instanceLifecycle"], "compose": compose_output, "observation": {"source": "compose", "freshness": "live"}}
-            return OperationResult(result.returncode == 0, op, descriptor["root"], "compose", data)
+            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": status, "health": health_state, "lifecycleState": lifecycle_state, "instanceLifecycle": descriptor["instanceLifecycle"], "compose": compose_output, "observation": {"source": "compose", "freshness": "live", "complete": not malformed}}
+            return OperationResult(result.returncode == 0 and not malformed and len(matching) <= 1, op, descriptor["root"], "compose", data)
 
         commands = {
             "start": ["start", service],

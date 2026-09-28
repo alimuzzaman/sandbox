@@ -5,6 +5,11 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+Remote project `status` is read-only. If no Sandbox instance is registered for
+the selected workspace, it reports that state and points to
+`sb instances --remote NAME --json` for the remote inventory. It does not
+create or register an instance.
+
 ## Host storage monitoring and cleanup
 
 Use the global `resources` command before raw host, Docker, or filesystem
@@ -228,6 +233,143 @@ sb resources swap-history --remote scaleway-sandbox --since 2026-09-04T00:00:00Z
 
 ## Durable remote-first jobs
 
+### Recoverable delivery admission and diagnosis
+
+Feature 054 requires ordinary `host apply` to run inside a durable local
+`job-start` child. Use the application checkout as `--project-dir`, bind its
+full application `HEAD`, and invoke the full absolute Sandbox executable in
+the child command:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+The recovery receipt is committed and read back before source transfer,
+initializer/runtime/route effects, or generation advance. A request flag alone
+does not establish recovery context; direct legacy apply is fenced with
+`recovery_context_required`. Keep the job ID, inspect `job-status` and bounded
+`job-output`, then query the joined result with:
+
+```sh
+sb delivery inspect --project-dir DIR --remote NAME \
+  --environment ENV --request-id ORIGINAL --json
+```
+
+The default delivery query is `recorded_only`. Add `--observe` only for
+bounded current read-only evidence; it never refreshes terminal history or
+creates a retry. `latest_attempt`,
+`latest_retained_complete_success`, and `current_observation` are separate.
+The CLI query and MCP `delivery_inspect` share the same selectors, bounds, and
+meaning. Query `ok=true` means the query was serviced, not that delivery
+succeeded.
+
+The application revision, Sandbox source/control revision, and installed
+controller runtime revision are separate evidence. Identity-only target proof
+can remain valid with partial optional telemetry, while required resource
+policy remains independent. A route write, healthy service, accepted job, or
+receipt-only result is not deployment or production proof. Feature 054 source
+and runtime acceptance remain pending.
+
+For exposed deploy/preview, carry the frozen creation context and exact
+`instance_incarnation_id` through ensure. Reused or unproved instances never
+gain cleanup ownership. The pure `ensure --creation-capability`,
+`--creation-prepare-json`, and `--creation-receipt` modes do not run ensure or
+mutate state. The covered `--creation-url-json` mode rechecks the incarnation
+before each `home`/`siteurl` write and readback; a partial result is retained,
+and replay returns that result without repeating writes.
+
+Public verification uses the closed `delivery.routes` contract. Its deadline
+defaults to 120 seconds and accepts 10–300 seconds; `deploy` and `preview
+create` expose the same range through `--verify-timeout`. WordPress defaults to
+the `/wp-json/` URL and namespace markers. Generic Compose needs an explicit
+application marker contract. Optional release identity keeps the result scoped
+to application availability; required identity and required edge proof must
+pass for full delivery success.
+
+### Deployment trace v1
+
+The early W11 full-command trace is a separate diagnostic capability. The
+canonical field and transition definitions are in
+`specs/054-recoverable-delivery-outcomes/contracts/deployment-trace.md`; keep
+this skill at the operational level. Use the same absolute Sandbox executable,
+controller, `SANDBOX_HOME`, and original W11 control checkout for every trace
+call:
+
+```sh
+sb delivery trace-capabilities --json
+sb delivery trace-start --project-dir /absolute/w11 \
+  --trace-request-id TRACE_REQUEST_UUID --input-json TRACE_START_JSON --json
+sb delivery trace-record --project-dir /absolute/w11 \
+  --trace-id TRACE_UUID --mutation-id MUTATION_UUID \
+  --expected-sequence N --input-json TRACE_RECORD_JSON --json
+sb delivery inspect --project-dir /absolute/w11 \
+  --trace-request-id TRACE_REQUEST_UUID --json
+sb delivery inspect --project-dir /absolute/w11 \
+  --trace-id TRACE_UUID --mutation-id MUTATION_UUID --json
+sb delivery trace-owner-status --project-dir /absolute/w11 \
+  --producer lenzora-hosted-v1 --parent-request-id PARENT_REQUEST_ID --json
+sb delivery trace-owner-record --project-dir /absolute/w11 \
+  --producer lenzora-hosted-v1 --parent-request-id PARENT_REQUEST_ID \
+  --publication-id PUBLICATION_UUID --expected-sequence N \
+  --input-json OWNER_RECORD_JSON --json
+```
+
+Trace selectors are a separate query grammar. Do not combine them with legacy
+remote, environment/label, operation/request, observe, limit, or cursor
+selectors. MCP `delivery_inspect` and the trace writer tools use the same
+selectors, bounds, and meaning. `trace-start` and `trace-record` publish
+bounded diagnostic evidence; `trace-owner-status` reads a publication receipt,
+and `trace-owner-record` publishes parent-keyed role evidence. Owner-status is
+not `job-status`, and owner-record does not create a parent without the first
+validated projection.
+
+Each phase job's `submission_digest` is a producer-recorded candidate. The
+native job owner independently recomputes it from the retained role request,
+control identity, and exact command digest; private argv and environment never
+enter the trace. A matching candidate digest alone is not proof. The trace adds
+no new `job-status` output: use existing `job-status` for lifecycle state and
+trace owner-status for publication receipts.
+
+The producer keeps preflight, the main command, and joined deployment distinct.
+A successful preflight means command success with deployment not started and
+creates no workload child. The main command keeps its own result; a missing
+wrapper acknowledgement stays unknown even when a child has a separate
+terminal owner result. The joined result is a bounded Sandbox read of retained
+producer projections plus native job, activation, delivery, and recovery
+owners. Producer reports are claims until native owners match exact identity.
+
+If a start, record, or publication acknowledgement is lost, inspect using the
+original request, trace, mutation, or publication ID. Replay the identical
+payload and ID only after a conclusive missing read. An ambiguous read stops;
+never mint a new trace, publication, job, workload request, or initializer.
+Trace writes have a ten-second call bound and trace input is capped at 32 KiB.
+Queries are read-only, have one cooperative five-second budget, and serialize
+at most 256 KiB. The trace document is capped at 128 KiB; the store retains at
+most 128 protected traces, 512 unprotected terminal traces globally, 64 per
+scope, and 30-day terminal detail. The SQLite busy bound is 2 seconds, the
+database cap is 128 MiB with up to 128 MiB rollback space. Permanent deny-only
+guards are capped at 4,096 per controller and are never reset or evicted.
+Optional detail may be elided with explicit coverage; missing or partial
+evidence never becomes deployment success. Feature 054 capability/source and
+installed-controller verification remain pending.
+
+Use this read-only command to inspect one initializer declared in
+`compose.init_services`:
+
+```sh
+sb host diagnose --project-dir DIR --environment ENV --remote NAME \
+  --initializer SERVICE --json
+```
+
+It reports a finite identity mismatch reason without raw labels or image IDs.
+A foreign, stale, or failed result does not authorize rerunning the initializer.
+New apply-log entries show UTC timestamps, phase names, and exit codes. Old
+unlabelled history remains unknown. A missing or unreadable protected apply log
+reports that state directly.
+
 ### Failed hosting apply recovery
 
 Use recovery when the first safe step must be observation. Do not substitute ordinary
@@ -242,7 +384,31 @@ sb host recover --project-dir DIR --environment ENV --remote NAME \
 
 Only a current-contract terminal failed apply with a pre-effect receipt can reconcile.
 Legacy, dirty, changed, partial, stale, torn, or mutation-requiring evidence refuses
-before protected effects. Receipt-only success is not deployment or public production
+before protected effects.
+
+When the owner exited before recording anything, recovery cannot observe its way out:
+it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.
+Close that attempt explicitly, then apply again.
+
+```sh
+sb delivery inspect --project-dir DIR --environment ENV --remote NAME --json
+sb host retire-delivery --project-dir DIR --environment ENV --remote NAME \
+  --original-request-id APPLY_REQUEST --confirm --json
+```
+
+It observes nothing, records the attempt as `interrupted` with its real evidence
+completeness, and refuses while the owning job is active (`accepted`, `queued`,
+`running`, or `cancelling`).
+
+Retiring the delivery record does not reset the target's staged runtime state. A
+failed apply that staged its revision leaves `staged_revision` set with
+`runtime.state` at `pending` or `unverified`, and every later apply of that same
+revision is refused as an unprovable replay. A failed `host apply` reports the
+cause in `message`, and a replay refusal adds a `detail` block naming the
+`code` (`unproven_staged_revision`, `unknown_source_state_identity`, or
+`unproven_recorded_revision`) with the revisions and digest comparisons behind
+it. Read that block before retrying: retrying the same revision cannot clear a
+refusal that the previous attempt's own record caused. Receipt-only success is not deployment or public production
 proof. Continue the sole pending edge only with a separate identity, the successful
 observation/evidence IDs, unchanged generation, authorizing governance, and `--confirm`.
 Feature 047 does not yet publish that governance projection, so public continuation
@@ -252,6 +418,12 @@ Recovery never resolves or parses secrets. It accepts only exact owner-only opaq
 binding metadata created by an eligible apply; missing, stale, environment-backed, or
 manually changed secret-source metadata refuses. Missing, symbolic-link, non-regular,
 or non-owner-only secret sources and binding keys never carry authorizing epoch/identity.
+Ordinary hosted apply also refuses environment-backed secret overrides before source
+publication or runtime effects; use the registered secret source instead. If a failed
+apply already staged a revision and recorded runtime `ready`, first close any failed
+delivery owner through the protected retirement command. A new apply must freshly prove
+that exact runtime before it can continue edge work, and must not rerun Compose or an
+initializer on that proof alone.
 The broker revision is guarded from validation through commit, and the raw digest of
 secret-bearing `environment.env` is never a receipt field. `host sync --watch` uses only
 a target effect lease after its short active-owner state check, so unrelated targets are
@@ -312,6 +484,12 @@ Remote job submission deploys the exact local working tree first, including
 uncommitted and untracked changes. Named workspaces are reusable; matrix cells
 must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
 server for live remote job status/output operations.
+
+Keep real credentials out of job arguments and project files. Remote submission
+rejects credential-like arguments before deployment. For public helper source or
+synthetic fixtures, place files in the project tree and pass their
+project-relative paths instead of embedding source in an argument; the exact
+staged tree is bound by its source commit and dirty digest.
 
 Use a stable `--request-id` for every detached submission. The accepted JSON
 line is flushed immediately after the durable row exists. Empty, malformed, or
@@ -389,8 +567,8 @@ cell; inspect the parent and children with ordinary job commands rather than
 streaming the runner over SSH.
 
 ```sh
-sb ci preflight .github/workflows/ci.yml --remote scaleway-sandbox --project-dir . --json
-sb ci run .github/workflows/ci.yml --remote scaleway-sandbox --workspace ci-run --timeout 1200 --json
+sb ci preflight .github/workflows/python.yml --remote scaleway-sandbox --project-dir . --accept-difference act.job-timeout-ignored --json
+sb ci run .github/workflows/python.yml --remote scaleway-sandbox --workspace ci-run --timeout 1200 --accept-difference act.job-timeout-ignored --json
 sb job-status <parent-job-id> --remote scaleway-sandbox --json
 sb job-output <child-job-id> --remote scaleway-sandbox --wait-seconds 20 --json
 sb job-artifacts <child-job-id> --remote scaleway-sandbox --json
@@ -403,6 +581,19 @@ compatibility differences. `actions/upload-artifact` is replaced with
 Sandbox's retained job-artifact collection because self-hosted `act` has no
 GitHub runtime token; declare literal project-relative artifact paths.
 
+For a workflow that does not need WordPress, opt into runtime-free CI with
+`--runtime none`:
+
+```sh
+sb ci run .github/workflows/python.yml --project-dir . --local --runtime none --json
+```
+
+This mode does not resolve, provision, or tear down a per-cell WordPress/runtime
+instance and does not inject `WP_BASE_URL` or `SANDBOX_INSTANCE`. The workflow's
+`act` result is authoritative. The default `--runtime sandbox` behavior is
+unchanged. The same flag can be passed to a remote `ci run`; it is propagated to
+each durable child.
+
 Retry only a terminal job, use a request ID for replay-safe control, and clean
 up only after retrieving any evidence you need:
 
@@ -410,6 +601,35 @@ up only after retrieving any evidence you need:
 sb job-retry <failed-job-id> --remote scaleway-sandbox --request-id ci-retry-1 --json
 sb job-cleanup <terminal-job-id> --remote scaleway-sandbox --logs --artifacts --metrics --json
 ```
+
+For terminal CI workspace cleanup, require the durable controller intent and
+matching broker receipt. The broker journals checkout and metadata phases
+independently under root-owned state; retries may resume only from recorded
+identities and deterministic quarantine targets. Prepared-but-absent objects,
+unknown journal versions, identity changes, and historical failures without a
+journal remain refused. Do not search quarantine by inode or delete retained
+journal/quarantine entries by hand. A successful cleanup means exact checkout
+and metadata removal, workspace lifecycle `destroyed`, and acknowledgement of
+the matching receipt; it does not prove remote runtime behavior without an
+installed broker and observed runtime evidence.
+
+Broker tombstones are retained without expiry to prevent cleanup-ID reuse.
+The current limit is 512 IDs and 32 MiB; when full, new cleanup operations are
+refused while existing IDs may finish. Separately, an interruption inside the
+owned-storage manager's quarantine step uses its own canonical request digest
+and SQLite cleanup intent; the CI broker receipt does not cover it. Replay the
+same request ID, or use the existing reconciliation path, to resume only when
+the recorded source and quarantine identities match. Source-only and
+quarantine-only states can resume from a captured intent. Both/neither states, identity changes, historical intents
+without captured inode evidence, and unknown quarantine entries stay retained
+with diagnostics. Never infer old identities from the current object row.
+Cleanup replay uses a deterministic preview identity and serializes by intent
+and object across processes. Recovery rechecks current-generation selection or
+materialization leases before resuming removal; a newly active reference blocks
+the retry. Phase writes compare the recorded prior phase, and retained lock files
+in the private database-side lock directory must not be deleted manually.
+Symlink descendants are treated only as leaves: recovery rechecks their link
+identity without following them, then unlinks by the open parent descriptor.
 
 Use this skill when MCP is unavailable, unnecessary, or would load tools for a
 different runtime. The `sb` CLI is the primary operational interface; MCP is an
@@ -478,7 +698,9 @@ sb deploy --remote <name> --ensure --expose
 `sb ensure` is project-scoped and refuses `--instance NAME`: use
 `--project-dir DIR`, plus `--label LABEL` for a labelled instance and
 `--create` when minting that label. Use `sb apply --instance NAME` to
-reconcile an existing named instance.
+reconcile that exact instance and its registered label. If the saved target
+cannot be resolved, use the exact `--project-dir DIR --label LABEL` pair by
+itself; do not combine the two selectors.
 
 Pass an argv list to `sb exec`; do not rely on an implicit shell. If a shell is
 required, make the boundary explicit, for example `sb exec -- sh -lc 'npm
@@ -509,6 +731,13 @@ sb deploy --remote <name> --ensure --expose
 Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.
+
+`sb wp -- help <command>` works without a pager installed; Sandbox runs the
+WP-CLI process with `PAGER=cat`. Default Apache and Nginx/FPM Compose instances
+also set `DISABLE_WP_CRON` to true. Use the project's `wpCron` setting instead
+of adding that constant again with `wp config set`; see the
+[WP passthrough guide](../../docs/wp-passthrough.md) and [config
+reference](../../docs/sandbox-config-reference.md) for server-specific rules.
 
 After a successful deploy, `sb wp --remote NAME --project-dir DIR` targets the
 existing deployed WordPress instance through authenticated control HTTP. It

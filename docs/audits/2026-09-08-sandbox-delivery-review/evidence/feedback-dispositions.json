@@ -1,0 +1,2286 @@
+{
+  "detail_coverage": {
+    "high_critical": 278,
+    "read_failures": 0,
+    "selected_medium": 3,
+    "total": 281
+  },
+  "disposition_counts": {
+    "capability_now_observed": 2,
+    "corroborated_baseline_separate_fix": 1,
+    "corroborated_current_observation": 1,
+    "corroborated_current_source": 2,
+    "corroborated_live_read_only": 1,
+    "corroborated_source_family": 1,
+    "corroborated_synthetic": 5,
+    "current_claim_unverified": 86,
+    "duplicate_claim_not_revalidated": 12,
+    "historical_diagnosis_gap": 1,
+    "historical_related_refusal": 2,
+    "later_runtime_acceptance": 2,
+    "operational_lead_unverified": 1,
+    "operational_toil_evidence": 1,
+    "platform_lead_unverified": 1,
+    "prior_fix_claim_scope_preserved": 2,
+    "prior_fix_scope_preserved": 1,
+    "prior_review_not_independently_reaccepted": 149,
+    "prior_scope_decision_not_revalidated": 6,
+    "source_family_not_exact_live_cause": 1,
+    "source_fixed_status_stale": 2,
+    "ux_claim_preserved": 1
+  },
+  "records": [
+    {
+      "claim": "Hosted deployment initializer compares incompatible Compose identity formats",
+      "disposition": "corroborated_baseline_separate_fix",
+      "evidence_limit": "Baseline generated proof reproduced. Separately owned c7ed709 plus final Amar Sonar reconciliation accepted within stated limits.",
+      "feedback_id": "0f0960d8c6ce36083fb195fb4a9fb3de",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F03"
+    },
+    {
+      "claim": "Restore diagnosis required repeated controller updates for missing safe evidence",
+      "disposition": "operational_toil_evidence",
+      "evidence_limit": "Retained restore diagnostics show repeated evidence collection/update work; do not infer those controller changes all remain missing.",
+      "feedback_id": "35ee84bb6ae44f5b7e2e590f3b45ea72",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W7/W9"
+    },
+    {
+      "claim": "Real WordPress lifecycle smoke exposes stopped registry and intermittent clean route failure",
+      "disposition": "later_runtime_acceptance",
+      "evidence_limit": "Later retained wake-fix smoke passed all 23 checks including restart clean URL; no current unfixed claim for that exact smoke defect.",
+      "feedback_id": "8e73e0097028218b3216103c86596b9b",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W3/W8"
+    },
+    {
+      "claim": "Production status and apply logs cannot establish the last successful Lenzora deployment",
+      "disposition": "corroborated_current_observation",
+      "evidence_limit": "Read-only Lenzora host/image observations retain unknown revision/history and uncertain activation.",
+      "feedback_id": "08771395ef4d93355a5c53d9dfe3f893",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F12"
+    },
+    {
+      "claim": "Fresh production recreate refused wp-permissions initializer as foreign evidence",
+      "disposition": "historical_related_refusal",
+      "evidence_limit": "Foreign-initializer refusal corroborates the family; exact original cause is not independently isolated for this record.",
+      "feedback_id": "4ae99c62c095ceb966f053c297343e1a",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F03"
+    },
+    {
+      "claim": "Registered PostgreSQL recovery profile lacks a concrete capture and isolated restore adapter",
+      "disposition": "capability_now_observed",
+      "evidence_limit": "Concrete PostgreSQL helper and later retained isolated drill/canary now exist. Complete restore verification remains separate.",
+      "feedback_id": "6c8b5ebfab40731d9b245eacbcfbdfbe",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F07"
+    },
+    {
+      "claim": "Hosted recovery may reuse stale content across backup sets",
+      "disposition": "corroborated_synthetic",
+      "evidence_limit": "Two backup sets share the real request digest; actual generated cache branch reuses synthetic prior content. No production backup claim.",
+      "feedback_id": "66035a8ff701c7010103f76ab117d838",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F15"
+    },
+    {
+      "claim": "ASB recovery capture hides stale controller diagnosis",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "372b578caf0b653ccf63cbc1271448f4",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Image recovery lacks read-only active transaction status",
+      "disposition": "capability_now_observed",
+      "evidence_limit": "Read-only image status exists and was used here; cross-store history/receipt join remains incomplete.",
+      "feedback_id": "4d413785f6471c09424195af3ca1755e",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F12"
+    },
+    {
+      "claim": "host apply final Compose convergence leaves dependent services in created state after 300s timeout",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "1f0321b04881029b992f0ae7dafe83cc",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "sb test prints only a job id and exits 0 while the run is still queued/running \u2014 looks like a pass",
+      "disposition": "ux_claim_preserved",
+      "evidence_limit": "Feedback distinguishes queued acceptance from test pass; acceptance exit zero alone is not a failing execution result.",
+      "feedback_id": "ae5d9f9f931491295cb69a91e4517a60",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W4/W7"
+    },
+    {
+      "claim": "Image activation signs stale runtime environment without manifest or source revision refresh",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "171fd36929aa7c319b848232afbba857",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Production effect_unknown persists after verified profile resolver fix",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "bc5f47704c2f81de3b09a8429c7e5bf4",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Production activation exact 821 returns effect_unknown",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "cbf25bd81d275d1502af3076b0bd609d",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Development exact revision healthy but edge purge provider_auth refused",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "1135f1bd5461c35c9998bea370a59bf3",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "New signed Lenzora production image activation refuses artifact_invalid",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "7dc12e973591c4f46d1fe0be41ca4d46",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Ordinary host apply silently loses recovery authority on partial resource status",
+      "disposition": "corroborated_current_source",
+      "evidence_limit": "Source can proceed with no durable recovery receipt after partial identity/resource observation.",
+      "feedback_id": "29031eb6f69e28ef4aea7ec5fdad2b3c",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F05"
+    },
+    {
+      "claim": "Fresh pinned host apply cannot enter observation recovery",
+      "disposition": "corroborated_source_family",
+      "evidence_limit": "Source establishes ineligible ordinary-apply path; original live operation was not replayed.",
+      "feedback_id": "3126f1d654a039c32481c0522d831870",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F05"
+    },
+    {
+      "claim": "Image provisioning hides controller revision mismatch as artifact_invalid",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "cbb01af7d11578bc2c46a257c2961d3f",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Initial image edge bootstrap rejects effect-free recovery history",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "b7ae36b87191b02dcb7a430b8f838116",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Production activation bundle refuses after successful immutable image staging",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "0062bddad85e9b8091b4baa569793274",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Production image staging returns observation_invalid after clean terminal cleanup",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "5e8d5502513f42ebdbaf5b2525834e42",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Production image staging returns observation_invalid after clean terminal cleanup",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "3bb47f37f9a1bad8fe538612b89daeb8",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Production image stage retry terminates with observation_invalid",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "4bde915ebfb4882e63ad9306765c0fda",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Production image staging blocked by capacity with no verified cache reclaim path",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "192679602e758ba1a1cb59c50248fadc",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hosted image stage-bundle refusal masks runtime revision mismatch",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "026f17d7be0be8d1ceb5db9fb9d0c5ee",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "sb test without --local fails at job submission: supervisor_launch_failed (remote_job_transport_error)",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "81d085d28ce5e5e84924787493084de1",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Legacy Hermes Drive backup scans stale registry instances",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "d7bae9124e5e49ac2cd6b0886e0522b6",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "HSSB remote CI preflight blocks artifact paths and misclassifies validation steps",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "00efae8d734cef3b5a5aab10bced0192",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "ensure JSON leaks local login credential before plugin activation failure",
+      "disposition": "corroborated_synthetic",
+      "evidence_limit": "Actual install progress expression bypasses final ensure JSON redaction in a synthetic failure.",
+      "feedback_id": "6704dc49fbf1d94c5578a7857e34010e",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F16"
+    },
+    {
+      "claim": "Production OCI stage-bundle provisioning refused with helper_failed",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "1057af13a2afe8caa2dd825ef6f44b89",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Lenzora production wrapper loses first protected OCI provisioning refusal",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "4a73fa1723f29ff4c9d8b93227599d1c",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "remote deploy cleanup loses ensure failure cause",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "60b58eea1c85b3578c50bd031ea491a4",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "deploy label is ignored for remote WordPress ensure",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "5ea5623e364eaa397c438a7ece0450ee",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "activation gateway 404s every request carrying a query string (forward_auth keeps the query)",
+      "disposition": "source_fixed_status_stale",
+      "evidence_limit": "Query clearing is present in Caddy forward-auth rendering at baseline via bba2de1; current live route not retested here.",
+      "feedback_id": "6cc6f10ce7cd1d1f3e6da51294caca6c",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W3/W8"
+    },
+    {
+      "claim": "Local .tst https vhost returns 404 for any URL with a query string (BaseHTTP upstream via Caddy)",
+      "disposition": "source_fixed_status_stale",
+      "evidence_limit": "Same query-clearing source correction; do not remove the gateway query rejection guard.",
+      "feedback_id": "d10b637f22211ec447c5ece88e57e506",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W3/W8"
+    },
+    {
+      "claim": "Production apply stopped after clean exact-SHA plan with generic readiness error",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "c07029871fadf960acfbceb83d2d3260",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Follow-up 1b5c9e9e: remote deploy failure is not multisite-specific; stale network state survives instance cleanup and --label is ignored",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "2b98ef8ff6bd3aa71d13f75ade6d6d9b",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote deploy --ensure fails for multisite:\"subdirectory\" projects: DOMAIN_CURRENT_SITE does not match the installed site",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "1b5c9e9e54b37db9021499aa080a7e68",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "sb preview create wrote its domain into a DIFFERENT existing instance's siteurl/home, breaking that instance's admin",
+      "disposition": "corroborated_current_source",
+      "evidence_limit": "Actual helper command and two-instance selector reproduce wrong-default selection; no live URL mutation here.",
+      "feedback_id": "b572b3d55192b8bc9e7c70dec0722d9f",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F02"
+    },
+    {
+      "claim": "sb preview create returns ok with an HTTPS URL that can never handshake when the base domain is a third-level name",
+      "disposition": "source_family_not_exact_live_cause",
+      "evidence_limit": "Route helper completion lacks public TLS/application proof. The reported hostname certificate limitation was not retested.",
+      "feedback_id": "e354cbc7b4e8f64af3d4f6bca20f5fc6",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F11"
+    },
+    {
+      "claim": "sb wp has no --remote in 0.2.2, but the sandbox-cli skill documents it as the post-deploy path",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "af7cf95d81966d8f6bde8c29610e84b4",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hosted Compose autologin targets public service instead of WordPress",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "b55e170130c402c0c4c876d58089968e",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote resource scan acceptance loses structured job envelope",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "a866f505d377eb84cd972879b6acce9d",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote direct job supervisor launch failed twice before execution",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "7ba71712a512c41794c72116ab503b70",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote multisite provisioning cannot write marker file",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "82fb70e7e901d00e7511f411c6b1af4e",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote job registry retains expired jobs as active or queued",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "0e96ca5cba4bdcf2ba4cad23641790e2",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Provisioned remote cannot execute advertised headed E2E",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "874a29b7373d68b97503ddfea760f04e",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hosted Lenzora dev apply times out during Caddy reload after application services become healthy",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "9294d65a6985ed3eacf1353b11c1febb",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hosted Lenzora dev deploy times out during compose restart and leaves worker runtime failures",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "95acb85a0e1cbbc855c7b8e508fbe73b",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Every .tst instance URL returns 404: proxy forward_auth /v1/activate 404s for known route IDs",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "74b4203d8e54a68aced7d0f164bcc652",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "WordPress apply failed reachability and rollback for xspeed review instance",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "0cca9b50cc59c730b17ab11625fcd380",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "WordPress apply rollback leaves CSS-capture instance unreachable",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "81a2e388d2aae43cebb46b0d206e2a31",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote Sandbox exact-head deploy hangs while ensuring instance",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "c5b8e6a908f458f3ccc5b2236b0b39f1",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Exact-head xSpeed PR review plugin activation fails in disposable Sandbox",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "52b78220ec4255f8d680b707ca409980",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hosted development apply reached rollback with network-unreachable SSH",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "5e44095151d103a4e1d13f043ea83a27",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hosted dev apply stalled building missing worker images from multi-GB context",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "7ab76b8b2a5191b77843b986f25d29c0",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Lenzora hosted deployment failed because remote SSH became unreachable during apply and rollback",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "cfdb4f37418aaf17cd06a584e6e99dd6",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Failed remote Compose job loses Jest failure evidence",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "0eab73b892802256d2ba001497ad2998",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote deployment job cannot be observed from Sandbox durable ledger",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "b4323966b25994dcd75e21650ab77f93",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "hosted apps need a fast source-sync path: watch-and-push to deploy-src without a full apply",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "fb17bb5c05c60ef78ce1e33e7a25685b",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "lenzora.dev host deploy failing due remote disk pressure",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "689840ec0c3890f568b130ddc0fd338e",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote Sandbox revision sync is blocked because the provisioned controller is unreachable",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "9c28c05a8b08c0aedd6e51e496cc8424",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote capacity and active-job monitor transport unavailable",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "6a1cca016d14d5cb8cb8f17648d15fc4",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote SSH banner exchange timed out during retained evidence recovery",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "fee3a2f77e25dcba833e6242976a0b8a",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Fresh remote Feature019 job still cannot provision Compose network",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "25008adab7a0612dca8f360ea6c27663",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote workspace references missing deployed project directory",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "e66a25a7442e753015cd3a22d40f74af",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote deploy blocked: Docker daemon out of address pools (31 networks) on scaleway-sandbox",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "498b193cc569470ec87feba685af3dea",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote workspace list resolves a missing deploy path",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "b06bb2505db8cfe037fe4af3f908f5c6",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Exact-source deploy Git push times out before remote job creation",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Preserve original operation evidence and run a bounded check before promotion.",
+      "feedback_id": "76b5ac739bf331866795b3407295dff5",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Amar Sonar recovery profile plan returns invalid remote inventory",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; independently verify the target before closing a release requirement.",
+      "feedback_id": "3197a23aa4d92f7f07c135c7166aa75a",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Activation enable fails while the existing supervisor is healthy",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; independently verify the target before closing a release requirement.",
+      "feedback_id": "e608c783333b62a9e4e6aad09e784ac1",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Ensure silently rewrites a clean domain back to localhost when proxy setup falls back",
+      "disposition": "prior_scope_decision_not_revalidated",
+      "evidence_limit": "Prior applicability decision retained; current source/runtime scope was not independently revalidated.",
+      "feedback_id": "a562850cc9e3fed23450d74aa6ded0dd",
+      "recorded_status": "not_applicable",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Activation supervisor restart fails while health state transitions to inactive",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "74f5a1b8a8da1d6a90bc081bf3d2e3f4",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "domains up reports clean ingress unavailable when another listener answers the hostname probe",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "a6f1f5a8c4611f430d6963b08d4e791a",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Hosted Lenzora deploy job is accepted but branch guard and job ledger prevent verification",
+      "disposition": "prior_fix_claim_scope_preserved",
+      "evidence_limit": "Prior review scopes acceptance to branch preflight plus small remote history page; not complete exact-release provenance.",
+      "feedback_id": "b459d15a68e801aa605881b9864a81ee",
+      "recorded_status": "verified",
+      "report_or_plan": "F12"
+    },
+    {
+      "claim": "Remote deploy of a composer-autoloaded WP plugin boots to a fatal: vendor/ is gitignored, so PSR-4 classes are missing",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "c0037db18a5c0485b646df051a1cdd59",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Stale mkcert certificate forced broken HTTPS redirect for plain .tst route",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "ae744b9b19f4a1de4d85735bd83693a1",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "clean URL ingress can be intercepted by OrbStack wildcard ports",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "7c8f8b0b7896b8a72981a4d5b097a0dc",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote service migration times out while staging current runtime",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "529a0ed3d6697d12c2c958100c09369f",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Deploy symlink defect reproduces on a clean instance, and the only workaround deadlocks future deploys on ownership",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "3a6cdc0284ae86c26c8bdbf27041457f",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Domain setup hits pre-existing XSpeed fatal during URL reconciliation",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; independently verify the target before closing a release requirement.",
+      "feedback_id": "6987343f2dcacaedf7edc59ad81aa9d3",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb deploy symlinks the plugin to a deploy-src path that is not bind-mounted, so WordPress cannot see it",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "1f5484a5bd4548de4514719d62615605",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Local idle-stop authority remains inactive when opted-in routes lack activation credentials",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "f56063057f25aca4696e8abdbdd5b160",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "activation scan fails on invalid route metadata",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "a05d10d59bf2e9bc1b49c58696bf752e",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote service migration hangs during runtime source upload",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "ead67171123ba137eb48221d56cc0d46",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb test always routes to the remote deploy path; --local is ignored and the run dies on an SSH git push timeout",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "483a4fef967b99f8e1957030a35a00e1",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Host apply cannot inject exact deployed source revision into runtime environment",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "e7412a6dd087f348858f78348525f88e",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Apply reported ready after WordPress critical error and lost pre-config instance routing",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "9275f8ff5da38293d452fe4d9e28a995",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "WordPress init guessed unavailable Elementor Pro dependency for xSpeed",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "f0b3e8fdf1023c0585b5ce145716ead5",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Host logs fail when desired background service is absent",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "f3a4d100828e51e70f4ea6e862329e58",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "remote job cancel fails with malformed control-plane error",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "b067e765faaf880f32a7d1ee5c0539ac",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Failed apply starts web containers without database service",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "1cfc73383f2132176c6dada6e6fde9e5",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote ensure leaves no registered instance after creating compose resources",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "cfb94c42166cb64f3b45c2d8189f624d",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Disposable Free Sandbox reaches HTTP but WordPress install core download times out",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "412f6c4c5a9eb9d337c8e73baf1ad2d0",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Fresh Sandbox cannot activate exact-head xSpeed PR source",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; independently verify the target before closing a release requirement.",
+      "feedback_id": "9e9e30aa23570f8d7f50438d155b4cf9",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote ensure cannot deploy detached exact-head review clone",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "b9d6995a1966fe8b31077bd124d23b9b",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Sandbox init rejects repository without compose or recognized project descriptor",
+      "disposition": "prior_scope_decision_not_revalidated",
+      "evidence_limit": "Prior applicability decision retained; current source/runtime scope was not independently revalidated.",
+      "feedback_id": "00de46521aee1ff013aeabb5bd7de792",
+      "recorded_status": "not_applicable",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Hosted apply retry timed out while resetting deployed source",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "4ad5d6605243e8a23beca6339ad7a001",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Detached deploy output follow hung during process identity inspection",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "9290217a7686140b82bdad36fa84fb55",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Hermes launcher accepted no --max-turns despite pinned release guidance",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "7437b8a82a701af8126b9b2d3dbaf1ae",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Ox Alpha autonomous Sandbox worker stopped after repeated empty model responses",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; independently verify the target before closing a release requirement.",
+      "feedback_id": "cd7025da758c2f5dc564dcc320748195",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote provision leaves obsolete cloudflared after successful completion",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "cdb2e1844f9557c118b44f9d36d46f71",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job submission rejected by unsupported execution policy capability",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "3d9a49cee63a623d9169eecfc6802610",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job submission blocked by missing execution policy capability",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "3326ceaec6df31b36d18f9e2c229bf2c",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Scoped sb setup started unrelated project instances",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "9f0122e71b1ca2a956b20ab3442cf3fd",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Deploy wrapper accepted an unobservable job after SSH timeout",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "ac945dffe6fc473d30ee91368e301442",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Reviewed Docker pool plan still blocks remote test job admission",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "45dcb0236e2ad64607251481e1b1ddf8",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote full-test job blocked by Docker network capacity admission",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "e6a9bec15a1cc6be016d4ec18af5528d",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote deploy is permanently blocked by docker_network_capacity_unavailable even though the address pools already match the desired plan",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "0ed665d09e60921f170c48162e2d488e",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb test routes to a remote runner by default and fails with NetworkCapacityAdmissionError, even with a healthy local instance",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "17f8ea64f9128f062d3e6c9498945594",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb apply --project-dir rolls back a valid config change: reachability probe false-negative on an https instance",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "7acb4245dd8694fb4ee03b061db7e4ec",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "host apply should emit incremental progress; the job runtime already proves the pattern",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "a6223e1481c8800431839f6a4e891b80",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sandbox is adding steps for hosted apps: no deploy diagnose command, and secrets run cannot inject a credential pair",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "5fb893827632bc14bb55a7f051410723",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "host apply is silent for 30+ minutes and discards build output, so every deploy failure needs a manual forensic session",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "37d95e663fb02755608c87d5715d67f7",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "host apply recreated containers from a stale image; no build ran despite compose.build defaulting to true",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "c158edba811694913fe4cb4ccc3bbe2b",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb host apply always passes --build and dies at the fixed 900s timeout for a large Next.js image",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "6728d6f332f0cc7b76a4df0659236bc0",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb host apply exits 0 after a failed deploy, and its rollback can fail silently when the disk is full",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "71be94307c0b2dfee1ef2640898bf1a0",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "target inference sent every project's sb ensure to the VPS instead of booting locally",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "0b420c9bf187cdce7a9e8be03d44dfda",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Provisioned remote reported unreachable during required validation retry",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "30a6c1d1f35eab1308137243f8ef119b",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Confirmed remote provision returned no receipt and service health timed out",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "b8fcedf19c65046b16ecd8d61877ad6c",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Herd lifecycle bypasses host-compatible mu-plugin provisioning",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "b2fac0b406d02626aead84c36ccfb4ad",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Init with project-dir provisions wrong Docker target",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "6a6d2325ed47be0e1c73860e5432278c",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote workspace index remains incomplete after provision",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "3a6e8c1a1fa71bde1a74b8b0eeb37e9c",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Direct-host T126 job-start returned no acceptance payload",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "3c4f9059a8509b919774072acb8aa63d",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Direct-host T124 job-start returned no acceptance payload",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "38efeba54f4a86c202a045b7cc55020a",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-status SSH lookup timed out during accepted-job observation",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "c4237726db9330b9c59a0fbc30328790",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote deploy reached plugin activation but deployed plugin was absent",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "5e985bc296c1a22a281d8d0ae11fd8a5",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-start intermittently returns no acceptance payload or durable ledger entry",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "0384ab6b647c4b6f3ce1db9a348d496e",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Direct-host job-start completed without acceptance payload",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "d7e6cba07d96a9d0d7af2d993b547640",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote ensure fails at post-install baseline snapshot: mariadb-dump cannot write /snapshots (Errcode 13)",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "0139d6637973f4f1d7ceec87a2f45b75",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-list large page failed and surfaced a tail of retained job data as an error",
+      "disposition": "prior_fix_scope_preserved",
+      "evidence_limit": "Prior closure explicitly fixed raw error-tail disclosure and did not run the large page. Current F10 confirms page usability still fails.",
+      "feedback_id": "009845006beb244f191c461c3d75cf55",
+      "recorded_status": "resolved",
+      "report_or_plan": "F10"
+    },
+    {
+      "claim": "Remote job output cannot resolve Sandbox home over SSH",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "dde35952937cff4f87cd77549d568878",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job status SSH control timed out after jobs completed",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "ab332c6de39e1d5c4fdd322ca1f5c057",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Docker pool rollback restored configuration but left 20 previously running containers stopped",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "088652d49fdabbff77311353f251270b",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Detached remote exec returned no job result for standalone evaluator state",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "ed693f7259cc768dd29fb4a01da89d48",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote active job list can return a false empty page",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "1a7dde8bc4c88c8f7f311bf11c5ab5f3",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Failed deploy leaves wrong remote instance registered",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "1f094d2f708e7c57cf128ac9635aa5af",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Deploy ignores instance and provisions wrong project",
+      "disposition": "prior_fix_claim_scope_preserved",
+      "evidence_limit": "Prior review claims pre-effect rejection of global instance selector. It does not cover new cleanup ownership or preview URL identity findings.",
+      "feedback_id": "a1fc66d41f603894e18bc4092a0a9aba",
+      "recorded_status": "verified",
+      "report_or_plan": "F01/F02"
+    },
+    {
+      "claim": "Deploy cannot reconcile diverged managed remote branch",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "f7e83e9e0dc00d0c08591d45f7eca1f5",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Direct job-start terminal output unavailable through remote transport",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "25a58f04cd6d056e6cb02379810f9b18",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Direct-host remote job cannot start: Docker address pools exhausted",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; independently verify the target before closing a release requirement.",
+      "feedback_id": "56a4b248c8c308ee4263e621eb897519",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote durable job output read fails after accepted submission",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "00be19feb659fa1989d757ee5e5b247d",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote deploy push timeout reproduced",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "d1a8a9f50d980bc8b1be061ef20c52ae",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote deploy Git push timed out",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "1ad96d2d24f9e1aa0bc401dde35eb2f1",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote deploy git push hardcodes a 120s timeout; large repos can never deploy",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "f1a869ebbf96377e09fb5f3dcee91c4c",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Detached job submission hangs and exact workspace job-list returns empty object",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "ab89060b777e09db660cec5cb2f40ba1",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Fresh wordpress@1 child-image build fails at mbstring and init resolves the wrong project root",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "665bb8da6b1d86c8e1754e1c85e94dd0",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb init ignored explicit project-dir and instance target",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "6d5a269d610dcd57d4fe2df5a0223532",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Accepted T105 r6 job-status returned no payload",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "f599f5f468f6a9c45ed83dd04b4b363b",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Accepted T105 r6 job output read failed",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "d1a8b56d500abb30aa94cb671c4cea64",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "T105 r5 job-list preflight still fails despite reported runtime alignment",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "ab65eeee5a3c52338cebf41cc0e6361d",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "T105 r4 remote compatibility probe still cannot list durable jobs",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "9db5f6426342bffb1befd24f3a8c0d05",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-start is blocked by project-identity protocol version skew",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "505bba6bf0a08db3d0e5762caa97bd7e",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-list client and direct host disagree on project-identity argument",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "234acaf1e04881a87ec78b47555f6d1b",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Authorized corrected T105 job-start again returned no acceptance identity",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "01f10c6bdbb113f102f4d1583b2d3e93",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-list preflight cannot return old or fresh workspace records",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "0f423fb08b654a25161008d35dd30f34",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Fresh T105 job-start returned no durable acceptance identity",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "7f392acceefd15b24d8b513e3825c87e",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Learning host apply stops at unhealthy background chat service",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "fc8b79070969844dba5548dc0b1fcdca",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote retained-output cursor read fails for accepted durable job",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "12e2ef47166e8deaa1cf5bbc698110d1",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-list control fails before returning retained records",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "79d775b43cac5d1795b9a2fc52b0ff26",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Detached remote job submission returned no job identity",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "3da039b402a4df0d831239c97a3cb987",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote job-start can return silently without durable acceptance",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "343d1a5ae1c59b8f2754ee24ebf96b9d",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Nested host manifest applies Compose from wrong source root",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "8291ab9c74350d34a0d5ed4ff65e9262",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Compose test provisioning blocks when Docker network pools are exhausted",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; independently verify the target before closing a release requirement.",
+      "feedback_id": "822b93235e7583db404d32b4400ae894",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb restore drops every table with no confirmation and no --yes flag",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read. No fresh acceptance for this exact historical claim; status and evidence keywords alone do not establish a current fix.",
+      "feedback_id": "adde58a69cc69c26071e2c8555edbb0a",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Initializer identity refusal remains opaque after hash normalization",
+      "disposition": "later_runtime_acceptance",
+      "evidence_limit": "Later corrected resolved hashes match and final Amar Sonar reconciliation succeeds; bounded reason diagnostics remain a product improvement.",
+      "feedback_id": "864f5436b6e662977c488328da3574ff",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F03/W7"
+    },
+    {
+      "claim": "Hosting initializer failure needs direct bounded initializer diagnostics",
+      "disposition": "historical_diagnosis_gap",
+      "evidence_limit": "Initializer diagnosis request supports reason-coded evidence; not counted as a separate current initializer execution defect.",
+      "feedback_id": "aff2834ebd645210a94963efacea4911",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F03/W7"
+    },
+    {
+      "claim": "Host apply stopped on foreign initializer evidence after runtime replacement",
+      "disposition": "historical_related_refusal",
+      "evidence_limit": "Related refusal after runtime replacement; preserve its time/target instead of claiming later success replays every earlier case.",
+      "feedback_id": "bc666ad8a12ed084febd3aa7f8ac32fc",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F03"
+    },
+    {
+      "claim": "Settlement quiescence refusal lacks supported diagnosis and containment path",
+      "disposition": "operational_lead_unverified",
+      "evidence_limit": "Read-only quiescence reason is an evidence gap; any containment operation needs a separate authority/ownership contract.",
+      "feedback_id": "d5ff87fa40df14ba6a87778e268a0f9b",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W7/W10"
+    },
+    {
+      "claim": "Instance advertises .tst URL while WordPress siteurl/home stay on localhost:PORT \u2014 every REST call 403s",
+      "disposition": "prior_scope_decision_not_revalidated",
+      "evidence_limit": "Prior applicability/validity decision retained; this exact historical case was not independently revalidated.",
+      "feedback_id": "e686909d857b0d989b9a7c87529a55fe",
+      "recorded_status": "invalid",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb ensure docker preflight fails deterministically whenever its stdout is a pipe, not a TTY",
+      "disposition": "platform_lead_unverified",
+      "evidence_limit": "Reported piped-stdout/TTY difference is not reproduced here; current source capture helper alone does not establish that root cause.",
+      "feedback_id": "24e6756299d9f7e39e28d87125338f2b",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W10/W8"
+    },
+    {
+      "claim": "Remote CI workflow_dispatch event mismatch runs changed taxonomy step",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "a41d34059b1f2ea195aced060704afd5",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote CI nested command lost label-prefix value",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "4bfd212e08eff9147baf516a50456f19",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "sb preview create leaves siteurl/home at localhost:PORT, so the public preview URL redirects to an unreachable host, and the project's path-mapped plugin is not active",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "1b24cb92013ca8c1f5fa8fb846c0653c",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Local ensure --json emits an unredacted autologin URL in progress output",
+      "disposition": "corroborated_synthetic",
+      "evidence_limit": "Same progress-output leak reproduced using actual installation expression and cmd_ensure with a synthetic marker.",
+      "feedback_id": "ea85cb298e201b4ba63e1ae71c9149df",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F16"
+    },
+    {
+      "claim": "Credential scanner blocks reviewed educational WordPress draft manifest",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "afa841a15051b98b11e59156bc117690",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hosted autologin URL cannot reach Amar Sonar WordPress behind Astro front door",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "9ab07ba2f63b5c393e2318932d9accdc",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Terminal workspace cleanup remains falsely protected",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "52622c4577419a51f02d728f886b40f0",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote ensure hides its structured failure behind a warning",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "a3f3f976128ca1542b0adbfe7536cdca",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Unpinned WordPress bootstrap passes archive URL as a version",
+      "disposition": "prior_scope_decision_not_revalidated",
+      "evidence_limit": "Prior applicability/validity decision retained; this exact historical case was not independently revalidated.",
+      "feedback_id": "cf1788f351001bf3fabdf3e2185daace",
+      "recorded_status": "invalid",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "up --json omits typed stale-network failure",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "bab948b85ef2912a1bb2e54abc15afa7",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Spec 033 sync once cannot reconcile remote acceptance",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "282cd7f7afba66f30a1c6ddd3bfe5cd3",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote CI parent interrupted while child remained running and remote cancellation failed",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "2672614f144034f658044583f173cdad",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "remote up: 300s runtime-source upload bound is unreachable on a slow-uplink VPS, so the remote runtime can never be refreshed",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "e1ad5110271d47cf5496072a4193ef64",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Lenzora development apply blocked by hosted migration history drift",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "483f8e2df3ac38c7e289fbddf8ed5755",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote workspace cleanup inventory is blocked by runtime revision mismatch",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "509c46e8e7f2119141e3922f7ceff607",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Current xspeed-pr188 status remains unreachable with web plane unavailable",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; verify its target before accepting a release requirement.",
+      "feedback_id": "4ecf436c6dadfaf25efbdb04bddffa31",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote resources plan exceeds CLI wait without returning evidence",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "ec48a43e60e5fd126f2fa846b460d8ff",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Resource cleanup plan accepts orphaned workspace volumes but cleanup fails for every candidate",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "50af0f82c1ba54de479d4f672f1ef1d9",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote cleanup plan rejected by client fallback target identity",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "5d67860ce4e2c9352b70319b62634050",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote workspace reap dry-run stalls without a bounded result",
+      "disposition": "prior_scope_decision_not_revalidated",
+      "evidence_limit": "Prior applicability/validity decision retained; this exact historical case was not independently revalidated.",
+      "feedback_id": "b433aa33c7fb802797628630044b494a",
+      "recorded_status": "not_applicable",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote tier cleanup plan stalls without a bounded result",
+      "disposition": "prior_scope_decision_not_revalidated",
+      "evidence_limit": "Prior applicability/validity decision retained; this exact historical case was not independently revalidated.",
+      "feedback_id": "a88920a9e7a99fa1396b8b162f714d45",
+      "recorded_status": "not_applicable",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote workspace cleanup returns indeterminate after a completed safe reap",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "71c12b23c43db92dcaacc9d1d1cb71ab",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote deep resource scan cannot measure host capacity for container cleanup",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "6d89bec0395e060774bb4134080be298",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Main-branch remote Sandbox runtime migration blocked by SSH banner timeout",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "49ea2ef5f18112ea22e5f9ce07686b23",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Lenzora development host apply blocked by repeated SSH banner timeout",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "fd48198f00b9c48fccaac8cee6bdf84a",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb ensure: a themes/plugins zip URL is misread as a local path, so the ready fast path refuses forever",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "f591d52ba4ba7d741824c1fce7397731",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Lifecycle apply unexpectedly upgrades WordPress core",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "444b55cbd7ed702a8c143313d4b0dfb8",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "In-place apply recreates containers then fails on unresolved declared plugin",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "7f014ae695c13eecc58607646a25d062",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "local resource scan cannot attribute container CPU or RAM",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "861028b8a2315b6f9a82506b8cb47a94",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb ensure/apply deadlock: apply uses --no-deps so db never starts",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "2413b7090bad3cc8f02ccf99b4247c0e",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "wp post list --search returned unrelated IDs and enabled unsafe cleanup",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "ef5fb478856eeb845b5b1ec177c260f8",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote workspace inventory blocked by runtime revision mismatch",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "dd6bbbed8a6706da0e9b070e6cde7b6e",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Disposable exact-head WordPress apply rejects extension plan digest",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "f37bd9aee69a896880eeb78c38c0d668",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Disposable exact-head WordPress ensure reports mount-state unavailable before first instance",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "c7be223a1e5f188aa88524fbbb3fe098",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote workspace inspection blocked by runtime revision mismatch",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "2861828e0252f5187c93bd11a1c521f2",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Host-local deep collector capped directory walk at 120 seconds despite larger detached budget",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "82a729ce37e1476c574327bc37c47a6e",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Detached resource scan submission rejected by remote policy wire validation",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "e5f1e6468abd63f375058b002020964a",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb ensure site bootstrap times out on WordPress core version check",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "6cb71d7e0f95307d343ed6d8285357a7",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Lenzora host apply returned generic remote command failure",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "e25a8491a48f74accf72d1b96f6421e4",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote normalization retry hit acceptance transaction expiry",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "fe5c3e02c95f5df8a1abfbda61ce9aff",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Sandbox launcher intermittently falls through into Python body",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "2aa8e4725bfddb72c64b78b4b13c2391",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Ox Alpha returned empty content for Lenzora implementation session",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "db34582b727bfea7d94ba446b681b9cc",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hermes dashboard cannot resume saved TUI sessions",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "120ce07b624da3c31e6c78f492adc04e",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Hermes public dashboard exposure blocked by obsolete cloudflared",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "7ef8c643198daefd31eaa66d7438562a",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Hermes setup fails on fresh v0.18.2 profile creation",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "2f6f1ecd91a543023a79414afdf8f939",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote high-memory build was host-killed below its container cap",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "5978c11e472eae799b5855fdab356e72",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote test submission rejects required non-secret test fixtures as credential-like",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "4f4075f4b5b4fa35039263677ded6d1d",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Local E2E fixture became unreachable during Playwright",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "a941c144b268fcb1f090deb46b75255d",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "workspace list/status/destroy all fail with workspace_index_incomplete on remote and host",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "fc79f41e549131be5d4d4edac49c4ad9",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb ensure against a remote target returns no instance record (no url)",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "ccd9e5e28f09f91f51cd36b5e7645900",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "resources status on remote: deep/scope-cache return measurement_unavailable, thorough times out most categories",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "01df389c5d1019fc1f82d52ea8072950",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Legacy write_secret() rewrites the whole personal secret file, destroying comments the broker preserves",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "54c1c9aed2fdf2bd620eee33eeb61b73",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb test silently runs REMOTE for a local project, and the working-tree push exceeds sb's own 120s timeout",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "b69b39a5a25a10e244b7918e36e169ab",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb ensure targets a remote that sb remote list already reports unreachable, then dies with a raw traceback after 120s",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "834d2253f4455e6fd21eb0faffad76ea",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote resource status cannot measure host capacity",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "b5ea143234f3d24d20f2ba78ea4435bb",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote detached exec fails with supervisor_launch_failed",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "6f0b87cd91d110adcdd8e94c1037458d",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Agent worktree setup switched the shared root branch",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "5021b7b9e9d71c82c3e9eacb026ca963",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote network-capacity monitor unavailable",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "3b3782464e982ed9387e8e2a81d12c53",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Herd ensure acceptance unknown and registry surfaces disagree",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "c5a41bf90e8b801fe99b9f6abe7298e9",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "ensure JSON exposes credential-bearing login URL",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "e8ab77173bf1be69b65f7d1e65b42d49",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote workspace index remains incomplete",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "822262fe39df0c080ec49b562307d7bf",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote resource status currently unavailable",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "3222e29592d229d03be37a60b9a43bf1",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote network capacity remains unmeasurable",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "c5548021faf772c2bc0bae19a8b94864",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote resource measurement unavailable after CLI 0.2.2 update",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "641481fd3eb621604ab8caf7adeb01e8",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote resource status timeout leaks traceback",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "d176d75f2af85574e78aadbc5018fefa",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Sandbox feature branch push rejected by GitHub SSH",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "0dc659545d6568afe931b2cfe93669f8",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "T120 evaluator report attachment relocated to user feedback storage",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; verify its target before accepting a release requirement.",
+      "feedback_id": "3321034abad0e4834919d73f8531f3d8",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote resource status classifies 32 networks as unattributed",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "84585e00f7126c3d37e11d6168091163",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Terminal output_bytes disagrees with complete retained output",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "dc88af801eb6ddafe66aaea5c7d4f0c0",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "T120 evaluator full log and remote benchmark workflow gaps",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "9bb7aea1a679db7233e18f8fbf31c841",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Status JSON disclosed an autologin credential",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "19fe2251d017bb8bbbf0dd6b5d609d26",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Explicit local instance selector was routed to configured remote",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "8371d7f7589feaff75cd7d4ee17424ca",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Sandbox cannot safely clean clearly temporary remote workspace stacks while the workspace index is incomplete",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "6e3ff886a6ccb6a37708abf705721189",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Repeated learning host apply SSH timeout",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "388324ebc557a5eb27571b62ef26689c",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Registered remote reachability disagrees with brokered SSH",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "b340f98a0df25f2c7817d7cac2bd652b",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Learning host apply blocked by remote SSH timeout",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "319480dd089a1225a40ad8a602838165",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote Docker pool transaction exceeded client timeout and failure envelope exposed encoded command detail",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "cd84b75dcfc5da657b6b5a95d35e54fb",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Repeated silent remote status probes block direct-host acceptance observation",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "b9815b2565193466965db85343ad26c2",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote workspace list rejects stale missing project directory",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "8bc9ca1c7fb7e293934bc6fcaa3e6506",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote T120 bootstrap blocked by exhausted Docker subnet pools",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; verify its target before accepting a release requirement.",
+      "feedback_id": "968d8f7a4416f26099ca49bff0b61b0b",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Apply recreates ownership failure after explicit repair",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "3ef73e91af2e0fcc11c1c111591e9784",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote apply partially recreates runtime then fails on plugin permissions",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "02987b45f3796f5dee74d5328302a887",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote status ignores explicit instance selector",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "955b20457245aab5573cda8fd9951eec",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Preview label selector also ignored",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "8f93049f0203d1b76e345b3447567079",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Preview root remains unresolvable with original config",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; verify its target before accepting a release requirement.",
+      "feedback_id": "9ff08b134474af5bfc4e85cfad35ab9b",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote network pressure remains high at 31 active managed networks",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "dcb1070b7240de1233c7c509a6d54c49",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "All documented remote instance selectors are ignored",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "11a08aafc269d5e0a602313acfbec231",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote preview project mapping breaks after exact source sync",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "20c0829c9145fb5a0ead2849d13e258b",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "VPS status ignores explicit instance selector",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "67ef77d6ad3d7acaaae60db41e0a5558",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote control updated; network pressure remains high",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "c841bc711c53936d6a6ce94cfe7200e7",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Global instance selector also ignored for remote status",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "90e893e45556e215e5963d34738c3e89",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote status ignores subcommand instance selector",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "a48f3f90e30a211b6fbd438890d40f93",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "OrbStack stop interrupted Sandbox E2E and teardown",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "fc1bc64c301c8dfe80b2c966e8149f20",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "ensure tried to replace a WordPress 7.1-RC3 instance with latest stable",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "ee3a1f3864e28125881d0651d9a53c1a",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Repeated T105 r7 status poll returned no payload",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "eddb34e41036f7cf38f01ad0a1fc64fc",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "T105 r7 status poll completed without a payload",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "05605f7f730e2340d2787b05445da98d",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "T105 r7 retained output long-poll failed",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "0a5987c9daee5c691b28ed6573c1c68e",
+      "recorded_status": "verified",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote network pressure remains high at 31 active managed networks",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "600d2def1a44dde2e811a79e01b9aa25",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Sandbox CLI crashes on duplicate --project-identity parser option",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "cc5a5f85457d80cacac085e2ec88a6af",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sandbox.config.<label>.json is root-only and silently no-ops when absent",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "e11914b581d92c102eea700ba9456a2e",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote network pressure remains at 31 active managed networks",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "a813480b2b761798b839cd4682c0649b",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote network pressure remains at 31 active managed networks",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "bf05eeb9362ba7e408b9315669698b60",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "Remote network pressure increased to 31 active managed networks",
+      "disposition": "current_claim_unverified",
+      "evidence_limit": "Detail read; no independent current reproduction for this exact record. Run a bounded check before promotion.",
+      "feedback_id": "0fac3b07416044a28041c2a358cf2084",
+      "recorded_status": "blocked",
+      "report_or_plan": "W9/W10"
+    },
+    {
+      "claim": "A pre-subcommand --label is silently clobbered for six subcommands, targeting the wrong instance",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "6481185910b63348f5c38308439049ca",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "sb wp interleaves its own progress with command output, producing always-true test assertions",
+      "disposition": "prior_review_not_independently_reaccepted",
+      "evidence_limit": "Detail and review metadata read; no fresh acceptance of this exact historical claim. Labels and evidence keywords alone are insufficient.",
+      "feedback_id": "0e2d74b605ea48799f470d76d62058e4",
+      "recorded_status": "resolved",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Remote fast-test harness blocked by Docker network pool exhaustion",
+      "disposition": "duplicate_claim_not_revalidated",
+      "evidence_limit": "Retain declared duplicate relationship as a log claim; verify its target before accepting a release requirement.",
+      "feedback_id": "78aaf5836d63078b060336a9e306b7f5",
+      "recorded_status": "duplicate",
+      "report_or_plan": "W9"
+    },
+    {
+      "claim": "Force cancellation fails when durable job is already cancelling",
+      "disposition": "corroborated_synthetic",
+      "evidence_limit": "Actual cancel method refuses cancelling-to-cancelling before force signal; all process boundaries synthetic.",
+      "feedback_id": "5a30b5cda8378a014d0ae9b15cdf826d",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F09"
+    },
+    {
+      "claim": "Force cancel rejects a job already cancelling",
+      "disposition": "corroborated_synthetic",
+      "evidence_limit": "Same cancel-then-force defect reproduced; retain both historical reports without treating them as two root causes.",
+      "feedback_id": "aaa61571984fb074981f7608e6423aeb",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F09"
+    },
+    {
+      "claim": "Remote job inventory loses the failure cause after successful transport",
+      "disposition": "corroborated_live_read_only",
+      "evidence_limit": "Exact supported query returned valid JSON above client byte bound; source and size probe explain generic exit-zero transport detail.",
+      "feedback_id": "6647c8aaf2ddb69b736e29548b30db02",
+      "recorded_status": "unreviewed",
+      "report_or_plan": "F10"
+    }
+  ],
+  "reviewed_source": "fd7d650f8bfbb1760d931e2484cc01fa0badf546",
+  "schema_version": 1,
+  "scope": "All 278 high/critical and 3 selected medium records read in detail. All 748 inventoried; remaining 467 medium/low received metadata coverage only. Independent current corroboration is limited to expressly identified cases. No feedback status changed.",
+  "source_snapshot": "2026-09-08T16:56:09.302196Z"
+}

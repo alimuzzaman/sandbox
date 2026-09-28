@@ -162,7 +162,7 @@ class TestManagedFailuresAreLegible(unittest.TestCase):
 
         source = (Path(__file__).resolve().parents[1] / "sandbox" / "commands"
                   / "instances_cmd.py").read_text()
-        guard = source.split("entry = dict(result.data)", 1)[1].split("if getattr(args", 1)[0]
+        guard = source.split("entry = dict(result.data)", 1)[1].split("\ndef ", 1)[0]
         self.assertIn('"instance" not in entry', guard)
         self.assertIn("instance is not ready", guard)
 

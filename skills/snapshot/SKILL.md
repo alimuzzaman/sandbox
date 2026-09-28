@@ -14,7 +14,7 @@ loops, and any "I'm about to do something that might break things."
 ./sb snapshots
 ```
 
-Snapshots live under `runtime/snapshots/<name>/` and contain `db.sql` +
+Snapshots live under `runtime/snapshots/<instance>/<name>/` and contain `db.sql` +
 `uploads.tgz` + a `META` file recording the active project at save time.
 Gitignored — they're a per-machine convenience, not shared state.
 
@@ -51,6 +51,17 @@ Snapshot database capture and restore stream through the `wpcli` service's
 standard output/input. The dump is opened host-side with exclusive `0600`
 permissions, so no snapshot directory is bind-mounted into the container and
 no MariaDB `mysql` UID chown or cross-UID permission window is needed.
+
+Capture requires the selected database to be running. `snapshot`, `snapshots`,
+and `reset --rebaseline` do not regenerate the stack; export uses `--no-deps`
+so it cannot recreate the web service. A missing or stopped database refuses
+capture. Inspect `./sb status --instance NAME`, then use `./sb up --instance NAME`
+when starting that existing stack is intended. Explicit rebaseline reports capture
+failure; only automatic provisioning baselines use best-effort logging.
+
+Replacement retains the old dump until the new snapshot is published. An
+interruption can leave a visible `*-previous-*` snapshot; inspect it with
+`./sb snapshots` and use the normal confirmed restore command if needed.
 
 ## From wp-admin (spec 002)
 

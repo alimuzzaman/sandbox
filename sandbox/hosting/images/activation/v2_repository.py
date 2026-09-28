@@ -218,6 +218,8 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
     context_fields = {"target", "compose_project", "selected_services"}
     if "execution_progress" in raw:
         context_fields.update(("compose_snapshot", "compatibility_grant"))
+        if "settlement_forward" in raw["recovery_context"]:
+            context_fields.add("settlement_forward")
     context = _closed(raw["recovery_context"], frozenset(context_fields))
     target = _closed(context["target"], frozenset({
         "machine_identity", "target_identity", "daemon_identity"}))
@@ -246,6 +248,12 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
                 or (raw["phase"] == "accepted" and progress.events)
                 or (raw["phase"] in {"runtime_proven", "edge_pending", "committed"} and not progress.complete)):
             raise ActivationContractError("init_mismatch")
+
+        if "settlement_forward" in context:
+            from .settlement_forward import validate_retained_forward
+            validate_retained_forward(context["settlement_forward"], target=target,
+                snapshot=snapshot, grant=grant, expected_generation=raw["starting_generation"],
+                request_id=raw["request_id"], operation=raw["operation"])
 
     replacement = raw["replacement_intent"]
     if replacement is not None:
@@ -362,6 +370,8 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
         if progress is not None:
             expected_evidence = {"compose_snapshot": context["compose_snapshot"],
                 "compatibility_grant": context["compatibility_grant"], "progress": progress.as_mapping()}
+            if "settlement_forward" in context:
+                expected_evidence["settlement_forward"] = context["settlement_forward"]
             if subject.get("execution_evidence") != expected_evidence:
                 raise ActivationContractError("init_mismatch")
         elif "execution_evidence" in subject:
@@ -406,6 +416,8 @@ def validate_transaction_v2(value: object) -> dict[str, Any]:
 
 def transaction_v2(request: ActivationRequestV2, *, holder: str, proof_pin: dict,
                    recovery_context: dict, prior_generation_digest: str) -> dict[str, Any]:
+    if recovery_context.get("settlement_forward") != request.settlement_forward:
+        raise ActivationContractError("authority_mismatch")
     body = {"schema_version": 2, "request_id": request.request_id,
             "request_digest": request.request_digest, "operation": request.operation,
             "holder": holder, "starting_generation": request.expected_generation,
@@ -446,6 +458,13 @@ def accept_candidate_v2(state: dict, request: ActivationRequestV2, *, holder: st
                 and active.get("request_digest") == request.request_digest:
             return "resume", state, active.get("result")
         return "busy", state, None
+    if request.request_id in state["tombstones"] or request.request_id in state.get("settlements", {}):
+        return "conflict", state, None
+    from .settlement_forward import validate_forward_binding
+    try:
+        validate_forward_binding(state, request)
+    except ActivationContractError as exc:
+        return exc.code, state, None
     if len(state["results"]) >= MAX_RESULTS and len(state["tombstones"]) >= MAX_TOMBSTONES:
         return "retention_full", state, None
     candidate = json.loads(canonical_bytes(state))

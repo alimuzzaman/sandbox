@@ -1,4 +1,8 @@
 import json
+import contextlib
+import io
+import shlex
+import tempfile
 import unittest
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -17,6 +21,36 @@ class FakeInventory:
 
 
 class TestRecoveryInventory(unittest.TestCase):
+    def test_native_bindings_expose_only_identity_and_nonsecret_postgres_fields(self):
+        name = "sandbox-host-lenzora-development-lenzora-db-1"
+        row = {"Name": "/" + name, "Id": "a" * 64, "Image": "sha256:" + "b" * 64,
+            "State": {"Running": True}, "Config": {
+                "Labels": {"com.docker.compose.project": "sandbox-host-lenzora-development"},
+                "Env": ["POSTGRES_DB=lenzora", "POSTGRES_USER=postgres",
+                        "POSTGRES_PASSWORD=private-canary", "DATABASE_URL=private-canary"]},
+            "Mounts": [{"Type": "volume", "Name": "pg-data", "Destination": "/var/lib/postgresql/data", "RW": True}]}
+        def fake_command(argv, **kwargs):
+            if argv[1] == "ps": return CompletedProcess(argv, 0, name + "\n", "")
+            self.assertEqual(argv, ["docker", "inspect", name])
+            return CompletedProcess(argv, 0, json.dumps([row]), "")
+        def fake_ssh(entry, command, **kwargs):
+            argv = shlex.split(command)
+            output = io.StringIO()
+            with patch("sys.argv", ["python3", argv[3]]), \
+                    patch("subprocess.run", side_effect=fake_command), contextlib.redirect_stdout(output):
+                exec(argv[2], {"__name__": "__main__"})
+            return CompletedProcess([], 0, output.getvalue(), "")
+        with tempfile.TemporaryDirectory() as home, \
+                patch("sandbox.core._remote.get_remote", return_value={"provisioned": True}), \
+                patch("sandbox.core._remote.resolve_sandbox_home", return_value=home), \
+                patch("sandbox.core._remote.ssh_run", side_effect=fake_ssh):
+            result = SandboxRemoteInventory().discover("fixture")
+        self.assertEqual(result["container_bindings"][name], {
+            "container_id": "a" * 64, "image_id": "sha256:" + "b" * 64,
+            "compose_project": "sandbox-host-lenzora-development", "running": True,
+            "postgres": {"POSTGRES_DB": "lenzora", "POSTGRES_USER": "postgres"}})
+        self.assertNotIn("private-canary", json.dumps(result))
+
     def test_remote_plan_uses_read_only_inventory_dependency(self):
         inventory = FakeInventory()
         payload = RecoveryService(RecoveryCatalog(1, ()), inventory=inventory).plan(remote="test")

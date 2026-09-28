@@ -314,14 +314,19 @@ class PrivateComposeInputSnapshotV2:
     def __post_init__(self) -> None:
         if self.schema_version != 2:
             raise ActivationContractError("policy_mismatch")
-        if self.input_contract not in (None, "candidate-v1"):
+        if self.input_contract not in (None, "candidate-v1", "candidate-v2"):
             raise ActivationContractError("policy_mismatch")
         if self.init_contract is not None:
-            if self.input_contract != "candidate-v1" or type(self.init_contract) is not InitExecutionContractV2:
+            if self.input_contract not in {"candidate-v1", "candidate-v2"} or type(self.init_contract) is not InitExecutionContractV2:
                 raise ActivationContractError("init_mismatch")
             if any(row.target != self.target or row.snapshot_id != self.snapshot_id
                    for row in self.init_contract.declarations):
                 raise ActivationContractError("init_mismatch")
+        if self.input_contract == "candidate-v2" and (
+                self.init_contract is None or self.init_contract.graph is None):
+            # Copied private files are prepared by the graph's stopped-container
+            # boundary. Legacy replace actions cannot supply this proof.
+            raise ActivationContractError("init_mismatch")
         _text(self.snapshot_id, identity=True)
         if not self.snapshot_id.startswith("compose-snapshot/"):
             raise ActivationContractError("policy_mismatch")
@@ -373,7 +378,7 @@ class PrivateComposeInputSnapshotV2:
     def from_mapping(cls, value: object) -> "PrivateComposeInputSnapshotV2":
         fields = cls.FIELDS
         if type(value) is dict and "input_contract" in value:
-            if value["input_contract"] != "candidate-v1":
+            if value["input_contract"] not in ("candidate-v1", "candidate-v2"):
                 raise ActivationContractError("policy_mismatch")
             fields = fields | {"input_contract"}
         if type(value) is dict and "init_contract" in value:
@@ -531,6 +536,7 @@ class ActivationRequestV2:
     rollback_grant_digest: str
     confirmed: bool
     request_digest: str
+    settlement_forward: dict[str, Any] | None = None
 
     FIELDS: ClassVar[frozenset[str]] = frozenset({
         "schema_version", "request_id", "operation", "expected_generation",
@@ -569,18 +575,26 @@ class ActivationRequestV2:
                         or row.config_digest != image.config_digest
                         or not set(row.dependency_services) <= set(bindings)):
                     raise ActivationContractError("init_mismatch")
+        if self.settlement_forward is not None:
+            from .settlement_forward import ForwardSettlementApproval
+            forward = ForwardSettlementApproval.from_mapping(self.settlement_forward)
+            forward.validate_request(self)
+            object.__setattr__(self, "settlement_forward", forward.as_mapping())
         if self.request_digest != activation_digest(
                 "sandbox.hosting.images.activation-request.v2", self.body_mapping()):
             raise ActivationContractError("request_conflict")
 
     def body_mapping(self) -> dict[str, Any]:
-        return {"schema_version": 2, "request_id": self.request_id,
+        body = {"schema_version": 2, "request_id": self.request_id,
                 "operation": self.operation, "expected_generation": self.expected_generation,
                 "policy_digest": self.policy_digest, "plan_set": self.plan_set.as_mapping(),
                 "proof_set": self.proof_set,
                 "compose_snapshot": self.compose_snapshot.as_mapping(),
                 "rollback_grant_digest": self.rollback_grant_digest,
                 "confirmed": self.confirmed}
+        if self.settlement_forward is not None:
+            body["settlement_forward"] = self.settlement_forward
+        return body
 
     def as_mapping(self) -> dict[str, Any]:
         return {**self.body_mapping(), "request_digest": self.request_digest}
@@ -589,7 +603,7 @@ class ActivationRequestV2:
     def create(cls, *, request_id: str, operation: str, expected_generation: int,
                policy_digest: str, plan_set: object, proof_set: object,
                compose_snapshot: object, rollback_grant_digest: str,
-               confirmed: bool) -> "ActivationRequestV2":
+               confirmed: bool, settlement_forward: dict[str, Any] | None = None) -> "ActivationRequestV2":
         plan = validate_verified_image_plan_set(plan_set)
         snapshot = (compose_snapshot if type(compose_snapshot) is PrivateComposeInputSnapshotV2
                     else PrivateComposeInputSnapshotV2.from_mapping(compose_snapshot))
@@ -599,13 +613,22 @@ class ActivationRequestV2:
                 "plan_set": plan.as_mapping(), "proof_set": proof,
                 "compose_snapshot": snapshot.as_mapping(), "confirmed": confirmed}
         body["rollback_grant_digest"] = rollback_grant_digest
+        if settlement_forward is not None:
+            from .settlement_forward import ForwardSettlementApproval
+            settlement_forward = ForwardSettlementApproval.from_mapping(settlement_forward).as_mapping()
+            body["settlement_forward"] = settlement_forward
         return cls(2, request_id, operation, expected_generation, policy_digest, plan,
                    proof, snapshot, rollback_grant_digest, confirmed, activation_digest(
-                       "sandbox.hosting.images.activation-request.v2", body))
+                       "sandbox.hosting.images.activation-request.v2", body), settlement_forward)
 
     @classmethod
     def from_mapping(cls, value: object) -> "ActivationRequestV2":
-        raw = _closed(value, cls.FIELDS)
+        fields = cls.FIELDS
+        if type(value) is dict and "settlement_forward" in value:
+            if value["settlement_forward"] is None:
+                raise ActivationContractError("authority_mismatch")
+            fields = fields | {"settlement_forward"}
+        raw = _closed(value, fields)
         if type(raw["schema_version"]) is not int or raw["schema_version"] != 2:
             raise ActivationContractError("request_conflict")
         candidate = cls.create(
@@ -614,7 +637,7 @@ class ActivationRequestV2:
             policy_digest=raw["policy_digest"], plan_set=raw["plan_set"],
             proof_set=raw["proof_set"], compose_snapshot=raw["compose_snapshot"],
             rollback_grant_digest=raw["rollback_grant_digest"],
-            confirmed=raw["confirmed"])
+            confirmed=raw["confirmed"], settlement_forward=raw.get("settlement_forward"))
         if candidate.request_digest != raw["request_digest"]:
             raise ActivationContractError("request_conflict")
         return candidate

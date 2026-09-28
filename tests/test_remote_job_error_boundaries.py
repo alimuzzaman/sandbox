@@ -102,6 +102,30 @@ class RemoteJobErrorBoundaryTests(unittest.TestCase):
         self.assertNotIn("retained-job-output", str(raised.exception))
         self.assertIn("remote exit code 1", str(raised.exception))
 
+    def test_error_detail_exit_code_zero_with_empty_output(self):
+        result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        detail = _error_detail(None, result)
+        self.assertEqual(detail, "remote command produced no output")
+
+    def test_error_detail_exit_code_zero_with_invalid_json(self):
+        result = SimpleNamespace(returncode=0, stdout="not json", stderr="")
+        detail = _error_detail(None, result)
+        self.assertEqual(detail, "remote command output contained no valid JSON")
+
+    def test_error_detail_surfaces_top_level_payload_code_and_message(self):
+        result = SimpleNamespace(returncode=0, stdout='{"ok":false,"code":"deploy_fenced"}', stderr="")
+        detail = _error_detail({"ok": False, "code": "deploy_fenced"}, result)
+        self.assertEqual(detail, "deploy_fenced")
+
+        result_msg = SimpleNamespace(returncode=0, stdout='{"ok":false,"message":"host unreachable"}', stderr="")
+        detail_msg = _error_detail({"ok": False, "message": "host unreachable"}, result_msg)
+        self.assertEqual(detail_msg, "host unreachable")
+
+    def test_error_detail_exit_code_zero_with_unsuccessful_status(self):
+        result = SimpleNamespace(returncode=0, stdout='{"ok":false,"status":"pending"}', stderr="")
+        detail = _error_detail({"ok": False, "status": "pending"}, result)
+        self.assertEqual(detail, "remote status pending")
+
 
 if __name__ == "__main__":
     unittest.main()

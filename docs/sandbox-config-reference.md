@@ -626,6 +626,15 @@ runtime WordPress tree (`runtime/wp-<instance>`), including its `wp-content`
 state, uploads, and cache directories; the shared download caches remain
 writable as well.
 
+For a declared local source with a `vendor/` symlink, Sandbox resolves an
+existing readable target and adds a separate read-only bind when no declared
+source mount already contains it. This keeps Composer autoload paths visible
+inside the container. If the target is missing, cannot be resolved, or remains
+outside the generated Compose mounts, Sandbox prints a warning and leaves the
+link unchanged. On an already-ready instance, a newly required target changes
+the source mount policy; `ensure` refuses with `instance_mount_drift` without
+mutation and directs the operator to `sb apply` to reconcile it.
+
 The local runtime also sets WordPress `FS_METHOD` to `direct` and repairs the
 parent `wp-content` directory during bootstrap. This prevents wp-admin and
 Templately dependency installs from falling back to unavailable FTP/SSH
@@ -734,6 +743,11 @@ neither GD nor Imagick is named. Sandbox pins official WordPress web and WP-CLI
 parents by registry digest, builds content-addressed child images below
 `$SANDBOX_HOME/runtime/build/php-extensions/`, and verifies the requirement in
 web, WP-CLI, bounded-exec, and PHPUnit planes.
+When `sb up --instance NAME` resumes an existing WordPress instance with
+`phpExtensions`, it verifies or rebuilds the child images from the persisted
+plan before starting Compose. If preparation fails, the command returns
+`php_extension_image_prepare_failed` without starting the stack; any image
+already built remains available for the next retry.
 
 During `sb migrate --apply`, automatic first-run migration, or `sb home <dir>`,
 the persisted extension requirement and digest metadata move with the other
@@ -841,8 +855,14 @@ Two special cases:
   project that needs scheduled events. The older
   `config.DISABLE_WP_CRON: false` spelling remains a compatibility alias when
   `wpCron` is omitted; if both spellings are present, they must describe the
-  same effective setting. Managed-native uses the same policy for its isolated
-  five-minute scheduler and never enables both triggers.
+  same effective setting. Set `wpCron.enabled` in `sandbox.config.json` and
+  reconcile it with `./sb apply`; do not manually add `DISABLE_WP_CRON` with
+  `wp config set`, which can write a duplicate constant into generated
+  `wp-config.php`. On the default Apache and Nginx/FPM Compose servers, Sandbox
+  supplies the constant through `WORDPRESS_CONFIG_EXTRA`. OpenLiteSpeed manages
+  its required literal writes through the runtime-specific sync described
+  below. Managed-native uses the same policy for its isolated five-minute
+  scheduler and never enables both triggers.
 - On a **litespeed** instance the constants are additionally written as
   literals via `wp config set` (lsphp runs via suExec and can't read the
   container env; the OLS image doesn't regenerate `wp-config.php`, so the
@@ -931,6 +951,71 @@ nor a declared alias. Pruning is opt-in because the inventory is read from the
 whole host, and a route may belong to a checkout that this project's config
 cannot see.
 
+### `delivery` route contract (Feature 054)
+
+An optional project-level `delivery` object declares the public application
+proof required by `deploy --expose` and `preview create`. Route configuration
+and verification are separate: a written route is `configured`, never proof
+that the public application is ready.
+
+```json
+{
+  "delivery": {
+    "schemaVersion": 1,
+    "routes": {
+      "deadlineSeconds": 120,
+      "aliasPolicy": "serve_or_redirect_to_primary",
+      "checks": [
+        {"path": "/health", "statuses": [200], "markers": [
+          {"kind": "header_equals", "field": "X-Application", "expected": "example-app"}
+        ]}
+      ],
+      "releaseIdentity": {
+        "required": true, "path": "/health", "kind": "header",
+        "field": "X-Release", "expectedFrom": "application_commit"
+      },
+      "edgeProof": {"required": false}
+    }
+  }
+}
+```
+
+The closed schema permits one to eight checks, one to four markers per check,
+one to eight allowed status codes per check, and one to 20 unique hostnames.
+Paths are absolute public paths without query, fragment, authority, or
+userinfo. Unknown keys, secret-like values, sensitive marker headers, and
+oversized contracts fail validation. `aliasPolicy` is
+`serve_or_redirect_to_primary` or `serve_only`; HTTP must upgrade to HTTPS.
+
+`deadlineSeconds` defaults to 120 and is limited to 10–300 seconds. The CLI
+overrides the frozen value with `--verify-timeout` on `deploy` or `preview
+create`. Every requested primary and alias is checked for DNS,
+HTTP-to-HTTPS redirect, TLS, path/query preservation, allowed status, and all
+declared markers under one aggregate deadline. A generic 200, route reload, or
+healthy container cannot satisfy the contract.
+
+WordPress without an explicit contract uses the runtime default: `GET
+/wp-json/` returns 200, JSON `/url` equals the primary public origin, and
+`/namespaces` contains `wp/v2`. This is application availability proof, not
+release proof. Generic Compose projects need an explicit marker contract or
+receive `delivery_route_contract_required` before requested exposure effects.
+
+Release identity is optional. If no identity mechanism is declared, the
+result records `release_identity_state=unsupported` and scope
+`application_availability_only`. If it is required, every applicable host
+must match the exact application commit or artifact digest. A Sandbox control
+revision is never an application release identity. A required edge proof is
+owned by the existing edge service and cannot be disabled here.
+
+Covered Feature 054 operations require the controller capabilities
+`delivery_outcomes_v1`, `ordinary_recovery_admission_v1`, and
+`instance_creation_receipt_v1`; covered public route verification also requires
+`delivery_route_verification_v1` before dependent effects. Record the
+application source revision, Sandbox control source/runtime revision, and
+installed controller runtime revision independently; a project config or
+source checkout does not prove that a registered remote has the required
+controller.
+
 ## Multisite
 
 With `multisite: true` (or `"subdirectory"` / `"subdomain"`), provisioning
@@ -988,6 +1073,11 @@ preserving an existing `.yml`).
 database or uploads**. Use it after editing config — toggling a constant
 (`TEMPLATELY_DEV_API`, `WP_DEBUG`), adding a plugin/theme, or enabling
 multisite. It:
+
+The CLI shortcut `./sb apply --instance NAME` resolves both the instance's
+registered project root and its exact registry label. If that saved target is
+unavailable, select it explicitly with `--project-dir <DIR> --label <LABEL>`
+by itself; do not combine both selectors.
 
 For a ready Docker instance, `sb ensure` first attests that every required web
 plane has exactly the read-only self-bind source set generated from

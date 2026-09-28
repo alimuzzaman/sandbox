@@ -15,7 +15,10 @@ from tests.hosting_image_fixtures import local_observation, stage_request, stagi
 class TestRemoteHostingImages(unittest.TestCase):
     def test_inode_exec_accepts_user_owned_home_chain_and_rejects_writable_ancestor(self):
         from sandbox.transports.remote_hosting_images import _INODE_EXEC
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent.parent) as directory:
+        # Keep the fixture outside the checkout: remote deployment workspaces
+        # can have group-writable ancestors. The synthetic chain must model a
+        # safe home path regardless of the runner's umask.
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             simulated_home_parent = Path(directory).resolve() / "home" / "alim"
             home = simulated_home_parent / "sandbox"
             revision = "b" * 40
@@ -24,6 +27,8 @@ class TestRemoteHostingImages(unittest.TestCase):
             root = (home / "runtime" / "helpers" / "image-stage"
                     / f"sha256-{digest}-revision-{revision}")
             root.mkdir(parents=True)
+            (Path(directory) / "home").chmod(0o755)
+            simulated_home_parent.chmod(0o755)
             for path in (home, home / "runtime", home / "runtime" / "helpers",
                          home / "runtime" / "helpers" / "image-stage", root):
                 path.chmod(0o700)

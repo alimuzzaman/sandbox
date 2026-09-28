@@ -180,3 +180,38 @@ results complete T032, T037, T043, T049, T052, T056, T059, T071, T078, T088, T09
 T101, T106, T110, T112, T114, T121, T128, T133, T139, and T146. T024 is complete solely
 as the RED-first waiver record.
 T061 is complete solely as the explicit live-gate record. T060 remains open.
+
+## Candidate-v2 source acceptance — 2026-09-08
+
+The opt-in `candidate-v2` input contract adds stopped-container private file
+delivery with exact ownership, mode, content and container-state readback. Its
+snapshot identity and configuration HMAC are distinct from candidate-v1; v1
+decoding and retained recovery remain supported. Matching CLI, contract and
+operator documentation accompany the change on `latest`, based on `235dd77`.
+
+The image-focused suite passed 365 tests. After independent review found the
+blocking stdin deadline defect, the corrected graph command port passed 21
+graph/runtime/topology tests, including unread large input and short reads.
+The test subprocess environment was then switched to the canonical synthetic
+helper; the affected 14-test module passed with warnings treated as errors.
+
+Disposable registered Linux job `0f36678534c230a625949ca9a146a780` passed the
+archive canary against the corrected source (dirty digest
+`7379a959793cec5715902e2b9a0c2dfae7633eb40a9ef7665d34dc07fbc76a42`).
+It used synthetic bytes and the already-present signed Lenzora worker image,
+proving stopped-container preparation/readback, UID/GID 1000 access, wrong-UID
+denial and cleanup. It does not prove the complete Lenzora dependency graph.
+
+The installed controller was not updated. T060 human security review,
+installed-revision acceptance, full disposable topology acceptance and retained
+production incident settlement remain open. A fresh production status still
+reports generation 0 with no deployed revision and partial runtime observation.
+No production activation or data reset was attempted in this amendment.
+
+Full local durable job `0c65582ace1b105159e2080a7d20422b` ran 5,527 tests in
+576 seconds, with 13 skipped and one failure: the explicit modularity inventory
+still expected 247 kind conditionals. Candidate-v2's legacy-replacement refusal
+adds the 248th. The inventory expectation was corrected and the complete
+modularity/architecture boundary modules rerun. No production code changed
+after the full run. This is full-run evidence plus a focused inventory correction,
+not a claim that the original full job exited successfully.

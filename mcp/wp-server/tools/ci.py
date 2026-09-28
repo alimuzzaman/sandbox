@@ -43,9 +43,11 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
           timeout: int = 900, async_: bool = False, local: bool = False,
           remote: str | None = None, workspace: str = "ci",
           accepted_differences: list[str] | None = None,
-          output_profile: str = "smart") -> dict:
+          output_profile: str = "smart", runtime: str = "sandbox") -> dict:
     """Execute a GitHub Actions workflow locally via `act` or durably on a
-    provisioned remote using isolated retained-log child jobs.
+    provisioned remote using isolated retained-log child jobs. Set
+    ``runtime="none"`` for workflows that do not need a WordPress/runtime
+    instance; this skips runtime lifecycle and leaves pass/fail to `act`.
     (full GitHub-Actions-equivalent fidelity: matrix, if:, needs, services:,
     composite/reusable actions) — one matrix cell per concurrent ephemeral
     sandbox instance (capped). See docs/ci-e2e-runner-spec.md §3.
@@ -76,7 +78,8 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
       and children with job_status/job_output/job_artifacts. The job survives
       even if this MCP call itself times out.
 
-    Each matrix cell's instance is provisioned with that cell's requested
+    With the default runtime, each matrix cell's instance is provisioned with
+    that cell's requested
     PHP/WP version when the workflow specifies one (matrix key or a
     `setup-php` step's `with.php-version`) — overriding the project's own
     sandbox.config.json for that instance only ("CI takes priority over
@@ -84,6 +87,8 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     `host.docker.internal` for workflows that test against a live WordPress
     site; workflows that don't reference it (classic self-contained
     phpunit-with-services: CI) simply ignore it.
+    With ``runtime="none"` no instance is provisioned or torn down and
+    ``WP_BASE_URL`` is not injected.
 
     Returns local {ok, workflow, run_id, jobs, cells:[{label, matrix, status,
     exit_code, url, warning, output, error}], neutralized:[...],
@@ -91,9 +96,12 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     remote execution returns {ok, parent_job_id, children, summary} whether
     detached or accepted through the bounded blocking adapter.
     """
-    capability_error = _require_project_capability(project_dir, None, "wordpress.cli")
-    if capability_error:
-        return capability_error
+    if runtime not in {"sandbox", "none"}:
+        return {"ok": False, "error": "runtime must be 'sandbox' or 'none'"}
+    if runtime != "none":
+        capability_error = _require_project_capability(project_dir, None, "wordpress.cli")
+        if capability_error:
+            return capability_error
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "ci", "run", workflow, "--project-dir", project_dir, "--json"]
     if local:
@@ -122,6 +130,8 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
         cmd += ["--timeout", str(timeout)]
     if output_profile:
         cmd += ["--output-profile", output_profile]
+    if runtime == "none":
+        cmd += ["--runtime", "none"]
     for difference in (accepted_differences or []):
         cmd += ["--accept-difference", difference]
     if async_:

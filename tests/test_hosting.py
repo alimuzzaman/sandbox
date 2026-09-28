@@ -13,9 +13,9 @@ import time
 import types
 import unittest
 import urllib.error
-from contextlib import nullcontext, redirect_stdout
+from contextlib import ExitStack, contextmanager, nullcontext, redirect_stdout
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -27,6 +27,164 @@ import sandbox.core._secrets as personal_secrets  # noqa: E402
 import sandbox.commands.preview as preview  # noqa: E402
 import sandbox.commands.hosting as hosting_cmd  # noqa: E402
 from tests.subprocess_support import run_test_process  # noqa: E402
+
+
+class _HostingOwnerFixture:
+    """Real local source/job/journal owners, with only external effects replaced.
+
+    The test process supplies its observed PID/start/boot/group identity to a
+    temporary retained job. Admission still reads that job, its original
+    submission, and the actual clean Git HEAD. No acceptance helper is stubbed.
+    """
+    def __init__(self, test, manifest=None, *, remote_name="myvps", binding_key=True, nested=False):
+        from sandbox.config.facade import project_identity
+        from sandbox.delivery import admission
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        from sandbox.jobs.process import capture_process_identity
+        from sandbox.jobs.registry import JobRepository
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+
+        temporary = tempfile.TemporaryDirectory()
+        test.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name).resolve()
+        self.checkout = self.home / "application"
+        self.checkout.mkdir()
+        self.root = self.checkout / "site" if nested else self.checkout
+        self.root.mkdir(exist_ok=True)
+        self.manifest_root = self.checkout / "config" if nested else self.root
+        self.manifest_root.mkdir(exist_ok=True)
+        manifest = manifest or _public_acme_manifest()
+        if nested:
+            manifest = manifest.replace("version: 1\n", "version: 1\nsource_root: ../site\n", 1)
+            (self.checkout / "outside.txt").write_text("Outside selected source\n")
+        (self.manifest_root / "sandbox.hosting.yml").write_text(manifest)
+        (self.root / "compose.yml").write_text("services: {}\n")
+        git_env = {
+            "HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
+            "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.test",
+        }
+        for arguments in (("init", "--initial-branch=main"), ("add", "."),
+                          ("commit", "-m", "Synthetic hosting source")):
+            run_test_process(("git", "-C", str(self.checkout), *arguments),
+                env=git_env, capture_output=True, text=True, check=True, timeout=10)
+        self.commit = run_test_process(
+            ("git", "-C", str(self.root), "rev-parse", "HEAD"), env=git_env,
+            capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+        self.deployed_commit = self.commit
+        if nested:
+            self.deployed_commit = run_test_process(
+                ("git", "-C", str(self.checkout), "subtree", "split", "--prefix=site", self.commit),
+                env=git_env, capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+        self.validated = hosting.validate_manifest(str(self.manifest_root))
+        self.remote_name = remote_name
+        self.entry = {"ssh": "fixture@example.test", "provisioned": True,
+                      "origin_ipv4": "203.0.113.10", "origin_ipv6": None,
+                      "mcp_service": {"runtime_revision": "c" * 24}}
+        self.runtime = hosting.desired_runtime(self.validated, remote_name)
+        self.runtime["records"] = hosting.desired_plan(
+            self.validated, self.entry["origin_ipv4"])["records"]
+        self.state = {"version": 1, "hosts": {}}
+        self.key = hosting.state_key(remote_name, self.validated)
+        runtime_dir = self.home / "runtime"
+        self.repository = RecoveryRepository(runtime_dir / "hosts.json", runtime_dir / "locks")
+        self.stack = ExitStack()
+        test.addCleanup(self.stack.close)
+        self.patch("sandbox.core._paths.RUNTIME_DIR", runtime_dir)
+        self.patch("sandbox.delivery.hosting.RUNTIME_DIR", runtime_dir)
+        self.patch("sandbox.delivery.context.RUNTIME_DIR", runtime_dir)
+        self.patch("sandbox.commands.hosting.RUNTIME_DIR", runtime_dir)
+        self.patch("sandbox.hosting.recovery.repository.RUNTIME_DIR", runtime_dir)
+        self.patch.object(hosting_cmd.remote, "RUNTIME_DIR", runtime_dir)
+        self.patch("sandbox.commands.hosting.RecoveryRepository", return_value=self.repository)
+        secret = self.home / "synthetic-secrets"
+        secret.write_text("# fixture only\n")
+        secret.chmod(0o600)
+        self.patch("sandbox.core._secrets.secret_file", return_value=secret)
+        self.binding_key = b"\0" * 32
+        if binding_key:
+            personal_secrets.hosting_binding_key(prepared=(
+                self.binding_key, personal_secrets._hosting_binding_key_version(self.binding_key)))
+        self.jobs = JobRepository(runtime_dir / "jobs" / "registry.sqlite3")
+        self.stack.callback(self.jobs.close)
+        root_digest = "sha256:" + hashlib.sha256(str(self.root).encode()).hexdigest()
+        identity = project_identity({"root": self.root})["identity"]
+        row, _ = self.jobs.accept(JobSubmission(
+            "exec", str(self.root), identity, "local", "default", ("fixture",), 300,
+            SourceIdentity(root_digest, self.commit), request_id="hosting-fixture"))
+        self.jobs.transition(row["job_id"], "running")
+        process = capture_process_identity(os.getpid())
+        if process is None:
+            raise AssertionError("test process identity is unavailable")
+        self.jobs.put_process_identity(row["job_id"], host_boot_id=process.host_boot_id,
+            supervisor_pid=process.pid, supervisor_start_identity=process.start_identity,
+            supervisor_nonce_hash=process.nonce_hash, child_pid=process.pid,
+            child_pgid=os.getpgrp(), child_start_identity=process.start_identity)
+        self.context = {"job_id": row["job_id"], "request_id": row["request_id"],
+            "project_identity": identity, "project_root_digest": root_digest,
+            "source_identity": root_digest, "source_commit": self.commit,
+            "source_dirty_digest": None}
+        environment = {"SANDBOX_DURABLE_" + key.upper(): value
+                       for key, value in self.context.items() if value is not None}
+        self.patch.object(admission, "os", types.SimpleNamespace(
+            environ=environment, defpath=os.defpath, getpgid=os.getpgid, getpgrp=os.getpgrp))
+        # This is the authenticated remote identity port, independent of the
+        # optional memory telemetry. It cannot mutate a target in these tests.
+        self.patch("sandbox.resources.context.authenticated_target_identity",
+                   return_value={"target_identity": "a" * 24})
+        self.patch.object(hosting_cmd.remote, "get_remote", return_value=self.entry)
+        self.patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox")
+        self.patch.object(hosting_cmd.remote, "_remote_mcp_runtime_revision", return_value="c" * 24)
+        self.patch.object(hosting_cmd, "_secret_status", return_value=({}, []))
+        self.prepare = self.patch.object(hosting_cmd, "_prepare_host_apply", return_value=None)
+        self.patch.object(hosting_cmd, "_release_host_apply_reservation", return_value=None)
+        self.source = self.patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source")
+        self.push = self.patch.object(hosting_cmd.remote, "push_commits", return_value=self.deployed_commit)
+        self.update = self.patch.object(hosting_cmd.remote, "update_target_to")
+        self.compose = self.patch.object(hosting_cmd, "_run_compose")
+        self.patch.object(hosting_cmd, "_write_remote_text")
+        self.health = self.patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True})
+        self.observe = self.patch.object(hosting_cmd, "_observe_host_runtime",
+            return_value=_ready_observation(self.deployed_commit, services=(
+                self.validated["compose"]["service"], *self.validated["compose"].get("background_services", []))))
+        self.patch.object(hosting_cmd, "_read_remote_optional", return_value=None)
+        self.configure_edge = self.patch.object(hosting_cmd, "_configure_host_caddy")
+        self.restore_edge = self.patch.object(hosting_cmd, "_restore_host_caddy")
+        self.edge = self.patch.object(hosting_cmd, "_verify_edge")
+        self.client = MagicMock()
+        self.client.zone.return_value = {"id": "zone-1", "name": "example.test"}
+        self.client.records.return_value = []
+        self.client.upsert_address.return_value = {"id": "record-1"}
+        self.patch.object(hosting_cmd.cloudflare, "Client", return_value=self.client)
+        self.save = self.patch.object(self.repository, "_write", wraps=self.repository._write)
+
+    @property
+    def patch(self):
+        class Patcher:
+            def __call__(_self, *args, **kwargs):
+                return self.stack.enter_context(patch(*args, **kwargs))
+            def object(_self, *args, **kwargs):
+                return self.stack.enter_context(patch.object(*args, **kwargs))
+        return Patcher()
+
+    def apply(self):
+        return hosting_cmd._apply_host(self.validated, self.entry, self.remote_name,
+            self.runtime, self.state, False, "main", recovery_repository=self.repository)
+
+    def config_digest(self):
+        runtime = dict(self.runtime, environment=hosting.render_env_file(
+            self.validated, {}, pushed_commit_sha=self.deployed_commit))
+        return hosting_cmd._host_config_digest(self.validated, runtime, binding_key=self.binding_key)
+
+    def delivery(self):
+        from sandbox.delivery.context import target_for_project
+        from sandbox.delivery.models import request_scope
+        from sandbox.delivery.repository import DeliveryRepository
+        target = target_for_project(self.manifest_root, self.remote_name,
+            environment=self.validated["environment"])
+        return DeliveryRepository(self.home).lookup_request(
+            request_scope(target), self.context["request_id"])
 
 
 def _manifest(aliases=None):
@@ -354,6 +512,12 @@ class TestHostingManifest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             nested = Path(directory) / "site"
             nested.mkdir()
+            # Make the fixture's checkout boundary explicit even when TMPDIR
+            # itself is inside the Sandbox checkout.
+            run_test_process(("git", "-C", str(nested), "init", "--quiet"),
+                env={"HOME": directory, "GIT_CONFIG_NOSYSTEM": "1",
+                     "GIT_CONFIG_GLOBAL": os.devnull},
+                capture_output=True, text=True, check=True, timeout=10)
             manifest = _manifest().replace("project: example-site", "project: example-site\nsource_root: ..")
             (nested / "sandbox.hosting.yml").write_text(manifest)
             (nested / "compose.yml").write_text("services: {}\n")
@@ -460,6 +624,26 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("reverse_proxy 127.0.0.1:18001", rendered)
         self.assertIn("redir https://xn--94b2eraib0c0bd9i.xn--54b7fta0cc{uri} 308", rendered)
         self.assertIn("tls /cert.pem /key.pem", rendered)
+
+    def test_served_routes_remove_cloudflare_client_header_from_untrusted_peers(self):
+        for robots in ("allow", "deny"):
+            with self.subTest(robots=robots):
+                manifest = _manifest().replace(
+                    "    cloudflare:\n", f"    robots: {robots}\n    cloudflare:\n")
+                with self._write(manifest) as directory:
+                    result = hosting.validate_manifest(directory)
+                rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem")
+                served, separator, redirect = rendered.partition("asb.bd {")
+                self.assertTrue(separator)
+                self.assertIn(
+                    "@sandbox_untrusted_cloudflare_peer not remote_ip 173.245.48.0/20",
+                    served)
+                self.assertIn(
+                    "request_header @sandbox_untrusted_cloudflare_peer -CF-Connecting-IP",
+                    served)
+                self.assertLess(served.index("request_header @sandbox_untrusted_cloudflare_peer"),
+                                served.index("reverse_proxy 127.0.0.1:18001"))
+                self.assertNotIn("request_header", redirect)
 
     def test_normalizes_an_idn_redirect_target_before_rendering_or_planning(self):
         aliases = "        - hostname: asb.bd\n          mode: redirect\n          target: https://আমারসোনার.বাংলা"
@@ -743,6 +927,7 @@ class TestHostingManifest(unittest.TestCase):
             with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
                  patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
                  patch.object(hosting_cmd, "_cmd_host_sync") as sync, \
+                 patch.object(hosting_cmd, "_with_host_effect_lease", side_effect=lambda v, r, cb: cb(None)), \
                  patch.object(hosting_cmd.hosting, "desired_plan") as plan:
                 hosting_cmd.cmd_host(None, args)
 
@@ -953,6 +1138,30 @@ class TestHostingManifest(unittest.TestCase):
                 self.assertFalse(any(" run --rm " in command for command in commands))
                 self.assertEqual(sum(" up -d" in command for command in commands), 1)
 
+    @patch("sandbox.commands.hosting._initializer_dependency_evidence",
+           return_value={"status": "foreign", "reason": "config_hash_label_mismatch"})
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_initializer_refusal_exposes_field_reason_without_replay(
+            self, remote_checked, _write, evidence):
+        with self._write(_manifest().replace(
+                "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+
+        with self.assertRaisesRegex(
+                RuntimeError, "initializer setup has foreign evidence "
+                "\\(config_hash_label_mismatch\\); refusing replay"):
+            hosting_cmd._run_compose(
+                {}, validated, "/srv/example", "/srv/runtime", runtime,
+            )
+
+        evidence.assert_called_once()
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertFalse(any(" run --rm " in command for command in commands))
+        self.assertEqual(sum(" up -d" in command for command in commands), 1)
+
     def test_initializer_status_command_has_bounded_identity_checks(self):
         command = hosting_cmd._initializer_status_command(
             "docker compose -p example -f compose.yml", "setup",
@@ -965,6 +1174,8 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("com.docker.compose.config-hash", argv[2])
         self.assertIn("created_at", argv[2])
         self.assertIn("not_before", argv[2])
+        self.assertIn("wait_for_completion", argv[2])
+        self.assertIn("schema_version':2", argv[2])
         self.assertIn("raw_prefix", argv[2])
         self.assertIn("time.monotonic()+900", argv[2])
         compile(argv[2], "<initializer-status>", "exec")
@@ -979,16 +1190,22 @@ class TestHostingManifest(unittest.TestCase):
                 "import json,os,sys\n"
                 "args=sys.argv[1:]\n"
                 "if args and args[0]=='compose':\n"
-                " if 'config' in args: print('hash-1')\n"
-                " elif 'images' in args: print('img-1')\n"
+                " if 'config' in args and '--format' in args: print(json.dumps({'services': {'setup': {'environment': {'SYNTHETIC': '$$literal'}}}}))\n"
+                " elif 'config' in args:\n"
+                "  if '-' not in args or '--no-interpolate' in args: print('setup ' + 'c' * 64)\n"
+                "  else:\n"
+                "   resolved=json.load(sys.stdin)\n"
+                "   assert resolved['services']['setup']['environment']['SYNTHETIC']=='$$literal'\n"
+                "   print(os.environ.get('HASH_OUTPUT', 'setup ' + 'a' * 64))\n"
+                " elif 'images' in args: print(os.environ.get('IMAGE_OUTPUT', 'b' * 64))\n"
                 " elif 'ps' in args: print('' if os.environ.get('NO_CONTAINER') else 'container-1')\n"
                 " else: raise SystemExit(2)\n"
                 "elif args and args[0]=='inspect':\n"
-                f" print(json.dumps({{'Created': {created!r}, 'Image': 'img-1', "
-                "'Config': {'Labels': {'com.docker.compose.project': 'example', "
-                "'com.docker.compose.service': 'setup', "
-                "'com.docker.compose.config-hash': 'hash-1'}}, "
-                "'State': {'Status': 'exited', 'ExitCode': 0}}))\n"
+                f" print(json.dumps({{'Created': {created!r}, 'Image': 'sha256:' + 'b' * 64, "
+                "'Config': {'Labels': {'com.docker.compose.project': os.environ.get('PROJECT_LABEL', 'example'), "
+                "'com.docker.compose.service': os.environ.get('SERVICE_LABEL', 'setup'), "
+                "'com.docker.compose.config-hash': os.environ.get('CONFIG_HASH_LABEL', 'a' * 64)}}, "
+                "'State': {'Status': os.environ.get('CONTAINER_STATUS', 'exited'), 'ExitCode': 0}}))\n"
                 "else: raise SystemExit(2)\n"
             )
             docker.chmod(0o755)
@@ -1012,8 +1229,39 @@ class TestHostingManifest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), {
-                "schema_version": 1, "status": "succeeded",
+                "schema_version": 2, "status": "succeeded", "reason": None,
             })
+
+            # Real Compose emits a service-prefixed hash and a bare image ID.
+            # Accept equivalent full identities, never wrong services or digests.
+            cases = [
+                ({"HASH_OUTPUT": "a" * 64}, "succeeded", None),
+                ({"IMAGE_OUTPUT": "sha256:" + "b" * 64}, "succeeded", None),
+                ({"HASH_OUTPUT": "other " + "a" * 64}, "foreign", "compose_config_hash_invalid"),
+                ({"HASH_OUTPUT": "setup " + "c" * 64}, "foreign", "config_hash_label_mismatch"),
+                ({"HASH_OUTPUT": "setup " + "a" * 64 + " extra"}, "foreign", "compose_config_hash_invalid"),
+                ({"HASH_OUTPUT": "setup " + "a" * 64 + "\nother " + "a" * 64}, "foreign", "compose_config_hash_invalid"),
+                ({"IMAGE_OUTPUT": "c" * 64}, "foreign", "container_image_identity_mismatch"),
+                ({"IMAGE_OUTPUT": "b" * 12}, "foreign", "expected_image_identity_invalid"),
+                ({"IMAGE_OUTPUT": "sha512:" + "b" * 64}, "foreign", "expected_image_identity_invalid"),
+                ({"IMAGE_OUTPUT": "b" * 64 + "\n" + "b" * 64}, "foreign", "image_identity_unavailable"),
+                ({"PROJECT_LABEL": "wrong"}, "foreign", "project_label_mismatch"),
+                ({"SERVICE_LABEL": "wrong"}, "foreign", "service_label_mismatch"),
+                ({"CONFIG_HASH_LABEL": "c" * 64}, "foreign", "config_hash_label_mismatch"),
+            ]
+            for overrides, expected, expected_reason in cases:
+                with self.subTest(overrides=overrides):
+                    variant = run_test_process(
+                        argv, capture_output=True, text=True, check=False,
+                        env={
+                            "PATH": str(root) + os.pathsep + os.defpath,
+                            **overrides,
+                        },
+                    )
+                    self.assertEqual(variant.returncode, 0, variant.stderr)
+                    receipt = json.loads(variant.stdout)
+                    self.assertEqual(receipt["status"], expected)
+                    self.assertEqual(receipt["reason"], expected_reason)
 
             stale = hosting_cmd._initializer_status_command(
                 prefix, "setup", not_before=time.time() + 5,
@@ -1025,7 +1273,8 @@ class TestHostingManifest(unittest.TestCase):
             )
             self.assertEqual(stale_result.returncode, 0, stale_result.stderr)
             self.assertEqual(json.loads(stale_result.stdout), {
-                "schema_version": 1, "status": "foreign",
+                "schema_version": 2, "status": "foreign",
+                "reason": "container_precedes_apply",
             })
 
             absent = hosting_cmd._initializer_status_command(
@@ -1038,7 +1287,23 @@ class TestHostingManifest(unittest.TestCase):
             )
             self.assertEqual(absent_result.returncode, 0, absent_result.stderr)
             self.assertEqual(json.loads(absent_result.stdout), {
-                "schema_version": 1, "status": "absent",
+                "schema_version": 2, "status": "absent", "reason": None,
+            })
+
+            running = hosting_cmd._initializer_status_command(
+                prefix, "setup", marker_path=str(marker), wait_for_completion=False,
+            )
+            running_argv = shlex.split(running)
+            running_argv[0] = sys.executable
+            running_result = run_test_process(
+                running_argv, capture_output=True, text=True, check=False,
+                env={"PATH": str(root) + os.pathsep + os.defpath,
+                     "CONTAINER_STATUS": "running"},
+            )
+            self.assertEqual(running_result.returncode, 0, running_result.stderr)
+            self.assertEqual(json.loads(running_result.stdout), {
+                "schema_version": 2, "status": "running",
+                "reason": "container_still_running",
             })
 
     @patch("sandbox.commands.hosting._remote_checked")
@@ -1046,6 +1311,28 @@ class TestHostingManifest(unittest.TestCase):
         remote_checked.return_value = '{"schema_version":1,"status":"unknown"}'
         with self.assertRaisesRegex(RuntimeError, "initializer setup proof was malformed"):
             hosting_cmd._initializer_dependency_status({}, "docker compose", "setup")
+
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_initializer_dependency_evidence_accepts_legacy_and_closed_v2(self, remote_checked):
+        remote_checked.return_value = '{"schema_version":1,"status":"succeeded"}'
+        self.assertEqual(hosting_cmd._initializer_dependency_evidence(
+            {}, "docker compose", "setup"), {"status": "succeeded", "reason": None})
+
+        remote_checked.return_value = json.dumps({
+            "schema_version": 2, "status": "foreign",
+            "reason": "config_hash_label_mismatch",
+        })
+        self.assertEqual(hosting_cmd._initializer_dependency_evidence(
+            {}, "docker compose", "setup", wait_for_completion=False), {
+                "status": "foreign", "reason": "config_hash_label_mismatch",
+            })
+        self.assertEqual(remote_checked.call_args.kwargs["timeout"], 60)
+
+        remote_checked.return_value = json.dumps({
+            "schema_version": 2, "status": "foreign", "reason": "raw-label-value",
+        })
+        with self.assertRaisesRegex(RuntimeError, "initializer setup proof was malformed"):
+            hosting_cmd._initializer_dependency_evidence({}, "docker compose", "setup")
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
@@ -1059,7 +1346,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertIn("--force-recreate --renew-anon-volumes --remove-orphans web worker", commands[0])
+        self.assertIn("--force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[0])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")
@@ -1090,7 +1377,7 @@ class TestHostingManifest(unittest.TestCase):
             if " up -d" in command or " run --rm " in command
         ))
         self.assertIn(
-            "up -d --no-build --force-recreate --renew-anon-volumes "
+            "up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes "
             "--remove-orphans web worker",
             next(command for command in commands if " up -d" in command),
         )
@@ -1287,6 +1574,57 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("tee -a", ssh_stream.call_args.args[1])
         self.assertEqual(ssh_stream.call_args.kwargs["timeout"], 42)
         self.assertEqual(ssh_stream.call_args.kwargs["on_line"], callback)
+
+    def test_apply_log_entries_record_named_timestamped_phase_and_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "apply.log")
+            command = hosting_cmd._logged_remote_command(
+                "printf '%s\\n' 'safe synthetic payload'", path,
+                phase="compose_recreate",
+            )
+            result = run_test_process(
+                ("sh", "-c", command), capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = Path(path).read_text().splitlines()
+            self.assertIn("[Sandbox] apply phase=compose_recreate event=started at=", lines[0])
+            self.assertTrue(lines[0].endswith("Z"))
+            self.assertEqual(lines[1], "safe synthetic payload")
+            self.assertIn("[Sandbox] apply phase=compose_recreate event=finished at=", lines[2])
+            self.assertTrue(lines[2].endswith("exit=0"))
+
+            failed = hosting_cmd._logged_remote_command("false", path, phase="initializer_run")
+            failure = run_test_process(
+                ("sh", "-c", failed), capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(failure.returncode, 1)
+            self.assertIn("phase=initializer_run event=finished", Path(path).read_text())
+            self.assertTrue(Path(path).read_text().rstrip().endswith("exit=1"))
+
+        with self.assertRaisesRegex(ValueError, "invalid apply-log phase"):
+            hosting_cmd._logged_remote_command("true", "/tmp/apply.log", phase="bad;phase")
+
+    def test_apply_log_read_reports_absent_file_without_generic_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            existing = Path(directory) / "apply.log"
+            existing.write_text("phase one\nphase two\nphase three\n")
+            read = run_test_process(
+                ("sh", "-c", hosting_cmd._host_apply_log_read_command(str(existing), 2)),
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(read.returncode, 0, read.stderr)
+            self.assertEqual(read.stdout, "phase two\nphase three\n")
+
+            missing = Path(directory) / "missing.log"
+            absent = run_test_process(
+                ("sh", "-c", hosting_cmd._host_apply_log_read_command(str(missing), 2)),
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(absent.returncode, 44)
+            self.assertIn("apply log unavailable: protected file is absent or unreadable", absent.stderr)
+
+        with self.assertRaisesRegex(hosting.HostingError, "--lines"):
+            hosting_cmd._host_apply_log_read_command("/tmp/apply.log", True)
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
@@ -2342,7 +2680,10 @@ class TestHostingManifest(unittest.TestCase):
             )
 
     def test_host_diagnose_combines_disk_images_and_source_revision_evidence(self):
-        with self._write(_manifest_with_derived_revision()) as directory:
+        manifest = _manifest_with_derived_revision().replace(
+            "container_port: 8080", "container_port: 8080\n      init_services: [setup]",
+        )
+        with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
         revision = "a" * 40
         state = {"version": 1, "hosts": {
@@ -2363,16 +2704,62 @@ class TestHostingManifest(unittest.TestCase):
         with patch.object(hosting_cmd, "_host_runtime_status", return_value=status), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=4096), \
-             patch.object(hosting_cmd, "_remote_checked", return_value=images) as checked:
+             patch.object(hosting_cmd, "_remote_checked", return_value=images) as checked, \
+             patch.object(hosting_cmd, "_initializer_dependency_evidence",
+                          return_value={"status": "foreign",
+                                        "reason": "project_label_mismatch"}) as initializer:
             result = hosting_cmd._host_runtime_diagnose(
                 validated, {"provisioned": True}, "myvps", state,
+                initializer_service="setup",
             )
         self.assertEqual(result["disk"], {"state": "ready", "free_mb": 4096})
         self.assertEqual(result["image_state"], {"state": "ready"})
         self.assertEqual(result["source_revision"]["state"], "ready")
         self.assertEqual(result["source_revision"]["checks"][0]["state"], "match")
+        self.assertEqual(result["initializer_evidence"], {
+            "service": "setup", "status": "foreign",
+            "reason": "project_label_mismatch",
+        })
+        self.assertEqual(initializer.call_args.args[2], "setup")
+        self.assertFalse(initializer.call_args.kwargs["wait_for_completion"])
+        self.assertTrue(initializer.call_args.kwargs["marker_path"].endswith(
+            "/.initializer-started-at"))
         self.assertEqual(checked.call_count, 1)
         self.assertTrue(result["apply_log"].endswith("/apply.log"))
+
+        with patch.object(hosting_cmd, "_host_runtime_status") as status:
+            with self.assertRaisesRegex(hosting.HostingError, "compose.init_services"):
+                hosting_cmd._host_runtime_diagnose(
+                    validated, {"provisioned": True}, "myvps", state,
+                    initializer_service="undeclared",
+                )
+        status.assert_not_called()
+
+    def test_host_diagnose_parses_json_array_images_without_scanning_initializers(self):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        validated["compose"]["init_services"] = ["migrate"]
+        state = {"version": 1, "hosts": {}}
+        status = {
+            "project": "example-site", "environment": "production", "remote": "myvps",
+            "health": {"state": "ready"},
+            "services": [{"service": "web", "state": "running", "health": "healthy"}],
+        }
+        images_json_array = json.dumps([
+            {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
+        ])
+        with patch.object(hosting_cmd, "_host_runtime_status", return_value=status), \
+             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=4096), \
+             patch.object(hosting_cmd, "_remote_checked", return_value=images_json_array), \
+             patch.object(hosting_cmd, "_initializer_dependency_status") as initializer_status:
+            result = hosting_cmd._host_runtime_diagnose(
+                validated, {"provisioned": True}, "myvps", state,
+            )
+        initializer_status.assert_not_called()
+        self.assertEqual(result["images"], [
+            {"Service": "web", "Image": "example:web", "ID": "sha256:1", "Created": "now"}
+        ])
 
     @patch("sandbox.commands.hosting.info")
     @patch("sandbox.commands.hosting._remote_checked")
@@ -2396,23 +2783,35 @@ class TestHostingManifest(unittest.TestCase):
 
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._remote_checked",
-           side_effect=["web\nworker\n", "web | ready\nworker | polling\n"])
-    def test_reads_bounded_logs_for_all_declared_host_services(self, remote_checked, _resolve_home):
+           side_effect=[
+               "web\nworker\nmigrate\n",
+               "web | ready\nworker | polling\n"
+               "migrate | failed: token at https://example.test/"
+               "?sandbox_autologin=log-secret-sentinel\n",
+           ])
+    def test_reads_bounded_logs_for_runtime_background_and_initializer_services(
+            self, remote_checked, _resolve_home):
         manifest = _manifest().replace(
             "      service: web\n",
-            "      service: web\n      background_services: [worker]\n",
+            "      service: web\n"
+            "      background_services: [worker]\n"
+            "      init_services: [migrate]\n",
         )
         with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
 
         output = hosting_cmd._read_host_logs(validated, {}, lines=75)
 
-        self.assertEqual(output, "web | ready\nworker | polling\n")
+        self.assertIn("web | ready", output)
+        self.assertIn("worker | polling", output)
+        self.assertIn("migrate | failed", output)
+        self.assertIn("REDACTED", output)
+        self.assertNotIn("log-secret-sentinel", output)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertIn("--profile '*' config --services", commands[0])
         self.assertIn("docker compose", commands[1])
         self.assertIn("-p sandbox-host-example-site-production", commands[1])
-        self.assertIn("logs --no-color --tail 75 web worker", commands[1])
+        self.assertIn("--profile '*' logs --no-color --tail 75 web worker migrate", commands[1])
 
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._remote_checked",
@@ -2420,7 +2819,9 @@ class TestHostingManifest(unittest.TestCase):
     def test_reads_present_logs_and_reports_missing_declared_service(self, remote_checked, _resolve_home):
         manifest = _manifest().replace(
             "      service: web\n",
-            "      service: web\n      background_services: [worker]\n",
+            "      service: web\n"
+            "      background_services: [worker]\n"
+            "      init_services: [migrate]\n",
         )
         with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
@@ -2428,10 +2829,39 @@ class TestHostingManifest(unittest.TestCase):
         output = hosting_cmd._read_host_logs(validated, {}, lines=50)
 
         self.assertIn("[missing service: worker]", output)
+        self.assertIn("[missing service: migrate]", output)
         self.assertIn("web | ready", output)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         self.assertIn("config --services", commands[0])
         self.assertIn("logs --no-color --tail 50 web", commands[1])
+
+    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
+    @patch("sandbox.commands.hosting._remote_checked", return_value="apply line 1\napply line 2\n")
+    def test_host_logs_apply_log_uses_guarded_remote_check(self, remote_checked, _resolve_home):
+        manifest = _manifest()
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+
+        args = types.SimpleNamespace(
+            action="logs", remote="myvps", lines=20, apply_log=True, json=True,
+            project_dir=None, environment=None,
+        )
+        entry = {"provisioned": True}
+        output_buf = io.StringIO()
+        with patch("sandbox.commands.hosting.hosting.validate_manifest", return_value=validated), \
+             patch("sandbox.commands.hosting.remote.get_remote", return_value=entry), \
+             patch("sandbox.commands.hosting.hosting.load_host_state", return_value={}), \
+             redirect_stdout(output_buf):
+            hosting_cmd.cmd_host({}, args)
+
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertEqual(len(commands), 1)
+        self.assertIn("if [ -f", commands[0])
+        self.assertIn("&& [ -r", commands[0])
+        self.assertIn("then tail -n 20", commands[0])
+        data = json.loads(output_buf.getvalue())
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["output"], "apply line 1\napply line 2\n")
 
     def test_state_round_trip_is_atomic_and_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2593,671 +3023,334 @@ class TestHostingManifest(unittest.TestCase):
         )
         self.assertTrue(all(item["ok"] for item in payload["environments"]))
     def test_host_apply_json_returns_sanitized_revision_evidence(self):
-        revision = "d" * 40
-        with self._write(_manifest_with_derived_revision()) as directory:
-            validated = hosting.validate_manifest(directory)
-        args = types.SimpleNamespace(
-            action="apply", project_dir=directory, environment=None,
-            remote="myvps", confirm=True, json=True,
-            allow_zone_ssl_change=False,
-        )
-        entry = {"provisioned": True, "origin_ipv4": "203.0.113.10", "origin_ipv6": None}
-        apply_result = {
-            "commit": revision,
-            "derived_environment": [{
-                "key": "LENZORA_SOURCE_REVISION",
-                "provider": "pushed_commit_sha",
-                "resolved_at_apply": True,
-            }],
-        }
-        with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
-             patch.object(hosting_cmd, "_validate_apply_source", return_value="main"), \
-             patch.object(hosting_cmd.remote, "get_remote", return_value=entry), \
-             patch.object(hosting_cmd.hosting, "load_host_state", return_value={"version": 1, "hosts": {}}), \
-             patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_declared_secret_sources", return_value=set()), \
-             patch.object(hosting_cmd, "_cloudflare_drift", return_value={"configured": False}), \
-             patch.object(hosting_cmd, "_apply_host", return_value=apply_result), \
-             patch("builtins.print") as printed:
+        fixture = _HostingOwnerFixture(self, _public_acme_manifest().replace(
+            "      require_clean: true\n",
+            "      require_clean: true\n      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n"))
+        args = types.SimpleNamespace(action="apply", project_dir=str(fixture.root),
+            environment=None, remote=fixture.remote_name, confirm=True, json=True,
+            allow_zone_ssl_change=False)
+        fixture.patch.object(hosting_cmd, "_cloudflare_drift", return_value={"configured": False})
+        fixture.patch.object(hosting_cmd, "_declared_secret_sources", return_value=set())
+        fixture.patch.object(hosting_cmd.hosting, "load_host_state", return_value=fixture.state)
+        output = io.StringIO()
+        with redirect_stdout(output):
             hosting_cmd.cmd_host(None, args)
-        evidence = json.loads(printed.call_args.args[0])
-        self.assertEqual(evidence, {
-            "ok": True,
-            "project": "example-site",
-            "environment": "production",
-            "remote": "myvps",
-            "remote_selection": "explicit",
-            **apply_result,
-        })
-        self.assertNotIn("runtime", evidence)
-        self.assertNotIn("environment.env", json.dumps(evidence))
+        evidence = json.loads(output.getvalue())
+        self.assertTrue(evidence["ok"])
+        self.assertEqual(evidence["commit"], fixture.commit)
+        self.assertEqual(evidence["remote"], fixture.remote_name)
+        self.assertEqual(evidence["remote_selection"], "explicit")
+        self.assertTrue(evidence["delivery"]["delivery_succeeded"])
+        self.assertEqual(evidence["derived_environment"], [{
+            "key": "LENZORA_SOURCE_REVISION", "provider": "pushed_commit_sha",
+            "resolved_at_apply": True}])
+        self.assertNotIn("environment.env", output.getvalue())
+        self.assertNotIn("LENZORA_SOURCE_REVISION=", output.getvalue())
 
-    def test_apply_derives_revision_from_nested_push_result_before_reset_and_compose(self):
-        revision = "c" * 40
+    def test_apply_prepares_nested_revision_before_admission_and_publishes_literal_object(self):
+        manifest = _public_acme_manifest().replace("      require_clean: true\n",
+            "      require_clean: true\n      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")
+        fixture = _HostingOwnerFixture(self, manifest, nested=True)
+        self.assertNotEqual(fixture.commit, fixture.deployed_commit)
         events = []
-        with self._write(_public_acme_manifest()) as directory:
-            manifest = Path(directory) / "sandbox.hosting.yml"
-            manifest.write_text(_public_acme_manifest().replace(
-                "      require_clean: true\n",
-                "      require_clean: true\n"
-                "      derived_environment:\n"
-                "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
-            ))
-            validated = hosting.validate_manifest(directory)
-        validated["source_root_nested"] = True
-        validated["source_root"] = "/checkout/nested-source"
-        validated["manifest_root"] = "/checkout"
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(
-            validated, "203.0.113.10",
-        )["records"]
-        state = {"version": 1, "hosts": {}}
-        client = MagicMock()
-        client.records.return_value = []
-        client.upsert_address.return_value = {"id": "record-1"}
-        original_render = hosting.render_env_file
-
-        def push(*_args, **_kwargs):
+        def publish(*args, **kwargs):
             events.append("push")
-            return revision
-
-        def render(*args, **kwargs):
-            events.append("render")
-            return original_render(*args, **kwargs)
-
-        def resolve_secrets(*_args):
-            events.append("secrets")
-            return {}, []
-
-        with patch.object(hosting_cmd, "_secret_status", side_effect=resolve_secrets), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", side_effect=push) as pushed, \
-             patch.object(hosting_cmd.hosting, "render_env_file", side_effect=render), \
-             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
-             patch.object(hosting_cmd.remote, "update_target_to", side_effect=lambda *_args, **_kwargs: events.append("reset")), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", side_effect=lambda *_: (events.append("capture") or ("", []))), \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_run_compose", side_effect=lambda *_, **__: events.append("compose")) as compose, \
-             patch.object(hosting_cmd, "_verify_remote_health"), \
-             patch.object(hosting_cmd, "_observe_host_runtime", return_value=_ready_observation(revision)), \
-             patch.object(hosting_cmd, "_verify_remote_derived_environment"), \
-             patch.object(hosting_cmd, "_configure_host_caddy"), \
-             patch.object(hosting_cmd, "_verify_edge"), \
-             patch.object(hosting_cmd.hosting, "save_host_state"):
-            result = hosting_cmd._apply_host(
-                validated, {}, "myvps", runtime, state, False, "main",
-            )
-
-        self.assertEqual(
-            events[:7],
-            ["secrets", "capture", "render", "push", "render", "reset", "compose"],
-        )
-        self.assertEqual(
-            pushed.call_args.kwargs["source_root"], "/checkout/nested-source",
-        )
-        self.assertIn(f"LENZORA_SOURCE_REVISION={revision}\n", compose.call_args.args[4]["environment"])
-        self.assertEqual(result["commit"], revision)
-        self.assertEqual(result["requested_revision"], revision)
-        self.assertEqual(result["staged_revision"], revision)
-        self.assertEqual(result["recorded_revision"], revision)
-        self.assertEqual(result["observed_runtime_revision"], revision)
+            admitted = fixture.repository.read_delivery_projection(fixture.key)["admission"]
+            self.assertIsNone(fixture.repository.load()["hosts"][fixture.key]["hosting_operation"]["evidence"]["source_revision"])
+            self.assertEqual(admitted["source"]["commit"], fixture.commit)
+            self.assertEqual(admitted["source"]["artifact"]["revision"], fixture.deployed_commit)
+            self.assertEqual(admitted["evidence"]["config_digest"], fixture.config_digest())
+            return fixture.deployed_commit
+        fixture.push.side_effect = publish
+        fixture.update.side_effect = lambda *args, **kwargs: events.append("reset")
+        fixture.compose.side_effect = lambda *args, **kwargs: events.append("compose")
+        result = fixture.apply()
+        self.assertEqual(events, ["push", "reset", "compose"])
+        self.assertEqual(fixture.push.call_args.args[1], fixture.checkout)
+        self.assertEqual(fixture.push.call_args.kwargs["source_ref"], fixture.deployed_commit)
+        self.assertEqual(fixture.push.call_args.kwargs["resolved_sha"], fixture.deployed_commit)
+        self.assertIn("LENZORA_SOURCE_REVISION=" + fixture.deployed_commit + "\n",
+                      fixture.compose.call_args.args[4]["environment"])
+        for field in ("commit", "requested_revision", "staged_revision", "recorded_revision", "observed_runtime_revision"):
+            self.assertEqual(result[field], fixture.deployed_commit)
         self.assertEqual(result["runtime"]["state"], "ready")
         self.assertEqual(result["edge"]["state"], "ready")
-        record = state["hosts"][hosting.state_key("myvps", validated)]
-        self.assertEqual(record["source_state_identity_version"], 2)
-        self.assertTrue(record["source_state_clean"])
+        self.assertTrue(result["delivery"]["delivery_succeeded"])
+        admission = fixture.repository.read_delivery_projection(fixture.key)["admission"]
+        self.assertEqual(admission["job_id"], fixture.context["job_id"])
+        self.assertEqual(admission["source"]["commit"], fixture.commit)
+        self.assertEqual(admission["source"]["artifact"], {
+            "schema_version": 1, "kind": "git_subtree", "root_relative": "site",
+            "revision": fixture.deployed_commit})
+        self.assertEqual(admission["source_schema"], 2)
+        self.assertEqual(fixture.delivery()["operation"]["requested_outcome"]["application"]["commit"], fixture.commit)
         self.assertNotIn("environment", result)
 
+    def test_nested_runtime_outer_commit_cannot_complete_delivery(self):
+        manifest = _public_acme_manifest().replace("      require_clean: true\n",
+            "      require_clean: true\n      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")
+        fixture = _HostingOwnerFixture(self, manifest, nested=True)
+        fixture.observe.return_value = _ready_observation(fixture.commit)
+        with self.assertRaisesRegex(RuntimeError, "stable contradictory evidence"):
+            fixture.apply()
+        fixture.edge.assert_not_called()
+        record = fixture.repository.load()["hosts"][fixture.key]
+        self.assertEqual(record["staged_revision"], fixture.deployed_commit)
+        self.assertEqual(record["runtime"]["state"], "unverified")
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
+
     def test_invalid_derived_push_sha_fails_before_reset_compose_or_state(self):
-        with self._write(_manifest_with_derived_revision()) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        state = {"version": 1, "hosts": {}}
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="d" * 40), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value="abc123"), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "update_target_to") as reset, \
-             patch.object(hosting_cmd, "_run_compose") as compose, \
-             patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
-            with self.assertRaisesRegex(hosting.HostingError, "lowercase 40-hex"):
-                hosting_cmd._apply_host(
-                    validated, {}, "myvps", runtime, state, False, "main",
-                )
-        reset.assert_not_called()
-        compose.assert_not_called()
-        save_state.assert_called_once_with(state)
-        self.assertEqual(state, {
-            "version": 1,
-            "hosts": {hosting.state_key("myvps", validated): {"generation": 1}},
-        })
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        fixture.push.return_value = "abc123"
+        with self.assertRaisesRegex(hosting.HostingError, "source_artifact_mismatch"):
+            fixture.apply()
+        fixture.update.assert_not_called()
+        fixture.compose.assert_not_called()
+        # Admission already committed before the source effect. Keep that fence.
+        admission = fixture.repository.read_delivery_projection(fixture.key)["admission"]
+        self.assertEqual(admission["request_id"], fixture.context["request_id"])
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
     def test_post_push_dirty_clean_source_fails_before_remote_mutation_or_state(self):
-        revision = "d" * 40
-        with self._write(_manifest_with_derived_revision()) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        state = {"version": 1, "hosts": {}}
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision) as pushed, \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("diff --git a/x b/x\n", ["new.txt"])), \
-             patch.object(hosting_cmd.hosting, "render_env_file") as render, \
-             patch.object(hosting_cmd.remote, "update_target_to") as reset, \
-             patch.object(hosting_cmd, "_run_compose") as compose, \
-             patch.object(hosting_cmd.hosting, "save_host_state") as save_state:
-            with self.assertRaisesRegex(hosting.HostingError, "working tree changed before source staging"):
-                hosting_cmd._apply_host(
-                    validated, {}, "myvps", runtime, state, False, "main",
-                )
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        fixture.patch.object(hosting_cmd.remote, "capture_uncommitted",
+                             return_value=("diff --git a/x b/x\n", ["new.txt"]))
+        with self.assertRaisesRegex(hosting.HostingError, "working tree changed before source staging"):
+            fixture.apply()
+        fixture.prepare.assert_not_called()
+        fixture.push.assert_not_called()
+        fixture.update.assert_not_called()
+        fixture.compose.assert_not_called()
+        fixture.save.assert_not_called()
+        self.assertEqual(fixture.state, {"version": 1, "hosts": {}})
 
-        render.assert_not_called()
-        pushed.assert_not_called()
-        reset.assert_not_called()
-        compose.assert_not_called()
-        save_state.assert_not_called()
-        self.assertEqual(state, {"version": 1, "hosts": {}})
-
-    def test_dirty_allowed_source_preserves_post_push_overlay(self):
-        revision = "e" * 40
-        with self._write(_public_acme_manifest().replace(
-            "      require_clean: true\n", "      require_clean: false\n",
-        )) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(
-            validated, "203.0.113.10",
-        )["records"]
-        state = {"version": 1, "hosts": {}}
-        client = MagicMock()
-        client.records.return_value = []
-        client.upsert_address.return_value = {"id": "record-1"}
-        overlay = ("diff --git a/x b/x\n", ["new.txt"])
-        overlay_identity = "sha256:" + "d" * 64
-
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=overlay), \
-             patch.object(hosting_cmd.remote, "snapshot_dirty_overlay", return_value={
-                 "identity": overlay_identity, "digest": "d" * 64,
-                 "archive": b"artifact", "deleted": [], "files": 1,
-             }), \
-             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
-             patch.object(hosting_cmd.remote, "update_target_to") as apply_overlay, \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_run_compose"), \
-             patch.object(hosting_cmd, "_verify_remote_health"), \
-             patch.object(hosting_cmd, "_observe_host_runtime", return_value=_ready_observation()), \
-             patch.object(hosting_cmd, "_configure_host_caddy"), \
-             patch.object(hosting_cmd, "_verify_edge"), \
-             patch.object(hosting_cmd.hosting, "save_host_state"):
-            hosting_cmd._apply_host(
-                validated, {}, "myvps", runtime, state, False, "main",
-            )
-
-        apply_overlay.assert_called_once_with(
-            {}, "/srv/source", revision,
-            project_root=validated["project_root"],
-            diff_text=overlay[0], untracked=overlay[1],
-            overlay_snapshot=ANY,
-        )
-        record = state["hosts"][hosting.state_key("myvps", validated)]
-        self.assertEqual(record["source_state_identity"], overlay_identity)
-        self.assertFalse(record["source_state_clean"])
+    def test_dirty_allowed_source_refuses_before_effects(self):
+        fixture = _HostingOwnerFixture(self, _public_acme_manifest().replace(
+            "      require_clean: true\n", "      require_clean: false\n"))
+        (fixture.root / "new.txt").write_text("synthetic dirty source\n")
+        with self.assertRaisesRegex(ValueError, "recovery_source_dirty"):
+            fixture.apply()
+        fixture.prepare.assert_not_called()
+        fixture.push.assert_not_called()
+        fixture.update.assert_not_called()
+        fixture.compose.assert_not_called()
+        fixture.save.assert_not_called()
+        self.assertEqual(fixture.delivery()["status"], "missing")
 
     def test_observation_timeout_preserves_staged_receipt_without_claiming_runtime(self):
-        revision = "f" * 40
-        with self._write(_public_acme_manifest()) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        state = {"version": 1, "hosts": {}}
+        fixture = _HostingOwnerFixture(self)
         unavailable = hosting_cmd._unavailable_host_observation()
-        failure = hosting_cmd._HostRuntimeObservationNotReady(
-            "remote runtime source/topology/health did not become fully ready before deadline",
-            observation=unavailable,
-            classified=hosting_cmd._classify_host_observation(
-                validated, unavailable, revision),
-        )
-
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "update_target_to"), \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_run_compose"), \
-             patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_poll_post_compose_host_observation",
-                          side_effect=failure), \
-             patch.object(hosting_cmd, "_release_host_apply_reservation"), \
-             patch.object(hosting_cmd, "_restore_host_caddy"), \
-             patch.object(hosting_cmd.hosting, "save_host_state") as save:
-            with self.assertRaisesRegex(RuntimeError, "did not become fully ready before deadline"):
-                hosting_cmd._apply_host(
-                    validated, {}, "myvps", runtime, state, False, "main",
-                )
-
-        record = state["hosts"][hosting.state_key("myvps", validated)]
-        self.assertEqual(record["requested_revision"], revision)
-        self.assertEqual(record["staged_revision"], revision)
+        failure = hosting_cmd._HostRuntimeObservationNotReady("observation deadline reached",
+            observation=unavailable, classified=hosting_cmd._classify_host_observation(
+                fixture.validated, unavailable, fixture.commit))
+        fixture.patch.object(hosting_cmd, "_poll_post_compose_host_observation", side_effect=failure)
+        with self.assertRaisesRegex(RuntimeError, "observation deadline reached"):
+            fixture.apply()
+        record = fixture.repository.load()["hosts"][fixture.key]
+        self.assertEqual(record["requested_revision"], fixture.commit)
+        self.assertEqual(record["staged_revision"], fixture.commit)
         self.assertEqual(record["runtime"]["state"], "unverified")
-        self.assertEqual(record["runtime"]["observation"], [
-            {"phase": "observation", "state": "unavailable"},
-        ])
+        self.assertEqual(record["runtime"]["observation"], [{"phase": "observation", "state": "unavailable"}])
         self.assertEqual(record["edge"]["state"], "pending")
         self.assertNotIn("commit", record)
-        self.assertGreaterEqual(save.call_count, 2)
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
     def test_partial_observation_receipt_is_persisted_before_apply_raises(self):
-        revision = "1" * 40
-        with self._write(_public_acme_manifest().replace(
-            "      require_clean: true\n",
-            "      require_clean: true\n"
-            "      derived_environment:\n"
-            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
-        )) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        state = {"version": 1, "hosts": {}}
-        partial = {
-            "schema_version": 1, "complete": False,
-            "configured_services": ["web"],
-            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
-            "revision_checks": [{"service": "web", "key": "LENZORA_SOURCE_REVISION",
-                                 "observed": None}],
-            "phases": [
-                {"phase": "compose_config", "state": "complete"},
-                {"phase": "source_revision:web", "state": "timeout"},
-            ],
-        }
-        failure = hosting_cmd._HostRuntimeObservationNotReady(
-            "remote runtime source/topology/health did not become fully ready before deadline",
-            observation=partial,
-            classified=hosting_cmd._classify_host_observation(
-                validated, partial, revision),
-        )
-
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "update_target_to"), \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_run_compose"), \
-             patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_poll_post_compose_host_observation",
-                          side_effect=failure), \
-             patch.object(hosting_cmd, "_release_host_apply_reservation"), \
-             patch.object(hosting_cmd, "_restore_host_caddy"), \
-             patch.object(hosting_cmd.hosting, "save_host_state") as save:
-            with self.assertRaisesRegex(RuntimeError, "did not become fully ready before deadline"):
-                hosting_cmd._apply_host(
-                    validated, {}, "myvps", runtime, state, False, "main",
-                )
-
-        record = state["hosts"][hosting.state_key("myvps", validated)]
-        self.assertEqual(record["requested_revision"], revision)
-        self.assertEqual(record["staged_revision"], revision)
-        self.assertIsNone(record["observed_runtime_revision"])
-        self.assertNotIn("recorded_revision", record)
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        partial = _ready_observation(fixture.commit)
+        partial.update(complete=False, phases=[{"phase": "source_revision:web", "state": "timeout"}])
+        partial["revision_checks"][0]["observed"] = None
+        classified = hosting_cmd._classify_host_observation(fixture.validated, partial, fixture.commit)
+        fixture.patch.object(hosting_cmd, "_poll_post_compose_host_observation",
+            side_effect=hosting_cmd._HostRuntimeObservationNotReady("partial observation",
+                observation=partial, classified=classified))
+        with self.assertRaisesRegex(RuntimeError, "partial observation"):
+            fixture.apply()
+        record = fixture.repository.load()["hosts"][fixture.key]
         self.assertEqual(record["runtime"]["state"], "unverified")
         self.assertEqual(record["runtime"]["observation"], partial["phases"])
-        self.assertEqual(record["edge"]["state"], "pending")
-        self.assertGreaterEqual(save.call_count, 2)
+        self.assertNotIn("recorded_revision", record)
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
     def test_identical_staged_unverified_retry_never_reruns_compose_or_initializer(self):
-        revision = "6" * 40
-        manifest = _public_acme_manifest().replace(
-            "      service: web\n",
-            "      service: web\n      init_services: [migrate]\n",
-        ).replace(
-            "      require_clean: true\n",
-            "      require_clean: true\n"
-            "      derived_environment:\n"
-            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
-        )
-        with self._write(manifest) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        digest_runtime = dict(runtime)
-        digest_runtime["environment"] = hosting.render_env_file(
-            validated, {}, pushed_commit_sha=revision,
-        )
-        digest = hosting_cmd._host_config_digest(
-            validated, digest_runtime, binding_key=b"\0" * 32,
-        )
-        key = hosting.state_key("myvps", validated)
-        state = {"version": 1, "hosts": {key: {
-            "requested_revision": revision, "staged_revision": revision,
-            "source_state_identity": _clean_source_identity(),
-            "source_state_clean": True,
-            "source_state_identity_version": 2,
-            "config_digest": digest, "runtime": {"state": "unverified"},
-            "edge": {"state": "pending"},
-        }}}
-        partial = {
-            "schema_version": 1, "complete": False, "configured_services": ["web"],
-            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
-            "revision_checks": [],
-            "phases": [{"phase": "source_revision:web", "state": "timeout"}],
-        }
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        fixture.state["hosts"][fixture.key] = {
+            "requested_revision": fixture.commit, "staged_revision": fixture.commit,
+            "source_state_identity": _clean_source_identity(), "source_state_clean": True,
+            "source_state_identity_version": 2, "config_digest": fixture.config_digest(),
+            "runtime": {"state": "unverified"}, "edge": {"state": "pending"}}
+        partial = _ready_observation(fixture.commit)
+        partial.update(complete=False, revision_checks=[])
+        fixture.observe.return_value = partial
+        with self.assertRaisesRegex(RuntimeError, "refusing Compose or initializer replay"):
+            fixture.apply()
+        fixture.compose.assert_not_called()
+        fixture.health.assert_not_called()
+        fixture.configure_edge.assert_not_called()
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "update_target_to"), \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_observe_host_runtime", return_value=partial), \
-             patch.object(hosting_cmd, "_run_compose") as compose, \
-             patch.object(hosting_cmd, "_verify_remote_health") as runtime_health, \
-             patch.object(hosting_cmd, "_configure_host_caddy") as edge, \
-             patch.object(hosting_cmd, "_release_host_apply_reservation"), \
-             patch.object(hosting_cmd, "_restore_host_caddy"), \
-             patch.object(hosting_cmd.hosting, "save_host_state"):
-            with self.assertRaisesRegex(RuntimeError, "refusing Compose or initializer replay"):
-                hosting_cmd._apply_host(
-                    validated, {}, "myvps", runtime, state, False, "main",
-                )
-
-        compose.assert_not_called()
-        runtime_health.assert_not_called()
-        edge.assert_not_called()
-
-    def test_current_dirty_same_identity_refuses_for_pending_and_ready_receipts(self):
-        revision = "b" * 40
-        manifest = _public_acme_manifest().replace(
-            "      service: web\n",
-            "      service: web\n      init_services: [migrate]\n",
-        ).replace("      require_clean: true\n", "      require_clean: false\n")
-        with self._write(manifest) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        digest_runtime = dict(runtime)
-        digest_runtime["environment"] = hosting.render_env_file(
-            validated, {}, pushed_commit_sha=revision,
+    def test_identical_staged_ready_retry_observes_exact_runtime_without_reapplying(self):
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        fixture.patch.object(
+            hosting_cmd, "_origin_certificate",
+            return_value=("/cert.pem", "/key.pem", "cert-data"),
         )
-        digest = hosting_cmd._host_config_digest(
-            validated, digest_runtime, binding_key=b"\0" * 32,
-        )
-        identity = "sha256:" + "e" * 64
-        key = hosting.state_key("myvps", validated)
-        snapshot = {"identity": identity, "digest": "e" * 64,
-                    "archive": b"artifact", "deleted": [], "files": 1}
-        cases = ({
-            "staged_revision": revision,
-            "runtime": {"state": "unverified"}, "edge": {"state": "pending"},
-        }, {
-            "recorded_revision": revision, "observed_runtime_revision": revision,
-            "runtime": {"state": "ready"}, "edge": {"state": "ready"},
-        })
-        for phase_receipt in cases:
-            with self.subTest(phase_receipt=phase_receipt):
-                state = {"version": 1, "hosts": {key: {
-                    "source_state_identity": identity, "source_state_clean": False,
-                    "source_state_identity_version": 2, "config_digest": digest,
-                    **phase_receipt,
-                }}}
-                original_state = json.loads(json.dumps(state))
-                with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-                     patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-                     patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-                     patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-                     patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-                     patch.object(hosting_cmd.remote, "capture_uncommitted",
-                                  return_value=("diff", ["new.txt"])), \
-                     patch.object(hosting_cmd.remote, "snapshot_dirty_overlay",
-                                  return_value=snapshot), \
-                     patch.object(hosting_cmd.remote, "update_target_to") as update_source, \
-                     patch.object(hosting_cmd, "_observe_host_runtime") as observe, \
-                     patch.object(hosting_cmd, "_run_compose") as compose, \
-                     patch.object(hosting_cmd, "_verify_remote_health") as runtime_health, \
-                     patch.object(hosting_cmd, "_configure_host_caddy") as edge, \
-                     patch.object(hosting_cmd, "_release_host_apply_reservation"), \
-                     patch.object(hosting_cmd.hosting, "save_host_state") as save:
-                    with self.assertRaisesRegex(RuntimeError, "source identity cannot be safely replayed"):
-                        hosting_cmd._apply_host(
-                            validated, {}, "myvps", runtime, state, False, "main",
-                        )
-                observe.assert_not_called()
-                update_source.assert_not_called()
-                compose.assert_not_called()
-                runtime_health.assert_not_called()
-                edge.assert_not_called()
-                save.assert_called_once_with(state)
-                original_state["hosts"][key]["generation"] = 1
-                self.assertEqual(state, original_state)
-
-    def test_current_dirty_changed_artifact_runs_full_recreate(self):
-        revision = "b" * 40
-        with self._write(_public_acme_manifest().replace(
-                "      require_clean: true\n", "      require_clean: false\n")) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        digest_runtime = dict(runtime)
-        digest_runtime["environment"] = hosting.render_env_file(
-            validated, {}, pushed_commit_sha=revision,
-        )
-        digest = hosting_cmd._host_config_digest(
-            validated, digest_runtime, binding_key=b"\0" * 32,
-        )
-        key = hosting.state_key("myvps", validated)
-        state = {"version": 1, "hosts": {key: {
-            "recorded_revision": revision, "observed_runtime_revision": revision,
-            "source_state_identity": "sha256:" + "d" * 64,
-            "source_state_clean": False, "source_state_identity_version": 2,
-            "config_digest": digest, "runtime": {"state": "ready"},
-            "edge": {"state": "pending"},
-        }}}
-        snapshot = {"identity": "sha256:" + "e" * 64, "digest": "e" * 64,
-                    "archive": b"new-artifact", "deleted": [], "files": 1}
-        client = MagicMock()
-        client.records.return_value = []
-        client.upsert_address.return_value = {"id": "record-1"}
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted",
-                          return_value=("diff", ["new.txt"])), \
-             patch.object(hosting_cmd.remote, "snapshot_dirty_overlay", return_value=snapshot), \
-             patch.object(hosting_cmd.remote, "update_target_to") as update_source, \
-             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_run_compose") as compose, \
-             patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_observe_host_runtime", return_value=_ready_observation()), \
-             patch.object(hosting_cmd, "_configure_host_caddy"), \
-             patch.object(hosting_cmd, "_verify_edge"), \
-             patch.object(hosting_cmd.hosting, "save_host_state"):
-            hosting_cmd._apply_host(
-                validated, {}, "myvps", runtime, state, False, "main",
-            )
-        update_source.assert_called_once()
-        compose.assert_called_once()
-        self.assertTrue(compose.call_args.kwargs["force_recreate"])
-
-    def test_legacy_dirty_or_missing_identity_policy_switch_refuses_before_remote_mutation(self):
-        revision = "c" * 40
-        with self._write(_public_acme_manifest()) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        digest_runtime = dict(runtime)
-        digest_runtime["environment"] = hosting.render_env_file(
-            validated, {}, pushed_commit_sha=revision,
-        )
-        digest = hosting_cmd._host_config_digest(
-            validated, digest_runtime, binding_key=b"\0" * 32,
-        )
-        key = hosting.state_key("myvps", validated)
-        cases = ({}, {
-            "source_state_identity": "sha256:" + "d" * 64,
-            "source_state_clean": False,
-        })
-        for source_receipt in cases:
-            with self.subTest(source_receipt=source_receipt):
-                state = {"version": 1, "hosts": {key: {
-                    "recorded_revision": revision,
-                    "observed_runtime_revision": revision,
-                    "config_digest": digest,
-                    "runtime": {"state": "ready"}, "edge": {"state": "pending"},
-                    **source_receipt,
-                }}}
-                original_state = json.loads(json.dumps(state))
-                with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-                     patch.object(hosting_cmd, "_resolve_host_source_commit",
-                                  return_value=revision), \
-                     patch.object(hosting_cmd.remote, "resolve_sandbox_home",
-                                  return_value="/srv/sandbox"), \
-                     patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-                     patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-                     patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(hosting_cmd.remote, "update_target_to") as update_source, \
-                     patch.object(hosting_cmd, "_observe_host_runtime") as observe, \
-                     patch.object(hosting_cmd, "_run_compose") as compose, \
-                     patch.object(hosting_cmd, "_release_host_apply_reservation"), \
-                     patch.object(hosting_cmd.hosting, "save_host_state") as save:
-                    with self.assertRaisesRegex(RuntimeError, "source identity cannot be safely replayed"):
-                        hosting_cmd._apply_host(
-                            validated, {}, "myvps", runtime, state, False, "main",
-                        )
-                update_source.assert_not_called()
-                observe.assert_not_called()
-                compose.assert_not_called()
-                save.assert_called_once_with(state)
-                original_state["hosts"][key]["generation"] = 1
-                self.assertEqual(state, original_state)
-
-    def test_changed_source_with_same_saved_config_runs_full_recreate(self):
-        old_revision, revision = "3" * 40, "4" * 40
-        with self._write(_public_acme_manifest()) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        digest_runtime = dict(runtime)
-        digest_runtime["environment"] = hosting.render_env_file(
-            validated, {}, pushed_commit_sha=revision,
-        )
-        digest = hosting_cmd._host_config_digest(
-            validated, digest_runtime, binding_key=b"\0" * 32,
-        )
-        key = hosting.state_key("myvps", validated)
-        state = {"version": 1, "hosts": {key: {
-            "commit": old_revision, "recorded_revision": old_revision,
-            "observed_runtime_revision": old_revision, "config_digest": digest,
-            "runtime": {"state": "ready"}, "edge": {"state": "ready"},
-        }}}
-        client = MagicMock()
-        client.records.return_value = []
-        client.upsert_address.return_value = {"id": "record-1"}
-
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "update_target_to"), \
-             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_run_compose") as compose, \
-             patch.object(hosting_cmd, "_verify_remote_health", return_value={"complete": True}), \
-             patch.object(hosting_cmd, "_observe_host_runtime",
-                          return_value=_ready_observation()), \
-             patch.object(hosting_cmd, "_configure_host_caddy"), \
-             patch.object(hosting_cmd, "_verify_edge"), \
-             patch.object(hosting_cmd.hosting, "save_host_state"):
-            hosting_cmd._apply_host(
-                validated, {}, "myvps", runtime, state, False, "main",
-            )
-
-        compose.assert_called_once()
-        self.assertTrue(compose.call_args.kwargs["force_recreate"])
-
-    def test_exact_edge_pending_replay_is_edge_only_and_skips_initializers(self):
-        revision = "2" * 40
-        manifest = _public_acme_manifest().replace(
-            "      service: web\n",
-            "      service: web\n      init_services: [migrate]\n",
-        ).replace(
-            "      require_clean: true\n",
-            "      require_clean: true\n"
-            "      derived_environment:\n"
-            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
-        )
-        with self._write(manifest) as directory:
-            validated = hosting.validate_manifest(directory)
-        runtime = hosting.desired_runtime(validated, "myvps")
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-        digest_runtime = dict(runtime)
-        digest_runtime["environment"] = hosting.render_env_file(
-            validated, {}, pushed_commit_sha=revision,
-        )
-        digest = hosting_cmd._host_config_digest(
-            validated, digest_runtime, binding_key=b"\0" * 32,
-        )
-        key = hosting.state_key("myvps", validated)
-        state = {"version": 1, "hosts": {key: {
-            "commit": revision, "recorded_revision": revision,
-            "observed_runtime_revision": revision, "config_digest": digest,
-            "source_state_identity": "sha256:" + hashlib.sha256(
-                b"sandbox-dirty-overlay-v1\0"
-            ).hexdigest(),
+        fixture.client.current_ssl_mode.return_value = "strict"
+        fixture.state["hosts"][fixture.key] = {
+            "commit": "a" * 40, "recorded_revision": "a" * 40,
+            "requested_revision": fixture.commit, "staged_revision": fixture.commit,
+            "source_state_identity": _clean_source_identity(), "source_state_clean": True,
+            "source_state_identity_version": 2, "config_digest": fixture.config_digest(),
             "runtime": {"state": "ready"}, "edge": {"state": "pending"},
-        }}}
-        client = MagicMock()
-        client.records.return_value = []
-        client.upsert_address.return_value = {"id": "record-1"}
+        }
+        fixture.observe.return_value = _ready_observation(fixture.commit)
 
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=revision), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
-             patch.object(hosting_cmd, "_ensure_host_source", return_value="/srv/source"), \
-             patch.object(hosting_cmd.remote, "push_commits", return_value=revision), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "update_target_to"), \
-             patch.object(hosting_cmd.cloudflare, "Client", return_value=client), \
-             patch.object(hosting_cmd, "_read_remote_optional", return_value=None), \
-             patch.object(hosting_cmd, "_observe_host_runtime",
-                          return_value=_ready_observation(revision)), \
-             patch.object(hosting_cmd, "_run_compose") as compose, \
-             patch.object(hosting_cmd, "_verify_remote_health") as runtime_health, \
-             patch.object(hosting_cmd, "_verify_remote_derived_environment") as derived, \
-             patch.object(hosting_cmd, "_configure_host_caddy"), \
-             patch.object(hosting_cmd, "_verify_edge"), \
-             patch.object(hosting_cmd.hosting, "save_host_state"):
-            result = hosting_cmd._apply_host(
-                validated, {}, "myvps", runtime, state, False, "main",
-            )
+        result = fixture.apply()
 
-        compose.assert_not_called()
-        runtime_health.assert_not_called()
-        derived.assert_not_called()
+        fixture.observe.assert_called_once()
+        fixture.compose.assert_not_called()
+        fixture.health.assert_not_called()
         self.assertEqual(result["runtime"]["state"], "ready")
         self.assertEqual(result["edge"]["state"], "ready")
-        migrated = state["hosts"][key]
+        self.assertEqual(fixture.state["hosts"][fixture.key]["recorded_revision"], fixture.commit)
+        self.assertTrue(fixture.delivery()["operation"]["delivery_succeeded"])
+
+    def test_current_dirty_same_identity_refuses_for_pending_and_ready_receipts(self):
+        fixture = _HostingOwnerFixture(self, _public_acme_manifest().replace(
+            "      require_clean: true\n", "      require_clean: false\n"))
+        (fixture.root / "new.txt").write_text("changed overlay\n")
+        for state in ("unverified", "ready"):
+            with self.subTest(runtime=state):
+                fixture.state["hosts"][fixture.key] = {"recorded_revision": fixture.commit,
+                    "source_state_identity": "sha256:" + "d" * 64, "source_state_clean": False,
+                    "runtime": {"state": state}, "edge": {"state": "pending"}}
+                before = json.loads(json.dumps(fixture.state))
+                with self.assertRaisesRegex(ValueError, "recovery_source_dirty"):
+                    fixture.apply()
+                self.assertEqual(fixture.state, before)
+        fixture.prepare.assert_not_called()
+        fixture.push.assert_not_called()
+        fixture.compose.assert_not_called()
+        fixture.save.assert_not_called()
+
+    def test_current_dirty_changed_artifact_refuses_without_recreate(self):
+        fixture = _HostingOwnerFixture(self, _public_acme_manifest().replace(
+            "      require_clean: true\n", "      require_clean: false\n"))
+        fixture.state["hosts"][fixture.key] = {"recorded_revision": fixture.commit,
+            "source_state_identity": "sha256:" + "d" * 64, "source_state_clean": False,
+            "runtime": {"state": "ready"}, "edge": {"state": "pending"}}
+        before = json.loads(json.dumps(fixture.state))
+        (fixture.root / "new.txt").write_text("different artifact\n")
+        with self.assertRaisesRegex(ValueError, "recovery_source_dirty"):
+            fixture.apply()
+        self.assertEqual(fixture.state, before)
+        fixture.prepare.assert_not_called()
+        fixture.update.assert_not_called()
+        fixture.compose.assert_not_called()
+        fixture.save.assert_not_called()
+
+    def test_legacy_dirty_or_missing_identity_policy_switch_refuses_before_remote_mutation(self):
+        for receipt in ({}, {"source_state_identity": "sha256:" + "d" * 64, "source_state_clean": False}):
+            with self.subTest(receipt=receipt):
+                fixture = _HostingOwnerFixture(self)
+                fixture.state["hosts"][fixture.key] = {"recorded_revision": fixture.commit,
+                    "observed_runtime_revision": fixture.commit, "config_digest": fixture.config_digest(),
+                    "runtime": {"state": "ready"}, "edge": {"state": "pending"}, **receipt}
+                with self.assertRaisesRegex(RuntimeError, "source identity cannot be safely replayed"):
+                    fixture.apply()
+                fixture.update.assert_not_called()
+                fixture.observe.assert_not_called()
+                fixture.compose.assert_not_called()
+                self.assertIsNotNone(fixture.repository.read_delivery_projection(fixture.key)["admission"])
+                self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
+                fixture.stack.close()
+
+    def test_source_replay_reason_distinguishes_missing_or_unsupported_history(self):
+        revision = "a" * 40
+        for receipt in (
+                {},
+                {"source_state_identity": "sha256:" + "b" * 64,
+                 "source_state_clean": False},
+                {"source_state_identity": "sha256:" + "b" * 64,
+                 "source_state_clean": False,
+                 "source_state_identity_version": 1},
+                {"source_state_identity": "not-a-digest",
+                 "source_state_clean": True,
+                 "source_state_identity_version": 2},
+        ):
+            with self.subTest(receipt=receipt):
+                previous = {
+                    "recorded_revision": revision,
+                    "config_digest": "digest-1",
+                    **receipt,
+                }
+                reason = hosting_cmd._source_replay_refusal_reason(
+                    previous, revision, "digest-1", _clean_source_identity(), True,
+                )
+                self.assertEqual(
+                    reason,
+                    hosting_cmd._SOURCE_REPLAY_HISTORICAL_PROOF_UNAVAILABLE,
+                )
+                self.assertTrue(hosting_cmd._source_replay_must_refuse(
+                    previous, revision, "digest-1", _clean_source_identity(), True,
+                ))
+
+    def test_source_replay_reason_distinguishes_unchanged_dirty_artifact(self):
+        revision = "a" * 40
+        identity = "sha256:" + "b" * 64
+        previous = {
+            "recorded_revision": revision,
+            "config_digest": "digest-1",
+            "source_state_identity": identity,
+            "source_state_identity_version": 2,
+            "source_state_clean": False,
+        }
+        self.assertEqual(
+            hosting_cmd._source_replay_refusal_reason(
+                previous, revision, "digest-1", identity, False,
+            ),
+            hosting_cmd._SOURCE_REPLAY_UNCHANGED_DIRTY,
+        )
+        self.assertTrue(hosting_cmd._source_replay_must_refuse(
+            previous, revision, "digest-1", identity, False,
+        ))
+        self.assertIsNone(hosting_cmd._source_replay_refusal_reason(
+            previous, revision, "digest-1", "sha256:" + "c" * 64, False,
+        ))
+        self.assertFalse(hosting_cmd._source_replay_must_refuse(
+            previous, revision, "digest-1", "sha256:" + "c" * 64, False,
+        ))
+
+    def test_changed_source_with_same_saved_config_runs_full_recreate(self):
+        fixture = _HostingOwnerFixture(self)
+        fixture.state["hosts"][fixture.key] = {"commit": "3" * 40,
+            "recorded_revision": "3" * 40, "observed_runtime_revision": "3" * 40,
+            "config_digest": fixture.config_digest(),
+            "runtime": {"state": "ready"}, "edge": {"state": "ready"}}
+        fixture.apply()
+        fixture.compose.assert_called_once()
+        self.assertTrue(fixture.compose.call_args.kwargs["force_recreate"])
+
+    def test_exact_edge_pending_replay_is_edge_only_and_skips_initializers(self):
+        manifest = _public_acme_manifest().replace(
+            "      service: web\n", "      service: web\n      init_services: [migrate]\n").replace(
+            "      require_clean: true\n", "      require_clean: true\n"
+            "      derived_environment:\n        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")
+        fixture = _HostingOwnerFixture(self, manifest)
+        fixture.state["hosts"][fixture.key] = {"commit": fixture.commit,
+            "recorded_revision": fixture.commit, "observed_runtime_revision": fixture.commit,
+            "config_digest": fixture.config_digest(),
+            "source_state_identity": "sha256:" + hashlib.sha256(b"sandbox-dirty-overlay-v1\0").hexdigest(),
+            "runtime": {"state": "ready"}, "edge": {"state": "pending"}}
+        result = fixture.apply()
+        fixture.compose.assert_not_called()
+        fixture.health.assert_not_called()
+        self.assertEqual(result["runtime"]["state"], "ready")
+        self.assertEqual(result["edge"]["state"], "ready")
+        migrated = fixture.state["hosts"][fixture.key]
         self.assertEqual(migrated["source_state_identity_version"], 2)
         self.assertTrue(migrated["source_state_clean"])
 
@@ -3279,52 +3372,20 @@ class TestHostingManifest(unittest.TestCase):
 
         self.assertEqual(build_opener.return_value.open.call_count, 1)
 
-    @patch("sandbox.commands.hosting.hosting.save_host_state")
-    @patch("sandbox.commands.hosting._verify_edge")
-    @patch("sandbox.commands.hosting._configure_host_caddy")
-    @patch("sandbox.commands.hosting._verify_remote_health")
-    @patch("sandbox.commands.hosting._observe_host_runtime", return_value=_ready_observation())
-    @patch("sandbox.commands.hosting._run_compose")
-    @patch("sandbox.commands.hosting._read_remote_optional", return_value=None)
-    @patch("sandbox.commands.hosting._origin_certificate")
-    @patch("sandbox.commands.hosting.remote.update_target_to")
-    @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
-    @patch("sandbox.commands.hosting.remote.push_commits", return_value="a" * 40)
-    @patch("sandbox.commands.hosting._resolve_host_source_commit", return_value="a" * 40)
-    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
-    @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
-    @patch("sandbox.commands.hosting.cloudflare.Client")
-    def test_public_acme_apply_skips_origin_ca_and_creates_dns_only_records(
-        self, client_type, _source, _home, _resolve_commit, _push, _capture, _update,
-        origin_certificate, _read_caddy, _compose, _observe, _health, configure_caddy,
-        verify_edge, save_state,
-    ):
-        client = client_type.return_value
-        client.zone.return_value = {"id": "zone-1", "name": "example.test"}
-        client.records.return_value = []
-        client.upsert_address.side_effect = [
-            {"id": "record-1"}, {"id": "record-2"},
-        ]
-        with TestHostingManifest()._write(_public_acme_manifest()) as directory:
-            validated = hosting.validate_manifest(directory)
-        state = {"version": 1, "hosts": {}}
-        runtime = hosting.desired_runtime(validated, "myvps", state)
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-
-        hosting_cmd._apply_host(validated, {}, "myvps", runtime, state, False, "main")
-
+    def test_public_acme_apply_skips_origin_ca_and_creates_dns_only_records(self):
+        fixture = _HostingOwnerFixture(self)
+        origin_certificate = fixture.patch.object(hosting_cmd, "_origin_certificate")
+        fixture.apply()
         origin_certificate.assert_not_called()
-        client.current_ssl_mode.assert_not_called()
-        client.ssl_mode.assert_not_called()
-        self.assertTrue(client.upsert_address.call_count)
-        self.assertTrue(all(call.kwargs["proxied"] is False for call in client.upsert_address.call_args_list))
-        self.assertNotIn("    tls ", configure_caddy.call_args.args[2])
-        verify_edge.assert_called_once_with(
-            validated["routes"],
-            healthcheck_path="/",
-            basic_auth_enabled=False,
-        )
-        self.assertGreaterEqual(save_state.call_count, 3)
+        fixture.client.current_ssl_mode.assert_not_called()
+        fixture.client.ssl_mode.assert_not_called()
+        self.assertTrue(fixture.client.upsert_address.call_count)
+        self.assertTrue(all(call.kwargs["proxied"] is False
+                            for call in fixture.client.upsert_address.call_args_list))
+        self.assertNotIn("    tls ", fixture.configure_edge.call_args.args[2])
+        fixture.edge.assert_called_once_with(fixture.validated["routes"],
+            healthcheck_path="/", basic_auth_enabled=False)
+        self.assertEqual(fixture.repository.load()["hosts"][fixture.key]["edge"]["state"], "ready")
 
     @patch("sandbox.commands.hosting.cloudflare.cloudflare_token", return_value="configured")
     @patch("sandbox.commands.hosting.cloudflare.Client")
@@ -3350,58 +3411,27 @@ class TestHostingManifest(unittest.TestCase):
         self.assertFalse(drift["records"][0]["exists"])
         client.current_ssl_mode.assert_not_called()
 
-    @patch("sandbox.commands.hosting.hosting.save_host_state")
-    @patch("sandbox.commands.hosting._restore_host_caddy")
-    @patch("sandbox.commands.hosting._verify_edge", side_effect=RuntimeError("certificate pending"))
-    @patch("sandbox.commands.hosting._configure_host_caddy")
-    @patch("sandbox.commands.hosting._verify_remote_health")
-    @patch("sandbox.commands.hosting._observe_host_runtime", return_value=_ready_observation())
-    @patch("sandbox.commands.hosting._run_compose")
-    @patch("sandbox.commands.hosting._read_remote_optional", return_value="old caddy")
-    @patch("sandbox.commands.hosting._origin_certificate")
-    @patch("sandbox.commands.hosting.remote.update_target_to")
-    @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
-    @patch("sandbox.commands.hosting.remote.push_commits", return_value="a" * 40)
-    @patch("sandbox.commands.hosting._resolve_host_source_commit", return_value="a" * 40)
-    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
-    @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
-    @patch("sandbox.commands.hosting.cloudflare.Client")
-    def test_public_acme_apply_restores_dns_and_caddy_when_certificate_verification_fails(
-        self, client_type, _source, _home, _resolve_commit, _push, _capture, _update,
-        origin_certificate, _read_caddy, _compose, _observe, _health, _configure,
-        _verify_edge, restore_caddy, save_state,
-    ):
-        client = client_type.return_value
-        client.zone.return_value = {"id": "zone-1", "name": "example.test"}
-        previous = [
-            {"id": "record-1", "type": "A", "name": "example-1.test",
-             "content": "192.0.2.1", "proxied": True, "ttl": 1},
-            {"id": "record-2", "type": "A", "name": "example-2.test",
-             "content": "192.0.2.1", "proxied": True, "ttl": 1},
-        ]
-        client.records.side_effect = [[previous[0]], [previous[1]]]
-        client.upsert_address.side_effect = [{"id": "record-1"}, {"id": "record-2"}]
-        with TestHostingManifest()._write(_public_acme_manifest()) as directory:
-            validated = hosting.validate_manifest(directory)
-        state = {"version": 1, "hosts": {}}
-        runtime = hosting.desired_runtime(validated, "myvps", state)
-        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
-
+    def test_public_acme_apply_restores_dns_and_caddy_when_certificate_verification_fails(self):
+        fixture = _HostingOwnerFixture(self)
+        fixture.patch.object(hosting_cmd, "_read_remote_optional", return_value="old caddy")
+        fixture.edge.side_effect = RuntimeError("certificate pending")
+        previous = [{"id": "record-1", "type": "A", "name": "example-1.test",
+                     "content": "192.0.2.1", "proxied": True, "ttl": 1},
+                    {"id": "record-2", "type": "A", "name": "example-2.test",
+                     "content": "192.0.2.1", "proxied": True, "ttl": 1}]
+        fixture.client.records.side_effect = [[previous[0]], [previous[1]]]
+        fixture.client.upsert_address.side_effect = [{"id": "record-1"}, {"id": "record-2"}]
         with self.assertRaisesRegex(RuntimeError, "certificate pending"):
-            hosting_cmd._apply_host(validated, {}, "myvps", runtime, state, False, "main")
-
-        origin_certificate.assert_not_called()
-        self.assertEqual(client.restore_record.call_count, 2)
-        restored = [call.args[1] for call in client.restore_record.call_args_list]
-        self.assertEqual(restored, list(reversed(previous)))
-        restore_caddy.assert_called_once_with(
-            {}, "sandbox-host-example-site-production", "old caddy",
-            log_path="/srv/sandbox/runtime/hosts/example-site/production/apply.log",
-        )
-        self.assertGreaterEqual(save_state.call_count, 2)
-        record = state["hosts"][hosting.state_key("myvps", validated)]
+            fixture.apply()
+        self.assertEqual([call.args[1] for call in fixture.client.restore_record.call_args_list],
+                         list(reversed(previous)))
+        fixture.restore_edge.assert_called_once_with(fixture.entry,
+            "sandbox-host-example-site-production", "old caddy",
+            log_path="/srv/sandbox/runtime/hosts/example-site/production/apply.log")
+        record = fixture.repository.load()["hosts"][fixture.key]
         self.assertEqual(record["runtime"]["state"], "ready")
         self.assertEqual(record["edge"]["state"], "pending")
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
     @patch("sandbox.commands.hosting.urllib.request.build_opener")
     def test_basic_auth_edge_probe_streams_credentials_only_in_memory(self, build_opener):
@@ -3513,28 +3543,91 @@ class TestHostingManifest(unittest.TestCase):
             self.assertTrue((root / "hosts.json").is_file())
 
     def test_direct_apply_persists_revocation_before_first_remote_effect(self):
-        with self._write(_manifest()) as directory:
-            validated = hosting.validate_manifest(directory)
-        state = {"version": 1, "hosts": {}}
-        runtime = hosting.desired_runtime(validated, "remote", state)
-        repository = MagicMock()
-
-        def first_effect(*_args, **_kwargs):
-            repository._write.assert_called_once_with(state)
+        fixture = _HostingOwnerFixture(self, remote_name="remote")
+        def first_effect(*args, **kwargs):
+            admission = fixture.repository.read_delivery_projection(fixture.key)["admission"]
+            self.assertEqual(admission["request_id"], fixture.context["request_id"])
+            self.assertEqual(admission["job_id"], fixture.context["job_id"])
+            self.assertEqual(fixture.delivery()["status"], "existing")
+            self.assertEqual(fixture.delivery()["operation"]["admission"]["result"], "passed")
             raise RuntimeError("stop-before-effect")
+        fixture.prepare.side_effect = first_effect
+        with self.assertRaisesRegex(RuntimeError, "stop-before-effect"):
+            fixture.apply()
+        fixture.push.assert_not_called()
+        fixture.update.assert_not_called()
+        fixture.compose.assert_not_called()
 
-        with patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-             patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="a" * 40), \
-             patch.object(hosting_cmd.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(hosting_cmd.remote, "snapshot_dirty_overlay", return_value={
-                 "identity": "sha256:" + "1" * 64}), \
-             patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv"), \
-             patch.object(hosting_cmd, "_accept_hosting_operation", return_value=None), \
-             patch.object(hosting_cmd, "_prepare_host_apply", side_effect=first_effect):
-            with self.assertRaisesRegex(RuntimeError, "stop-before-effect"):
-                hosting_cmd._apply_host(
-                    validated, {}, "remote", runtime, state, False, "main",
-                    recovery_repository=repository)
+    def test_environment_backed_secret_refuses_before_publishing_or_deploying(self):
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        fixture.patch.object(
+            hosting_cmd.personal_secrets, "prospective_hosting_binding_reference",
+            return_value={"metadata_id": "sha256:" + "1" * 64, "revision": 1,
+                          "key_version": "v1-test",
+                          "environment_backed": ["SYNTHETIC_HOSTING_SECRET"]},
+        )
+        write_binding = fixture.patch.object(
+            hosting_cmd.personal_secrets, "write_hosting_binding_metadata")
+
+        with self.assertRaisesRegex(
+                hosting.HostingError, "environment overrides cannot authorize recovery"):
+            fixture.apply()
+
+        write_binding.assert_not_called()
+        fixture.push.assert_not_called()
+        fixture.update.assert_not_called()
+        fixture.compose.assert_not_called()
+
+    def test_host_delivery_guidance_mints_runnable_command_without_placeholders(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        with patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="a" * 40):
+            argv = hosting_cmd._host_delivery_guidance(validated, "scaleway-sandbox")
+        joined = " ".join(argv)
+        self.assertNotIn("<original-request-id>", joined)
+        self.assertNotIn("<full-clean-HEAD>", joined)
+        self.assertIn("a" * 40, joined)
+        req_idx = argv.index("--request-id") + 1
+        self.assertTrue(argv[req_idx].startswith("deploy-"))
+
+    def test_host_status_and_diagnose_report_observed_revision_on_mismatch(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        expected = "a" * 40
+        observed = "b" * 40
+        classified = hosting_cmd._classify_host_observation(validated, {
+            "complete": True,
+            "configured_services": ["web"],
+            "rows": [{"Service": "web", "State": "running", "Health": "healthy"}],
+            "revision_checks": [{
+                "service": "web", "key": "LENZORA_SOURCE_REVISION",
+                "observed": observed,
+            }],
+            "phases": [{"phase": "source_revision:web", "state": "complete"}],
+        }, expected)
+        self.assertEqual(classified["source_revision"]["checks"][0]["observed"], observed)
+        self.assertEqual(classified["observed_runtime_revision"], observed)
+
+    def test_host_retire_delivery_clears_host_state(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {target_key: {
+            "active_operation": "active-1",
+            "recovery_uncertainty": "uncertain-1",
+            "image_activation": {"active": "active-img"},
+        }}}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req", "execution_state": "interrupted", "evidence_completeness": "missing"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state") as mock_save:
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        record = state["hosts"][target_key]
+        self.assertIsNone(record["active_operation"])
+        self.assertIsNone(record["recovery_uncertainty"])
+        self.assertIsNone(record["image_activation"]["active"])
+        mock_save.assert_called_once_with(state)
 
 
 class _Response:
@@ -3618,167 +3711,210 @@ class TestCloudflareClient(unittest.TestCase):
 
 
 class TestRemotePreviewIdentity(unittest.TestCase):
-    def test_preview_transfers_ignored_descriptor_before_remote_ensure(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "sandbox.config.json").write_text(
-                '{"slug":"demo","plugins":{"demo":"."}}'
-            )
-            args = types.SimpleNamespace(
-                action="create", json=True, confirm=True, ttl_hours=24,
-                remote="preview", project_dir=str(root), name=None,
-                base_domain="sandbox.asb.bd",
-            )
-            config_core = MagicMock()
-            config_core.load_project_config.return_value = {
-                "root": str(root), "slug": "demo",
-            }
-            entry = {"provisioned": True, "origin_ipv4": "203.0.113.10"}
-            with patch.object(preview, "_load_state",
-                              return_value={"version": 1, "previews": {}}), \
-                 patch.object(preview.core, "_core", return_value=config_core), \
-                 patch.object(preview.remote, "get_remote", return_value=entry), \
-                 patch.object(preview, "preflight_project_capability",
-                              return_value=None), \
-                 patch.object(preview.remote, "current_branch", return_value="latest"), \
-                 patch.object(preview, "preview_identity",
-                              return_value=("preview-id", "preview-label")), \
-                 patch.object(preview.remote, "ensure_deploy_repo",
-                              return_value="/srv/demo"), \
-                 patch.object(preview.remote, "push_commits", return_value="abc123"), \
-                 patch.object(preview.remote, "update_target_to") as overlay, \
-                 patch.object(preview.remote, "capture_uncommitted",
-                              return_value=("", [])), \
-                 patch.object(preview.remote, "ensure_remote_instance",
-                              side_effect=RuntimeError("stop after overlay")), \
-                 patch.object(preview.remote, "delete_remote_instance_for_label"), \
-                 patch("builtins.print"):
-                with self.assertRaises(SystemExit):
-                    preview.cmd_preview(None, args)
-            overlay.assert_called_once_with(
-                entry, "/srv/demo", "abc123", project_root=root,
-                diff_text="", untracked=["sandbox.config.json"],
-            )
-
-    def test_preview_rolls_back_a_partial_instance_when_ensure_fails(self):
-        args = types.SimpleNamespace(
-            action="create", json=True, confirm=True, ttl_hours=24,
-            remote="preview", project_dir="/tmp/project", name=None,
-            base_domain="sandbox.asb.bd",
+    @contextmanager
+    def _preview_owners(self, root, *, kind="wordpress"):
+        """Keep the real attempt, receipt joins, store, and route aggregator."""
+        from sandbox.delivery import exposure, routes
+        from sandbox.delivery.models import canonical_digest, now
+        from sandbox.server_config.models import (
+            creation_digest, validate_creation_context, validate_creation_receipt,
+            validate_url_mutation_result,
         )
-        config_core = MagicMock()
-        config_core.load_project_config.return_value = {"root": "/tmp/project", "slug": "demo"}
-        entry = {"provisioned": True, "origin_ipv4": "203.0.113.10"}
 
-        with patch.object(preview, "_load_state", return_value={"version": 1, "previews": {}}), \
-             patch.object(preview.core, "_core", return_value=config_core), \
-             patch.object(preview.remote, "get_remote", return_value=entry), \
-             patch.object(preview, "preflight_project_capability", return_value=None), \
-             patch.object(preview.remote, "current_branch", return_value="latest"), \
-             patch.object(preview, "preview_identity", return_value=("preview-id", "preview-label")), \
-             patch.object(preview.remote, "ensure_deploy_repo", return_value="/srv/demo"), \
-             patch.object(preview.remote, "push_commits", return_value="abc123"), \
-             patch.object(preview.remote, "update_target_to"), \
-             patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(preview.remote, "ensure_remote_instance", side_effect=RuntimeError("bootstrap failed")), \
-             patch.object(preview.remote, "delete_remote_instance_for_label") as cleanup, \
-             patch.object(preview, "die", side_effect=SystemExit):
+        owners = types.SimpleNamespace(context=None, receipt=None)
+        incarnation = "inc_" + "1" * 32
+
+        def prepare(_entry, target, label, *, operation_id, request_id,
+                    delivery_intent_digest, target_scope_digest, create_allowed):
+            self.assertEqual(target, "/srv/demo")
+            self.assertEqual(label, "preview-label")
+            self.assertTrue(create_allowed)
+            fields = {
+                "schema_version": 1, "delivery_intent_digest": delivery_intent_digest,
+                "target_scope_digest": target_scope_digest,
+                "project_identity": "remote-demo",
+                "project_root_digest": creation_digest(target), "label": label,
+                "instance_config_digest": "sha256:" + "e" * 64,
+                "create_allowed": create_allowed,
+            }
+            owners.context = validate_creation_context({
+                "schema_version": 1, "operation_id": operation_id,
+                "request_id": request_id, "job_id": None,
+                "intent_digest": creation_digest(fields), "intent_fields": fields,
+                **{key: fields[key] for key in (
+                    "project_identity", "project_root_digest", "label")},
+            })
+            stamp = now()
+            owners.receipt = validate_creation_receipt({
+                **{key: owners.context[key] for key in (
+                    "schema_version", "operation_id", "request_id", "job_id",
+                    "intent_digest", "project_identity", "project_root_digest", "label")},
+                "instance_id": "preview-demo", "instance_incarnation_id": incarnation,
+                "relation": "reused", "owner_commit_at": stamp,
+                "completion": "succeeded", "completed_at": stamp, "result_code": None,
+            })
+            return {"ok": True, "schema_version": 1,
+                    "creation_context": owners.context}
+
+        def receipt(_entry, target, label, *, creation_context):
+            self.assertEqual(target, "/srv/demo")
+            self.assertEqual(label, "preview-label")
+            self.assertEqual(creation_context, owners.context)
+            return {"ok": True, "schema_version": 1,
+                    "creation_receipt": owners.receipt, "instance": "preview-demo",
+                    "instance_incarnation_id": incarnation, "lookup_only": True}
+
+        def set_url(_entry, target, instance, url, *, label, creation_context,
+                    expected_incarnation):
+            self.assertEqual((target, instance, label), ("/srv/demo", "preview-demo", "preview-label"))
+            self.assertEqual(creation_context, owners.context)
+            self.assertEqual(expected_incarnation, incarnation)
+            self.assertTrue(url.startswith("https://"))
+            return validate_url_mutation_result({
+                "operation_id": creation_context["operation_id"],
+                "request_id": creation_context["request_id"],
+                "target_digest": creation_context["intent_fields"]["target_scope_digest"],
+                "expected_incarnation": incarnation, "observed_incarnation": incarnation,
+                "before_observed_at": now(), "finished_at": now(),
+                "writes": {"home": "succeeded", "siteurl": "succeeded"},
+                "readback": {"home": True, "siteurl": True},
+                "result_code": "remote_instance_url_verified",
+            })
+
+        class RouteProcess:
+            """Synthetic worker output; observe_routes still validates and joins it."""
+            returncode = 0
+
+            def __init__(self, argv, **_kwargs):
+                self.args = argv
+                self.stdin, self.stdout = io.BytesIO(), io.BytesIO()
+
+            def communicate(self, payload, timeout):
+                contract = json.loads(payload)["contract"]
+                stamp = now()
+                hosts = []
+                for hostname in contract["hostnames"]:
+                    checks = [{
+                        "path": check["path"], "result": "passed", "attempts": 1,
+                        "started_at": stamp, "finished_at": stamp,
+                        "origin": "https://" + hostname,
+                        "status": check["statuses"][0], "query_preserved": True,
+                        "http_upgrade": True, "tls": "passed", "redirect_count": 0,
+                        "marker_digests": [canonical_digest(marker)
+                                           for marker in check["markers"]],
+                    } for check in contract["delivery"]["routes"]["checks"]]
+                    hosts.append({
+                        "hostname": hostname,
+                        "dns": {"result": "passed", "observed_at": stamp,
+                                "address_count": 1, "address_digest": "sha256:" + "f" * 64},
+                        "checks": checks, "release_identity": {"state": "unsupported"},
+                    })
+                return json.dumps({"hosts": hosts}).encode(), b""
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        # Shadow only the route module's subprocess reference. Patching the
+        # shared subprocess.Popen would also intercept the local Git reader.
+        route_transport = types.SimpleNamespace(
+            Popen=RouteProcess, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        )
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(exposure, "RUNTIME_DIR", root.parent / "preview-delivery-home" / "runtime"))
+            stack.enter_context(patch.object(remote, "resolve_sandbox_home", return_value="/srv/sandbox"))
+            stack.enter_context(patch("sandbox.resources.context.authenticated_target_identity",
+                return_value={"schema_version": 1, "target_identity": "b" * 24,
+                              "evidence_state": "known", "observed_at": now()}))
+            owners.capability = stack.enter_context(patch.object(remote, "remote_creation_capability",
+                return_value={"ok": True, "schema_version": 1,
+                              "capabilities": ["instance_creation_receipt_v1"],
+                              "kind": kind, "scope": "controller_support"}))
+            owners.prepare = stack.enter_context(patch.object(remote, "prepare_creation_context", side_effect=prepare))
+            owners.read = stack.enter_context(patch.object(remote, "read_remote_creation_receipt", side_effect=receipt))
+            owners.set_url = stack.enter_context(patch.object(remote, "set_remote_instance_url", side_effect=set_url))
+            stack.enter_context(patch.object(routes, "subprocess", route_transport))
+            for name in ("ssh_run", "ssh_stream", "remote_host_memory_request"):
+                stack.enter_context(patch.object(remote, name,
+                    side_effect=AssertionError("unexpected remote transport in exposure fixture")))
+            yield owners
+
+    def _preview_fixture(self):
+        owner = _HostingOwnerFixture(self, remote_name="preview")
+        (owner.root / "sandbox.config.json").write_text('{"slug":"demo","plugins":{"demo":"."}}')
+        args = types.SimpleNamespace(action="create", json=True, confirm=True,
+            ttl_hours=24, remote="preview", project_dir=str(owner.root), name=None,
+            base_domain="sandbox.asb.bd", request_id="preview/request-a")
+        config = MagicMock()
+        config.load_project_config.return_value = {"root": str(owner.root), "slug": "demo"}
+        owner.patch.object(preview, "_load_state", return_value={"version": 1, "previews": {}})
+        owner.patch.object(preview, "_save_state")
+        owner.patch.object(preview.core, "_core", return_value=config)
+        owner.patch.object(preview, "preflight_project_capability", return_value=None)
+        owner.patch.object(preview, "preview_identity", return_value=("preview-id", "preview-label"))
+        owner.patch.object(remote, "ensure_deploy_repo", return_value="/srv/demo")
+        owner.patch.object(remote, "capture_uncommitted", return_value=("", []))
+        owner.patch.object(remote, "ensure_remote_instance", return_value={
+            "instance": "preview-demo", "wordpress_port": 8188,
+            "login_url": "http://127.0.0.1:8188/wp-login.php?sandbox_autologin=fixture"})
+        owner.patch.object(remote, "reconcile_remote_instance", return_value={"instance": "preview-demo"})
+        owner.patch.object(remote, "activate_remote_plugin")
+        owner.patch.object(remote, "configure_instance_https_route")
+        owner.patch.object(remote, "remove_instance_https_route")
+        owner.patch.object(remote, "delete_remote_instance_for_label")
+        return owner, args, config
+
+    def test_preview_transfers_ignored_descriptor_before_remote_ensure(self):
+        owner, args, _ = self._preview_fixture()
+        with self._preview_owners(owner.root) as ports, redirect_stdout(io.StringIO()):
+            ports.prepare.side_effect = RuntimeError("stop after overlay")
             with self.assertRaises(SystemExit):
                 preview.cmd_preview(None, args)
+        call = owner.update.call_args
+        self.assertEqual(call.args, (owner.entry, "/srv/demo", owner.commit))
+        self.assertEqual(call.kwargs["project_root"], owner.root)
+        self.assertEqual(call.kwargs["untracked"], ["sandbox.config.json"])
+        self.assertEqual(call.kwargs["diff_text"], "")
+        self.assertIsNotNone(call.kwargs["overlay_snapshot"]["identity"])
 
-        cleanup.assert_called_once_with(entry, "/srv/demo", "preview-label")
+    def test_preview_retains_uncertain_instance_when_ensure_fails(self):
+        owner, args, _ = self._preview_fixture()
+        ensure = owner.patch.object(remote, "ensure_remote_instance", side_effect=RuntimeError("bootstrap failed"))
+        cleanup = owner.patch.object(remote, "delete_remote_instance_for_label")
+        with self._preview_owners(owner.root) as ports, redirect_stdout(io.StringIO()):
+            ports.read.side_effect = None
+            ports.read.return_value = {"ok": False}
+            with self.assertRaises(SystemExit):
+                preview.cmd_preview(None, args)
+            ensure.assert_called_once()
+            ports.read.assert_called_once()
+        cleanup.assert_not_called()
 
     def test_preview_failure_json_always_names_label_and_instance(self):
-        args = types.SimpleNamespace(
-            action="create", json=True, confirm=True, ttl_hours=24,
-            remote="preview", project_dir="/tmp/project", name=None,
-            base_domain="sandbox.asb.bd",
-        )
-        config_core = MagicMock()
-        config_core.load_project_config.return_value = {
-            "root": "/tmp/project", "slug": "demo",
-        }
-        instance = {"instance": "preview-demo", "wordpress_port": 8188}
+        owner, args, _ = self._preview_fixture()
+        owner.patch.object(remote, "reconcile_remote_instance", side_effect=RuntimeError("apply failed"))
         output = io.StringIO()
-        with patch.object(preview, "_load_state",
-                          return_value={"version": 1, "previews": {}}), \
-             patch.object(preview.core, "_core", return_value=config_core), \
-             patch.object(preview.remote, "get_remote", return_value={
-                 "provisioned": True, "origin_ipv4": "203.0.113.10"}), \
-             patch.object(preview, "preflight_project_capability", return_value=None), \
-             patch.object(preview.remote, "current_branch", return_value="latest"), \
-             patch.object(preview, "preview_identity",
-                          return_value=("preview-id", "preview-label")), \
-             patch.object(preview.remote, "ensure_deploy_repo",
-                          return_value="/srv/demo"), \
-             patch.object(preview.remote, "push_commits", return_value="abc123"), \
-             patch.object(preview.remote, "update_target_to"), \
-             patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(preview.remote, "ensure_remote_instance",
-                          return_value=instance), \
-             patch.object(preview.remote, "reconcile_remote_instance",
-                          side_effect=RuntimeError("apply failed")), \
-             patch.object(preview.remote, "delete_remote_instance"), \
-             redirect_stdout(output):
+        with self._preview_owners(owner.root), redirect_stdout(output):
             with self.assertRaises(SystemExit):
                 preview.cmd_preview(None, args)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["preview"], {
-            "label": "preview-label", "instance": "preview-demo",
-        })
+        self.assertEqual(payload["preview"], {"label": "preview-label", "instance": "preview-demo"})
+        self.assertFalse(payload["delivery"]["delivery_succeeded"])
 
     def test_preview_create_loads_project_config_from_core_facade(self):
-        args = types.SimpleNamespace(
-            action="create", json=True, confirm=True, ttl_hours=24,
-            remote="preview", project_dir="/tmp/project", name=None,
-            base_domain="sandbox.asb.bd",
-        )
-        config_core = MagicMock()
-        config_core.load_project_config.return_value = {"root": "/tmp/project", "slug": "demo"}
-        client = MagicMock()
-        client.zone.return_value = {"id": "zone-1"}
-        client.records.return_value = []
-        client.upsert_address.return_value = {"id": "record-1"}
-        instance = {
-            "instance": "preview-demo",
-            "wordpress_port": 8188,
-            "login_url": "http://127.0.0.1:8188/wp-login.php?sandbox_autologin=token",
-        }
-        state = {"version": 1, "previews": {}}
-
-        with patch.object(preview, "_load_state", return_value=state), \
-             patch.object(preview, "_save_state"), \
-             patch.object(preview.core, "_core", return_value=config_core), \
-             patch.object(preview.remote, "get_remote", return_value={
-                 "provisioned": True, "origin_ipv4": "203.0.113.10",
-             }), \
-             patch.object(preview, "preflight_project_capability", return_value=None), \
-             patch.object(preview.remote, "current_branch", return_value="latest"), \
-             patch.object(preview.remote, "ensure_deploy_repo", return_value="/srv/demo"), \
-             patch.object(preview.remote, "push_commits", return_value="abc123"), \
-             patch.object(preview.remote, "update_target_to"), \
-             patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
-             patch.object(preview.remote, "ensure_remote_instance", return_value=instance), \
-             patch.object(preview.remote, "reconcile_remote_instance",
-                          return_value=instance) as reconciled, \
-             patch.object(preview.remote, "activate_remote_plugin"), \
-             patch.object(preview.remote, "configure_instance_https_route"), \
-             patch.object(preview.remote, "set_remote_instance_url"), \
-             patch.object(preview.remote, "rewrite_instance_url", return_value="https://preview.example.test/wp-login.php?sandbox_autologin=token"), \
-             patch.object(preview.cloudflare, "Client", return_value=client), \
-             patch("builtins.print") as printed:
+        owner, args, config = self._preview_fixture()
+        output = io.StringIO()
+        with self._preview_owners(owner.root) as ports, redirect_stdout(output):
             preview.cmd_preview(None, args)
-        response = json.loads(printed.call_args.args[0])
-        self.assertEqual(
-            response["preview"]["login_url"],
-            "https://preview.example.test/wp-login.php?sandbox_autologin=token",
-        )
-
-        config_core.load_project_config.assert_called_once_with("/tmp/project")
-        reconciled.assert_called_once_with(
-            {"provisioned": True, "origin_ipv4": "203.0.113.10"},
-            "/srv/demo", ANY,
-        )
+        payload = json.loads(output.getvalue())
+        config.load_project_config.assert_called_once_with(str(owner.root))
+        self.assertEqual(payload["preview"]["instance"], "preview-demo")
+        self.assertIn("https://", payload["preview"]["login_url"])
+        ports.set_url.assert_called_once()
+        self.assertTrue(payload["delivery"]["delivery_succeeded"], payload)
 
     def test_preview_identity_is_stable_and_namespaced(self):
         first = preview.preview_identity("/tmp/example", "fix/login", "login")
@@ -3933,3 +4069,75 @@ class TestHostingSecrets(unittest.TestCase):
         target = hosting_cmd._ensure_host_source({"ssh": "ubuntu@example.test"}, "/srv/sandbox", "alimuzzaman-me")
         self.assertEqual(target, "/srv/sandbox/deploy-src/hosts/alimuzzaman-me")
         self.assertIn("deploy-src/hosts/alimuzzaman-me", mocked.call_args.args[1])
+
+
+class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
+    """A refusal must name the input that caused it, not just the verdict."""
+
+    def _reason(self, previous, **overrides):
+        arguments = {
+            "previous": previous,
+            "requested_revision": "a" * 40,
+            "config_digest": "digest-1",
+            "source_state_identity": _clean_source_identity(),
+            "source_state_clean": True,
+            "exact_runtime_proven": False,
+        }
+        arguments.update(overrides)
+        return hosting_cmd._runtime_apply_refusal_reason(**arguments)
+
+    def test_staged_predecessor_that_never_proved_itself_is_named(self):
+        previous = {
+            "config_digest": "digest-1", "staged_revision": "a" * 40,
+            "runtime": {"state": "unverified"},
+            "source_state_identity": _clean_source_identity(),
+        }
+        reason = self._reason(previous)
+        self.assertEqual(reason["code"], "unproven_staged_revision")
+        self.assertEqual(reason["staged_revision"], "a" * 40)
+        self.assertEqual(reason["runtime_state"], "unverified")
+        self.assertFalse(reason["config_digest_changed"])
+        self.assertFalse(reason["source_state_identity_changed"])
+        self.assertFalse(reason["exact_runtime_proven"])
+
+    def test_missing_source_state_identity_is_distinguished(self):
+        previous = {
+            "config_digest": "digest-1", "staged_revision": "a" * 40,
+            "runtime": {"state": "pending"}, "source_state_identity": None,
+        }
+        self.assertEqual(self._reason(previous)["code"],
+                         "unknown_source_state_identity")
+
+    def test_recorded_revision_refusal_is_distinguished(self):
+        previous = {
+            "config_digest": "digest-1", "recorded_revision": "a" * 40,
+            "observed_runtime_revision": "a" * 40, "runtime": {"state": "ready"},
+            "source_state_identity": _clean_source_identity(),
+        }
+        reason = self._reason(previous)
+        self.assertEqual(reason["code"], "unproven_recorded_revision")
+        self.assertEqual(reason["observed_runtime_revision"], "a" * 40)
+
+    def test_refusal_reason_carries_no_credential_bearing_field(self):
+        previous = {
+            "config_digest": "digest-1", "staged_revision": "a" * 40,
+            "runtime": {"state": "unverified"},
+            "source_state_identity": _clean_source_identity(),
+            "basic_auth": {"password_secret": "SECRET_KEY"},
+            "ssh": "ubuntu@example.test",
+        }
+        reason = self._reason(previous)
+        self.assertEqual(set(reason), {
+            "code", "requested_revision", "recorded_revision", "staged_revision",
+            "observed_runtime_revision", "runtime_state", "config_digest_changed",
+            "source_state_identity_changed", "source_state_clean",
+            "exact_runtime_proven",
+        })
+
+    def test_exception_carries_the_reason_and_states_the_code(self):
+        reason = {"code": "unproven_staged_revision"}
+        error = hosting_cmd.HostRuntimeApplyRefused(reason)
+        self.assertIs(error.detail, reason)
+        self.assertEqual(error.code, "unproven_staged_revision")
+        self.assertIn("unproven_staged_revision", str(error))
+        self.assertIsInstance(error, RuntimeError)

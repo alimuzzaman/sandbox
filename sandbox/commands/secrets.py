@@ -56,7 +56,8 @@ def configure_parser(parser) -> None:
     run.add_argument("--key", help="one secret key (use --secret for paired bindings)")
     run.add_argument("--secret", action="append", dest="secrets", metavar="KEY=DEST",
                      help="bind one key to one child environment name; repeatable")
-    run.add_argument("--destination", default="SANDBOX_SECRET")
+    run.add_argument("--destination", default=None,
+                     help="destination environment variable name (defaults to KEY)")
     run.add_argument("--timeout-seconds", type=int, default=300,
                      help="maximum child lifetime (1-1800 seconds; default 300)")
     run.add_argument("--project-dir", default=".")
@@ -221,7 +222,7 @@ def cmd_secrets(cfg, args) -> None:
             if command and command[0] == "--":
                 command.pop(0)
             if args.secrets:
-                if args.key or args.destination != "SANDBOX_SECRET":
+                if args.key or (args.destination is not None and args.destination != "SANDBOX_SECRET"):
                     raise SecretBrokerError(
                         "selection_invalid",
                         "use either --key/--destination or repeat --secret KEY=DEST",
@@ -239,7 +240,8 @@ def cmd_secrets(cfg, args) -> None:
                     raise SecretBrokerError(
                         "selection_invalid", "--key is required unless --secret is provided",
                     )
-                bindings = [(args.key, args.destination)]
+                destination = args.destination if args.destination is not None else args.key
+                bindings = [(args.key, destination)]
             payload = service.run_many(
                 args.source, bindings, command,
                 timeout_seconds=args.timeout_seconds,

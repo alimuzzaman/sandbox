@@ -1,0 +1,13 @@
+{
+  "acceptance": null,
+  "code": "remote_job_transport_error",
+  "error": "remote job control operation failed: remote exit code 0",
+  "ok": false,
+  "operation": "job-list",
+  "retryable": true,
+  "status": "unknown",
+  "target": {
+    "kind": "remote",
+    "remote": "scaleway-sandbox"
+  }
+}

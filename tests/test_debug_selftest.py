@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -16,6 +17,9 @@ class TestSelftestEnvironment(unittest.TestCase):
         child_environment = run.call_args.kwargs["env"]
         self.assertEqual(child_environment["PATH"], "/synthetic/bin")
         self.assertEqual(child_environment["PYTHONUTF8"], "1")
+        self.assertEqual(child_environment["PYTHONPATH"], str(Path(__file__).resolve().parents[1]))
+        self.assertIn("sandbox-selftest-", child_environment["SANDBOX_HOME"])
+        self.assertFalse(Path(child_environment["SANDBOX_HOME"]).exists())
         self.assertNotIn("UNRELATED_SYNTHETIC", child_environment)
         self.assertEqual(run.call_args.kwargs["timeout"], 1800)
         self.assertIs(run.call_args.kwargs["shell"], False)

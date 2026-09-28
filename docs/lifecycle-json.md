@@ -24,11 +24,22 @@ URL:
 }
 ```
 
+For WordPress instances with `phpExtensions`, `up` prepares missing
+Sandbox-managed child images before Compose startup. A preparation failure
+emits one bounded, redacted JSON failure document with
+`error.code: "php_extension_image_prepare_failed"`; Compose is not started.
+Successfully built local images are retained for a later retry.
+
 Generic Compose and Herd responses use the same envelope and omit
 `mailpit_url` when that service is not part of the runtime. For Generic Compose,
 startup failures emit one bounded, redacted JSON failure document on stdout and
 exit nonzero; stderr remains empty. Machine callers should branch on
 `error.code`. Human output without `--json` keeps the normal error path.
+
+`sb apply --json` emits its redacted project result as one JSON document on
+stdout. When the CLI infers the project from `--instance` or the current
+directory, its explanatory routing message is omitted in JSON mode; human mode
+continues to show that message.
 
 Remote `ensure` applies the same typed-failure priority at the SSH boundary. A
 nonzero child exit is parsed as exactly one JSON object from stdout before

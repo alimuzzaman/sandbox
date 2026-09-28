@@ -60,6 +60,11 @@ phpunit tests** — no central catalog, nothing to pre-register.
 
 ## Get started
 
+The [delivery repair implementation](docs/delivery-repair-implementation.md) tracks
+the current instance, initializer, job-control and backup-freshness corrections and
+their actual command acceptance. A ready result requires the declared service to
+be usable; accepted jobs and configured routes remain distinct from completion.
+
 > **Note:** This is a major rewrite to the per-project model hosted at
 > [`alimuzzaman/sandbox`](https://github.com/alimuzzaman/sandbox). Install:
 
@@ -117,6 +122,12 @@ checkout by mistake. For an additional labeled instance, run
 `sb ensure --project-dir DIR --label LABEL --create` explicitly.
 Init treats that exact directory (or the exact current directory when omitted) as its
 maximum root, does not inherit ancestor project markers, and refuses the user home itself.
+
+`sb apply --instance NAME` uses that instance's registered project root and
+label together, so a project with several instances cannot redirect the apply
+to its default instance. If the saved target cannot be resolved, pass the exact
+`--project-dir DIR --label LABEL` pair; do not combine that pair with
+`--instance`.
 
 On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
 by default when Homebrew is available. It provides the `reader` command for
@@ -195,6 +206,11 @@ A plugin repo carries a **`sandbox.config.json`** describing its stack:
   "tests":      { "suite": "auto" }   // auto-detect WP_UnitTestCase vs Brain/Monkey
 }
 ```
+
+Declared local sources are mounted read-only. When a plugin source has an
+existing `vendor/` symlink whose target is outside the current mounts, Sandbox
+adds that target as a read-only bind so Composer autoloading works in the
+container.
 
 (An existing **`.wp-env.json`** is read as a fallback and converted on
 `sandbox init`. Full schema: [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).)
@@ -458,6 +474,50 @@ disables a one-shot wait) to suit the agent's output verbosity; `--follow`
 converts a validated zero into its one-second polling wait. The complete sealed
 log remains available for later retrieval.
 
+### Recoverable delivery outcomes
+
+Feature 054 requires ordinary `host apply` to run inside a durable local
+`job-start` child. The recovery receipt must be committed and read back before
+source transfer or other protected effects. A request flag by itself does not
+make a direct apply recoverable; legacy direct callers are fenced with a typed
+refusal. Use the application checkout and the full absolute Sandbox executable
+for both the durable parent and child:
+
+```sh
+/absolute/sandbox/sb job-start --local --project-dir /absolute/app \
+  --source-commit FULLHEAD --request-id ORIGINAL --timeout 900 -- \
+  /absolute/sandbox/sb host apply --project-dir /absolute/app \
+  --remote registered-remote --environment staging --confirm --json
+```
+
+Inspect the retained job with `job-status`/`job-output`, then use
+`./sb delivery inspect` (or MCP `delivery_inspect`) for the joined outcome.
+The default query is recorded-only; `--observe` adds bounded current
+read-only evidence. `latest_attempt`, `latest_retained_complete_success`, and
+`current_observation` remain separate. For historical results, use the exact
+project root and request ID from the original job; sibling checkouts are
+different query scopes. `host status` and `host logs` show current state and a
+bounded log tail. If an operation selector misses while history has the
+attempt, use its retained request ID. See
+[`docs/delivery-outcomes.md`](docs/delivery-outcomes.md) for the closed route
+contract, exact incarnation/URL receipt rules, permanent guard limits, and
+validation status.
+
+The separate `deployment_trace_v1` capability covers the early W11 command
+trace. Inspect it with `--trace-id UUID`, or with `--trace-request-id UUID`
+when the start acknowledgement is uncertain; add `--mutation-id UUID` only
+with a trace ID to resolve one original record. Trace selectors use their own
+query mode and do not combine with legacy remote, target, operation, observe,
+limit, or cursor selectors. Trace start/record and the owner-status/owner-record
+ports are diagnostic writers and readback ports, not job or deployment
+authority. Lost acknowledgements use the original selector and ID; an
+ambiguous read stops, and no new trace, job, workload request, or initializer
+is created. Job evidence reads a bounded private snapshot, including validated
+committed WAL pages, without opening SQLite on owner files or changing shared
+memory. Changed, unsupported, or oversized captures remain partial. The
+capability and producer wiring passed isolated supported CLI/MCP exercises.
+Installed-controller and production verification remain separate gates.
+
 Generic Compose `exec` failures retain stdout and stderr independently, each
 bounded to the 1 MiB process-runner limit; when a stream overflows, the runner
 keeps both edges around an explicit truncation marker. Failures include the child `exit_code`. Human `sb exec`
@@ -562,7 +622,8 @@ emitting incremental changes.
 
 For the exceptional case where an operator must run a command directly on a host,
 use the explicit CLI escape hatch. It is never used internally and is not exposed as
-an MCP tool:
+an MCP tool. Every direct SSH command requires `--confirm`, including read-only
+diagnostics, and a short `--reason`:
 
 ```sh
 ./sb remote ssh <remote> --confirm --reason "diagnose service" --command 'systemctl --user status sandbox-remote-mcp'
@@ -617,7 +678,9 @@ Use the same runtime operations without an MCP client:
 ```
 
 `--json` output is redacted: every credential-shaped field, including the
-`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. Test
+`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. This
+applies to `sb apply --json`, even when you target a non-default instance.
+Apply never returns a usable login URL. Test
 harnesses that need to open an admin session without a password pass
 `--reveal-login`, which restores `login_url` alone (other credentials stay
 redacted). A local instance qualifies when its host is loopback-bound; a remote
@@ -799,13 +862,36 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb clean                # stop + wipe DB volume (start fresh)
 ```
 
+Remote project status is read-only. If the selected remote workspace has no
+registered Sandbox instance, the command reports that state and points to
+`./sb instances --remote NAME --json` to inspect the remote inventory; it does
+not create or register an instance.
+
+For WordPress projects with `phpExtensions`, `sb up --instance NAME` verifies
+or rebuilds missing Sandbox-managed child images before starting the stack.
+Sandbox builds those child images locally instead of expecting the registry to
+host their generated tags.
+
 Run `./sb` with no args for the full list. `doctor` runs on the local controller and
 intentionally has no `--project-dir`, `--local`, or `--remote`; run it from the project
 directory, or resolve the registered instance with `./sb instances --project-dir DIR --json`
 and pass `--instance NAME`. Most instance-scoped commands accept
 `--instance <name>`; project-routed `ensure`/`test`/`init` use
 `--project-dir <dir>` (and `--label` where supported). Use
-`sb apply --instance NAME` to reconcile an existing named instance.
+`sb apply --instance NAME` to reconcile that exact named instance and its
+registered label.
+
+`snapshot` exports from the selected instance's already running database. It does
+not regenerate Compose files or start/recreate the web tier. If the existing
+database or generated stack is unavailable, inspect `sb status --instance NAME`
+and start that instance with `sb up --instance NAME` before retrying. `snapshots`
+only lists retained artifacts; it does not prepare or reconcile a stack.
+
+Snapshot replacement keeps the old dump until the new capture is published.
+If the process stops during publication, a `*-previous-*` snapshot can remain
+in `sb snapshots` and is available through the normal restore command. Explicit
+`sb reset --rebaseline` propagates capture failure and also avoids stack
+regeneration; automatic provisioning baselines remain best-effort.
 
 `sandbox test` / `./sb test` dispatches plugin test modes: `auto` resolves to
 `unit` or `integration`; `integration` provisions and runs the external
@@ -844,6 +930,15 @@ defaults:
   github_org: "wpdeveloper"
 ```
 
+Sandbox validates this machine-local YAML before using it. Under a shared lock,
+each write compares the version its operation read with the latest file, merges
+independent concurrent updates, then uses a validated temporary file and atomic
+replacement. Conflicting edits fail safely for retry. The previous valid file is
+retained at `$SANDBOX_HOME/sandbox.local.yml.bak` with owner-only permissions.
+Parse errors report the file and line and point to that backup without printing
+the source line. `sb feedback submit` remains available while machine config
+needs repair.
+
 `pro_plugins_home` (default `~/Sites/plugins-pro`) is the one directory holding Pro
 plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a remote
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
@@ -852,6 +947,14 @@ host so every instance there lists the same slugs on **Plugins → Sandbox On-De
 Immutable multi-image activation prepares private candidate configuration without
 overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)
 for source binding, replay limits and required initializer execution proof.
+An effect-entered incident stays fenced until recovery proves its outcome or an
+operator completes the separate [settlement procedure](docs/image-activation-settlement.md).
+
+For ordinary hosted deployments, `./sb host diagnose --remote NAME --json` is a
+read-only status view. Add `--initializer SERVICE` to inspect one declared setup job
+without rerunning it; foreign evidence includes a bounded identity-mismatch reason.
+New apply-log entries include UTC phase timestamps and exit codes. See the
+[remote-hosting guide](docs/remote-hosting.md) for the full evidence limits.
 
 There is **no central project catalog** — each plugin self-describes.
 
@@ -1010,3 +1113,8 @@ Hermes scheduled state is reproducible from the committed cron catalog: use
 `sb hermes cron reconcile --remote NAME` to preview, then repeat with
 `--confirm --force-replace`. `sb hermes health` reports false-green provider
 errors, catalog drift, competing gateway owners, and dirty managed worktrees.
+
+Hosted image conversion can use [component data recovery](docs/hosted-data-recovery.md)
+for encrypted PostgreSQL/storage checkpoints and isolated restore evidence.
+Immutable image preparation exposes public authority discovery and an explicit
+operator handoff; see [remote hosting](docs/remote-hosting.md).

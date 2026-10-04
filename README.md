@@ -7,6 +7,12 @@ drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 
 Recovery is profile-driven through `sb recovery`. Capture, restore apply, retention deletion,
 and schedule activation are protected; see [docs/recovery.md](docs/recovery.md).
+Read-only PostgreSQL restore inspection reports a bounded phase, refusal code,
+request correlation, and local and installed runtime revisions; see
+[hosted data recovery](docs/hosted-data-recovery.md).
+
+CLI progress output masks values attached to password, token, secret, and credential
+arguments while keeping the command shape visible.
 
 ## Extension boundaries
 

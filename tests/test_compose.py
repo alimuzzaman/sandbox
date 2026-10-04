@@ -8,15 +8,19 @@ extra_hosts (the spec-002 container→host reachability fix).
 import os
 import shutil
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 import yaml
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import sandbox.core as core  # noqa: E402
+import sandbox.core._docker as docker  # noqa: E402
 import sandbox_core  # noqa: E402
 
 
@@ -115,6 +119,41 @@ class TestRenderCompose(unittest.TestCase):
             if server == "nginx":
                 self.assertIn(f"{runtime}/wp-ti:/var/www/html:ro",
                               services["nginx"]["volumes"])
+
+
+class TestWriteComposeFilesConcurrency(unittest.TestCase):
+    def test_parallel_orphan_cleanup_tolerates_an_already_removed_file(self):
+        class SynchronizedComposeDir:
+            def __init__(self, path, barrier):
+                self.path = Path(path)
+                self.barrier = barrier
+
+            def mkdir(self, *, parents, exist_ok):
+                self.path.mkdir(parents=parents, exist_ok=exist_ok)
+
+            def glob(self, pattern):
+                entries = list(self.path.glob(pattern))
+                self.barrier.wait(timeout=5)
+                return iter(entries)
+
+        with tempfile.TemporaryDirectory(prefix="sb-compose-race-") as root:
+            compose_root = Path(root) / "compose"
+            compose_root.mkdir()
+            orphan = compose_root / "removed-instance.yml"
+            orphan.write_text("orphan\n", encoding="utf-8")
+            compose_dir = SynchronizedComposeDir(compose_root, threading.Barrier(2))
+            with (patch.object(docker, "COMPOSE_DIR", compose_dir),
+                  patch.object(docker, "_ensure_wp_cli_phar"),
+                  patch.object(docker, "_sync_shipped_seeds"),
+                  patch.object(docker, "DL_CACHE_DIR", Path(root) / "cache"),
+                  patch.object(docker, "_DL_CACHE_LAYERS", ()),
+                  patch.object(docker, "_plugins_home", return_value=Path(root)),
+                  patch.object(docker, "resolve_instances", return_value={})):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [pool.submit(docker.write_compose_files, {}) for _ in range(2)]
+                    for future in futures:
+                        future.result(timeout=5)
+            self.assertFalse(orphan.exists())
 
 
 if __name__ == "__main__":

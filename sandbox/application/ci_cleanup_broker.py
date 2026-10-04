@@ -1099,12 +1099,27 @@ def _verify_metadata_content(raw: bytes, config: dict[str, Any],
         document = json.loads(raw)
     except (ValueError, UnicodeError) as exc:
         raise CiCleanupBrokerError("cleanup_metadata_changed") from exc
+    document_path = document.get("path") if isinstance(document, dict) else None
+    if not isinstance(document_path, str) or not Path(document_path).is_absolute():
+        raise CiCleanupBrokerError("cleanup_metadata_changed")
+    try:
+        expected_path = _metadata_directory_path(config, request)
+        if expected_path.exists():
+            document_directory = Path(document_path).resolve(strict=True)
+            expected_directory = expected_path.resolve(strict=True)
+        else:
+            # A replay can validate the pinned metadata bytes after the
+            # directory was removed. At that point no alias can be proven.
+            document_directory = Path(document_path)
+            expected_directory = expected_path
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CiCleanupBrokerError("cleanup_metadata_changed") from exc
     if (not isinstance(document, dict)
             or document.get("workspace_id") != request["workspace_id"]
             or document.get("project_identity") != request["project_identity"]
             or document.get("label") != request["workspace_label"]
             or document.get("mode") != request["workspace_mode"]
-            or document.get("path") != str(_metadata_directory_path(config, request))):
+            or document_directory != expected_directory):
         raise CiCleanupBrokerError("cleanup_metadata_changed")
 
 

@@ -5,6 +5,14 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+CLI progress masks credential option values. Treat command output as sensitive until
+you check it; do not copy credential material into feedback or chat.
+
+For read-only PostgreSQL restore inspection, check `data.inspection_diagnostic`
+with `data.all_match`. The bounded phase and code identify what was observed;
+`status=complete` alone does not mean the target matches. Keep the original
+request identity when the result is `unknown`. See `docs/hosted-data-recovery.md`.
+
 Remote project `status` is read-only. If no Sandbox instance is registered for
 the selected workspace, it reports that state and points to
 `sb instances --remote NAME --json` for the remote inventory. It does not

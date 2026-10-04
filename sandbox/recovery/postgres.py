@@ -17,7 +17,10 @@ from sandbox.hosting.images.plan_set import read_stable_file
 from .database import DatabaseCapture
 from .errors import RecoveryError
 from .integrity import sha256_file
-from .postgres_contract import recovery_source, digest
+from .postgres_contract import (
+    recovery_source, digest, valid_restore_inspection_diagnostic,
+    restore_inspection_result_matches_diagnostic,
+)
 from .restore import verify_manifest
 from .postgres_helper import observation_matches, validate_schema_proof, _validate_capture_evidence
 
@@ -308,7 +311,7 @@ class PostgresRecovery:
         receipt_path = self.root / 'restores' / (plan['native_request_id'] + '.json')
         retained = _read_owner_only_json(receipt_path)
         manifest = verify_manifest(self.capture.drive, plan['backup_id'])
-        if retained is not None:
+        if retained is not None and not inspect:
             if reopen: raise RecoveryError('restore is already verified', 'request_invalid')
             if plan['profile'] != 'lenzora-prod-storage':
                 _validate_database_receipt(retained, source, manifest, plan['native_request_id'],
@@ -331,7 +334,21 @@ class PostgresRecovery:
             arguments = {'archive': archive, 'target_volume': plan['target_volume']}
             if reopen: arguments['reopen_plan'] = reopen_plan
             result = _load_json_bytes(self.transport.invoke(source, operation, plan['native_request_id'], **arguments))
+            if inspect:
+                archive_digest = 'sha256:' + hashlib.sha256(archive).hexdigest()
+                inspection_diagnostic = result.get('inspection_diagnostic')
+                if (not valid_restore_inspection_diagnostic(
+                        inspection_diagnostic,
+                        correlation_id=plan['native_request_id'],
+                        source_digest=source.source_digest,
+                        archive_digest=archive_digest)
+                        or not restore_inspection_result_matches_diagnostic(
+                            result.get('code'), result.get('ok'), inspection_diagnostic)):
+                    raise RecoveryError('restore inspection diagnostic is unavailable',
+                        'restore_verification_failed')
             if result.get('ok') is False:
+                if inspect:
+                    return result
                 code = result.get('code')
                 if code not in {'restore_target_changed', 'restore_target_stopped', 'restore_target_busy',
                         'schema_evidence_invalid', 'schema_reference_changed', 'schema_reference_cleanup_failed',
@@ -357,7 +374,9 @@ class PostgresRecovery:
                         or not _reopen_binding_matches(plan, result.get('reopen_plan'), source.source_digest)
                         or result.get('container_id') != result['reopen_plan']['container_id']):
                     raise RecoveryError('stopped restore evidence is unavailable', 'restore_verification_failed')
-                if result.get('ok') is not True or result.get('code') not in {'restore_inspected', 'restore_verified', 'restore_target_stopped'} or result.get('target') != plan['target']:
+                if result.get('ok') is not True or result.get('code') not in {
+                        'restore_inspected', 'restore_verified', 'restore_target_stopped',
+                        'restore_database_unavailable'} or result.get('target') != plan['target']:
                     raise RecoveryError('restore inspection is unavailable', 'restore_verification_failed')
                 return result
             if not result.get('ok') or result.get('code') not in {'restore_verified', 'storage_restore_verified'} or result.get('target') != plan['target']:

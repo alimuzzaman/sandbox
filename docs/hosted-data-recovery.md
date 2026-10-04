@@ -72,6 +72,24 @@ It starts only that existing container and PostgreSQL data directory. It never
 imports, initializes a database, recreates a target, removes a PID file, or
 recreates the transient initialization password.
 
+Once an inspect request reaches the remote recovery transport, its response includes
+`data.inspection_diagnostic`, a closed value-free record with the native request
+correlation ID, source and archive digests, local and installed Sandbox revisions,
+revision compatibility, the phase reached, a bounded status, and a refusal or
+comparison code. Local plan, manifest, or archive validation errors can still stop the
+command before a remote inspection response exists. Phases identify request
+validation/binding, archive validation, runtime compatibility, retained-target identity
+and state, database probing/observation, schema comparison, transport, or response
+validation. Codes are fixed identifiers; raw exception text, SQL definitions, and
+credential material are never included. `status=complete` means inspection completed,
+not that the retained target passed verification. Check `data.all_match` and any
+`data.schema_diagnostic` separately. `status=unavailable` identifies a bounded probe or
+comparison that could not produce evidence. `status=unknown` means the helper result was
+not established; keep the original request identity and inspect that retained request again
+after resolving the reported condition before considering another operation. A runtime
+revision mismatch is reported before the helper runs and requires the supported Sandbox
+lifecycle update before a fresh inspect.
+
 Reopening is a write operation: PostgreSQL startup may perform crash recovery
 on the retained files. A natural exit (0) or an explicitly stopped, non-OOM
 container exit (137) can be planned; the full stopped state is digest-bound.

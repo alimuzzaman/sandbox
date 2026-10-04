@@ -80,6 +80,167 @@ class RemotePostgresRecoveryTests(unittest.TestCase):
                 transport.invoke(source(), "observe", "a" * 64)
         self.assertEqual(process_calls, [])
 
+    def test_inspection_revision_mismatch_returns_correlated_refusal_without_helper(self):
+        process_calls = []
+        archive = b"retained-archive"
+        transport = self._transport(
+            status=lambda _entry: {
+                "runtime_revision_state": "mismatch",
+                "local_runtime_revision": "a" * 24,
+                "installed_runtime_revision": "b" * 24,
+                "active": True,
+                "authenticated": True,
+            },
+            process=lambda *args, **kwargs: process_calls.append((args, kwargs)),
+        )
+
+        result = json.loads(transport.invoke(
+            source(), "inspect-restore", "c" * 64, archive=archive))
+
+        diagnostic = result["inspection_diagnostic"]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "remote_revision_mismatch")
+        self.assertEqual(diagnostic["code"], "remote_revision_mismatch")
+        self.assertEqual(diagnostic["correlation_id"], "c" * 64)
+        self.assertEqual(diagnostic["local_runtime_revision"], "a" * 24)
+        self.assertEqual(diagnostic["installed_runtime_revision"], "b" * 24)
+        self.assertEqual(diagnostic["runtime_revision_state"], "mismatch")
+        self.assertEqual(diagnostic["phase"], "runtime_compatibility")
+        self.assertEqual(diagnostic["status"], "refused")
+        self.assertEqual(diagnostic["archive_digest"], "sha256:" + hashlib.sha256(archive).hexdigest())
+        self.assertEqual(process_calls, [])
+
+    def test_inspection_malformed_revision_state_fails_closed(self):
+        process_calls = []
+        transport = self._transport(
+            status=lambda _entry: {
+                "runtime_revision_state": [],
+                "active": True,
+                "authenticated": True,
+            },
+            process=lambda *args, **kwargs: process_calls.append((args, kwargs)),
+        )
+
+        result = json.loads(transport.invoke(
+            source(), "inspect-restore", "d" * 64, archive=b"archive"))
+
+        self.assertEqual(result["code"], "remote_status_unavailable")
+        self.assertEqual(result["inspection_diagnostic"]["runtime_revision_state"], "unknown")
+        self.assertEqual(result["inspection_diagnostic"]["phase"], "runtime_compatibility")
+        self.assertEqual(process_calls, [])
+
+    def test_inspection_malformed_helper_response_returns_closed_unknown(self):
+        status = {
+            "runtime_revision_state": "match",
+            "local_runtime_revision": "a" * 24,
+            "installed_runtime_revision": "a" * 24,
+            "active": True,
+            "authenticated": True,
+        }
+        transport = self._transport(
+            status=lambda _entry: status,
+            process=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0, stdout=b'{"schema_version":true,"ok":true,"code":"restore_inspected"}'),
+        )
+
+        result = json.loads(transport.invoke(
+            source(), "inspect-restore", "e" * 64, archive=b"archive"))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "inspection_response_invalid")
+        self.assertEqual(result["inspection_diagnostic"]["status"], "unknown")
+        self.assertEqual(result["inspection_diagnostic"]["phase"], "response_validation")
+
+    def test_inspection_ok_flag_must_match_closed_status(self):
+        status = {
+            "runtime_revision_state": "match",
+            "local_runtime_revision": "a" * 24,
+            "installed_runtime_revision": "a" * 24,
+            "active": True,
+            "authenticated": True,
+        }
+        response = {
+            "schema_version": 1,
+            "ok": True,
+            "code": "restore_inspected",
+            "inspection_diagnostic": {
+                "phase": "complete", "status": "refused", "code": "restore_inspected",
+            },
+        }
+        transport = self._transport(
+            status=lambda _entry: status,
+            process=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0, stdout=json.dumps(response).encode()),
+        )
+
+        result = json.loads(transport.invoke(
+            source(), "inspect-restore", "f" * 64, archive=b"archive"))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "inspection_response_invalid")
+        self.assertEqual(result["inspection_diagnostic"]["status"], "unknown")
+
+    def test_known_database_unavailability_preserves_its_diagnostic(self):
+        status = {
+            "runtime_revision_state": "match",
+            "local_runtime_revision": "a" * 24,
+            "installed_runtime_revision": "a" * 24,
+            "active": True,
+            "authenticated": True,
+        }
+        response = {
+            "schema_version": 1,
+            "ok": True,
+            "code": "restore_database_unavailable",
+            "inspection_diagnostic": {
+                "phase": "database_probe", "status": "unavailable",
+                "code": "restore_database_unavailable",
+            },
+        }
+        transport = self._transport(
+            status=lambda _entry: status,
+            process=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0, stdout=json.dumps(response).encode()),
+        )
+
+        result = json.loads(transport.invoke(
+            source(), "inspect-restore", "9" * 64, archive=b"archive"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["code"], "restore_database_unavailable")
+        self.assertEqual(result["inspection_diagnostic"]["status"], "unavailable")
+        self.assertEqual(result["inspection_diagnostic"]["phase"], "database_probe")
+
+    def test_schema_comparison_code_can_refine_completed_inspection(self):
+        status = {
+            "runtime_revision_state": "match",
+            "local_runtime_revision": "a" * 24,
+            "installed_runtime_revision": "a" * 24,
+            "active": True,
+            "authenticated": True,
+        }
+        response = {
+            "schema_version": 1,
+            "ok": True,
+            "code": "restore_inspected",
+            "inspection_diagnostic": {
+                "phase": "schema_comparison", "status": "complete",
+                "code": "source_schema_changed",
+            },
+        }
+        transport = self._transport(
+            status=lambda _entry: status,
+            process=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=0, stdout=json.dumps(response).encode()),
+        )
+
+        result = json.loads(transport.invoke(
+            source(), "inspect-restore", "8" * 64, archive=b"archive"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["code"], "restore_inspected")
+        self.assertEqual(result["inspection_diagnostic"]["code"], "source_schema_changed")
+
     def test_request_identity_and_helper_frame_are_bounded_and_secret_free_at_command_boundary(self):
         calls = []
 

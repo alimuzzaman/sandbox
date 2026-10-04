@@ -626,7 +626,9 @@ def write_compose_files(cfg: dict) -> None:
     # Only remove .yml under our managed dir — don't touch user files.
     for existing in COMPOSE_DIR.glob("*.yml"):
         if existing.name not in current_files:
-            existing.unlink()
+            # A parallel CLI invocation may have removed this same orphan
+            # after the directory scan completed.
+            existing.unlink(missing_ok=True)
 
 
 def compose(*args: str, instance: str,

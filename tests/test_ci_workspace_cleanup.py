@@ -88,6 +88,22 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             workspace_registry=self.workspaces,
         )
 
+    def test_ci_materialization_normalizes_reused_checkout_root_before_authority(self):
+        checkout = self._checkout("reused-root-mode")
+        checkout.chmod(0o755)
+        service = self._service(lambda _descriptor: None)
+
+        accepted = service.submit(self._submission(
+            checkout, request_id="reused-root-mode-request"))
+
+        row = self.job_repository.get(accepted["job_id"])
+        record = self.workspace_repository.get(row["workspace_id"])
+        info = checkout.stat()
+        self.assertEqual(info.st_mode & 0o777, 0o700)
+        self.assertEqual(record.metadata["ci_cleanup_authority"]["checkout_identity"], {
+            "device": info.st_dev, "inode": info.st_ino,
+        })
+
     def _invoke_test_broker(self, action, *args):
         """Exercise the real journal operations with only test-owned roots."""
         from sandbox.application import ci_cleanup_broker as broker
@@ -261,6 +277,32 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             "checkout_parent": deployment, "operations": operations,
             "quarantine": quarantine,
         }
+
+    def test_cleanup_broker_accepts_existing_metadata_path_alias(self):
+        broker, _owner_uid, config, request, _paths = (
+            self._broker_cleanup_fixture("5" * 32))
+        directory = broker._metadata_directory_path(config, request)
+        alias = directory.parent / "metadata-alias"
+        alias.symlink_to(directory, target_is_directory=True)
+        document = json.loads((directory / "workspace.json").read_bytes())
+        document["path"] = str(alias)
+        raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        request["metadata_content_digest"] = hashlib.sha256(raw).hexdigest()
+
+        broker._verify_metadata_content(raw, config, request)
+
+    def test_cleanup_broker_rejects_missing_metadata_path_component(self):
+        broker, _owner_uid, config, request, _paths = (
+            self._broker_cleanup_fixture("6" * 32))
+        directory = broker._metadata_directory_path(config, request)
+        document = json.loads((directory / "workspace.json").read_bytes())
+        document["path"] = str(directory.parent / "missing" / ".." / directory.name)
+        raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        request["metadata_content_digest"] = hashlib.sha256(raw).hexdigest()
+
+        with self.assertRaisesRegex(broker.CiCleanupBrokerError,
+                                    "cleanup_metadata_changed"):
+            broker._verify_metadata_content(raw, config, request)
 
     def _patch_broker_filesystem(self, broker, paths):
         patches = [

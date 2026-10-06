@@ -219,8 +219,20 @@ def configure_status_parser(parser) -> None:
     parser.add_argument("job_id", nargs="?")
     parser.add_argument("--job-id", dest="job_id_option",
                         help="accepted job identifier (alias for the positional argument)")
-    parser.add_argument("--remote")
+    _add_job_target_selectors(parser)
     parser.add_argument("--json", action="store_true")
+
+
+def _add_job_target_selectors(parser) -> None:
+    """Accept the same --local/--remote selectors job-start takes.
+
+    Local is the default for inspection, so --local is accepted as an explicit
+    no-op; this lets callers reuse the submission's selector unchanged.
+    """
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--local", action="store_true",
+                        help="inspect a local durable job (the default)")
+    target.add_argument("--remote")
 
 
 def configure_output_parser(parser) -> None:
@@ -243,7 +255,7 @@ def configure_output_parser(parser) -> None:
     parser.add_argument("--follow", action="store_true")
     parser.add_argument("--wait-seconds", type=_parse_output_wait_argument, default=0,
                         help="bounded retained-log long poll, 0-20 whole seconds (default 0; 0 disables waiting)")
-    parser.add_argument("--remote")
+    _add_job_target_selectors(parser)
     parser.add_argument("--json", action="store_true")
 
 

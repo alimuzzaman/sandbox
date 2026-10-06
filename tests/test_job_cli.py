@@ -6,7 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -271,6 +271,16 @@ class JobCliTests(unittest.TestCase):
             cmd_job_list(None, args)
         self.assertEqual(captured, [{"limit": 50, "active_only": True}])
         self.assertEqual(len(json.loads(output.getvalue())["jobs"]), 1)
+
+    def test_status_and_output_accept_local_selector_like_start(self):
+        import argparse
+        from sandbox.commands.jobs_runtime import configure_output_parser, configure_status_parser
+        for configure in (configure_status_parser, configure_output_parser):
+            parser = argparse.ArgumentParser()
+            configure(parser)
+            self.assertTrue(parser.parse_args(["a" * 32, "--local"]).local)
+            with self.assertRaises(SystemExit), redirect_stderr(StringIO()):
+                parser.parse_args(["a" * 32, "--local", "--remote", "r"])
 
     def _wait_start(self, lifecycle, exit_code):
         parser = __import__("argparse").ArgumentParser()

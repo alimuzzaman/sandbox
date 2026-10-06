@@ -406,18 +406,24 @@ def cmd_job_start(_cfg, args) -> None:
     if target.kind == "remote":
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
-        accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+        transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
             ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-            remote_sb_path=_remote.remote_sb_path).submit(submission)
+            remote_sb_path=_remote.remote_sb_path)
+        accepted = transport.submit(submission)
+        read_state = lambda job_id: transport.status(target.remote_name, job_id)
+        interval = 2.0
     else:
         accepted = dependencies["job_service"].submit(submission)
-    if getattr(args, "wait", False) and target.kind != "remote":
+        read_state = lambda job_id: dependencies["job_service"].get(job_id)
+        interval = .2
+    waited = bool(getattr(args, "wait", False))
+    if waited:
         while True:
-            state = dependencies["job_service"].get(accepted["job_id"])
-            if state["lifecycle"] in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}:
+            state = read_state(accepted["job_id"])
+            if state.get("lifecycle") in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}:
                 accepted["result"] = state
                 break
-            time.sleep(.2)
+            time.sleep(interval)
     if getattr(args, "json", False):
         _emit_json_line(accepted)
     else:
@@ -426,6 +432,13 @@ def cmd_job_start(_cfg, args) -> None:
         deadline = accepted.get("deadline", {})
         print(f"{accepted['job_id']} target={target_name} workspace={accepted.get('workspace', target.workspace_label)} "
               f"deadline={deadline.get('seconds', policy.deadline_seconds)}s source={deadline.get('source', submission.deadline_source)}")
+        if waited:
+            result = accepted["result"]
+            print(f"{accepted['job_id']} {result.get('lifecycle')} exit={result.get('exit_code')} "
+                  f"reason={result.get('termination_reason')}")
+    # --wait reports the job's outcome: exit 0 only when the job succeeded.
+    if waited and accepted["result"].get("lifecycle") != "succeeded":
+        raise SystemExit(1)
 
 
 def _normalize_observation_job_id(args) -> str:

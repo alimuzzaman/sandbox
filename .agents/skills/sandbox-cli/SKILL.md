@@ -498,6 +498,8 @@ names the remote on stderr before pushing source, prints the job id on stdout,
 and states that this is not a test result; exit 0 only means accepted. Use
 `sb test --wait` to follow the output and exit with the job's exit code, or
 `--local` for a local instance.
+`sb job-start --wait` (local or remote) prints the job's lifecycle and exit
+code and exits non-zero unless the job succeeded.
 
 Keep real credentials out of job arguments and project files. Remote submission
 rejects credential-like arguments before deployment. For public helper source or

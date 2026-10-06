@@ -272,6 +272,33 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(captured, [{"limit": 50, "active_only": True}])
         self.assertEqual(len(json.loads(output.getvalue())["jobs"]), 1)
 
+    def _wait_start(self, lifecycle, exit_code):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args(["--project-dir", "/project", "--local", "--wait", "--", "false"])
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="default", runtime_policy={},
+                                 sources={"identity": "project:cli"})
+        accepted = {"ok": True, "job_id": "e" * 32, "target": {"kind": "local", "remote": None}}
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                "target_service": SimpleNamespace(resolve=lambda _request: target),
+                "job_service": SimpleNamespace(
+                    submit=lambda _submission: accepted,
+                    get=lambda _job_id: {"lifecycle": lifecycle, "exit_code": exit_code,
+                                         "termination_reason": None}),
+            }), redirect_stdout(output):
+            cmd_job_start(None, args)
+        return output.getvalue()
+
+    def test_start_wait_exits_nonzero_when_job_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            self._wait_start("failed", 1)
+        self.assertEqual(raised.exception.code, 1)
+
+    def test_start_wait_reports_success_and_exits_zero(self):
+        self.assertIn("succeeded exit=0", self._wait_start("succeeded", 0))
+
     def test_start_parser_and_detached_acceptance_preserve_explicit_argv_context(self):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)

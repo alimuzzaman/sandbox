@@ -5,6 +5,11 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+Remote project `status` is read-only. If no Sandbox instance is registered for
+the selected workspace, it reports that state and points to
+`sb instances --remote NAME --json` for the remote inventory. It does not
+create or register an instance.
+
 ## Host storage monitoring and cleanup
 
 Use the global `resources` command before raw host, Docker, or filesystem
@@ -351,14 +356,6 @@ Optional detail may be elided with explicit coverage; missing or partial
 evidence never becomes deployment success. Feature 054 capability/source and
 installed-controller verification remain pending.
 
-For an exact one-shot initializer check without replay, use
-`sb host diagnose --project-dir DIR --environment ENV --remote NAME --initializer SERVICE --json`, where `SERVICE` is declared in
-`compose.init_services`. It returns a nonblocking read-only status and a finite
-identity mismatch reason without raw labels or image IDs. A foreign, stale, or
-failed result does not authorize rerunning that initializer. New apply-log entries
-show UTC timestamps, phase names, and exit codes; old unlabelled history remains
-unknown. A missing or unreadable protected apply log reports that state directly.
-
 ### Failed hosting apply recovery
 
 Use recovery when the first safe step must be observation. Do not substitute ordinary
@@ -407,12 +404,6 @@ Recovery never resolves or parses secrets. It accepts only exact owner-only opaq
 binding metadata created by an eligible apply; missing, stale, environment-backed, or
 manually changed secret-source metadata refuses. Missing, symbolic-link, non-regular,
 or non-owner-only secret sources and binding keys never carry authorizing epoch/identity.
-Ordinary hosted apply also refuses environment-backed secret overrides before source
-publication or runtime effects; use the registered secret source instead. If a failed
-apply already staged a revision and recorded runtime `ready`, first close any failed
-delivery owner through the protected retirement command. A new apply must freshly prove
-that exact runtime before it can continue edge work, and must not rerun Compose or an
-initializer on that proof alone.
 The broker revision is guarded from validation through commit, and the raw digest of
 secret-bearing `environment.env` is never a receipt field. `host sync --watch` uses only
 a target effect lease after its short active-owner state check, so unrelated targets are
@@ -473,12 +464,6 @@ Remote job submission deploys the exact local working tree first, including
 uncommitted and untracked changes. Named workspaces are reusable; matrix cells
 must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
 server for live remote job status/output operations.
-
-Keep real credentials out of job arguments and project files. Remote submission
-rejects credential-like arguments before deployment. For public helper source or
-synthetic fixtures, place files in the project tree and pass their
-project-relative paths instead of embedding source in an argument; the exact
-staged tree is bound by its source commit and dirty digest.
 
 Use a stable `--request-id` for every detached submission. The accepted JSON
 line is flushed immediately after the durable row exists. Empty, malformed, or
@@ -687,7 +672,9 @@ sb deploy --remote <name> --ensure --expose
 `sb ensure` is project-scoped and refuses `--instance NAME`: use
 `--project-dir DIR`, plus `--label LABEL` for a labelled instance and
 `--create` when minting that label. Use `sb apply --instance NAME` to
-reconcile an existing named instance.
+reconcile that exact instance and its registered label. If the saved target
+cannot be resolved, use the exact `--project-dir DIR --label LABEL` pair by
+itself; do not combine the two selectors.
 
 Pass an argv list to `sb exec`; do not rely on an implicit shell. If a shell is
 required, make the boundary explicit, for example `sb exec -- sh -lc 'npm
@@ -718,6 +705,13 @@ sb deploy --remote <name> --ensure --expose
 Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.
+
+`sb wp -- help <command>` works without a pager installed; Sandbox runs the
+WP-CLI process with `PAGER=cat`. Default Apache and Nginx/FPM Compose instances
+also set `DISABLE_WP_CRON` to true. Use the project's `wpCron` setting instead
+of adding that constant again with `wp config set`; see the
+[WP passthrough guide](../../docs/wp-passthrough.md) and [config
+reference](../../docs/sandbox-config-reference.md) for server-specific rules.
 
 After a successful deploy, `sb wp --remote NAME --project-dir DIR` targets the
 existing deployed WordPress instance through authenticated control HTTP. It

@@ -674,7 +674,10 @@ class TestProxyHealthChecks(unittest.TestCase):
                  mock.patch.object(domains_core, "_caddyfile_readable_in_container",
                                    return_value=readable), \
                  mock.patch.object(domains_core, "resolve_instances",
-                                   return_value=cfg):
+                                   return_value=cfg), \
+                 mock.patch.object(domains_core, "_published_listener_check",
+                                   return_value={"label": "proxy listener", "ok": True,
+                                                 "hint": ""}):
                 return domains_core.proxy_health_checks({})
 
     def test_missing_route_for_configured_domain_fails(self):

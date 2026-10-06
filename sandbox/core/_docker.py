@@ -153,10 +153,18 @@ def attest_source_mounts(instance: str, server: str,
                 return {"ok": False, "code": "instance_mount_state_unavailable"}
             if source == destination:
                 if source in observed:
-                    return {"ok": False, "code": "instance_mount_drift"}
+                    return {"ok": False, "code": "instance_mount_drift",
+                            "drift": {"service": service, "duplicate": 1}}
                 observed[source] = writable
         if set(observed) != expected or any(observed[source] for source in expected):
-            return {"ok": False, "code": "instance_mount_drift"}
+            # Counts only: paths stay internal, but which kind of mismatch it
+            # is decides whether `sb apply` or the project config is the fix.
+            return {"ok": False, "code": "instance_mount_drift", "drift": {
+                "service": service,
+                "missing": len(expected - set(observed)),
+                "undeclared": len(set(observed) - expected),
+                "writable": sum(1 for source in expected if observed.get(source)),
+            }}
     return {"ok": True}
 
 

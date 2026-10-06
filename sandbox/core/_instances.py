@@ -1281,9 +1281,28 @@ def _assert_apply_runtime_dependencies(name: str, server: str,
         )
 
 
+def _mount_drift_detail(drift: object) -> str:
+    """Render bounded drift counts (never paths) for the refusal message."""
+    if not isinstance(drift, Mapping):
+        return ""
+    parts = []
+    for key, text in (("missing", "declared source(s) not mounted"),
+                      ("undeclared", "mounted source(s) not declared"),
+                      ("writable", "declared source(s) mounted writable"),
+                      ("duplicate", "source(s) mounted twice")):
+        count = drift.get(key)
+        if type(count) is int and count > 0:
+            parts.append(f"{count} {text}")
+    service = drift.get("service")
+    if not parts:
+        return ""
+    where = f" on service {service}" if isinstance(service, str) and service.isidentifier() else ""
+    return f" ({', '.join(parts)}{where})"
+
+
 def _mount_attestation_refusal(code: object, project_dir: str,
                                instance_name: str,
-                               label: str = "default") -> dict:
+                               label: str = "default", drift: object = None) -> dict:
     """Return a bounded ready-path refusal with an explicit safe remedy."""
     if code not in {"instance_mount_drift", "instance_mount_state_unavailable",
                     "instance_runtime_stopped"}:
@@ -1295,8 +1314,8 @@ def _mount_attestation_refusal(code: object, project_dir: str,
         f"run `sb up --instance {instance_name}` to start the full Compose set, "
         "then retry ensure"
         if code == "instance_runtime_stopped" else
-        "live Sandbox source mounts do not match the declared policy; "
-        f"run `{remedy}` to reconcile"
+        "live Sandbox source mounts do not match the declared policy"
+        f"{_mount_drift_detail(drift)}; run `{remedy}` to reconcile"
         if code == "instance_mount_drift" else
         "live Sandbox source mount state is unavailable; "
         f"instance identity is name={instance_name}, project={project_dir}, "
@@ -1594,6 +1613,7 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                     return _mount_attestation_refusal(
                         attestation.get("code"), root,
                         str(existing.get("instance") or "unknown"), label,
+                        drift=attestation.get("drift"),
                     )
             # A reachable setup screen is not proof that WordPress completed
             # its database install.  Observe install state while the project

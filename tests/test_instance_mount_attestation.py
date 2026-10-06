@@ -88,7 +88,11 @@ class TestSourceMountAttestation(unittest.TestCase):
                 mounts["wp"][0]["Destination"] = "/tmp/changed-destination"
             with self.subTest(case=case), mock.patch.object(_docker, "run", _inspect_run(mounts)):
                 result = _docker.attest_source_mounts("fixture", "apache", sources)
-            self.assertEqual(result, {"ok": False, "code": "instance_mount_drift"})
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "instance_mount_drift")
+            self.assertEqual(result["drift"]["service"], "wp")
+            if case == "writable":
+                self.assertEqual(result["drift"]["writable"], 1)
 
     def test_unavailable_or_malformed_docker_evidence_refuses_without_fallback(self):
         sources = ["/tmp/plugins-home"]
@@ -503,6 +507,21 @@ class TestApplyRuntimeDependencies(unittest.TestCase):
             self.assertIn("extra_mounts", block)
             self.assertIn(str(vendor_dir.resolve()), block["extra_mounts"])
             self.assertNotIn(str(external_target.resolve()), block["extra_mounts"])
+
+
+
+class MountDriftDetailTests(unittest.TestCase):
+    def test_refusal_names_drift_kind_and_service_without_paths(self):
+        from sandbox.core import _instances
+        refusal = _instances._mount_attestation_refusal(
+            "instance_mount_drift", "/p", "fixture",
+            drift={"service": "nginx", "missing": 1, "undeclared": 0, "writable": 0})
+        message = refusal["error"]["message"]
+        self.assertIn("1 declared source(s) not mounted on service nginx", message)
+        self.assertNotIn("undeclared", message)
+        self.assertIn("sb apply --project-dir /p", message)
+        plain = _instances._mount_attestation_refusal("instance_mount_drift", "/p", "fixture")
+        self.assertIn("do not match the declared policy; run", plain["error"]["message"])
 
 
 if __name__ == "__main__":

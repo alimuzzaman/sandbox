@@ -46,6 +46,45 @@ class JobReconciliationTests(unittest.TestCase):
         self.repository.connection.commit()
         return row
 
+    def _matrix(self, *, age_seconds):
+        parent, _ = self.repository.accept(JobSubmission(
+            "matrix", self.temp.name, "project", "local", "matrix-parent",
+            ("sandbox-matrix-parent",), 60, SourceIdentity("source")))
+        child, _ = self.repository.accept(JobSubmission(
+            "ci", self.temp.name, "project", "local", "cell-one", ("echo", "ok"), 60,
+            SourceIdentity("source"), parent_job_id=parent["job_id"]))
+        self.repository.transition(child["job_id"], "queued", queue_reason="workspace_or_capacity_busy")
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat().replace("+00:00", "Z")
+        self.repository.connection.execute(
+            "UPDATE jobs SET accepted_at=? WHERE job_id=?", (stamp, parent["job_id"]))
+        self.repository.connection.commit()
+        return parent, child
+
+    def test_reconcile_never_expires_a_matrix_parent_that_owns_active_children(self):
+        """Feedback 2672614f: the parent went interrupted while its child ran."""
+        parent, child = self._matrix(age_seconds=60 + 25 * 3600)
+        self.repository.transition(child["job_id"], "running")
+        result = self.service.reconcile_startup()
+        self.assertNotIn(parent["job_id"], result["interrupted"])
+        self.assertNotIn(self.repository.get(parent["job_id"])["lifecycle"],
+                         {"interrupted", "cancelled", "failed"})
+
+    def test_terminal_parent_with_active_child_reports_and_cancels_it(self):
+        parent, child = self._matrix(age_seconds=0)
+        # An older runtime could persist the parent terminal before its child.
+        self.repository.transition(parent["job_id"], "queued")
+        self.repository.transition(parent["job_id"], "interrupted",
+                                   termination_reason="queue_expired")
+        status = self.service.get(parent["job_id"])
+        self.assertEqual(status["lifecycle"], "interrupted")
+        self.assertEqual(status["health"], "orphaned")
+        self.assertEqual(status["active_children"], [child["job_id"]])
+        cancelled = self.service.cancel(parent["job_id"])
+        self.assertEqual([item["job_id"] for item in cancelled["cancelled_children"]],
+                         [child["job_id"]])
+        self.assertEqual(self.repository.get(child["job_id"])["lifecycle"], "cancelled")
+        self.assertEqual(self.service.get(parent["job_id"])["active_children"], [])
+
     def test_queued_job_past_deadline_and_grace_is_interrupted_as_queue_expired(self):
         stale = self._queued(age_seconds=60 + 25 * 3600)
         fresh = self._queued(age_seconds=120)

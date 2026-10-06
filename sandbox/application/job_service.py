@@ -694,10 +694,19 @@ class JobService:
         result = persisted if snapshot["lifecycle"] in terminal and persisted is not None else normalized
         aggregate = self._aggregate_result(children)
         effective_lifecycle = snapshot["lifecycle"]
+        active_children = [child["job_id"] for child in (*children, *retry_attempts)
+                           if child["lifecycle"] not in terminal]
+        health = "terminal" if effective_lifecycle in terminal else (
+            "active" if effective_lifecycle == "running" else "quiet")
+        if effective_lifecycle in terminal and active_children:
+            # A parent recorded terminal by an older runtime can still own
+            # running children. Never report that as finished: name them so
+            # `job-cancel <parent>` (which cancels every active child) is the
+            # obvious next step.
+            health = Health.ORPHANED.value
         return {**snapshot, "children": children, "retry_attempts": retry_attempts,
-                "aggregate": aggregate, "result": result,
-                "health": "terminal" if effective_lifecycle in terminal else (
-                    "active" if effective_lifecycle == "running" else "quiet")}
+                "aggregate": aggregate, "result": result, "health": health,
+                "active_children": active_children}
 
     @staticmethod
     def _decode_result(value: object) -> dict | None:
@@ -879,6 +888,12 @@ class JobService:
                 and self.sync_gateway is not None
             ):
                 self.sync_gateway.release_job(row["job_id"])
+                continue
+            if row["lifecycle"] not in terminal and self._is_aggregate(row):
+                # A matrix/plan parent has no supervisor or process of its own;
+                # its lifecycle is derived from its children by _get_parent.
+                # Expiring or interrupting it here would make the parent
+                # terminal while a child it owns keeps running (2672614f).
                 continue
             if (
                 row["lifecycle"] == Lifecycle.QUEUED.value

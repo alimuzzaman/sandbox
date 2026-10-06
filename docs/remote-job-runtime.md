@@ -251,7 +251,12 @@ reached even when the registry holds more jobs than one reconcile page.
 ## Cancellation, retry, and cleanup
 
 `job-cancel` sends a verified graceful signal first; `--force` uses the verified
-owned process group. `job-retry` creates a linked attempt and does not mutate the
+owned process group. Cancelling a matrix or CI parent cancels every child that is
+still active, even when the parent itself is already terminal. Startup
+reconciliation never expires or interrupts a non-terminal parent, since its state
+comes from its children. A parent that an older runtime recorded as terminal
+while a child kept running reports `health: orphaned` and lists the running
+children in `active_children`; `job-cancel <parent>` stops them. `job-retry` creates a linked attempt and does not mutate the
 original result. Retry reads a bounded canonical submission snapshot, preserving
 artifact declarations, compatibility/dependency/failure policy, cleanup policy,
 environment key names, source/workspace/deadline/output settings, and parent context.

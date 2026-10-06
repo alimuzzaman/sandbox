@@ -636,6 +636,25 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertEqual(commands[1][1], 3)
         self.assertIn("job-cancel abc --force", commands[3][0])
 
+    def test_bare_job_snapshot_from_cancel_is_success_but_ok_false_is_not(self):
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+        outputs = iter([
+            '{"job_id":"' + "a" * 32 + '","lifecycle":"cancelled"}\n',
+            '{"ok":false,"job_id":"' + "a" * 32 + '"}\n',
+            '{"lifecycle":"cancelled"}\n',
+        ])
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: SimpleNamespace(
+                returncode=0, stdout=next(outputs), stderr=""),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec"]},
+        )
+        self.assertEqual(transport.cancel("r", "a" * 32)["lifecycle"], "cancelled")
+        with self.assertRaises(RemoteJobTransportError):
+            transport.cancel("r", "a" * 32)
+        with self.assertRaises(RemoteJobTransportError):
+            transport.cancel("r", "a" * 32)
+
     def test_remote_list_filters_by_canonical_project_identity_without_forwarding_local_path(self):
         commands = []
         transport = RemoteJobTransport(

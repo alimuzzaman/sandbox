@@ -264,6 +264,18 @@ def _last_json(text: str) -> dict | None:
     return None
 
 
+def _control_succeeded(payload: dict) -> bool:
+    """Whether a zero-exit control payload is a success.
+
+    job-cancel, job-retry and job-cleanup print the bare job snapshot, which
+    has no ``ok`` field. Requiring ``ok: true`` turned every successful remote
+    cancel into a transport error, so a snapshot with a job id also counts.
+    """
+    if payload.get("ok") is True:
+        return True
+    return "ok" not in payload and isinstance(payload.get("job_id"), str)
+
+
 def _error_detail(payload: dict | None, result: object) -> str:
     """Return a bounded controller diagnostic without echoing retained output.
 
@@ -821,7 +833,7 @@ class RemoteJobTransport:
             remote, self._remote_command(remote, [*argv, "--json"]), timeout=timeout,
         )
         payload = _last_json(getattr(result, "stdout", ""))
-        if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
+        if getattr(result, "returncode", 1) != 0 or not payload or not _control_succeeded(payload):
             raise RemoteJobTransportError(
                 f"remote job control operation failed: {_error_detail(payload, result)}")
         return payload

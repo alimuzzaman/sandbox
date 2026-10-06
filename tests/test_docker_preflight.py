@@ -39,6 +39,16 @@ class TestDockerDaemonPreflight(unittest.TestCase):
         self.assertIn("install Docker", missing["message"])
 
 
+    def test_busy_daemon_is_retried_with_growing_budget(self):
+        outcomes = [subprocess.TimeoutExpired("docker info", 5), _Result(0)]
+        with mock.patch.object(_docker.shutil, "which", return_value="docker"), \
+             mock.patch.object(_docker, "run", side_effect=lambda *a, **k: (
+                 (_ for _ in ()).throw(outcomes.pop(0)) if isinstance(outcomes[0], Exception)
+                 else outcomes.pop(0))) as run:
+            result = _docker.docker_daemon_preflight(timeout=5)
+        self.assertEqual(result["code"], "docker_daemon_ready")
+        self.assertEqual([c.kwargs["timeout"] for c in run.call_args_list], [5.0, 10.0])
+
 class TestEnsureDockerGate(unittest.TestCase):
     def test_unavailable_daemon_refuses_before_port_or_state_writes(self):
         class State:

@@ -684,22 +684,32 @@ def docker_daemon_preflight(*, timeout: float = 5.0) -> dict[str, object]:
             "code": "docker_cli_unavailable",
             "message": "Docker CLI is not installed or is not on PATH; install Docker Desktop/OrbStack and retry `sb ensure`.",
         }
-    try:
-        result = run(
-            ["docker", "info"], check=False, capture=True, timeout=float(timeout),
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False,
-            "code": "docker_daemon_timeout",
-            "message": f"Docker daemon did not respond within {float(timeout):g}s; start Docker Desktop/OrbStack and retry `sb ensure`.",
-        }
-    except (OSError, subprocess.SubprocessError):
-        return {
-            "ok": False,
-            "code": "docker_daemon_unavailable",
-            "message": "Docker daemon is unavailable; start Docker Desktop/OrbStack and retry `sb ensure`.",
-        }
+    # A busy engine (many containers starting, a build in flight) can miss one
+    # short probe while running fine. Retry with a growing budget before
+    # declaring it unresponsive.
+    budgets = (float(timeout), float(timeout) * 2, float(timeout) * 3)
+    for attempt, budget in enumerate(budgets):
+        try:
+            result = run(
+                ["docker", "info"], check=False, capture=True, timeout=budget,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            if attempt + 1 < len(budgets):
+                continue
+            return {
+                "ok": False,
+                "code": "docker_daemon_timeout",
+                "message": (f"Docker daemon did not respond after {len(budgets)} attempts "
+                            f"({sum(budgets):g}s total); it may be stopped or busy. "
+                            "Check Docker Desktop/OrbStack and retry `sb ensure`."),
+            }
+        except (OSError, subprocess.SubprocessError):
+            return {
+                "ok": False,
+                "code": "docker_daemon_unavailable",
+                "message": "Docker daemon is unavailable; start Docker Desktop/OrbStack and retry `sb ensure`.",
+            }
     if getattr(result, "returncode", 1) != 0:
         return {
             "ok": False,

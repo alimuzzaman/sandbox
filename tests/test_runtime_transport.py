@@ -357,6 +357,51 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
             commands.cmd_ensure({}, args)
         return output.getvalue(), json.loads(output.getvalue())
 
+    def test_cli_ensure_json_redacts_autologin_in_progress_output(self):
+        """Progress printed before the JSON document never carries the token.
+
+        Feedback ea85cb29: the final document redacted login_url while the
+        install progress line above it printed the full loopback autologin URL.
+        """
+        import sys
+        import sandbox.commands.instances_cmd as commands
+        from sandbox.runtimes.base import OperationResult
+
+        token = "progress-login-sentinel"
+        login_url = f"http://127.0.0.1:8188/?sandbox_autologin={token}"
+
+        class ChattyService:
+            def invoke(self, request):
+                print(f"  Admin: {login_url}")
+                print(f"autologin_token={token}", file=sys.stderr)
+                return OperationResult(
+                    True, "ensure", request.project_root, "wordpress",
+                    {"instance": "fixture", "url": "http://127.0.0.1:8188",
+                     "login_url": login_url},
+                )
+
+        for reveal in (False, True):
+            with self.subTest(reveal_login=reveal):
+                args = types.SimpleNamespace(
+                    project_dir="/tmp/project", label="default", create=False,
+                    json=True, local=True, reveal_login=reveal)
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(commands, "wordpress_runtime_service",
+                                       return_value=ChattyService()), \
+                        mock.patch("socket.gethostbyname", return_value="127.0.0.1"), \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    commands.cmd_ensure({}, args)
+                lines = out.getvalue().strip().splitlines()
+                progress = "\n".join(lines[:-1]) + err.getvalue()
+                self.assertIn("Admin: http://127.0.0.1:8188/", progress)
+                self.assertNotIn(token, progress)
+                payload = json.loads(lines[-1])
+                if reveal:
+                    # The explicit opt-in still governs the final document only.
+                    self.assertEqual(payload["login_url"], login_url)
+                else:
+                    self.assertNotIn(token, out.getvalue() + err.getvalue())
+
     def test_cli_ensure_json_reveal_login_returns_local_autologin_url(self):
         """--reveal-login is the documented opt-in for a loopback instance."""
         login_url = "https://fixture.tst/?sandbox_autologin=login-token"

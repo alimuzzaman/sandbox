@@ -546,13 +546,32 @@ def _domain_port_alternative(domain, fallback_url, *, timeout: float = 1.0):
     return f"http://{domain}:{port}"
 
 
+@contextmanager
+def _json_progress_guard(args):
+    """Redact credentials from progress output printed before ``--json``'s document.
+
+    ``ensure --json`` puts its machine document on the LAST stdout line, so the
+    boot/install progress above it still reaches the terminal and its logs.
+    That progress must never carry what the document itself redacts (the
+    loopback autologin URL and token), whether or not ``--reveal-login`` asks
+    for the final document to include it.
+    """
+    if not getattr(args, "json", False):
+        yield
+        return
+    from sandbox.commands._output import redacted_output
+    with redacted_output():
+        yield
+
+
 def cmd_ensure(cfg, args) -> None:
     """`./sb ensure [--project-dir DIR]` — boot the instance for a project
     directory (create-if-missing) and print its URL. The MCP server's
     ensure_instance tool wraps this; also usable by hand."""
     if not getattr(args, "local", False):
         from sandbox.commands.lifecycle import _remote_lifecycle
-        remote_result = _remote_lifecycle(cfg, args, "ensure")
+        with _json_progress_guard(args):
+            remote_result = _remote_lifecycle(cfg, args, "ensure")
         if remote_result is not None and getattr(args, "json", False):
             _print_ensure_json(remote_result, sort_keys=True,
                                reveal_login=getattr(args, "reveal_login", False))
@@ -574,14 +593,15 @@ def cmd_ensure(cfg, args) -> None:
     label = getattr(args, "label", None)
     create = getattr(args, "create", False)
     try:
-        result = wordpress_runtime_service(cfg).invoke(OperationRequest(
-            project_root=pd,
-            operation="ensure",
-            label=label or "default",
-            arguments={"create": create, "config_file": getattr(args, "config_file", None),
-                       "creation_context": _creation_context_argument(args),
-                       "expected_incarnation": getattr(args, "expected_incarnation", None)},
-        ))
+        with _json_progress_guard(args):
+            result = wordpress_runtime_service(cfg).invoke(OperationRequest(
+                project_root=pd,
+                operation="ensure",
+                label=label or "default",
+                arguments={"create": create, "config_file": getattr(args, "config_file", None),
+                           "creation_context": _creation_context_argument(args),
+                           "expected_incarnation": getattr(args, "expected_incarnation", None)},
+            ))
     except (sc.ConfigError, ValueError) as e:
         message = str(e)
         if getattr(args, "json", False):

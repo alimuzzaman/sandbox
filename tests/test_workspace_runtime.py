@@ -19,7 +19,7 @@ from sandbox.jobs.storage import JobStorage
 from sandbox.jobs.scheduler import JobScheduler
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.models import JobSubmission, SourceIdentity
-from sandbox.workspaces import WorkspaceRepository
+from sandbox.workspaces import WorkspaceIndexError, WorkspaceRepository
 from sandbox.workspaces.models import JobEvidence
 
 
@@ -781,6 +781,73 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertTrue(service.destroy(identity)["source_removed"])
             self.assertFalse(checkout.exists())
             self.assertTrue(source.is_dir())
+
+    def test_job_workspace_destroy_without_receipt_proof(self):
+        """Feedback 52622c45: job workspaces never carry source_identity.
+
+        A job-reference workspace destroys its own directory and leaves the
+        referenced checkout; a CI-materialized one is refused with reap
+        guidance. Neither refusal nor success strands the record as
+        indeterminate.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            deploy_root = Path(temp) / "deploy-src"
+            service = WorkspaceService(
+                _Target(), JobStorage(temp, free_disk_reserve=0),
+                deployment_root=deploy_root,
+            )
+
+            def register(label, source, extra=None):
+                checkout = deploy_root / label
+                checkout.mkdir(parents=True)
+                locator = str(checkout.resolve())
+                proof = {"checkout_locator": locator,
+                         "checkout_locator_digest": "sha256:" + hashlib.sha256(
+                             locator.encode()).hexdigest(), **(extra or {})}
+                record, _ = service._register(
+                    project_identity="project:test", label=label,
+                    namespace="local-test", checkout_locator=locator,
+                    source=source, deployment_proof=proof)
+                return record, checkout
+
+            reference, ref_checkout = register("ref", "job-reference")
+            result = service.destroy(TargetRequest(
+                project_identity="project:test", workspace_id=reference.workspace_id,
+                workspace="ref", confirm=True))
+            self.assertTrue(result["destroyed"])
+            self.assertTrue(result["checkout_retained"])
+            self.assertTrue(ref_checkout.is_dir())
+            self.assertFalse(Path(reference.path).exists())
+            self.assertEqual(
+                service._repo().get(reference.workspace_id).lifecycle, "destroyed")
+
+            source = deploy_root / "source"
+            source.mkdir()
+            ci, ci_checkout = register("ci", "ci-materialization", {
+                "source_checkout_locator": str(source.resolve()),
+                "ci_cleanup_authority": {"owner": "controller-ci-materialization"},
+            })
+            with self.assertRaises(WorkspaceIndexError) as refused:
+                service.destroy(TargetRequest(
+                    project_identity="project:test", workspace_id=ci.workspace_id,
+                    workspace="ci", confirm=True))
+            self.assertEqual(refused.exception.code, "workspace_cleanup_owned_by_job")
+            self.assertIn("workspace reap", str(refused.exception))
+            self.assertTrue(ci_checkout.is_dir())
+            stored = service._repo().get(ci.workspace_id)
+            self.assertEqual((stored.lifecycle, stored.status), ("ready", "ready"))
+
+            # Once reap has removed the checkout, its index reconciliation
+            # (`workspace destroy --workspace-id`) drops the record.
+            shutil.rmtree(ci_checkout)
+            dropped = service.destroy(TargetRequest(
+                project_identity="project:test", workspace_id=ci.workspace_id,
+                workspace="ci", confirm=True))
+            self.assertTrue(dropped["destroyed"])
+            self.assertTrue(dropped["checkout_absent"])
+            self.assertTrue(source.is_dir())
+            self.assertEqual(
+                service._repo().get(ci.workspace_id).lifecycle, "destroyed")
 
     def test_migration_is_metadata_only_and_status_survives_missing_checkout(self):
         with tempfile.TemporaryDirectory() as temp:

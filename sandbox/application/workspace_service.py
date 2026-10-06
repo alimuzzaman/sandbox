@@ -1653,6 +1653,65 @@ class WorkspaceService:
 
     def _local_lifecycle(self, action: str, record) -> dict[str, Any]:
         """Preserve the legacy scoped reset/destroy behind index containment."""
+        plan = self._local_lifecycle_preflight(action, record)
+        workspace_root = plan["workspace_root"]
+        if plan["kind"] == "receipt":
+            checkout = plan["checkout"]
+            if action == "reset":
+                from sandbox.workspaces.checkout import (
+                    WorkspaceMaterializationError, materialize,
+                    plan_materialization,
+                )
+                try:
+                    receipt = materialize(plan_materialization(
+                        plan["source_checkout"], checkout,
+                        source_identity=plan["source_identity"],
+                        workspace_label=record.label,
+                    ))
+                except WorkspaceMaterializationError as exc:
+                    raise WorkspaceIndexError(
+                        "workspace_lifecycle_indeterminate",
+                        "receipt-backed workspace reset is indeterminate",
+                    ) from exc
+                return {"ok": True, "reset": True, "source_restored": True,
+                        "materialization": receipt.to_dict()}
+            if checkout.exists():
+                if not checkout.is_dir():
+                    raise WorkspaceIndexError(
+                        "workspace_ownership_drift",
+                        "receipt-backed workspace is not a directory")
+                shutil.rmtree(checkout)
+            shutil.rmtree(workspace_root)
+            return {"ok": True, "destroyed": True, "source_removed": True}
+        # A job-reference workspace records the checkout its job ran in but
+        # does not own it, so its lifecycle touches only the workspace's own
+        # directory and reports the referenced checkout as retained.
+        retained = ({"checkout_retained": True}
+                    if plan["kind"] == "job_reference" else
+                    {"checkout_absent": True}
+                    if plan["kind"] == "checkout_absent" else {})
+        if action == "reset":
+            for child in workspace_root.iterdir():
+                if child.name == "workspace.json":
+                    continue
+                if child.is_symlink() or child.is_file():
+                    child.unlink()
+                elif child.is_dir():
+                    shutil.rmtree(child)
+            return {"ok": True, "reset": True, **retained}
+        shutil.rmtree(workspace_root)
+        return {"ok": True, "destroyed": True, **retained}
+
+    def _local_lifecycle_preflight(self, action: str, record) -> dict[str, Any]:
+        """Validate a local reset/destroy without changing anything.
+
+        Every refusal happens here, before the record is marked transient, so
+        a refused lifecycle request leaves the workspace ``ready`` rather than
+        ``indeterminate``.
+        """
+        if action not in {"reset", "destroy"}:
+            raise WorkspaceIndexError(
+                "workspace_operation_unsupported", "unsupported workspace lifecycle action")
         metadata_path = Path(record.path) if isinstance(record.path, str) else None
         if metadata_path is None or metadata_path.name != "workspace.json":
             raise WorkspaceIndexError(
@@ -1678,78 +1737,77 @@ class WorkspaceService:
         checkout_locator = record.metadata.get("checkout_locator")
         source_locator = record.metadata.get("source_checkout_locator")
         source_identity = record.metadata.get("source_identity")
-        if any(value is not None for value in (
+        if all(value is None for value in (
                 checkout_locator, source_locator, source_identity)):
-            if (self.deployment_root is None or
-                    not all(isinstance(value, str) and value for value in (
-                        checkout_locator, source_locator, source_identity))):
+            return {"kind": "legacy", "workspace_root": workspace_root}
+        if (action == "destroy" and isinstance(checkout_locator, str) and
+                checkout_locator):
+            raw_checkout = Path(checkout_locator)
+            digests = {
+                "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+                for value in (checkout_locator,
+                              str(raw_checkout.resolve(strict=False)))
+            }
+            if (record.metadata.get("checkout_locator_digest") in digests and
+                    not raw_checkout.is_symlink() and not raw_checkout.exists()):
+                # Reclaim (``workspace reap``) already removed the checkout and
+                # now drops the index record. Nothing outside the workspace's
+                # own directory is touched, so no source proof is needed.
+                return {"kind": "checkout_absent", "workspace_root": workspace_root}
+        if record.source == "ci-materialization":
+            # The controller materialized this checkout and only its cleanup
+            # broker may remove it; an operator destroy must not race that
+            # journal with a plain rmtree.
+            raise WorkspaceIndexError(
+                "workspace_cleanup_owned_by_job",
+                "CI-materialized workspace is released by terminal job cleanup; "
+                "preview it with `sb workspace reap --dry-run`, then run "
+                "`sb workspace reap --confirm`")
+        if (record.source == "job-reference" and
+                isinstance(checkout_locator, str) and checkout_locator and
+                source_locator is None and source_identity is None):
+            expected = "sha256:" + hashlib.sha256(checkout_locator.encode()).hexdigest()
+            if record.metadata.get("checkout_locator_digest") != expected:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
-                    "receipt-backed workspace lifecycle proof is incomplete")
-            deployment_root = self.deployment_root.resolve(strict=False)
-            checkout = Path(checkout_locator).resolve(strict=False)
-            source_checkout = Path(source_locator).resolve(strict=False)
-            try:
-                checkout.relative_to(deployment_root)
-                source_checkout.relative_to(deployment_root)
-            except ValueError as exc:
-                raise WorkspaceIndexError(
-                    "workspace_path_escape",
-                    "receipt-backed workspace escapes deploy storage") from exc
-            if (checkout == deployment_root or source_checkout == deployment_root or
-                    checkout == source_checkout or checkout.is_symlink() or
-                    source_checkout.is_symlink() or not source_checkout.is_dir()):
-                raise WorkspaceIndexError(
-                    "workspace_ownership_drift",
-                    "receipt-backed workspace locator is unavailable")
-            expected_digest = record.metadata.get("checkout_locator_digest")
-            observed_digest = "sha256:" + hashlib.sha256(
-                str(checkout).encode()).hexdigest()
-            if expected_digest != observed_digest:
-                raise WorkspaceIndexError(
-                    "workspace_ownership_drift",
-                    "receipt-backed workspace locator digest changed")
-            if action == "reset":
-                from sandbox.workspaces.checkout import (
-                    WorkspaceMaterializationError, materialize,
-                    plan_materialization,
-                )
-                try:
-                    receipt = materialize(plan_materialization(
-                        source_checkout, checkout,
-                        source_identity=source_identity,
-                        workspace_label=record.label,
-                    ))
-                except WorkspaceMaterializationError as exc:
-                    raise WorkspaceIndexError(
-                        "workspace_lifecycle_indeterminate",
-                        "receipt-backed workspace reset is indeterminate",
-                    ) from exc
-                return {"ok": True, "reset": True, "source_restored": True,
-                        "materialization": receipt.to_dict()}
-            if action == "destroy":
-                if checkout.exists():
-                    if not checkout.is_dir():
-                        raise WorkspaceIndexError(
-                            "workspace_ownership_drift",
-                            "receipt-backed workspace is not a directory")
-                    shutil.rmtree(checkout)
-                shutil.rmtree(workspace_root)
-                return {"ok": True, "destroyed": True, "source_removed": True}
-        if action == "reset":
-            for child in workspace_root.iterdir():
-                if child.name == "workspace.json":
-                    continue
-                if child.is_symlink() or child.is_file():
-                    child.unlink()
-                elif child.is_dir():
-                    shutil.rmtree(child)
-            return {"ok": True, "reset": True}
-        if action == "destroy":
-            shutil.rmtree(workspace_root)
-            return {"ok": True, "destroyed": True}
-        raise WorkspaceIndexError(
-            "workspace_operation_unsupported", "unsupported workspace lifecycle action")
+                    "job-reference workspace locator digest changed")
+            return {"kind": "job_reference", "workspace_root": workspace_root}
+        if (self.deployment_root is None or
+                not all(isinstance(value, str) and value for value in (
+                    checkout_locator, source_locator, source_identity))):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "receipt-backed workspace lifecycle proof is incomplete")
+        deployment_root = self.deployment_root.resolve(strict=False)
+        checkout = Path(checkout_locator).resolve(strict=False)
+        source_checkout = Path(source_locator).resolve(strict=False)
+        try:
+            checkout.relative_to(deployment_root)
+            source_checkout.relative_to(deployment_root)
+        except ValueError as exc:
+            raise WorkspaceIndexError(
+                "workspace_path_escape",
+                "receipt-backed workspace escapes deploy storage") from exc
+        if (checkout == deployment_root or source_checkout == deployment_root or
+                checkout == source_checkout or checkout.is_symlink() or
+                source_checkout.is_symlink() or not source_checkout.is_dir()):
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "receipt-backed workspace locator is unavailable")
+        expected_digest = record.metadata.get("checkout_locator_digest")
+        observed_digest = "sha256:" + hashlib.sha256(
+            str(checkout).encode()).hexdigest()
+        if expected_digest != observed_digest:
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "receipt-backed workspace locator digest changed")
+        if action == "destroy" and checkout.exists() and not checkout.is_dir():
+            raise WorkspaceIndexError(
+                "workspace_ownership_drift",
+                "receipt-backed workspace is not a directory")
+        return {"kind": "receipt", "workspace_root": workspace_root,
+                "checkout": checkout, "source_checkout": source_checkout,
+                "source_identity": source_identity}
 
     def _indexed_locators(self) -> dict[str, str]:
         """Map every indexed deployment locator to its owning workspace ID."""
@@ -3473,6 +3531,10 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     f"workspace_{action}_unsupported",
                     f"workspace {action} requires a registered runtime lifecycle adapter")
+            if self.lifecycle_gateway == self._local_lifecycle:
+                # Refuse before the transient mark: a precondition failure
+                # must not strand a ready workspace as indeterminate.
+                self._local_lifecycle_preflight(action, current)
             transient = "resetting" if action == "reset" else "destroying"
             repo.mark_lifecycle(current.workspace_id, transient, status=transient)
             try:

@@ -554,6 +554,16 @@ workspace index records are dropped through `sb workspace destroy
 --workspace-id`. A host whose runtime predates that command reports
 `index_pending` with status `partial` instead of implying the index is clean.
 
+`sb workspace destroy` on a job workspace follows what the workspace owns. A
+job-reference workspace removes only its own directory and reports the
+referenced checkout as `checkout_retained`. A CI-materialized workspace whose
+checkout still exists is refused with `workspace_cleanup_owned_by_job`, because
+only terminal job cleanup or `sb workspace reap --confirm` may remove that
+checkout. Once the checkout is gone, destroy drops the index record and reports
+`checkout_absent`. Every refusal happens before the record is marked
+`destroying`, so a refused destroy leaves the workspace `ready`, not
+`indeterminate`.
+
 ### Retention
 
 ```sh

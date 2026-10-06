@@ -99,6 +99,20 @@ class TestDeepAttributionModels(unittest.TestCase):
         self.assertEqual(pressure["classification_summary"]["unverified"], 1)
         self.assertEqual(pressure["recovery"]["code"], None)
 
+    def test_unknown_ownership_is_not_unattributed_and_lowers_confidence(self):
+        pressure = network_capacity_pressure([
+            SimpleNamespace(
+                kind="network", classification="active", owner_kind="unknown",
+            ) for _ in range(27)
+        ])
+        summary = pressure["classification_summary"]
+        self.assertEqual(summary["ownership_unknown"], 27)
+        self.assertEqual(summary["unattributed"], 0)
+        self.assertEqual(pressure["ownership_unknown_network_count"], 27)
+        self.assertEqual(pressure["confidence"], "low")
+        self.assertEqual(pressure["status"], "partial")
+        self.assertIn("understated", pressure["recovery"]["guidance"])
+
     def test_network_pressure_is_low_confidence_when_inventory_is_partial(self):
         pressure = network_capacity_pressure([
             SimpleNamespace(

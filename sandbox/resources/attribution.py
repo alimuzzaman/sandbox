@@ -88,6 +88,7 @@ def network_capacity_pressure(
         "disposable_cache": 0,
         "stale_candidate": 0,
         "foreign": 0,
+        "ownership_unknown": 0,
         "unattributed": 0,
     })
     for item in resources or ():
@@ -110,6 +111,12 @@ def network_capacity_pressure(
                 summary["unverified"] += 1
         elif ownership == "foreign":
             summary["foreign"] += 1
+        elif ownership == "unknown":
+            # Ownership could not be resolved (for example the workspace
+            # index is incomplete).  These networks may be Sandbox-managed,
+            # so they are reported apart from genuinely unattributed ones
+            # and make the pressure level low-confidence below.
+            summary["ownership_unknown"] += 1
         else:
             summary["unattributed"] += 1
 
@@ -139,6 +146,7 @@ def network_capacity_pressure(
         }
 
     count = len(managed)
+    ownership_unknown = summary["ownership_unknown"]
     level = (
         "high" if count >= NETWORK_PRESSURE_THRESHOLD else
         "medium" if count >= NETWORK_PRESSURE_THRESHOLD - 4 else "low"
@@ -170,13 +178,21 @@ def network_capacity_pressure(
             "No immediate Sandbox network-capacity recovery action is indicated; "
             "continue bounded monitoring."
         )
+    if ownership_unknown:
+        guidance += (
+            f" {ownership_unknown} network(s) have unresolved ownership "
+            "(workspace index incomplete), so the managed count may be "
+            "understated; resolve the workspace index and rescan."
+        )
+    complete = inventory_status in {"complete", "observed"} and not ownership_unknown
     return {
         "level": level,
         "managed_user_defined_network_count": count,
+        "ownership_unknown_network_count": ownership_unknown,
         "threshold": NETWORK_PRESSURE_THRESHOLD,
         "classification_summary": dict(summary),
-        "confidence": "high" if inventory_status in {"complete", "observed"} else "low",
-        "status": "complete" if inventory_status in {"complete", "observed"} else "partial",
+        "confidence": "high" if complete else "low",
+        "status": "complete" if complete else "partial",
         "recovery": {
             "code": code,
             "guidance": guidance,

@@ -3523,6 +3523,27 @@ class TestDeployRequiresProvisionedRemote(unittest.TestCase):
                 self.assertIn("no remote named", result["error"])
 
 
+    def test_json_deploy_from_invalid_checkout_name_returns_json(self):
+        with tempfile.TemporaryDirectory() as parent:
+            d = Path(parent) / "Review.Worktree"
+            d.mkdir()
+            with _patched_config_local(Path(parent) / "sandbox.local.yml"):
+                args = MagicMock()
+                args.project_dir = str(d)
+                args.remote = "vps"
+                args.json = True
+                args.instance = None
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config",
+                                  return_value={"root": str(d), "slug": "proj"}), \
+                     patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit):
+                        deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+                self.assertFalse(result["ok"])
+                self.assertIn("invalid project slug", result["error"])
+                self.assertIn("Review.Worktree", result["error"])
+
 class TestRejectHerdProjects(unittest.TestCase):
     def test_herd_configured_project_raises(self):
         with self.assertRaises(ValueError):

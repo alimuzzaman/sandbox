@@ -308,10 +308,27 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(commands, "wordpress_runtime_service",
                                return_value=MockService()), \
+                mock.patch.object(commands, "_domain_port_alternative",
+                                  return_value="http://fixture.tst:8123"), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             commands.cmd_ensure({}, args)
         self.assertIn("clean URL fixture.tst did not answer", output.getvalue())
         self.assertIn("sb doctor", output.getvalue())
+        self.assertIn("http://fixture.tst:8123 also answers", output.getvalue())
+
+    def test_domain_port_alternative_requires_a_live_listener(self):
+        import socket
+        import sandbox.commands.instances_cmd as commands
+        listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(1)
+        port = listener.getsockname()[1]
+        try:
+            self.assertEqual(commands._domain_port_alternative(
+                "localhost", f"http://localhost:{port}"), f"http://localhost:{port}")
+        finally:
+            listener.close()
+        self.assertIsNone(commands._domain_port_alternative(
+            "unresolvable.invalid", f"http://localhost:{port}", timeout=0.2))
+        self.assertIsNone(commands._domain_port_alternative("x.tst", "http://localhost"))
 
     def _ensure_json_payload(self, login_url, **overrides):
         """Run `cmd_ensure --json` over one fixture record and parse its line."""

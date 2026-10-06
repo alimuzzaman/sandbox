@@ -528,6 +528,24 @@ def cmd_creation_query(cfg, args):
         raise SystemExit(1)
 
 
+def _domain_port_alternative(domain, fallback_url, *, timeout: float = 1.0):
+    """Return ``http://<domain>:<port>`` when it answers, else None.
+
+    Only offered next to the localhost fallback, never instead of it: the name
+    resolves only while Sandbox DNS is installed, so it is proven by a TCP
+    connect on this machine before it is mentioned.
+    """
+    port = urlsplit(str(fallback_url or "")).port
+    if not port or not isinstance(domain, str) or not domain:
+        return None
+    try:
+        with socket.create_connection((domain, port), timeout=timeout):
+            pass
+    except (OSError, ValueError):
+        return None
+    return f"http://{domain}:{port}"
+
+
 def cmd_ensure(cfg, args) -> None:
     """`./sb ensure [--project-dir DIR]` — boot the instance for a project
     directory (create-if-missing) and print its URL. The MCP server's
@@ -655,6 +673,12 @@ def cmd_ensure(cfg, args) -> None:
             print(f"  note:    clean URL {domain} did not answer through the Sandbox "
                   "proxy (another app may hold port 80/443, e.g. OrbStack); using the "
                   "per-port URL. Diagnose with `./sb doctor`.")
+            alternative = _domain_port_alternative(domain, entry.get("url"))
+            if alternative:
+                # Proven reachable here, but not adopted automatically: on a
+                # box without Sandbox DNS the name would not resolve at all.
+                print(f"  note:    {alternative} also answers on this machine and keeps "
+                      "the configured name; use it where a localhost URL is refused.")
         print(f"  project: {entry['root']}")
         if entry.get("kind") == "compose":
             print(f"  kind:    compose  service={entry.get('service')} http={entry.get('http_port')}")

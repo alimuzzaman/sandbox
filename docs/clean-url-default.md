@@ -16,6 +16,9 @@ manifests.
   They MUST NOT gate the default path: with zero proven adapters, clean URLs still work.
 - Per-port `http://localhost:<port>` is reported only when the default provider itself is
   unavailable (no Docker, a foreign listener on the required endpoints, declined sudo).
+  `sb ensure` then says so, and when `http://<domain>:<port>` answers on this machine it
+  names that as an alternative. It is only offered, never adopted, because the name
+  resolves only where Sandbox DNS is installed.
 - Docker Compose stays the default runtime. Selecting Herd/Valet or managed-native is the
   explicit opt-in that hands ingress to that product.
 

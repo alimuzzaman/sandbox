@@ -719,6 +719,16 @@ def cmd_job_cancel(_cfg, args) -> None:
         else:
             result = durable_job_dependencies()["job_service"].cancel(args.job_id, force=args.force)
     except RuntimeError as exc:
+        # The controller answered: the job already finished. That is a final,
+        # non-retryable outcome, not an unknown transport failure.
+        if str(exc).endswith("already_terminal"):
+            if args.json:
+                _emit_json_line({"ok": False, "code": "already_terminal", "job_id": args.job_id,
+                                 "operation": "job-cancel", "retryable": False,
+                                 "status": "terminal",
+                                 "error": "job already finished; nothing to cancel"})
+                raise SystemExit(1)
+            _die(f"{args.job_id} already finished; nothing to cancel")
         if args.remote and isinstance(exc, RemoteJobTransportError):
             _remote_job_transport_failure(exc, args, "job-cancel")
         _die(str(exc))

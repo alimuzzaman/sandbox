@@ -322,6 +322,24 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(payload["code"], "workspace_alias_collision")
         self.assertFalse(payload["ok"])
 
+    def test_cancel_of_finished_remote_job_is_terminal_not_retryable(self):
+        from sandbox.commands.jobs_runtime import cmd_job_cancel
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+        args = SimpleNamespace(remote="vps", job_id="f" * 32, force=False, json=True)
+        output = StringIO()
+
+        class Transport:
+            def __init__(self, **_kw): pass
+            def cancel(self, *_a, **_kw):
+                raise RemoteJobTransportError(
+                    "remote job control operation failed: error: already_terminal")
+        with patch("sandbox.transports.remote_jobs.RemoteJobTransport", Transport), \
+                redirect_stdout(output), self.assertRaises(SystemExit):
+            cmd_job_cancel(None, args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["code"], "already_terminal")
+        self.assertFalse(payload["retryable"])
+
     def _wait_start(self, lifecycle, exit_code):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)

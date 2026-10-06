@@ -11,7 +11,9 @@ from pathlib import Path
 from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError
 from sandbox.recovery.postgres import PostgresRecovery, _load_json_bytes
-from sandbox.recovery.postgres_contract import PostgresSource
+from sandbox.recovery.postgres_contract import (
+    PostgresSource, valid_restore_inspection_diagnostic,
+)
 
 
 def source(**changes):
@@ -87,6 +89,46 @@ def restore_receipt(plan, evidence, *, observation=None, schema_verification=Non
     if schema_verification is not None:
         receipt["schema_verification"] = schema_verification
     return receipt
+
+
+def inspection_diagnostic(plan, archive, *, code, phase, status):
+    return {
+        "schema_version": 1,
+        "correlation_id": plan["native_request_id"],
+        "source_digest": plan["source_digest"],
+        "archive_digest": "sha256:" + hashlib.sha256(archive).hexdigest(),
+        "local_runtime_revision": "a" * 24,
+        "installed_runtime_revision": "a" * 24,
+        "runtime_revision_state": "match",
+        "phase": phase,
+        "status": status,
+        "code": code,
+    }
+
+
+class RestoreInspectionDiagnosticContractTests(unittest.TestCase):
+    def test_revision_match_requires_both_observed_revisions(self):
+        diagnostic = {
+            "schema_version": 1,
+            "correlation_id": "a" * 64,
+            "source_digest": "sha256:" + "b" * 64,
+            "archive_digest": "sha256:" + "c" * 64,
+            "local_runtime_revision": "d" * 24,
+            "installed_runtime_revision": "d" * 24,
+            "runtime_revision_state": "match",
+            "phase": "complete",
+            "status": "complete",
+            "code": "restore_inspected",
+        }
+        expected = {
+            "correlation_id": diagnostic["correlation_id"],
+            "source_digest": diagnostic["source_digest"],
+            "archive_digest": diagnostic["archive_digest"],
+        }
+
+        self.assertTrue(valid_restore_inspection_diagnostic(diagnostic, **expected))
+        diagnostic["installed_runtime_revision"] = None
+        self.assertFalse(valid_restore_inspection_diagnostic(diagnostic, **expected))
 
 
 def raw_schema_proof(source_value, evidence, actual, plan, archive):
@@ -418,7 +460,7 @@ class PostgresRecoveryTests(unittest.TestCase):
 
     def test_stopped_inspection_is_closed_and_does_not_install_a_restore_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
-            recovery, _capture, transport, plan, _archive = self._prepared_plan(Path(directory))
+            recovery, _capture, transport, plan, archive = self._prepared_plan(Path(directory))
             reopen_plan = self._reopen_plan(plan)
             transport.responses["inspect-restore"] = json.dumps({
                 "schema_version": 1,
@@ -429,6 +471,9 @@ class PostgresRecoveryTests(unittest.TestCase):
                 "database_available": False,
                 "all_match": False,
                 "reopen_plan": reopen_plan,
+                "inspection_diagnostic": inspection_diagnostic(
+                    plan, archive, code="restore_target_stopped",
+                    phase="target_state", status="refused"),
             }).encode()
 
             result = recovery.restore(plan, inspect=True)
@@ -437,8 +482,58 @@ class PostgresRecoveryTests(unittest.TestCase):
             self.assertFalse(result["database_available"])
             self.assertFalse(result["all_match"])
             self.assertEqual(result["reopen_plan"], reopen_plan)
+            self.assertEqual(result["inspection_diagnostic"]["correlation_id"], plan["native_request_id"])
+            self.assertEqual(result["inspection_diagnostic"]["phase"], "target_state")
             self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
             self.assertEqual(transport.calls[-1][1:3], ("inspect-restore", plan["native_request_id"]))
+
+    def test_inspection_bypasses_verified_local_receipt_and_observes_current_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, capture, transport, plan, archive = self._prepared_plan(Path(directory))
+            _same_archive, evidence = capture_archive(plan["source_digest"])
+            transport.responses["restore"] = json.dumps(restore_receipt(plan, evidence)).encode()
+            recovery.restore(plan, confirm=True)
+            receipt_path = recovery.root / "restores" / (plan["native_request_id"] + ".json")
+            self.assertTrue(receipt_path.exists())
+
+            transport.responses["inspect-restore"] = json.dumps({
+                "schema_version": 1,
+                "ok": True,
+                "code": "restore_inspected",
+                "target": plan["target"],
+                "all_match": False,
+                "schema_diagnostic": {"schema_version": 1, "code": "source_schema_changed"},
+                "inspection_diagnostic": inspection_diagnostic(
+                    plan, archive, code="source_schema_changed",
+                    phase="schema_comparison", status="complete"),
+            }).encode()
+            result = recovery.restore(plan, inspect=True)
+
+            self.assertEqual(result["code"], "restore_inspected")
+            self.assertEqual(transport.calls[-1][1], "inspect-restore")
+            self.assertTrue(receipt_path.exists())
+
+    def test_database_probe_unavailability_remains_a_read_only_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, archive = self._prepared_plan(Path(directory))
+            transport.responses["inspect-restore"] = json.dumps({
+                "schema_version": 1,
+                "ok": True,
+                "code": "restore_database_unavailable",
+                "target": plan["target"],
+                "database_available": False,
+                "all_match": False,
+                "inspection_diagnostic": inspection_diagnostic(
+                    plan, archive, code="restore_database_unavailable",
+                    phase="database_probe", status="unavailable"),
+            }).encode()
+
+            result = recovery.restore(plan, inspect=True)
+
+            self.assertEqual(result["code"], "restore_database_unavailable")
+            self.assertFalse(result["database_available"])
+            self.assertFalse(result["all_match"])
+            self.assertFalse((recovery.root / "restores" / (plan["native_request_id"] + ".json")).exists())
 
     def test_restore_rejects_raw_schema_mismatch_without_proof_before_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -534,6 +629,9 @@ class PostgresRecoveryTests(unittest.TestCase):
                     "database_available": False,
                     "all_match": False,
                     "reopen_plan": reopen_plan,
+                    "inspection_diagnostic": inspection_diagnostic(
+                        plan, _archive, code="restore_target_stopped",
+                        phase="target_state", status="refused"),
                 }
                 if field in {"database_available", "all_match", "reopen_plan"}:
                     response[field] = value

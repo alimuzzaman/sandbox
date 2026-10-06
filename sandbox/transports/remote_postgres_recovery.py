@@ -7,7 +7,103 @@ import re
 import shlex
 
 from sandbox.recovery.errors import RecoveryError
-from sandbox.recovery.postgres_contract import PostgresSource, recovery_source
+from sandbox.recovery.postgres_contract import (
+    PostgresSource, RESTORE_INSPECTION_CODES, RESTORE_INSPECTION_PHASES,
+    RESTORE_INSPECTION_STATUSES, recovery_source,
+    restore_inspection_result_matches_diagnostic,
+)
+
+MAX_INSPECTION_RESPONSE_BYTES = 1024 * 1024
+
+
+def _runtime_revision(value):
+    return value if isinstance(value, str) and re.fullmatch(r'[a-f0-9]{12,40}', value) else None
+
+
+def _inspection_bytes(source, request_id, archive, *, phase, status, code,
+                      runtime_status=None):
+    runtime_status = runtime_status if isinstance(runtime_status, dict) else {}
+    local_revision = _runtime_revision(runtime_status.get('local_runtime_revision'))
+    installed_revision = _runtime_revision(runtime_status.get('installed_runtime_revision'))
+    if not isinstance(phase, str) or phase not in RESTORE_INSPECTION_PHASES:
+        phase = 'response_validation'
+    if not isinstance(status, str) or status not in RESTORE_INSPECTION_STATUSES:
+        status = 'unknown'
+    if not isinstance(code, str) or code not in RESTORE_INSPECTION_CODES:
+        code = 'inspection_failed'
+    revision_state = runtime_status.get('runtime_revision_state')
+    if not isinstance(revision_state, str) or revision_state not in {'match', 'mismatch', 'unavailable', 'unknown'}:
+        revision_state = 'unavailable' if not runtime_status else 'unknown'
+    if revision_state in {'match', 'mismatch'} and (local_revision is None or installed_revision is None):
+        revision_state = 'unknown'
+    payload = {
+        'schema_version': 1,
+        'ok': status == 'complete',
+        'code': code,
+        'inspection_diagnostic': {
+            'schema_version': 1,
+            'correlation_id': request_id,
+            'source_digest': source.source_digest,
+            'archive_digest': 'sha256:' + hashlib.sha256(archive).hexdigest(),
+            'local_runtime_revision': local_revision,
+            'installed_runtime_revision': installed_revision,
+            'runtime_revision_state': revision_state,
+            'phase': phase,
+            'status': status,
+            'code': code,
+        },
+    }
+    return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+
+
+def _inspection_response(source, request_id, archive, payload, runtime_status):
+    if not isinstance(payload, bytes):
+        return _inspection_bytes(source, request_id, archive,
+            phase='response_validation', status='unknown',
+            code='inspection_response_invalid', runtime_status=runtime_status)
+    if len(payload) > MAX_INSPECTION_RESPONSE_BYTES:
+        return _inspection_bytes(source, request_id, archive,
+            phase='response_validation', status='unknown',
+            code='inspection_response_oversized', runtime_status=runtime_status)
+    try:
+        result = json.loads(payload.decode('utf-8'))
+    except (AttributeError, UnicodeError, ValueError, json.JSONDecodeError):
+        return _inspection_bytes(source, request_id, archive,
+            phase='response_validation', status='unknown',
+            code='inspection_response_invalid', runtime_status=runtime_status)
+    if (type(result) is not dict or type(result.get('schema_version')) is not int
+            or result.get('schema_version') != 1 or type(result.get('ok')) is not bool
+            or type(result.get('code')) is not str):
+        return _inspection_bytes(source, request_id, archive,
+            phase='response_validation', status='unknown',
+            code='inspection_response_invalid', runtime_status=runtime_status)
+    private = result.get('inspection_diagnostic')
+    if (type(private) is not dict or set(private) != {'phase', 'status', 'code'}
+            or any(type(private.get(field)) is not str for field in ('phase', 'status', 'code'))
+            or private.get('phase') not in RESTORE_INSPECTION_PHASES
+            or private.get('status') not in RESTORE_INSPECTION_STATUSES
+            or private.get('code') not in RESTORE_INSPECTION_CODES
+            or not restore_inspection_result_matches_diagnostic(
+                result.get('code'), result.get('ok'), private)):
+        return _inspection_bytes(source, request_id, archive,
+            phase='response_validation', status='unknown',
+            code='inspection_response_invalid', runtime_status=runtime_status)
+    result['inspection_diagnostic'] = {
+        'schema_version': 1,
+        'correlation_id': request_id,
+        'source_digest': source.source_digest,
+        'archive_digest': 'sha256:' + hashlib.sha256(archive).hexdigest(),
+        'local_runtime_revision': _runtime_revision(runtime_status.get('local_runtime_revision')),
+        'installed_runtime_revision': _runtime_revision(runtime_status.get('installed_runtime_revision')),
+        'runtime_revision_state': runtime_status.get('runtime_revision_state')
+            if isinstance(runtime_status.get('runtime_revision_state'), str)
+            and runtime_status.get('runtime_revision_state') in {'match', 'mismatch', 'unavailable', 'unknown'}
+            else 'unknown',
+        'phase': private['phase'],
+        'status': private['status'],
+        'code': private['code'],
+    }
+    return json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
 
 
 class RegisteredPostgresRecoveryTransport:
@@ -58,15 +154,64 @@ class RegisteredPostgresRecoveryTransport:
             raise RecoveryError('restore reopen is invalid', 'request_invalid')
         if resume_capture and (operation != 'capture' or source.profile != 'lenzora-dev'):
             raise RecoveryError('capture resume is invalid', 'request_invalid')
-        entry = self.lookup(source.remote)
+        try:
+            entry = self.lookup(source.remote)
+        except Exception:
+            if operation == 'inspect-restore':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_unavailable')
+            raise
         if not isinstance(entry, dict) or entry.get('provisioned') is not True:
+            if operation == 'inspect-restore':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_unavailable')
             raise RecoveryError('registered remote is unavailable', 'remote_unavailable')
-        status = self.status(entry)
+        try:
+            status = self.status(entry)
+        except Exception:
+            if operation == 'inspect-restore':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_status_unavailable')
+            raise
+        if operation == 'inspect-restore' and isinstance(status, dict):
+            revision_state = status.get('runtime_revision_state')
+            if (isinstance(revision_state, str) and revision_state in {'match', 'mismatch'}
+                    and (_runtime_revision(status.get('local_runtime_revision')) is None
+                         or _runtime_revision(status.get('installed_runtime_revision')) is None)):
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_status_unavailable', runtime_status=status)
+            if revision_state == 'mismatch':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='refused',
+                    code='remote_revision_mismatch', runtime_status=status)
+            if not status.get('active') or not status.get('authenticated'):
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_authentication_unavailable', runtime_status=status)
         if (not isinstance(status, dict) or status.get('runtime_revision_state') != 'match'
                 or not status.get('active') or not status.get('authenticated')):
+            if operation == 'inspect-restore':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_status_unavailable', runtime_status=status)
             raise RecoveryError('installed recovery runtime differs', 'remote_revision_mismatch')
-        home = self.home(entry)
+        try:
+            home = self.home(entry)
+        except Exception:
+            if operation == 'inspect-restore':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_unavailable', runtime_status=status)
+            raise
         if not isinstance(home, str) or not home.startswith('/') or '\n' in home:
+            if operation == 'inspect-restore':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='unavailable',
+                    code='remote_unavailable', runtime_status=status)
             raise RecoveryError('remote recovery root is unavailable', 'remote_unavailable')
         helper = (Path(__file__).parents[1] / 'recovery' / 'postgres_helper.py').read_text()
         def invoke(material, revision):
@@ -77,11 +222,26 @@ class RegisteredPostgresRecoveryTransport:
             if resume_capture: request['resume_capture'] = True
             if reopen_plan is not None: request['reopen_plan'] = reopen_plan
             frame = json.dumps(request, sort_keys=True, separators=(',', ':')).encode() + b'\n' + material + archive
-            result = self.process(entry, 'python3 -c ' + shlex.quote(helper), input_data=frame, timeout=3600)
+            try:
+                result = self.process(entry, 'python3 -c ' + shlex.quote(helper), input_data=frame, timeout=3600)
+            except Exception:
+                if operation == 'inspect-restore':
+                    return _inspection_bytes(source, request_id, archive,
+                        phase='transport', status='unknown', code='acceptance_unknown',
+                        runtime_status=status)
+                raise
             payload = getattr(result, 'stdout', b'')
             if isinstance(payload, str): payload = payload.encode()
             if getattr(result, 'returncode', 1) != 0 or not isinstance(payload, bytes) or not payload or len(payload) > 512 * 1024 * 1024:
+                if operation == 'inspect-restore':
+                    code = ('inspection_response_oversized' if isinstance(payload, bytes)
+                            and len(payload) > 512 * 1024 * 1024 else 'acceptance_unknown')
+                    return _inspection_bytes(source, request_id, archive,
+                        phase='transport', status='unknown', code=code,
+                        runtime_status=status)
                 raise RecoveryError('PostgreSQL operation requires retained-request inspection', 'acceptance_unknown')
+            if operation == 'inspect-restore':
+                return _inspection_response(source, request_id, archive, payload, status)
             return payload
         if operation == 'restore' and target_volume is not None:
             if not source.target_password_reference:

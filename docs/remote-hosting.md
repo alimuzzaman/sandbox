@@ -736,8 +736,8 @@ For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
 manifest-declared services, profile-aware configured Compose services, running service
 rows, per-service Compose state/health, free disk, image metadata, derived source-revision
-checks for every declared long-lived service, and the protected apply-log path. A
-single bounded remote observer collects configured services, runtime rows, and all
+checks for every declared long-lived service, and the protected apply-log path. By
+default, one bounded remote observer collects configured services, runtime rows, and all
 declared source-revision keys under one strict total deadline. It queries only those exact
 allowlisted keys, never a container's full environment, and bounds service/key fan-out,
 rows, bytes, phases, and receipt size. Each subprocess pipe is drained incrementally into
@@ -751,8 +751,33 @@ Git checkout-boundary probes also discard inherited `GIT_*` repository selectors
 declared service missing from either Compose configuration or the running set is
 topology drift and makes readiness `degraded`. Init jobs and undeclared dependency
 services are excluded from this long-lived topology comparison. Missing remote evidence
-is reported as
-`unavailable` or `degraded`; the command never mutates the host or prints secrets.
+is reported as `unavailable` or `degraded`; the command never mutates the host or prints
+secrets. Passing `--initializer SERVICE` adds one bounded status-only check for that
+declared initializer.
+
+### Hosted apply diagnostics
+
+Logged runtime and edge apply commands include UTC start/exit times, the phase, request
+identity, and source revision when known. If Compose fails, Sandbox checks at most eight
+declared initializers and reports how many it omitted. When a bounded read-only proof
+identifies a failed initializer owned by the current project/config/image, Sandbox appends
+its service name, exit reason, and at most 50 log lines (32 KiB) to the mode-0600 apply
+log. It does not read logs from a container whose ownership proof is missing or foreign.
+
+Inspect one declared initializer without waiting for it or running it again:
+
+```sh
+./sb host diagnose --project-dir DIR --environment ENV --remote NAME \
+  --initializer SERVICE --json
+```
+
+The `initializer_diagnostic` field reports the service, `status`, a closed `reason` code,
+and `observed_at`. Codes such as `compose_config_hash_mismatch`,
+`image_identity_mismatch`, `container_predates_apply`, and `nonzero_exit` distinguish the
+failed identity check without returning container IDs, image values, or environment data.
+The diagnostic is a current observation; `absent` does not prove historical success.
+Read bounded output through `./sb host logs --project-dir DIR --environment ENV \
+--remote NAME --apply-log --lines 200`.
 
 An environment may also protect its public origin with Basic Auth:
 

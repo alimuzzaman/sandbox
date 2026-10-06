@@ -881,7 +881,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose a deployment or initializer, read logs, or issue a one-time hosting login URL")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url"])
     host_p.add_argument("image_action", nargs="?",
         choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
@@ -908,6 +908,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded number of recent hosted-service log lines (1-1000; --tail is an alias)")
     host_p.add_argument("--apply-log", action="store_true",
         help="read the protected replayable host-apply log instead of service logs")
+    host_p.add_argument("--initializer", default=None, metavar="SERVICE",
+        help="with `host diagnose`, inspect one declared initializer without running it")
     host_p.add_argument("--request-id", default=None,
         help="replay-safe host sync/recovery request identity")
     host_p.add_argument("--verified-plan", default=None, metavar="PATH",

@@ -26,10 +26,62 @@ ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LANG": "C.UTF-8"}
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_SCHEMA_BYTES = 8 * 1024 * 1024
 _TEMP_COUNTS_SQL = 'CREATE TEMP TABLE recovery_counts (name text, count bigint);\n'
+_INSPECTION_PHASES = {
+    'request_validation', 'archive_validation', 'retained_request',
+    'request_binding', 'target_identity', 'target_state', 'database_probe',
+    'database_observation', 'schema_comparison', 'transport',
+    'response_validation', 'complete',
+}
+_INSPECTION_CODES = {
+    'restore_inspected', 'restore_target_stopped', 'restore_target_changed',
+    'restore_target_busy', 'restore_target_unavailable', 'restore_data_invalid',
+    'restore_database_unavailable', 'schema_compared', 'schema_diagnostic_unavailable',
+    'schema_evidence_invalid', 'schema_reference_changed',
+    'schema_reference_cleanup_failed', 'schema_reference_source_unavailable',
+    'schema_reference_pending', 'schema_reference_unavailable',
+    'source_schema_changed', 'target_schema_changed', 'restore_verification_failed',
+    'request_invalid', 'request_identity_mismatch', 'request_binding_mismatch',
+    'operation_binding_mismatch', 'source_binding_mismatch', 'archive_binding_mismatch',
+    'target_binding_mismatch', 'acceptance_unknown', 'inspection_busy',
+    'inspection_failed', 'retained_request_missing', 'retained_request_unavailable',
+    'inspection_response_invalid', 'inspection_response_oversized',
+    'remote_revision_mismatch', 'remote_unavailable', 'remote_authentication_unavailable',
+    'remote_status_unavailable', 'archive_changed', 'source_changed', 'path_unsafe',
+    'reopen_plan_changed', 'reopen_pending', 'reopen_history_invalid',
+}
+_INSPECTION_OPERATION = None
+_INSPECTION_PHASE = 'request_validation'
 _SCHEMA_FIELDS_SQL = r'''
  'constraints', (SELECT coalesce(json_agg(json_build_object('table',c.relname,'name',con.conname,'definition',pg_get_constraintdef(con.oid),'validated',con.convalidated) ORDER BY c.relname,con.conname),'[]') FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),
  'columns', (SELECT coalesce(json_agg(json_build_object('table',table_name,'column',column_name,'type',data_type,'nullable',is_nullable) ORDER BY table_name,ordinal_position),'[]') FROM information_schema.columns WHERE table_schema='public')
 '''
+
+
+def _set_inspection_phase(phase):
+    global _INSPECTION_PHASE
+    if phase in _INSPECTION_PHASES:
+        _INSPECTION_PHASE = phase
+
+
+def _inspection_diagnostic(phase, code, status):
+    return {'phase': phase, 'code': code, 'status': status}
+
+
+def _request_binding_error(saved, expected):
+    if type(saved) is not dict:
+        return 'request_binding_mismatch'
+    if saved.get('request_id') != expected.get('request_id'):
+        return 'request_identity_mismatch'
+    if saved.get('operation') != expected.get('operation'):
+        return 'operation_binding_mismatch'
+    if saved.get('source') != expected.get('source'):
+        return 'source_binding_mismatch'
+    if (saved.get('archive_digest') != expected.get('archive_digest')
+            or saved.get('archive_size') != expected.get('archive_size')):
+        return 'archive_binding_mismatch'
+    if saved.get('target_volume') != expected.get('target_volume'):
+        return 'target_binding_mismatch'
+    return 'request_binding_mismatch'
 
 
 def run(argv, *, data=None, timeout=60, output=None):
@@ -732,23 +784,37 @@ def restore_target(source, name, *, volume=None):
 
 
 def inspect_restore(source, archive, work, name, *, slot=None):
+    _set_inspection_phase('archive_validation')
     evidence, _dump = restore_input(archive, work)
-    row, _volume = restore_target(source, name)
+    _set_inspection_phase('target_identity')
+    try:
+        row, _volume = restore_target(source, name)
+    except ValueError as error:
+        if str(error) == 'operation_failed':
+            raise ValueError('restore_target_unavailable') from None
+        raise
     volume = name + '-data'
     base = {'schema_version': 1, 'ok': True, 'code': 'restore_inspected', 'target': name,
             'container_id': row['Id'], 'volume': volume}
+    _set_inspection_phase('target_state')
     if not row['State']['Running']:
         if slot is None: raise ValueError('restore_target_stopped')
         plan = prepare_reopen(source, archive, evidence, name, slot)
         return {**base, 'code': 'restore_target_stopped', 'database_available': False,
-                'all_match': False, 'reopen_plan': plan}
+                'all_match': False, 'reopen_plan': plan,
+                'inspection_diagnostic': _inspection_diagnostic(
+                    'target_state', 'restore_target_stopped', 'refused')}
     client = ['docker', 'exec', '-i', '--user', 'postgres', '-e', 'PGUSER=' + source['role'], row['Id']]
+    _set_inspection_phase('database_probe')
     try:
         importers = sql(client, source['database'], "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND application_name='pg_restore';")
     except ValueError:
-        return {**base, 'database_available': False, 'all_match': False, 'matches': {}}
+        return {**base, 'database_available': False, 'all_match': False, 'matches': {},
+                'inspection_diagnostic': _inspection_diagnostic(
+                    'database_probe', 'restore_database_unavailable', 'unavailable')}
     if importers != '0':
         raise ValueError('restore_target_busy')
+    _set_inspection_phase('database_observation')
     actual = observation(client, source['database'])
     matches = observation_matches(evidence, actual)
     expected_counts = {row['name']: row['count'] for row in evidence['table_counts']}
@@ -757,17 +823,26 @@ def inspect_restore(source, archive, work, name, *, slot=None):
         if expected_counts.get(name) != actual_counts.get(name))
     diagnostic = {}
     if not matches['schema_digest']:
+        _set_inspection_phase('schema_comparison')
         try:
             diagnostic['schema_diagnostic'] = schema_diagnostic(source, client,
                 evidence['schema_digest'], actual['schema_digest'])
         except (ValueError, OSError, KeyError, subprocess.TimeoutExpired):
             diagnostic['schema_diagnostic'] = {'schema_version': 1, 'code': 'schema_diagnostic_unavailable'}
+    comparison = diagnostic.get('schema_diagnostic') or {}
+    diagnostic_phase = 'schema_comparison' if comparison else 'complete'
+    diagnostic_code = comparison.get('code') or 'restore_inspected'
+    diagnostic_status = ('unavailable' if diagnostic_code == 'schema_diagnostic_unavailable'
+                         else 'complete')
+    _set_inspection_phase('complete')
     return {**base, 'database_available': True, 'matches': matches, 'all_match': all(matches.values()),
         'observation': actual, 'dump_digest': evidence['dump_digest'],
         'source_database_identity': evidence['database_identity'],
         'target_database': source['database'], 'target_role': source['role'],
         'source_table_count': len(expected_counts), 'restored_table_count': len(actual_counts),
-        'mismatched_table_count': len(different), 'mismatched_tables': different[:32], **diagnostic}
+        'mismatched_table_count': len(different), 'mismatched_tables': different[:32],
+        'inspection_diagnostic': _inspection_diagnostic(
+            diagnostic_phase, diagnostic_code, diagnostic_status), **diagnostic}
 
 
 _REOPEN_FIELDS = {'schema_version', 'native_request_id', 'source_digest', 'archive_digest',
@@ -1154,6 +1229,9 @@ def storage_operation(source, operation, work, archive_bytes, name):
 
 
 def main():
+    global _INSPECTION_OPERATION, _INSPECTION_PHASE
+    _INSPECTION_OPERATION = None
+    _INSPECTION_PHASE = 'request_validation'
     line = sys.stdin.buffer.readline(32769)
     if len(line) > 32768: raise ValueError('request_invalid')
     request = json.loads(line, object_pairs_hook=_closed_pairs)
@@ -1163,6 +1241,8 @@ def main():
     if set(request) != {'operation', 'source', 'request_id', 'root', 'credential_size', 'credential_revision', 'archive_size', 'archive_digest', 'target_volume'}:
         raise ValueError('request_invalid')
     source = request['source']; operation = request['operation']; identity = request['request_id']
+    if operation == 'inspect-restore':
+        _INSPECTION_OPERATION = operation
     if operation not in {'observe', 'capture', 'restore', 'inspect-restore', 'verify-restore', 'reopen-restore', 'status'} or not re.fullmatch(r'[a-f0-9]{64}', identity):
         raise ValueError('request_invalid')
     if operation in {'inspect-restore', 'verify-restore', 'reopen-restore'} and (source['profile'] != 'lenzora-dev' or request['target_volume'] is not None):
@@ -1174,6 +1254,7 @@ def main():
         raise ValueError('request_invalid')
     if resume and (operation != 'capture' or source['profile'] != 'lenzora-dev' or source['credential_reference'] is not None):
         raise ValueError('request_invalid')
+    _set_inspection_phase('archive_validation')
     if type(request['credential_size']) is not int or not 0 <= request['credential_size'] <= 16384:
         raise ValueError('request_invalid')
     if type(request['archive_size']) is not int or not 0 <= request['archive_size'] <= MAX_ARCHIVE:
@@ -1186,6 +1267,7 @@ def main():
         raise ValueError('archive_changed')
     root = Path(request['root'])
     if not root.is_absolute() or '..' in root.parts: raise ValueError('path_unsafe')
+    _set_inspection_phase('retained_request')
     if operation not in {'status', 'inspect-restore', 'verify-restore', 'reopen-restore'}: root.mkdir(parents=True, mode=0o700, exist_ok=True)
     if root.is_symlink() or root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
         raise ValueError('path_unsafe')
@@ -1206,6 +1288,7 @@ def main():
             if resume: raise ValueError('acceptance_unknown')
             private_write(slot / 'request.json', canonical(request))
         else:
+            _set_inspection_phase('request_binding')
             saved = json.loads(owned_read(slot / 'request.json', 32768))
             if operation == 'status':
                 if saved.get('source') != source or saved.get('request_id') != identity:
@@ -1221,12 +1304,17 @@ def main():
                     'operation': original, 'source_digest': 'sha256:' + hashlib.sha256(canonical(source)).hexdigest()}
                 sys.stdout.buffer.write(canonical(result)); return
             expected = {**request, 'operation': 'restore'} if operation in {'inspect-restore', 'verify-restore', 'reopen-restore'} else request
-            if saved != expected: raise ValueError('acceptance_unknown')
+            if saved != expected:
+                code = _request_binding_error(saved, expected) if operation == 'inspect-restore' else 'acceptance_unknown'
+                raise ValueError(code)
             terminal = slot / ('capture.tar' if operation == 'capture' else 'result.json')
             if terminal.is_symlink(): raise ValueError('path_unsafe')
             if terminal.exists():
                 if operation == 'reopen-restore': raise ValueError('request_invalid')
-                sys.stdout.buffer.write(owned_read(terminal, MAX_ARCHIVE)); return
+                # Inspection must observe the exact retained target now; an old
+                # restore receipt cannot answer whether that target still exists.
+                if operation != 'inspect-restore':
+                    sys.stdout.buffer.write(owned_read(terminal, MAX_ARCHIVE)); return
             if not resume and operation not in {'inspect-restore', 'verify-restore', 'reopen-restore'}: raise ValueError('acceptance_unknown')
         _execute(request, source, operation, identity, slot, credential, archive_bytes, reopen_plan=reopen_plan)
     finally:
@@ -1315,8 +1403,38 @@ def _execute(request, source, operation, identity, slot, credential, archive_byt
 
 
 def safe_main():
+    global _INSPECTION_OPERATION, _INSPECTION_PHASE
+    _INSPECTION_OPERATION = None
+    _INSPECTION_PHASE = 'request_validation'
     try: main()
     except Exception as error:
+        if _INSPECTION_OPERATION == 'inspect-restore':
+            if isinstance(error, FileNotFoundError):
+                code = ('retained_request_missing' if _INSPECTION_PHASE == 'retained_request'
+                        else 'restore_target_unavailable' if _INSPECTION_PHASE == 'target_identity'
+                        else 'inspection_failed')
+            elif isinstance(error, BlockingIOError):
+                code = 'inspection_busy'
+            elif isinstance(error, OSError):
+                code = ('retained_request_unavailable' if _INSPECTION_PHASE == 'retained_request'
+                        else 'restore_target_unavailable' if _INSPECTION_PHASE == 'target_identity'
+                        else 'inspection_failed')
+            else:
+                candidate = str(error) if type(error) is ValueError else ''
+                code = candidate if candidate in _INSPECTION_CODES else 'inspection_failed'
+            status = ('unknown' if code in {
+                'acceptance_unknown', 'inspection_busy', 'inspection_failed',
+                'retained_request_missing', 'retained_request_unavailable',
+                'restore_target_unavailable',
+            } else 'unavailable' if code in {
+                'restore_database_unavailable', 'schema_diagnostic_unavailable',
+            } else 'refused')
+            sys.stdout.buffer.write(canonical({
+                'schema_version': 1, 'ok': False, 'code': code,
+                'inspection_diagnostic': _inspection_diagnostic(
+                    _INSPECTION_PHASE, code, status),
+            }))
+            return 0
         code = str(error) if type(error) is ValueError else ''
         if code not in {'restore_target_changed', 'restore_target_stopped', 'restore_target_busy',
                 'schema_evidence_invalid', 'schema_reference_changed', 'schema_reference_cleanup_failed',

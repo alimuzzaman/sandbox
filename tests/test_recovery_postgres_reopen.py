@@ -127,9 +127,19 @@ class ReopenHelperTests(unittest.TestCase):
             helper.main()
         return json.loads(output.getvalue())
 
+    def invoke_safe_main(self, request):
+        output = io.BytesIO()
+        with patch.object(helper.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(
+                helper.canonical(request) + b'\n' + self.archive_bytes))), \
+                patch.object(helper.sys, 'stdout', SimpleNamespace(buffer=output)):
+            exit_code = helper.safe_main()
+        return exit_code, json.loads(output.getvalue())
+
     def test_stopped_inspection_is_read_only_and_plan_contains_no_private_marker_bytes(self):
         result = helper.inspect_restore(source(), self.archive, self.work(), NAME, slot=self.slot)
         self.assertEqual(result['code'], 'restore_target_stopped')
+        self.assertEqual(result['inspection_diagnostic'], {
+            'phase': 'target_state', 'code': 'restore_target_stopped', 'status': 'refused'})
         self.assertFalse(result['all_match'])
         self.assertFalse(result['database_available'])
         self.assertEqual(result['container_id'], CONTAINER)
@@ -137,6 +147,59 @@ class ReopenHelperTests(unittest.TestCase):
         self.assertNotIn('private-control-canary', json.dumps(result))
         self.assertEqual(self.docker.writes(), [])
         self.assertEqual(list(self.slot.iterdir()), [])
+
+    def test_inspection_ignores_a_stale_verified_receipt_and_observes_retained_target(self):
+        original = self.request()
+        helper.private_write(self.slot / 'request.json', helper.canonical(original))
+        retained_request = (self.slot / 'request.json').read_bytes()
+        stale_receipt = helper.canonical({
+            'schema_version': 1, 'ok': True, 'code': 'restore_verified',
+            'target': NAME, 'container_id': CONTAINER,
+        })
+        helper.private_write(self.slot / 'result.json', stale_receipt)
+
+        result = self.invoke_main(self.request('inspect-restore'))
+
+        self.assertEqual(result['code'], 'restore_target_stopped')
+        self.assertEqual(result['inspection_diagnostic']['phase'], 'target_state')
+        self.assertEqual(result['inspection_diagnostic']['status'], 'refused')
+        self.assertEqual((self.slot / 'request.json').read_bytes(), retained_request)
+        self.assertEqual((self.slot / 'result.json').read_bytes(), stale_receipt)
+        self.assertEqual(self.docker.writes(), [])
+
+    def test_inspection_request_binding_error_has_closed_phase_and_code(self):
+        saved = self.request()
+        saved['request_id'] = 'f' * 64
+        helper.private_write(self.slot / 'request.json', helper.canonical(saved))
+
+        exit_code, result = self.invoke_safe_main(self.request('inspect-restore'))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result['code'], 'request_identity_mismatch')
+        self.assertEqual(result['inspection_diagnostic'], {
+            'phase': 'request_binding',
+            'code': 'request_identity_mismatch',
+            'status': 'refused',
+        })
+        self.assertNotIn('f' * 64, json.dumps(result))
+
+    def test_inspection_failure_diagnostic_hides_raw_error_text(self):
+        output = io.BytesIO()
+
+        def fail_after_database_probe():
+            helper._INSPECTION_OPERATION = 'inspect-restore'
+            helper._INSPECTION_PHASE = 'database_probe'
+            raise ValueError('private query text with SECRET_CANARY')
+
+        with patch.object(helper, 'main', side_effect=fail_after_database_probe), \
+                patch.object(helper.sys, 'stdout', SimpleNamespace(buffer=output)):
+            exit_code = helper.safe_main()
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result['code'], 'inspection_failed')
+        self.assertEqual(result['inspection_diagnostic']['phase'], 'database_probe')
+        self.assertNotIn('SECRET_CANARY', json.dumps(result))
 
     def test_reopen_preserves_original_request_identity_and_does_not_install_restore_receipt(self):
         original = self.request()

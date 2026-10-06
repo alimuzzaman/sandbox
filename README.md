@@ -6,7 +6,26 @@ drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 ## Scoped recovery
 
 Recovery is profile-driven through `sb recovery`. Capture, restore apply, retention deletion,
-and schedule activation are protected; see [docs/recovery.md](docs/recovery.md).
+and schedule activation are protected; see [docs/recovery.md](docs/recovery.md). Read-only
+PostgreSQL restore inspection includes bounded phase, refusal-code, request-correlation,
+and local/installed runtime-revision evidence; see
+[hosted data recovery](docs/hosted-data-recovery.md).
+
+## Hosted apply diagnosis
+
+`host diagnose` reports the currently observed deployment revision and health. To inspect
+one declared Compose initializer without running or retrying it, add
+`--initializer SERVICE`. The result includes a bounded status, reason code, and observation
+time. Logged runtime and edge apply commands record UTC start/exit times, phase, request,
+and source revision in the protected apply log. After a Compose failure, Sandbox checks up
+to eight declared initializers and reports how many it omitted. When it can prove an
+initializer container belongs to that exact Compose service and apply, it also appends up
+to 50 log lines (32 KiB) for that initializer.
+Read the tail with `./sb host logs --project-dir DIR --environment ENV --remote NAME
+--apply-log --lines 200`; see [remote hosting](docs/remote-hosting.md#hosted-apply-diagnostics).
+
+CLI progress output masks values attached to password, token, secret, and credential
+arguments while keeping the command shape visible.
 
 ## Extension boundaries
 

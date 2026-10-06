@@ -11,6 +11,7 @@ import base64
 import shlex
 import stat
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -58,6 +59,22 @@ _HOST_OBSERVATION_MAX_CONFIG_DIGESTS = 64
 _HOST_OBSERVATION_MAX_PHASES = 6 + _HOST_OBSERVATION_MAX_SERVICES
 _HOST_OBSERVATION_MAX_OUTPUT_BYTES = 64 * 1024
 _HOST_OBSERVATION_MAX_RECEIPT_BYTES = 128 * 1024
+_HOST_INITIALIZER_DIAGNOSTIC_MAX_SERVICES = 8
+_HOST_INITIALIZER_LOG_MAX_BYTES = 32 * 1024
+_HOST_INITIALIZER_LOG_MAX_LINES = 50
+_HOST_INITIALIZER_REASONS = frozenset({
+    "ambiguous_containers", "container_absent", "container_inspect_invalid",
+    "container_inspect_unavailable", "container_predates_apply",
+    "container_state_unrecognized", "created_timestamp_invalid",
+    "created_timestamp_missing", "image_identity_invalid",
+    "image_identity_mismatch", "image_identity_unavailable",
+    "nonzero_exit", "project_name_missing",
+    "remote_command_unavailable", "resolved_hash_invalid",
+    "resolved_hash_unavailable", "still_running", "start_marker_unavailable",
+    "compose_config_hash_mismatch", "compose_output_unavailable",
+    "compose_project_mismatch", "compose_service_mismatch",
+    "completed_successfully",
+})
 # A complete observation runs a bounded set of Compose, Git, image, and one
 # batched container-inspect command. Ten seconds was shorter than a healthy
 # loaded host needs, causing successful applies to lose their receipt. Keep a
@@ -454,14 +471,20 @@ def _decode_timeout_output(value: object) -> str:
     return str(value or "").strip()
 
 
-def _logged_remote_command(command: str, log_path: str) -> str:
+def _logged_remote_command(command: str, log_path: str, *, phase: str | None = None,
+                           request_id: str | None = None,
+                           revision: str | None = None) -> str:
     """Tee one remote command to a protected apply log while preserving rc."""
     log = shlex.quote(log_path)
     status = f"{log}.status.$$"
+    phase_value = phase if isinstance(phase, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", phase) else "unknown"
+    request_value = request_id if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id) else "unknown"
+    revision_value = revision if isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision) else "unknown"
+    metadata = f"phase={phase_value} request_id={request_value} revision={revision_value}"
     return (
         "set +e; "
-        f"{{ printf '%s\\n' '[Sandbox] apply command started'; {command}; "
-        "rc=$?; printf '[Sandbox] apply command exit %s\\n' \"$rc\"; "
+        f"{{ printf '[Sandbox] apply command started {metadata} at=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; {command}; "
+        f"rc=$?; printf '[Sandbox] apply command exit %s {metadata} at=%s\\n' \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; "
         f"printf '%s' \"$rc\" > {status}; exit \"$rc\"; }} "
         f"2>&1 | tee -a {log}; "
         f"rc=$(cat {status} 2>/dev/null || printf '125'); rm -f {status}; exit \"$rc\""
@@ -469,9 +492,15 @@ def _logged_remote_command(command: str, log_path: str) -> str:
 
 
 def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
-                   progress=None, log_path: str | None = None) -> str:
+                   progress=None, log_path: str | None = None,
+                   log_phase: str | None = None,
+                   log_request_id: str | None = None,
+                   log_revision: str | None = None) -> str:
     if log_path:
-        command = _logged_remote_command(command, log_path)
+        command = _logged_remote_command(
+            command, log_path, phase=log_phase,
+            request_id=log_request_id, revision=log_revision,
+        )
     try:
         if progress is not None or log_path:
             result = remote.ssh_stream(entry, command, timeout=timeout,
@@ -723,7 +752,10 @@ fi
 
 def _configure_host_caddy(entry: dict, name: str, content: str,
                           previous: str | None = None, *,
-                          log_path: str | None = None) -> dict:
+                          log_path: str | None = None,
+                          log_phase: str | None = "edge_apply",
+                          log_request_id: str | None = None,
+                          log_revision: str | None = None) -> dict:
     path = f"/etc/caddy/conf.d/{name}.caddy"
     digest = hashlib.sha256(content.encode()).hexdigest()
     temporary = f"/tmp/{name}.{digest}.caddy"
@@ -735,13 +767,18 @@ def _configure_host_caddy(entry: dict, name: str, content: str,
         ),
         timeout=_CADDY_TRANSACTION_TIMEOUT_SECONDS,
         log_path=log_path,
+        log_phase=log_phase, log_request_id=log_request_id,
+        log_revision=log_revision,
     )
     state = "unchanged" if "phase=noop state=unchanged" in output else "changed"
     return {"state": state, "digest": digest}
 
 
 def _restore_host_caddy(entry: dict, name: str, previous: str | None, *,
-                        log_path: str | None = None) -> dict:
+                        log_path: str | None = None,
+                        log_phase: str | None = "rollback",
+                        log_request_id: str | None = None,
+                        log_revision: str | None = None) -> dict:
     path = f"/etc/caddy/conf.d/{name}.caddy"
     digest = "absent"
     temporary = None
@@ -758,6 +795,8 @@ def _restore_host_caddy(entry: dict, name: str, previous: str | None, *,
             ),
             timeout=_CADDY_TRANSACTION_TIMEOUT_SECONDS,
             log_path=log_path,
+            log_phase=log_phase, log_request_id=log_request_id,
+            log_revision=log_revision,
         )
     except Exception as exc:
         raise hosting.HostingError(f"rollback_incomplete: Caddy restore failed: {exc}") from exc
@@ -802,7 +841,10 @@ def _origin_certificate(entry: dict, validated: dict, runtime: dict, state_entry
 
 def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
                    timeout: int = 900, *, progress=None,
-                   log_path: str | None = None) -> str:
+                   log_path: str | None = None,
+                   log_phase: str | None = None,
+                   log_request_id: str | None = None,
+                   log_revision: str | None = None) -> str:
     """Run a building compose command, recovering from a stale BuildKit snapshot.
 
     A single `--no-cache` build regenerates the affected layer as a valid
@@ -812,7 +854,9 @@ def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
     """
     try:
         return _remote_checked(entry, command, timeout=timeout,
-                               progress=progress, log_path=log_path)
+                               progress=progress, log_path=log_path,
+                               log_phase=log_phase, log_request_id=log_request_id,
+                               log_revision=log_revision)
     except RuntimeError as error:
         if _STALE_SNAPSHOT_MARKER not in str(error):
             raise
@@ -822,9 +866,13 @@ def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
         else:
             progress(message)
         _remote_checked(entry, f"{prefix} build --no-cache {service_args}",
-                        timeout=timeout * 2, progress=progress, log_path=log_path)
+                        timeout=timeout * 2, progress=progress, log_path=log_path,
+                        log_phase=log_phase, log_request_id=log_request_id,
+                        log_revision=log_revision)
         return _remote_checked(entry, command, timeout=timeout,
-                               progress=progress, log_path=log_path)
+                               progress=progress, log_path=log_path,
+                               log_phase=log_phase, log_request_id=log_request_id,
+                               log_revision=log_revision)
 
 
 def _no_build_image_preflight_command(prefix: str, services: list[str]) -> str:
@@ -889,7 +937,7 @@ def _preflight_no_build_images(entry: dict, prefix: str, services: list[str],
 
 
 def _initializer_status_command(prefix: str, service: str, *, not_before: float = 0.0,
-                                marker_path: str = "") -> str:
+                                marker_path: str = "", wait_seconds: int = 900) -> str:
     """Build a bounded read-only proof for a Compose-owned initializer.
 
     The first ``compose up`` may already execute an initializer through its
@@ -902,89 +950,94 @@ def _initializer_status_command(prefix: str, service: str, *, not_before: float 
         "raw_prefix=shlex.split(sys.argv[1]);env=dict(os.environ)",
         "while raw_prefix and '=' in raw_prefix[0] and raw_prefix[0].split('=',1)[0].isidentifier():",
         " key,value=raw_prefix.pop(0).split('=',1);env[key]=value",
-        "prefix=raw_prefix;service=sys.argv[2];not_before=float(sys.argv[3]);marker_path=sys.argv[4];deadline=time.monotonic()+900",
+        "prefix=raw_prefix;service=sys.argv[2];not_before=float(sys.argv[3]);marker_path=sys.argv[4];wait_seconds=int(sys.argv[5]);deadline=time.monotonic()+wait_seconds;probe_timeout=30 if wait_seconds>0 else 4",
         "project=None",
         "for i,value in enumerate(prefix[:-1]):",
         " if value in ('-p','--project-name'):project=prefix[i+1]",
         " if value.startswith('--project-name='):project=value.split('=',1)[1]",
-        "def emit(status):",
-        " print(json.dumps({'schema_version':1,'status':status},separators=(',',':')))",
+        "def emit(status,reason):",
+        " observed_at=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')",
+        " print(json.dumps({'schema_version':1,'status':status,'reason':reason,'observed_at':observed_at},separators=(',',':')))",
         " raise SystemExit(0)",
         "if marker_path:",
         " try:",
         "  with open(marker_path,encoding='ascii') as marker:not_before=float(marker.read().strip())",
-        " except (OSError,TypeError,ValueError):emit('foreign')",
-        "def call(argv,timeout=30,input_text=None):",
+        " except (OSError,TypeError,ValueError):emit('foreign','start_marker_unavailable')",
+        "def call(argv,timeout=None,input_text=None):",
+        " timeout=probe_timeout if timeout is None else min(timeout,probe_timeout)",
         " try:return subprocess.run(argv,input=input_text,env=env,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=timeout,check=False)",
-        " except (OSError,subprocess.SubprocessError):emit('foreign')",
+        " except (OSError,subprocess.SubprocessError):emit('foreign','remote_command_unavailable')",
         "def compose(*args,max_bytes=65536):",
         " result=call([*prefix,*args])",
-        " if result.returncode or len(result.stdout.encode('utf-8'))>max_bytes:emit('foreign')",
+        " if result.returncode or len(result.stdout.encode('utf-8'))>max_bytes:emit('foreign','compose_output_unavailable')",
         " return result.stdout.strip()",
         # Compose's hash subcommand skips env_file resolution. Resolve first,
         # then hash its escaped serialization over stdin. Never log the model.
         "resolved=compose('config','--format','json',max_bytes=8*1024*1024)",
-        "if not project:emit('foreign')",
+        "if not project:emit('foreign','project_name_missing')",
         "hashed=call(['docker','compose','-p',project,'-f','-','config','--hash',service],input_text=resolved)",
         "resolved=None",
-        "if hashed.returncode:emit('foreign')",
+        "if hashed.returncode:emit('foreign','resolved_hash_unavailable')",
         "config_hash=hashed.stdout.strip()",
-        "if not config_hash or '\\n' in config_hash or len(config_hash)>256:emit('foreign')",
+        "if not config_hash or '\\n' in config_hash or len(config_hash)>256:emit('foreign','resolved_hash_invalid')",
         "hash_parts=config_hash.split()",
         "if len(hash_parts)==2 and hash_parts[0]==service:config_hash=hash_parts[1]",
-        "elif len(hash_parts)!=1:emit('foreign')",
-        "if re.fullmatch(r'[0-9a-f]{64}',config_hash) is None:emit('foreign')",
+        "elif len(hash_parts)!=1:emit('foreign','resolved_hash_invalid')",
+        "if re.fullmatch(r'[0-9a-f]{64}',config_hash) is None:emit('foreign','resolved_hash_invalid')",
         "ids=[row for row in compose('ps','-aq',service).splitlines() if row]",
-        "if not ids:emit('absent')",
-        "if len(ids)!=1:emit('ambiguous')",
+        "if not ids:emit('absent','container_absent')",
+        "if len(ids)!=1:emit('ambiguous','ambiguous_containers')",
         "image_ids=[row for row in compose('images','-q',service).splitlines() if row]",
-        "if len(image_ids)!=1:emit('foreign')",
+        "if len(image_ids)!=1:emit('foreign','image_identity_unavailable')",
         "def image_digest(value):",
-        " if not isinstance(value,str):emit('foreign')",
+        " if not isinstance(value,str):emit('foreign','image_identity_invalid')",
         " digest=value.removeprefix('sha256:')",
-        " if re.fullmatch(r'[0-9a-f]{64}',digest) is None:emit('foreign')",
+        " if re.fullmatch(r'[0-9a-f]{64}',digest) is None:emit('foreign','image_identity_invalid')",
         " return digest",
         "expected_image=image_digest(image_ids[0])",
         "container=ids[0]",
         "def inspect():",
         " raw=call(['docker','inspect','--format','{{json .}}',container])",
-        " if raw.returncode or len(raw.stdout)>65536:emit('foreign')",
+        " if raw.returncode or len(raw.stdout)>65536:emit('foreign','container_inspect_unavailable')",
         " try:value=json.loads(raw.stdout)",
-        " except (TypeError,ValueError,json.JSONDecodeError):emit('foreign')",
-        " return value if isinstance(value,dict) else emit('foreign')",
+        " except (TypeError,ValueError,json.JSONDecodeError):emit('foreign','container_inspect_invalid')",
+        " return value if isinstance(value,dict) else emit('foreign','container_inspect_invalid')",
         "while True:",
         " value=inspect();labels=((value.get('Config') or {}).get('Labels') or {})",
-        " if (not project or labels.get('com.docker.compose.project')!=project or",
-        "     labels.get('com.docker.compose.service')!=service or",
-        "     labels.get('com.docker.compose.config-hash')!=config_hash or",
-        "     image_digest(value.get('Image'))!=expected_image):emit('foreign')",
+        " if not project or labels.get('com.docker.compose.project')!=project:emit('foreign','compose_project_mismatch')",
+        " if labels.get('com.docker.compose.service')!=service:emit('foreign','compose_service_mismatch')",
+        " if labels.get('com.docker.compose.config-hash')!=config_hash:emit('foreign','compose_config_hash_mismatch')",
+        " if image_digest(value.get('Image'))!=expected_image:emit('foreign','image_identity_mismatch')",
         " state=value.get('State') or {};status=state.get('Status')",
         " if status in ('running','created','restarting'):",
-        "  if time.monotonic()>=deadline:emit('running')",
-        "  time.sleep(min(2,deadline-time.monotonic()));continue",
+        "  if wait_seconds<=0 or time.monotonic()>=deadline:emit('running','still_running')",
+        "  time.sleep(min(2,max(0,deadline-time.monotonic())));continue",
         " created=value.get('Created')",
-        " if not isinstance(created,str):emit('foreign')",
+        " if not isinstance(created,str):emit('foreign','created_timestamp_missing')",
         " try:created_at=datetime.datetime.fromisoformat(created.replace('Z','+00:00')).timestamp()",
-        " except (TypeError,ValueError,OverflowError):emit('foreign')",
-        " if created_at < not_before:emit('foreign')",
-        " if status=='exited' and state.get('ExitCode')==0:emit('succeeded')",
-        " if status=='exited':emit('failed')",
-        " emit('foreign')",
+        " except (TypeError,ValueError,OverflowError):emit('foreign','created_timestamp_invalid')",
+        " if created_at < not_before:emit('foreign','container_predates_apply')",
+        " if status=='exited' and state.get('ExitCode')==0:emit('succeeded','completed_successfully')",
+        " if status=='exited':emit('failed','nonzero_exit')",
+        " emit('foreign','container_state_unrecognized')",
     ))
     return shlex.join([
         "python3", "-c", program, prefix, service, repr(float(not_before)), marker_path,
+        str(max(0, min(900, int(wait_seconds)))),
     ])
 
 
 def _initializer_dependency_status(entry: dict, prefix: str, service: str,
-                                   *, not_before: float = 0.0, marker_path: str = "") -> str:
+                                   *, not_before: float = 0.0, marker_path: str = "",
+                                   wait_seconds: int = 900) -> dict:
     """Return the private, exact status of one Compose-owned initializer."""
     raw = _remote_checked(
         entry,
         _initializer_status_command(
             prefix, service, not_before=not_before, marker_path=marker_path,
+            wait_seconds=wait_seconds,
         ),
-        timeout=930,
+        timeout=max(30, wait_seconds + 30),
     )
     try:
         receipt = json.loads((raw or "").strip())
@@ -993,15 +1046,77 @@ def _initializer_dependency_status(entry: dict, prefix: str, service: str,
     if (type(receipt) is not dict or receipt.get("schema_version") != 1
             or receipt.get("status") not in {
                 "absent", "succeeded", "failed", "running", "foreign", "ambiguous",
-            }):
+            }
+            or receipt.get("reason") not in _HOST_INITIALIZER_REASONS
+            or not isinstance(receipt.get("observed_at"), str)
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", receipt["observed_at"])):
         raise RuntimeError(f"initializer {service} proof was malformed")
-    return receipt["status"]
+    return {"status": receipt["status"], "reason": receipt["reason"],
+            "observed_at": receipt["observed_at"]}
+
+
+def _append_initializer_diagnostic(entry: dict, prefix: str, apply_log: str,
+                                   service: str, proof: dict, *,
+                                   request_id: str | None, revision: str | None,
+                                   include_output: bool) -> None:
+    """Append safe initializer identity evidence and bounded owned logs remotely."""
+    request_value = request_id if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id) else "unknown"
+    revision_value = revision if isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision) else "unknown"
+    marker = (
+        f"[Sandbox] apply phase=initializer service={service} status={proof['status']} "
+        f"reason={proof['reason']} observed_at={proof['observed_at']} "
+        f"request_id={request_value} revision={revision_value}"
+    )
+    log = shlex.quote(apply_log)
+    command = f"set +e; umask 077; printf '%s\\n' {shlex.quote(marker)} >> {log}; "
+    if include_output:
+        command += (
+            f"{{ {prefix} --profile jobs logs --no-color --tail {_HOST_INITIALIZER_LOG_MAX_LINES} "
+            f"{shlex.quote(service)}; }} 2>&1 | head -c {_HOST_INITIALIZER_LOG_MAX_BYTES} >> {log}; "
+            f"printf '%s\\n' '[Sandbox] initializer output end service={service}' >> {log}; "
+        )
+    command += f"chmod 0600 {log}"
+    _remote_checked(entry, command, timeout=45)
+
+
+def _diagnose_failed_initializers(entry: dict, prefix: str, runtime_dir: str,
+                                  apply_log: str | None, services: tuple[str, ...], *,
+                                  request_id: str | None, revision: str | None) -> tuple[list[dict], int]:
+    """Inspect bounded initializer owners and report how many were omitted."""
+    if not apply_log:
+        return [], 0
+    marker_path = f"{runtime_dir}/.initializer-started-at"
+    details = []
+    selected = services[:_HOST_INITIALIZER_DIAGNOSTIC_MAX_SERVICES]
+    omitted = max(0, len(services) - len(selected))
+    for service in selected:
+        try:
+            proof = _initializer_dependency_status(
+                entry, f"{prefix} --profile jobs", service,
+                marker_path=marker_path, wait_seconds=0,
+            )
+        except (RuntimeError, subprocess.SubprocessError, OSError):
+            continue
+        if proof["status"] in {"absent", "succeeded"}:
+            continue
+        try:
+            _append_initializer_diagnostic(
+                entry, prefix, apply_log, service, proof,
+                request_id=request_id, revision=revision,
+                include_output=proof["status"] == "failed",
+            )
+        except (RuntimeError, subprocess.SubprocessError, OSError):
+            pass
+        details.append({"service": service, **proof})
+    return details, omitted
 
 
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
                  *, force_recreate: bool = True,
-                 runtime_convergence_proof: dict | None = None) -> None:
+                 runtime_convergence_proof: dict | None = None,
+                 request_id: str | None = None,
+                 source_revision: str | None = None) -> None:
     proof = runtime_convergence_proof or {}
     revisions = [proof.get(key) for key in (
         "requested_revision", "recorded_revision", "observed_runtime_revision",
@@ -1065,6 +1180,8 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         _build_checked(
             entry, prefix, f"{prefix} build {init_args}", init_args,
             timeout=build_timeout, progress=progress, log_path=apply_log,
+            log_phase="initializer", log_request_id=request_id,
+            log_revision=source_revision,
         )
         if progress is not None:
             progress("Initializer image build completed")
@@ -1083,30 +1200,76 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         if force_recreate else " --no-build" if not build else ""
     )
     command = f"{prefix} up -d{converge_flags} --remove-orphans {service_args}"
-    if force_recreate and build:
-        _build_checked(
-            entry, prefix, command, service_args, timeout=build_timeout,
-            progress=progress, log_path=apply_log,
+    try:
+        if force_recreate and build:
+            _build_checked(
+                entry, prefix, command, service_args, timeout=build_timeout,
+                progress=progress, log_path=apply_log,
+                log_phase="runtime_apply", log_request_id=request_id,
+                log_revision=source_revision,
+            )
+        else:
+            _remote_checked(
+                entry, command, timeout=build_timeout,
+                progress=progress, log_path=apply_log,
+                log_phase="runtime_apply", log_request_id=request_id,
+                log_revision=source_revision,
+            )
+    except RuntimeError as exc:
+        diagnostics, omitted = _diagnose_failed_initializers(
+            entry, prefix, runtime_dir, apply_log, init_services,
+            request_id=request_id, revision=source_revision,
         )
-    else:
-        _remote_checked(
-            entry, command, timeout=build_timeout,
-            progress=progress, log_path=apply_log,
-        )
+        failures = [item for item in diagnostics
+                    if item["status"] not in {"absent", "succeeded"}]
+        if failures or omitted:
+            parts = [
+                f"initializer {item['service']} has {item['status']} evidence "
+                f"(reason={item['reason']})" for item in failures
+            ]
+            if omitted:
+                parts.append(
+                    f"initializer diagnostics omitted {omitted} declared service(s) "
+                    f"after the {_HOST_INITIALIZER_DIAGNOSTIC_MAX_SERVICES}-service bound"
+                )
+            summary = "; ".join(parts)
+            log_hint = f"; inspect {apply_log} with `./sb host logs --apply-log`" if apply_log else ""
+            raise RuntimeError(f"{exc}; {summary}{log_hint}") from None
+        raise
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
     for init_service in init_services if force_recreate else ():
-        status = _initializer_dependency_status(
+        evidence = _initializer_dependency_status(
             entry, f"{prefix} --profile jobs", init_service,
             marker_path=initializer_marker,
         )
+        status = evidence["status"]
         if status == "succeeded":
+            if apply_log:
+                try:
+                    _append_initializer_diagnostic(
+                        entry, prefix, apply_log, init_service, evidence,
+                        request_id=request_id, revision=source_revision,
+                        include_output=False,
+                    )
+                except (RuntimeError, subprocess.SubprocessError, OSError):
+                    pass
             if progress is not None:
                 progress(f"Init service {init_service} completed as a Compose dependency")
             continue
         if status != "absent":
+            if status not in {"succeeded", "absent"} and apply_log:
+                try:
+                    _append_initializer_diagnostic(
+                        entry, prefix, apply_log, init_service, evidence,
+                        request_id=request_id, revision=source_revision,
+                        include_output=status == "failed",
+                    )
+                except (RuntimeError, subprocess.SubprocessError, OSError):
+                    pass
             raise RuntimeError(
-                f"initializer {init_service} has {status} evidence; refusing replay"
+                f"initializer {init_service} has {status} evidence "
+                f"(reason={evidence['reason']}); refusing replay"
             )
         no_build = " --no-build" if not build else ""
         _remote_checked(
@@ -1114,12 +1277,16 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
             f"{prefix} --profile jobs run --rm --pull never{no_build}"
             f" {shlex.quote(init_service)}",
             timeout=900, progress=progress, log_path=apply_log,
+            log_phase="initializer", log_request_id=request_id,
+            log_revision=source_revision,
         )
     _remote_checked(
         entry,
         f"{prefix} up -d{' --no-build' if not build else ''} --no-deps {service_args}",
         timeout=300,
         progress=progress, log_path=apply_log,
+        log_phase="runtime_apply", log_request_id=request_id,
+        log_revision=source_revision,
     )
 
 
@@ -2847,7 +3014,7 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
 
 
 def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
-                           state: dict) -> dict:
+                           state: dict, *, initializer_service: str | None = None) -> dict:
     """Collect one read-only deployment explanation without exposing secrets."""
     result = _host_runtime_status(validated, entry, remote_name, state)
     result["disk"] = {"state": "unavailable", "free_mb": None}
@@ -2855,9 +3022,17 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
     result["image_state"] = {"state": "unavailable", "reason": "image metadata not observed"}
     result.setdefault("source_revision", {"state": "not_declared", "checks": []})
     result["apply_log"] = None
+    result["initializer_diagnostic"] = None
     if not entry.get("provisioned"):
         result["disk"]["reason"] = "remote is not provisioned"
         result["image_state"] = {"state": "unavailable", "reason": "remote is not provisioned"}
+        if initializer_service is not None:
+            result["initializer_diagnostic"] = {
+                "service": initializer_service,
+                "status": "unavailable",
+                "reason": "remote_not_provisioned",
+                "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
         return result
 
     try:
@@ -2879,6 +3054,23 @@ def _host_runtime_diagnose(validated: dict, entry: dict, remote_name: str,
             f"{runtime_dir}/compose.override.yml",
             f"{runtime_dir}/environment.env",
         )
+        if initializer_service is not None:
+            try:
+                proof = _initializer_dependency_status(
+                    entry, f"{prefix} --profile jobs", initializer_service,
+                    marker_path=f"{runtime_dir}/.initializer-started-at",
+                    wait_seconds=0,
+                )
+                result["initializer_diagnostic"] = {
+                    "service": initializer_service, **proof,
+                }
+            except (RuntimeError, subprocess.SubprocessError, OSError):
+                result["initializer_diagnostic"] = {
+                    "service": initializer_service,
+                    "status": "unavailable",
+                    "reason": "proof_unavailable",
+                    "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
         try:
             raw_images = _remote_checked(entry, f"{prefix} images --format json", timeout=60)
             for line in (raw_images or "").splitlines():
@@ -3401,6 +3593,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         try:
             _restore_host_caddy(
                 entry, caddy_name, previous_caddy, log_path=apply_log,
+                log_phase="rollback", log_request_id=context["request_id"],
+                log_revision=sha,
             )
         except Exception as exc:
             failures.append(f"Caddy restore: {exc}")
@@ -3488,6 +3682,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 entry, validated, target, runtime_dir, runtime,
                 stream_progress, apply_log,
                 force_recreate=True,
+                request_id=context["request_id"], source_revision=sha,
             )
             _mark_hosting_init_complete(
                 state, key, entry=entry, runtime_dir=runtime_dir,
@@ -3535,6 +3730,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         _configure_host_caddy(
             entry, caddy_name, runtime["caddyfile"], previous_caddy,
             log_path=apply_log,
+            log_request_id=context["request_id"], log_revision=sha,
         )
         zones: dict[str, dict] = {}
         for wanted in runtime["records"]:
@@ -5797,6 +5993,9 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
 
 
 def cmd_host(cfg, args) -> None:
+    initializer_service = getattr(args, "initializer", None)
+    if initializer_service is not None and args.action != "diagnose":
+        die("--initializer is only valid with `host diagnose`; no remote query was run")
     if args.action == "image" and getattr(args, "image_action", None) == "verify":
         _cmd_host_image_verify(args)
         return
@@ -5866,6 +6065,12 @@ def cmd_host(cfg, args) -> None:
         validated['_invocation_root'] = str(Path(args.project_dir or '.').resolve())
     except hosting.HostingError as exc:
         die(str(exc))
+    if initializer_service is not None:
+        declared = validated["compose"].get("init_services", [])
+        if not isinstance(initializer_service, str) or initializer_service not in declared:
+            die("--initializer must name a declared init_services entry; no remote query was run")
+        if not args.remote:
+            die("--remote is required with `host diagnose --initializer`")
     if args.action == "secrets":
         _cmd_host_secrets(validated, args)
         return
@@ -5948,7 +6153,10 @@ def cmd_host(cfg, args) -> None:
                 print(f"  reason: {result['health']['reason']}")
         return
     if args.action == "diagnose":
-        result = _host_runtime_diagnose(validated, entry, args.remote, state)
+        result = _host_runtime_diagnose(
+            validated, entry, args.remote, state,
+            initializer_service=initializer_service,
+        )
         if args.json:
             print(json.dumps({"ok": True, **result}, sort_keys=True))
         else:
@@ -5967,6 +6175,12 @@ def cmd_host(cfg, args) -> None:
                 print(f"  reason: {result['health']['reason']}")
             if result["apply_log"]:
                 print(f"  apply log: {result['apply_log']}")
+            if result.get("initializer_diagnostic"):
+                initializer = result["initializer_diagnostic"]
+                print(
+                    f"  initializer {initializer['service']}: {initializer['status']} "
+                    f"(reason={initializer['reason']}, observed={initializer['observed_at']})"
+                )
         return
     if args.action == "logs":
         if not entry.get("provisioned"):

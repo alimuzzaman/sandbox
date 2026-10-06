@@ -1064,7 +1064,7 @@ class TestHostingManifest(unittest.TestCase):
             "compose_override": "services: {}\n",
             "environment": "EXAMPLE=value\n",
         }
-        remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
+        remote_checked.return_value = '{"schema_version":1,"status":"absent","reason":"container_absent","observed_at":"2026-09-25T00:00:00Z"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         up_commands = [command for command in commands if " up -d" in command]
@@ -1086,7 +1086,7 @@ class TestHostingManifest(unittest.TestCase):
         )) as directory:
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
-        remote_checked.return_value = '{"schema_version":1,"status":"succeeded"}'
+        remote_checked.return_value = '{"schema_version":1,"status":"succeeded","reason":"completed_successfully","observed_at":"2026-09-25T00:00:00Z"}'
 
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
 
@@ -1106,16 +1106,64 @@ class TestHostingManifest(unittest.TestCase):
         for status in ("failed", "running", "foreign", "ambiguous"):
             with self.subTest(status=status):
                 remote_checked.reset_mock()
-                remote_checked.return_value = (
-                    '{"schema_version":1,"status":"' + status + '"}'
-                )
-                with self.assertRaisesRegex(RuntimeError, f"initializer setup has {status}"):
+                reasons = {
+                    "failed": "nonzero_exit", "running": "still_running",
+                    "foreign": "compose_project_mismatch", "ambiguous": "ambiguous_containers",
+                }
+                remote_checked.return_value = json.dumps({
+                    "schema_version": 1, "status": status,
+                    "reason": reasons[status], "observed_at": "2026-09-25T00:00:00Z",
+                })
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        f"initializer setup has {status} evidence \\(reason={reasons[status]}\\)"):
                     hosting_cmd._run_compose(
                         {}, validated, "/srv/example", "/srv/runtime", runtime,
                     )
                 commands = [call.args[1] for call in remote_checked.call_args_list]
                 self.assertFalse(any(" run --rm " in command for command in commands))
                 self.assertEqual(sum(" up -d" in command for command in commands), 1)
+
+    @patch("sandbox.commands.hosting._diagnose_failed_initializers")
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._build_checked")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_compose_failure_reports_initializer_evidence_without_replaying_it(
+            self, remote_checked, build_checked, _write, diagnose):
+        with self._write(_manifest().replace(
+                "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
+        )) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        build_checked.side_effect = [None, RuntimeError("compose apply failed")]
+        diagnose.return_value = ([{
+            "service": "setup", "status": "failed", "reason": "nonzero_exit",
+            "observed_at": "2026-09-25T00:00:00Z",
+        }], 2)
+
+        with self.assertRaisesRegex(
+                RuntimeError,
+                r"compose apply failed; initializer setup has failed evidence \(reason=nonzero_exit\); "
+                r"initializer diagnostics omitted 2 declared service\(s\).*host logs --apply-log"):
+            hosting_cmd._run_compose(
+                {}, validated, "/srv/example", "/srv/runtime", runtime,
+                apply_log="/srv/runtime/apply.log", request_id="apply-1",
+                source_revision="a" * 40,
+            )
+
+        diagnose.assert_called_once()
+        self.assertEqual(diagnose.call_args.args[0], {})
+        self.assertIn("compose", diagnose.call_args.args[1])
+        self.assertEqual(diagnose.call_args.args[2:5], (
+            "/srv/runtime", "/srv/runtime/apply.log", ("setup",),
+        ))
+        self.assertEqual(diagnose.call_args.kwargs, {
+            "request_id": "apply-1", "revision": "a" * 40,
+        })
+        commands = [call.args[2] for call in build_checked.call_args_list]
+        self.assertTrue(any(command.endswith("build setup") for command in commands))
+        self.assertTrue(any(" up -d" in command for command in commands))
+        self.assertFalse(any(" run --rm " in command for command in commands))
 
     def test_initializer_status_command_has_bounded_identity_checks(self):
         command = hosting_cmd._initializer_status_command(
@@ -1130,7 +1178,9 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("created_at", argv[2])
         self.assertIn("not_before", argv[2])
         self.assertIn("raw_prefix", argv[2])
-        self.assertIn("time.monotonic()+900", argv[2])
+        self.assertIn("deadline=time.monotonic()+wait_seconds", argv[2])
+        self.assertIn("compose_config_hash_mismatch", argv[2])
+        self.assertIn("observed_at", argv[2])
         compile(argv[2], "<initializer-status>", "exec")
 
     def test_initializer_status_command_accepts_env_prefix_and_rejects_stale_container(self):
@@ -1155,10 +1205,11 @@ class TestHostingManifest(unittest.TestCase):
                 " else: raise SystemExit(2)\n"
                 "elif args and args[0]=='inspect':\n"
                 f" print(json.dumps({{'Created': {created!r}, 'Image': 'sha256:' + 'b' * 64, "
-                "'Config': {'Labels': {'com.docker.compose.project': 'example', "
-                "'com.docker.compose.service': 'setup', "
-                "'com.docker.compose.config-hash': 'a' * 64}}, "
-                "'State': {'Status': 'exited', 'ExitCode': 0}}))\n"
+                "'Config': {'Labels': {'com.docker.compose.project': os.environ.get('PROJECT_LABEL','example'), "
+                "'com.docker.compose.service': os.environ.get('SERVICE_LABEL','setup'), "
+                "'com.docker.compose.config-hash': os.environ.get('LABEL_HASH','a' * 64)}}, "
+                "'State': {'Status': os.environ.get('CONTAINER_STATUS','exited'), "
+                "'ExitCode': int(os.environ.get('CONTAINER_EXIT','0'))}}))\n"
                 "else: raise SystemExit(2)\n"
             )
             docker.chmod(0o755)
@@ -1169,7 +1220,7 @@ class TestHostingManifest(unittest.TestCase):
             marker = root / "initializer-started-at"
             marker.write_text(str(time.time() - 120))
             command = hosting_cmd._initializer_status_command(
-                prefix, "setup", marker_path=str(marker),
+                prefix, "setup", marker_path=str(marker), wait_seconds=0,
             )
             argv = shlex.split(command)
             argv[0] = sys.executable
@@ -1181,25 +1232,34 @@ class TestHostingManifest(unittest.TestCase):
                 argv, capture_output=True, text=True, check=False, env=environment,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), {
-                "schema_version": 1, "status": "succeeded",
-            })
+            observation = json.loads(result.stdout)
+            self.assertEqual(observation["schema_version"], 1)
+            self.assertEqual(observation["status"], "succeeded")
+            self.assertEqual(observation["reason"], "completed_successfully")
+            self.assertRegex(
+                observation["observed_at"],
+                r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$",
+            )
 
             # Real Compose emits a service-prefixed hash and a bare image ID.
             # Accept equivalent full identities, never wrong services or digests.
             cases = [
-                ({"HASH_OUTPUT": "a" * 64}, "succeeded"),
-                ({"IMAGE_OUTPUT": "sha256:" + "b" * 64}, "succeeded"),
-                ({"HASH_OUTPUT": "other " + "a" * 64}, "foreign"),
-                ({"HASH_OUTPUT": "setup " + "c" * 64}, "foreign"),
-                ({"HASH_OUTPUT": "setup " + "a" * 64 + " extra"}, "foreign"),
-                ({"HASH_OUTPUT": "setup " + "a" * 64 + "\nother " + "a" * 64}, "foreign"),
-                ({"IMAGE_OUTPUT": "c" * 64}, "foreign"),
-                ({"IMAGE_OUTPUT": "b" * 12}, "foreign"),
-                ({"IMAGE_OUTPUT": "sha512:" + "b" * 64}, "foreign"),
-                ({"IMAGE_OUTPUT": "b" * 64 + "\n" + "b" * 64}, "foreign"),
+                ({"HASH_OUTPUT": "a" * 64}, "succeeded", "completed_successfully"),
+                ({"IMAGE_OUTPUT": "sha256:" + "b" * 64}, "succeeded", "completed_successfully"),
+                ({"HASH_OUTPUT": "other " + "a" * 64}, "foreign", "resolved_hash_invalid"),
+                ({"HASH_OUTPUT": "setup " + "c" * 64}, "foreign", "compose_config_hash_mismatch"),
+                ({"HASH_OUTPUT": "setup " + "a" * 64 + " extra"}, "foreign", "resolved_hash_invalid"),
+                ({"HASH_OUTPUT": "setup " + "a" * 64 + "\nother " + "a" * 64}, "foreign", "resolved_hash_invalid"),
+                ({"IMAGE_OUTPUT": "c" * 64}, "foreign", "image_identity_mismatch"),
+                ({"IMAGE_OUTPUT": "b" * 12}, "foreign", "image_identity_invalid"),
+                ({"IMAGE_OUTPUT": "sha512:" + "b" * 64}, "foreign", "image_identity_invalid"),
+                ({"IMAGE_OUTPUT": "b" * 64 + "\n" + "b" * 64}, "foreign", "image_identity_unavailable"),
+                ({"PROJECT_LABEL": "other"}, "foreign", "compose_project_mismatch"),
+                ({"SERVICE_LABEL": "other"}, "foreign", "compose_service_mismatch"),
+                ({"CONTAINER_STATUS": "running"}, "running", "still_running"),
+                ({"CONTAINER_EXIT": "17"}, "failed", "nonzero_exit"),
             ]
-            for overrides, expected in cases:
+            for overrides, expected, reason in cases:
                 with self.subTest(overrides=overrides):
                     variant = run_test_process(
                         argv, capture_output=True, text=True, check=False,
@@ -1209,10 +1269,13 @@ class TestHostingManifest(unittest.TestCase):
                         },
                     )
                     self.assertEqual(variant.returncode, 0, variant.stderr)
-                    self.assertEqual(json.loads(variant.stdout)["status"], expected)
+                    observation = json.loads(variant.stdout)
+                    self.assertEqual(observation["status"], expected)
+                    self.assertEqual(observation["reason"], reason)
+                    self.assertIn("observed_at", observation)
 
             stale = hosting_cmd._initializer_status_command(
-                prefix, "setup", not_before=time.time() + 5,
+                prefix, "setup", not_before=time.time() + 5, wait_seconds=0,
             )
             stale_argv = shlex.split(stale)
             stale_argv[0] = sys.executable
@@ -1220,12 +1283,13 @@ class TestHostingManifest(unittest.TestCase):
                 stale_argv, capture_output=True, text=True, check=False, env=environment,
             )
             self.assertEqual(stale_result.returncode, 0, stale_result.stderr)
-            self.assertEqual(json.loads(stale_result.stdout), {
-                "schema_version": 1, "status": "foreign",
-            })
+            stale_observation = json.loads(stale_result.stdout)
+            self.assertEqual(stale_observation["status"], "foreign")
+            self.assertEqual(stale_observation["reason"], "container_predates_apply")
 
             absent = hosting_cmd._initializer_status_command(
                 "NO_CONTAINER=1 " + prefix, "setup", not_before=time.time() - 120,
+                wait_seconds=0,
             )
             absent_argv = shlex.split(absent)
             absent_argv[0] = sys.executable
@@ -1233,15 +1297,56 @@ class TestHostingManifest(unittest.TestCase):
                 absent_argv, capture_output=True, text=True, check=False, env=environment,
             )
             self.assertEqual(absent_result.returncode, 0, absent_result.stderr)
-            self.assertEqual(json.loads(absent_result.stdout), {
-                "schema_version": 1, "status": "absent",
-            })
+            absent_observation = json.loads(absent_result.stdout)
+            self.assertEqual(absent_observation["status"], "absent")
+            self.assertEqual(absent_observation["reason"], "container_absent")
 
     @patch("sandbox.commands.hosting._remote_checked")
     def test_initializer_dependency_status_refuses_malformed_receipt(self, remote_checked):
         remote_checked.return_value = '{"schema_version":1,"status":"unknown"}'
         with self.assertRaisesRegex(RuntimeError, "initializer setup proof was malformed"):
             hosting_cmd._initializer_dependency_status({}, "docker compose", "setup")
+
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_initializer_log_append_is_bounded_and_keeps_safe_identity(self, remote_checked):
+        hosting_cmd._append_initializer_diagnostic(
+            {}, "docker compose", "/srv/runtime/apply.log", "setup",
+            {
+                "status": "failed", "reason": "nonzero_exit",
+                "observed_at": "2026-09-25T00:00:00Z",
+            },
+            request_id="apply-1", revision="a" * 40, include_output=True,
+        )
+
+        command = remote_checked.call_args.args[1]
+        self.assertIn("phase=initializer", command)
+        self.assertIn("service=setup status=failed reason=nonzero_exit", command)
+        self.assertIn("request_id=apply-1", command)
+        self.assertIn("revision=" + "a" * 40, command)
+        self.assertIn("logs --no-color --tail 50 setup", command)
+        self.assertIn("head -c 32768", command)
+        self.assertIn("chmod 0600", command)
+        self.assertEqual(remote_checked.call_args.kwargs["timeout"], 45)
+
+    @patch("sandbox.commands.hosting._append_initializer_diagnostic")
+    @patch("sandbox.commands.hosting._initializer_dependency_status")
+    def test_initializer_failure_diagnostics_report_services_omitted_by_bound(
+            self, initializer_status, append_diagnostic):
+        initializer_status.return_value = {
+            "status": "running", "reason": "still_running",
+            "observed_at": "2026-09-25T00:00:00Z",
+        }
+        services = tuple(f"setup-{index}" for index in range(10))
+
+        diagnostics, omitted = hosting_cmd._diagnose_failed_initializers(
+            {}, "docker compose", "/srv/runtime", "/srv/runtime/apply.log", services,
+            request_id="apply-1", revision="a" * 40,
+        )
+
+        self.assertEqual(len(diagnostics), 8)
+        self.assertEqual(omitted, 2)
+        self.assertEqual(initializer_status.call_count, 8)
+        self.assertEqual(append_diagnostic.call_count, 8)
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
@@ -1273,7 +1378,7 @@ class TestHostingManifest(unittest.TestCase):
             ))
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
-        remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
+        remote_checked.return_value = '{"schema_version":1,"status":"absent","reason":"container_absent","observed_at":"2026-09-25T00:00:00Z"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
         preflight.assert_called_once()
@@ -1477,10 +1582,16 @@ class TestHostingManifest(unittest.TestCase):
         output = hosting_cmd._remote_checked(
             {}, "printf output", timeout=42, progress=callback,
             log_path="/srv/runtime/apply.log",
+            log_phase="initializer", log_request_id="apply-1",
+            log_revision="a" * 40,
         )
         self.assertEqual(output, "remote output\n")
         ssh_stream.assert_called_once()
-        self.assertIn("tee -a", ssh_stream.call_args.args[1])
+        command = ssh_stream.call_args.args[1]
+        self.assertIn("tee -a", command)
+        self.assertIn("phase=initializer request_id=apply-1 revision=" + "a" * 40, command)
+        self.assertIn("date -u +%Y-%m-%dT%H:%M:%SZ", command)
+        self.assertIn("apply command exit %s", command)
         self.assertEqual(ssh_stream.call_args.kwargs["timeout"], 42)
         self.assertEqual(ssh_stream.call_args.kwargs["on_line"], callback)
 
@@ -1541,7 +1652,7 @@ class TestHostingManifest(unittest.TestCase):
         with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
-        remote_checked.return_value = '{"schema_version":1,"status":"absent"}'
+        remote_checked.return_value = '{"schema_version":1,"status":"absent","reason":"container_absent","observed_at":"2026-09-25T00:00:00Z"}'
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         build_calls = [call for call in remote_checked.call_args_list
                        if "--force-recreate" in call.args[1]
@@ -2538,7 +2649,10 @@ class TestHostingManifest(unittest.TestCase):
             )
 
     def test_host_diagnose_combines_disk_images_and_source_revision_evidence(self):
-        with self._write(_manifest_with_derived_revision()) as directory:
+        manifest = _manifest_with_derived_revision().replace(
+            "      service: web\n", "      service: web\n      init_services: [setup]\n",
+        )
+        with self._write(manifest) as directory:
             validated = hosting.validate_manifest(directory)
         revision = "a" * 40
         state = {"version": 1, "hosts": {
@@ -2559,14 +2673,30 @@ class TestHostingManifest(unittest.TestCase):
         with patch.object(hosting_cmd, "_host_runtime_status", return_value=status), \
              patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
              patch.object(hosting_cmd, "_remote_disk_free_mb", return_value=4096), \
-             patch.object(hosting_cmd, "_remote_checked", return_value=images) as checked:
+             patch.object(hosting_cmd, "_remote_checked", return_value=images) as checked, \
+             patch.object(
+                 hosting_cmd, "_initializer_dependency_status",
+                 return_value={
+                     "status": "failed", "reason": "nonzero_exit",
+                     "observed_at": "2026-09-25T00:00:00Z",
+                 },
+             ) as initializer_status:
             result = hosting_cmd._host_runtime_diagnose(
                 validated, {"provisioned": True}, "myvps", state,
+                initializer_service="setup",
             )
         self.assertEqual(result["disk"], {"state": "ready", "free_mb": 4096})
         self.assertEqual(result["image_state"], {"state": "ready"})
         self.assertEqual(result["source_revision"]["state"], "ready")
         self.assertEqual(result["source_revision"]["checks"][0]["state"], "match")
+        self.assertEqual(result["initializer_diagnostic"], {
+            "service": "setup", "status": "failed", "reason": "nonzero_exit",
+            "observed_at": "2026-09-25T00:00:00Z",
+        })
+        self.assertEqual(initializer_status.call_args.kwargs["wait_seconds"], 0)
+        self.assertTrue(initializer_status.call_args.kwargs["marker_path"].endswith(
+            "/.initializer-started-at"
+        ))
         self.assertEqual(checked.call_count, 1)
         self.assertTrue(result["apply_log"].endswith("/apply.log"))
 
@@ -3193,7 +3323,9 @@ class TestHostingManifest(unittest.TestCase):
                          list(reversed(previous)))
         fixture.restore_edge.assert_called_once_with(fixture.entry,
             "sandbox-host-example-site-production", "old caddy",
-            log_path="/srv/sandbox/runtime/hosts/example-site/production/apply.log")
+            log_path="/srv/sandbox/runtime/hosts/example-site/production/apply.log",
+            log_phase="rollback", log_request_id="hosting-fixture",
+            log_revision=fixture.deployed_commit)
         record = fixture.repository.load()["hosts"][fixture.key]
         self.assertEqual(record["runtime"]["state"], "ready")
         self.assertEqual(record["edge"]["state"], "pending")

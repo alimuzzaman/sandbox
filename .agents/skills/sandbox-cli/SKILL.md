@@ -5,6 +5,10 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+CLI progress output may show command arguments, but values attached to password,
+token, secret, and credential flags are redacted. Never copy a credential value
+from command output into feedback or chat.
+
 ## Host storage monitoring and cleanup
 
 Use the global `resources` command before raw host, Docker, or filesystem
@@ -158,6 +162,19 @@ Deep status is diagnostic only. `existing_cache_scope` and
 by the ordinary resource inventory; deleted-open files and anonymous host
 directories remain manual. Never turn a deep finding into a raw path deletion
 or process termination.
+
+### Read-only PostgreSQL restore inspection
+
+For `recovery data --postgres-operation inspect-restore`, read
+`data.inspection_diagnostic` alongside `data.all_match` and
+`data.schema_diagnostic`. The diagnostic carries the exact request correlation,
+source/archive digests, local and installed Sandbox revisions, a fixed phase and
+code, and a status of `complete`, `refused`, `unavailable`, or `unknown`. A
+completed inspection can still report mismatches. Do not treat `unknown` as a
+target result or replay another request; inspect the retained request under its
+original identity. `unavailable` names a bounded probe or comparison that could not
+produce evidence. Resolve runtime revision mismatch only through the supported Sandbox
+lifecycle.
 
 Review remote `cache` and `stale` plans separately: cache may contain exact
 immutable build-cache IDs, while volumes and worktrees remain stale-only.
@@ -355,6 +372,21 @@ installed-controller verification remain pending.
 
 Use recovery when the first safe step must be observation. Do not substitute ordinary
 `host apply`, because apply may stage source before deciding replay safety.
+
+For a read-only check of one declared Compose initializer, use:
+
+```sh
+sb host diagnose --project-dir DIR --environment ENV --remote NAME \
+  --initializer SERVICE --json
+```
+
+This returns bounded initializer status, a finite reason code, and observation time. It does
+not wait for, run, or retry the initializer. On a failed Compose apply, Sandbox checks up to
+eight declared initializers and reports how many it omitted. The protected `apply.log`
+records UTC command times, phase, request, and source revision when known. It adds
+initializer output only after proving the exact Compose project, service, config, and image
+identity; the output is capped at 50 lines and 32 KiB. Read it with
+`sb host logs --project-dir DIR --environment ENV --remote NAME --apply-log --lines 200`.
 
 ```sh
 sb host status --project-dir DIR --environment ENV --remote NAME --json

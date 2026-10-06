@@ -34,11 +34,43 @@ class _RunResult:
         self.stderr = stderr
 
 
+_SECRET_OPTION_MARKERS = (
+    "password", "passwd", "passphrase", "token", "secret", "credential",
+    "authorization", "api_key", "apikey", "private_key", "privatekey",
+    "bearer", "dbpass",
+)
+
+
+def _display_command(cmd: list[str]) -> str:
+    """Render argv for progress output without printing sensitive option values."""
+    rendered = []
+    redact_next = False
+    for raw in cmd:
+        value = str(raw)
+        if redact_next:
+            rendered.append("[REDACTED]")
+            redact_next = False
+            continue
+        option, separator, _argument = value.partition("=")
+        normalized = option.lstrip("-").lower().replace("-", "_")
+        sensitive = any(marker in normalized for marker in _SECRET_OPTION_MARKERS)
+        if not sensitive:
+            rendered.append(value)
+        elif separator:
+            rendered.append(f"{option}=[REDACTED]")
+        else:
+            rendered.append(value)
+            # Boolean opt-out/display flags do not consume a credential value.
+            if not normalized.startswith(("no_", "show_", "hide_")):
+                redact_next = True
+    return " ".join(rendered)
+
+
 def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
     if capture and (kw.get("stdin") is not None or kw.get("stdout") is not None):
         raise ValueError("capture cannot be combined with explicit stdin/stdout")
     if not capture:
-        print(f"  $ {' '.join(cmd)}")
+        print(f"  $ {_display_command(cmd)}")
 
     # Web-streaming path: only when not capturing (capture callers want the
     # buffered value back) and the flag is on. Merge stderr into stdout and

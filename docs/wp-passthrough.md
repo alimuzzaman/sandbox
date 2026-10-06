@@ -11,6 +11,12 @@ If the first passthrough token is another `wp`, Sandbox rejects it before
 starting the runtime and reports the correct spelling. This prevents a
 misleading missing-file or plugin error from hiding an argument mistake.
 
+A relative `--require=FILE` is resolved against `--project-dir` (or the current
+directory), not the WordPress root WP-CLI runs in. When that names an existing
+file inside the project, Sandbox passes its absolute host path, which the
+container sees at the same path through the project mount. Other values pass
+through unchanged.
+
 ## `wp eval` and PHP namespaces
 
 The `--` separator ends Sandbox options. After it, the expression is passed

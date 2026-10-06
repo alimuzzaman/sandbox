@@ -255,6 +255,37 @@ def _stage_host_package_paths(
     return rewritten, staged
 
 
+def _absolutize_project_requires(
+    argv: list[str], project_root: str | Path | None = None,
+) -> list[str]:
+    """Resolve a relative ``--require=FILE`` against the project, not WordPress.
+
+    WP-CLI resolves ``--require`` from its own working directory (the WordPress
+    root), so a project-relative fixture path fails with "Required file does
+    not exist". The project checkout is mounted at its host path, so the
+    absolute host path is what WP-CLI can load. Only an existing regular file
+    inside the project is rewritten; anything else passes through unchanged.
+    """
+    base = (Path(project_root).expanduser() if project_root else Path.cwd()).resolve()
+    rewritten = list(argv)
+    for index, token in enumerate(argv):
+        if token == "--":
+            break
+        if not token.startswith("--require="):
+            continue
+        value = token[len("--require="):]
+        if not value or Path(value).is_absolute() or value.startswith("~"):
+            continue
+        candidate = (base / value).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            rewritten[index] = f"--require={candidate}"
+    return rewritten
+
+
 def _remote_project_slug(project_root: Path) -> str:
     return _remote.deploy_target_slug(project_root)
 
@@ -360,6 +391,7 @@ def cmd_wp(cfg, args) -> None:
         print(f"  follow: ./sb job {jid} --follow", file=sys.stderr)
         print(f"  kill:   ./sb job {jid} --kill", file=sys.stderr)
         return
+    pt = _absolutize_project_requires(pt, getattr(args, "project_dir", None))
     pt, staged_packages = _stage_host_package_paths(
         pt, args.resolved_instance, getattr(args, "project_dir", None),
     )

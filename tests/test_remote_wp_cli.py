@@ -285,6 +285,24 @@ class TestRemoteWpCliCommand(unittest.TestCase):
         wpcli.assert_called_once()
         remote_wp_cli.assert_not_called()
 
+    def test_relative_require_resolves_from_the_project_mount(self):
+        """Feedback 30123145: --require=tests/... resolved against WordPress."""
+        with tempfile.TemporaryDirectory() as raw:
+            project = Path(raw).resolve() / "project"
+            fixture = project / "tests" / "fixtures" / "boot.php"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text("<?php\n")
+            rewritten = command._absolutize_project_requires([
+                "--require=tests/fixtures/boot.php", "--require=missing.php",
+                "--require=../outside.php", "--require=/abs/keep.php",
+                "eval", "echo 1;",
+            ], project)
+        self.assertEqual(rewritten, [
+            f"--require={fixture}", "--require=missing.php",
+            "--require=../outside.php", "--require=/abs/keep.php",
+            "eval", "echo 1;",
+        ])
+
     def test_local_host_file_staging_behavior_remains_available(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

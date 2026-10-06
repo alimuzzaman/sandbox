@@ -269,6 +269,12 @@ check must prove no live recorded child/supervisor, residual child process group
 owned child cgroup, container mount, host mountpoint or bind source, resource binding,
 lease, or other active job. The exact filesystem identity is moved into a private
 owner-only cleanup root and emptied through its continuously open directory descriptor.
+Before recording cleanup authority, the controller opens the materialized checkout
+root without following symlinks, verifies that it is owned by the current user, and
+normalizes its mode to `0700`; this also covers a pre-existing checkout reused by
+materialization. The broker resolves the metadata directory recorded in the
+workspace file against its pinned root, so equivalent platform path aliases still
+refer to the same owned directory.
 Linux remotes can enable final removal with the protected, owner-scoped cleanup broker:
 
 ```sh

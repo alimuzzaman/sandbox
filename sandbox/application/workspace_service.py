@@ -195,6 +195,41 @@ def _filesystem_identity(path: Path) -> dict[str, int]:
     return {"device": int(observed.st_dev), "inode": int(observed.st_ino)}
 
 
+def _normalize_ci_checkout_root(path: Path) -> dict[str, int]:
+    """Make an owned CI checkout root satisfy the cleanup broker boundary."""
+    parent_fd = checkout_fd = None
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+             getattr(os, "O_NOFOLLOW", 0))
+    try:
+        parent_fd = _open_absolute_directory_nofollow(path.parent)
+        checkout_fd = os.open(path.name, flags, dir_fd=parent_fd)
+        before = os.fstat(checkout_fd)
+        if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid():
+            raise OSError("CI checkout root is not an owned directory")
+        os.fchmod(checkout_fd, 0o700)
+        os.fsync(checkout_fd)
+        os.fsync(parent_fd)
+        after = os.fstat(checkout_fd)
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (int(after.st_dev), int(after.st_ino))
+        if (not stat.S_ISDIR(after.st_mode)
+                or after.st_uid != os.getuid()
+                or stat.S_IMODE(after.st_mode) != 0o700
+                or (int(current.st_dev), int(current.st_ino)) != identity
+                or current.st_uid != os.getuid()
+                or stat.S_IMODE(current.st_mode) != 0o700):
+            raise OSError("CI checkout root identity changed during normalization")
+        return {"device": identity[0], "inode": identity[1]}
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WorkspaceIndexError(
+            "workspace_path_unsafe",
+            "CI checkout root could not be normalized safely") from exc
+    finally:
+        for descriptor in (checkout_fd, parent_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
 def _open_absolute_directory_nofollow(path: Path) -> int:
     if not path.is_absolute():
         raise OSError("directory locator is not absolute")
@@ -2129,6 +2164,7 @@ class WorkspaceService:
                     "workspace_materialization_failed",
                     "controller CI materialization failed") from exc
             receipt_payload = receipt.to_dict()
+        checkout_identity = _normalize_ci_checkout_root(checkout)
         generation = uuid.uuid4().hex
         if restore_authority is None:
             artifact = self._repo().index_path.parent / "ci-materializations" / (
@@ -2142,7 +2178,7 @@ class WorkspaceService:
             "source_checkout_locator": str(source),
             "source_identity": submission.source.identity,
             "workspace_label": submission.workspace_label,
-            "checkout_identity": _filesystem_identity(checkout),
+            "checkout_identity": checkout_identity,
             "receipt": receipt_payload,
             "generation": generation,
             "artifact_locator": str(artifact),

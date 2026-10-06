@@ -521,3 +521,16 @@ class TestSecretBrokerService(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunWithSecretsArgvTests(unittest.TestCase):
+    def test_empty_argument_is_allowed_but_empty_executable_is_not(self):
+        from sandbox.secrets.runner import run_with_secrets
+        from sandbox.secrets.models import SecretBrokerError
+        result = run_with_secrets([sys.executable, "-c", "import sys; print(len(sys.argv))", ""],
+                                  secrets={"PROBE_VALUE": "fixture-value"}, timeout_seconds=30)
+        self.assertEqual(result.exit_code, 0)
+        for argv in ([""], ["python3", "a\x00b"]):
+            with self.assertRaises(SecretBrokerError):
+                run_with_secrets(argv, secrets={"PROBE_VALUE": "fixture-value"},
+                                 timeout_seconds=30)

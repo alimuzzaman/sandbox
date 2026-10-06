@@ -67,7 +67,10 @@ def run_with_secrets(
     if (
         not isinstance(argv, (list, tuple))
         or not argv
-        or any(not isinstance(item, str) or not item or "\x00" in item for item in argv)
+        or not isinstance(argv[0], str) or not argv[0]
+        # Empty arguments are legitimate (e.g. `--prefix ""`); only the
+        # executable must be non-empty. NUL can never cross exec.
+        or any(not isinstance(item, str) or "\x00" in item for item in argv)
     ):
         raise SecretBrokerError("command_invalid", "secret use requires a non-empty direct command")
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) \

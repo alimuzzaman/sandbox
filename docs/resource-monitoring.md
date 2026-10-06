@@ -123,6 +123,16 @@ other slow categories need measurement:
 ./sb resources status --remote scaleway-sandbox --thorough --budget 300 --json
 ```
 
+A thorough scan measures the reclaim-relevant paths first: deploy worktrees,
+runtime entries, and job artifacts, each group in one streamed `du -s` call, so
+a path that finishes is kept even if the call runs out of time. The Docker
+storage roots and host filesystem roots come after, also one `du` call per group.
+Before walking, those roots are read from a cached host index younger than 6
+hours (see below), if one exists. A path that a call did not reach is reported
+`timed_out` without another `du` of its own. A category that ran out of budget
+carries `reason: probe_budget_exhausted` and a `next_step` naming the durable
+`--deep --refresh --detach` scan that finishes it, then `--fast` to read it.
+
 Use deep attribution when the capacity-level unknown bucket remains large:
 
 ```sh

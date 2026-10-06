@@ -1041,3 +1041,55 @@ class TestHostMemoryRemoteTransport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestThoroughProbeBudget(unittest.TestCase):
+    """Feedback e3d8c553: slow host du starved the managed categories."""
+
+    def test_managed_paths_finish_before_slow_host_breakdown(self):
+        import os
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "sandbox"
+            for name in ("alpha-workspace-one", "beta"):
+                tree = home / "deploy-src" / name
+                tree.mkdir(parents=True)
+                (tree / "file.bin").write_bytes(b"x" * 65536)
+            (home / "runtime" / "dl-cache").mkdir(parents=True)
+            fake_bin = Path(temp) / "bin"
+            fake_bin.mkdir()
+            # An elevated du over a huge engine store: never finishes in budget.
+            for tool, body in (("sudo", "sleep 60"), ("docker", "exit 1")):
+                script = fake_bin / tool
+                script.write_text("#!/bin/sh\n" + body + "\n")
+                script.chmod(0o755)
+            program = _program({
+                "action": "observe", "thorough": True, "deep": False,
+                "budget_seconds": 14, "managed_host": True,
+                "remote_name": "remote-a",
+            })
+            env = dict(os.environ, SANDBOX_HOME=str(home),
+                       PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))
+            started = time.monotonic()
+            completed = subprocess.run(
+                [sys.executable, "-c", program], capture_output=True, text=True,
+                env=env, timeout=60,
+            )
+            elapsed = time.monotonic() - started
+        final = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(final.get("stage"), "final")
+        self.assertLess(elapsed, 30)
+        outcomes = {item["category"]: item for item in final["category_outcomes"]}
+        self.assertEqual(outcomes["deploy_worktrees"]["status"], "complete")
+        self.assertEqual(outcomes["sandbox_runtime"]["status"], "complete")
+        worktrees = [item for item in final["resources"] if item["kind"] == "worktree"]
+        self.assertEqual(len(worktrees), 2)
+        self.assertTrue(all(item["size_state"] == "measured" for item in worktrees))
+        host = outcomes["host_filesystem"]
+        self.assertEqual(host["status"], "timed_out")
+        self.assertEqual(host["reason"], "probe_budget_exhausted")
+        self.assertIn("--remote remote-a", host["next_step"])
+        self.assertIn("--refresh", host["next_step"])

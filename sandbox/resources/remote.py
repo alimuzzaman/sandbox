@@ -312,12 +312,98 @@ def directory_index(mount, argv, multiplier, timeout, keep_prefixes):
             index["cached"] = directory_cache_write(payload)
     return index
 
+# Paths a bounded multi-path walk did not reach before its share of the
+# budget ran out. Repeating one ``du`` per path for them would spend the rest
+# of the budget on the same slow subtree, so they report ``timed_out``.
+UNREACHED_PATHS = set()
+
+
+def index_paths(paths, seconds, elevated=False, count_links=False):
+    # Measure many paths with one streamed ``du -s`` under one budget.
+    #
+    # Each path lands in INDEX_ROWS as soon as du finishes it, so a walk that
+    # runs out of time still answers every path it completed.  Returns the
+    # paths left unmeasured and whether the walk stopped on its deadline.
+    paths = [str(path) for path in paths]
+    if not paths:
+        return [], False
+    started = time.monotonic()
+    seconds = max(min(float(seconds), DEADLINE - started), 0.01)
+    argv = (["sudo", "-n"] if elevated else []) + ["du", "-x", "-k", "-s"]
+    if count_links:
+        # du counts an inode once per invocation; worktrees that share
+        # hard-linked objects must each report their full size, as a
+        # separate per-path du would.
+        argv.append("-l")
+    argv.extend(paths)
+    rows, _complete = walk_rows(argv, seconds, 1024, keep_prefixes=tuple(paths))
+    wanted = set(paths)
+    INDEX_ROWS.update({path: measured for measured, path in rows if path in wanted})
+    missing = [path for path in paths if path not in INDEX_ROWS]
+    deadline_hit = time.monotonic() - started >= seconds - 0.25
+    if deadline_hit:
+        UNREACHED_PATHS.update(missing)
+    return missing, deadline_hit
+
+
+def budget_share(fraction, reserve=3.0):
+    remaining = DEADLINE - time.monotonic()
+    return max(min(remaining * fraction, remaining - reserve), 0.5)
+
+
+_CACHED_DIRECTORY_ROWS = None
+
+
+def cached_directory_size(path):
+    # A fresh host index from an earlier ``--refresh``/``--deep`` answers the
+    # host breakdown without walking again.  Read only; never written here.
+    global _CACHED_DIRECTORY_ROWS
+    if _CACHED_DIRECTORY_ROWS is None:
+        _CACHED_DIRECTORY_ROWS = {}
+        cached = directory_cache_read() if DIRECTORY_CACHE_MODE != "refresh" else None
+        now = time.time()
+        for entry in ((cached or {}).get("mounts") or {}).values():
+            if not isinstance(entry, dict) or not isinstance(entry.get("rows"), list):
+                continue
+            try:
+                age_seconds = max(now - float(entry.get("created_at") or 0), 0)
+            except (TypeError, ValueError):
+                continue
+            if age_seconds > DIRECTORY_CACHE_TTL:
+                continue
+            for item in entry["rows"]:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    try:
+                        _CACHED_DIRECTORY_ROWS[str(item[1])] = int(item[0])
+                    except (TypeError, ValueError):
+                        continue
+    return _CACHED_DIRECTORY_ROWS.get(str(path))
+
+
+def budget_outcome(category, status):
+    # A category that ran out of budget says so and names the retry that
+    # finishes it, instead of a bare ``timed_out``.
+    outcome = {"category": category, "status": status}
+    if status == "timed_out":
+        remote = REQUEST.get("remote_name")
+        target = " --remote " + str(remote) if remote else ""
+        outcome["reason"] = "probe_budget_exhausted"
+        outcome["next_step"] = (
+            "sb resources status" + target + " --deep --refresh --budget 1800"
+            " --detach --json builds the host index as a durable job; then"
+            " sb resources status" + target + " --fast reads it"
+        )
+    return outcome
+
+
 def size(path, thorough):
     indexed = indexed_size(path)
     if indexed is not None:
         return "measured", indexed, None
     if not thorough:
         return "not_measured", None, None
+    if str(path) in UNREACHED_PATHS:
+        return "timed_out", None, "measurement timed out"
     code, out, _err = run(["du", "-sk", str(path)], 8)
     if code == 124:
         return "timed_out", None, "measurement timed out"
@@ -1767,10 +1853,15 @@ def host_capacity_resources(thorough):
         (Path("/boot"), "host /boot"),
         (Path("/etc"), "host /etc"),
     )
+    roots = tuple((path, display) for path, display in roots if path.exists())
+    if not FAST:
+        pending = [path for path, _display in roots
+                   if indexed_size(path) is None and cached_directory_size(path) is None]
+        index_paths(pending, budget_share(0.9), elevated=True)
     for path, display in roots:
-        if not path.exists():
-            continue
         indexed = indexed_size(path)
+        if indexed is None:
+            indexed = cached_directory_size(path)
         if indexed is not None:
             resources.append(observation(
                 "host_root", str(path), display, "host",
@@ -1784,9 +1875,15 @@ def host_capacity_resources(thorough):
             # The fast path answers from the cached index or not at all.
             status = "partial"
             continue
-        if time.monotonic() >= DEADLINE:
+        if time.monotonic() >= DEADLINE or str(path) in UNREACHED_PATHS:
             status = "timed_out"
-            break
+            resources.append(observation(
+                "host_root", str(path), display, "host", REQUEST.get("remote_name"),
+                "retained", "timed_out", None, 0, ("monitoring_only",),
+                ("filesystem_capacity_root",), ("measurement timed out",),
+                capacity_accounted=True,
+            ))
+            continue
         code, out, _err = run(
             ["sudo", "-n", "du", "-x", "-sk", str(path)], 45,
         )
@@ -1809,14 +1906,14 @@ def host_capacity_resources(thorough):
             ("filesystem_capacity_root",), (error,) if error else (),
             capacity_accounted=True,
         ))
-    return resources, [{"category": "host_filesystem", "status": status}]
+    return resources, [budget_outcome("host_filesystem", status)]
 
 def docker_storage_resources(thorough):
     if not thorough:
         return [], [{"category": "docker_storage", "status": "not_measured"}]
     resources = []
     status = "complete"
-    for path, display in (
+    roots = (
         (Path("/var/lib/docker/overlay2"), "Docker overlay layers"),
         (Path("/var/lib/docker/volumes"), "Docker volume storage"),
         (Path("/var/lib/docker/buildkit"), "Docker BuildKit storage"),
@@ -1825,8 +1922,17 @@ def docker_storage_resources(thorough):
         # containerd keeps its own content store; `docker system df` never
         # reports it, so a docker-only report silently loses that space.
         (Path("/var/lib/containerd"), "containerd content store"),
-    ):
+    )
+    if not FAST:
+        pending = [path for path, _display in roots
+                   if indexed_size(path) is None and cached_directory_size(path) is None
+                   and path.exists()]
+        # Leave the host breakdown that follows a share of what remains.
+        index_paths(pending, budget_share(0.5), elevated=True)
+    for path, display in roots:
         indexed = indexed_size(path)
+        if indexed is None:
+            indexed = cached_directory_size(path)
         if indexed is not None:
             resources.append(observation(
                 "engine_storage", str(path), display, "host",
@@ -1838,9 +1944,15 @@ def docker_storage_resources(thorough):
         if FAST:
             status = "partial"
             continue
-        if time.monotonic() >= DEADLINE:
+        if time.monotonic() >= DEADLINE or str(path) in UNREACHED_PATHS:
             status = "timed_out"
-            break
+            resources.append(observation(
+                "engine_storage", str(path), display, "host",
+                REQUEST.get("remote_name"), "retained", "timed_out", None, 0,
+                ("monitoring_only",), ("docker_storage_root",),
+                ("measurement timed out",),
+            ))
+            continue
         code, out, _err = run(["sudo", "-n", "du", "-x", "-sk", str(path)], 25)
         if code == 0:
             try:
@@ -1861,7 +1973,7 @@ def docker_storage_resources(thorough):
             ("monitoring_only",), ("docker_storage_root",),
             (error,) if error else (),
         ))
-    return resources, [{"category": "docker_storage", "status": status}]
+    return resources, [budget_outcome("docker_storage", status)]
 
 LEASE_DIR = RUNTIME / "resources" / "leases"
 DELETION_DIR = RUNTIME / "resources" / "deletions"
@@ -2560,10 +2672,8 @@ def scan():
                 "category": "deep_attribution", "status": "unavailable",
                 "reason": "category_failure_isolated",
             })
-    if not targeted and focus is None:
-        # In deep mode these are answered from the directory index, so the
-        # engine and host breakdown costs nothing extra and one command
-        # reports the whole host.
+    def host_breakdown():
+        global PHASE
         PHASE = "docker_storage"
         storage_resources, storage_outcomes = docker_storage_resources(
             thorough or deep_requested,
@@ -2576,6 +2686,16 @@ def scan():
         )
         resources.extend(host_resources)
         outcomes.extend(host_outcomes)
+
+    # In deep mode these are answered from the directory index, so the engine
+    # and host breakdown costs nothing extra and one command reports the whole
+    # host. A thorough pass walks them with du instead, which on a large engine
+    # store can take minutes; measure the managed, reclaim-relevant paths first
+    # and give the monitoring-only breakdown what remains.
+    host_breakdown_pending = not targeted and focus is None
+    if host_breakdown_pending and (deep_requested or FAST):
+        host_breakdown()
+        host_breakdown_pending = False
     active_volumes = set()
     active_sources = set()
     active_projects = set()
@@ -2912,6 +3032,18 @@ def scan():
             ),
         ))
     PHASE = "managed_path_classification"
+    if resource_thorough and not FAST:
+        managed_paths = []
+        for root in (DEPLOY, RUNTIME):
+            try:
+                managed_paths.extend(
+                    path for path in sorted(root.iterdir(), key=lambda item: item.name)
+                    if not (targeted and target_locator != str(path))
+                    and indexed_size(path) is None
+                )
+            except OSError:
+                continue
+        index_paths(managed_paths, budget_share(0.6), count_links=True)
     for root, category in ((DEPLOY, "deploy_worktrees"), (RUNTIME, "sandbox_runtime")):
         if targeted and target_kind not in {
             "worktree", "download_cache", "runtime", "job_artifact",
@@ -3026,12 +3158,29 @@ def scan():
                 )
             item["age_seconds"] = age(path)
             resources.append(item)
-        outcomes.append({"category": category, "status": category_status})
+            if state == "timed_out" and category_status == "complete":
+                category_status = "timed_out"
+        outcomes.append(budget_outcome(category, category_status))
     PHASE = "job_artifact_classification"
     terminal = {
         "succeeded", "failed", "timed_out", "cancelled", "interrupted",
     }
     artifact_status = "complete" if artifacts_complete else "unavailable"
+    if resource_thorough and not FAST and not targeted:
+        # A separate walk: du counts an inode once per invocation, so nesting
+        # these under the runtime walk above would report them as empty.
+        artifact_paths = []
+        for artifact in artifacts:
+            job_id = artifact.get("job_id")
+            relative = artifact.get("stored_relative_path")
+            if not (isinstance(job_id, str) and job_id
+                    and isinstance(relative, str) and relative):
+                continue
+            path = (RUNTIME / "jobs" / job_id / relative).resolve(strict=False)
+            if inside(path, RUNTIME / "jobs") and indexed_size(path) is None \
+                    and (path.exists() or path.is_symlink()):
+                artifact_paths.append(path)
+        index_paths(artifact_paths, budget_share(0.5), count_links=True)
     for artifact in artifacts:
         if time.monotonic() >= DEADLINE:
             artifact_status = "timed_out"
@@ -3088,7 +3237,9 @@ def scan():
             if expired else ("job_registry", "retained"),
             (error,) if error else (),
         ))
-    outcomes.append({"category": "job_artifacts", "status": artifact_status})
+    outcomes.append(budget_outcome("job_artifacts", artifact_status))
+    if host_breakdown_pending:
+        host_breakdown()
     reclaim = None
     if not targeted and REQUEST.get("reclaim") is not False:
         PHASE = "reclaim_inventory"

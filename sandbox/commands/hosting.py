@@ -460,6 +460,21 @@ def _remote_failure_message(text: str, limit: int = 2000) -> str:
     return message
 
 
+class HostRemoteCommandFailed(RuntimeError):
+    """A remote command exited non-zero: a known result, not an uncertain one."""
+
+    def __init__(self, message: str, *, phase: str, exit_code: int):
+        super().__init__(message)
+        self.phase = phase
+        self.exit_code = exit_code
+
+
+# Phases that only build images. A failure here changes nothing the running
+# deployment depends on, so the delivery can be recorded as failed outright.
+_PRE_EFFECT_PHASES = frozenset({"initializer_build", "compose_build"})
+_SSH_TRANSPORT_EXIT = 255
+
+
 def _decode_timeout_output(value: object) -> str:
     """Normalize partial ``TimeoutExpired`` output without leaking bytes repr."""
     if isinstance(value, bytes):
@@ -507,8 +522,20 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
         raise RuntimeError(
             f"remote command timed out after {timeout} seconds{suffix}"
         ) from None
+    if result.returncode == _SSH_TRANSPORT_EXIT:
+        # ssh's own failure code: the link dropped, so the remote phase may
+        # still have finished. Never report this as a known command failure.
+        raise RuntimeError(
+            f"SSH connection lost during remote phase {log_phase} (exit 255); "
+            "the remote command may have completed. Check the phase markers with "
+            "`sb host logs --apply-log` before retrying.\nlast output:\n"
+            + _remote_failure_message(result.stderr or result.stdout, limit=800)
+        )
     if result.returncode != 0:
-        raise RuntimeError(_remote_failure_message(result.stderr or result.stdout))
+        raise HostRemoteCommandFailed(
+            _remote_failure_message(result.stderr or result.stdout),
+            phase=log_phase, exit_code=result.returncode,
+        )
     return result.stdout or ""
 
 
@@ -1131,19 +1158,22 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         f"{build_flag} --force-recreate --always-recreate-deps --renew-anon-volumes"
         if force_recreate else " --no-build" if not build else ""
     )
-    command = f"{prefix} up -d{converge_flags} --remove-orphans {service_args}"
     if force_recreate and build:
+        # Build before touching containers: a build failure is then a known,
+        # effect-free failure with its own phase in apply.log, instead of an
+        # uncertain one buried in interleaved `up --build` output.
         _build_checked(
-            entry, prefix, command, service_args, timeout=build_timeout,
-            progress=progress, log_path=apply_log,
-            log_phase="compose_recreate" if force_recreate else "compose_converge",
+            entry, prefix, f"{prefix} build {service_args}", service_args,
+            timeout=build_timeout, progress=progress, log_path=apply_log,
+            log_phase="compose_build",
         )
-    else:
-        _remote_checked(
-            entry, command, timeout=build_timeout,
-            progress=progress, log_path=apply_log,
-            log_phase="compose_recreate" if force_recreate else "compose_converge",
-        )
+        converge_flags = " --no-build --force-recreate --always-recreate-deps --renew-anon-volumes"
+    command = f"{prefix} up -d{converge_flags} --remove-orphans {service_args}"
+    _remote_checked(
+        entry, command, timeout=build_timeout,
+        progress=progress, log_path=apply_log,
+        log_phase="compose_recreate" if force_recreate else "compose_converge",
+    )
     if progress is not None:
         progress(f"Compose {'build/recreate' if force_recreate else 'targeted convergence'} completed")
     for init_service in init_services if force_recreate else ():
@@ -6286,9 +6316,15 @@ def cmd_host(cfg, args) -> None:
         summary = None
         admitted = delivery_holder.get('admission_committed', False)
         record_incomplete = bool(admitted and attempt is not None and not attempt.reserved)
+        known_failure = (isinstance(exc, HostRemoteCommandFailed)
+                         and exc.phase in _PRE_EFFECT_PHASES)
         if admitted and attempt.reserved and attempt.operation['finished_at'] is None:
             try:
-                summary = attempt.finish(False, uncertain=True, failure_stage=attempt.operation['phase'])
+                summary = attempt.finish(
+                    False, uncertain=not known_failure,
+                    failure_stage=attempt.operation['phase'],
+                    reason_message=(f'Remote {exc.phase} exited {exc.exit_code}; no runtime change was made.'
+                                    if known_failure else None))
             except (ValueError, OSError, RuntimeError):
                 record_incomplete = True
         payload = {'ok': False, 'code': 'delivery_record_incomplete' if record_incomplete else
@@ -6303,7 +6339,13 @@ def cmd_host(cfg, args) -> None:
         # named the delivery as failed but discarded the one sentence that says
         # why. The text is redacted because a subprocess error can quote a
         # remote command line.
-        payload['message'] = remote.redact_text(str(exc))[:500]
+        # Keep the tail: build and migrate errors end with their cause.
+        message = remote.redact_text(str(exc))
+        payload['message'] = message if len(message) <= 2000 else '... ' + message[-1996:]
+        if isinstance(exc, HostRemoteCommandFailed):
+            payload['failed_phase'] = exc.phase
+            payload['exit_code'] = exc.exit_code
+            payload['log_hint'] = 'sb host logs --apply-log --lines 1000 shows the full phase output'
         detail = getattr(exc, 'detail', None)
         if isinstance(detail, dict):
             payload['detail'] = detail

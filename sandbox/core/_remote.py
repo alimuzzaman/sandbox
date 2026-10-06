@@ -740,12 +740,10 @@ def ssh_stream(remote_or_target, command: str, *, timeout: int = 30,
     the same SSH argument and multiplexing policy as ``ssh_process`` and never
     retries an ambiguous command.
     """
-    multiplex = True
-    try:
-        _ensure_ssh_control_dir()
-    except OSError:
-        multiplex = False
-    args = ssh_command_args(remote_or_target, command, multiplex=multiplex)
+    # Long builds get their own connection. A shared ControlMaster is reused
+    # by every concurrent `sb` call to the host, and when it drops, each
+    # session riding it exits 255 even if the remote command finished.
+    args = ssh_command_args(remote_or_target, command, multiplex=False)
     proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL, bufsize=0,

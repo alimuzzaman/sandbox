@@ -191,7 +191,7 @@ class HostingAttempt:
             value['images'] = images
         self.operation[kind] = value
 
-    def finish(self, succeeded, *, uncertain=False, failure_stage=None):
+    def finish(self, succeeded, *, uncertain=False, failure_stage=None, reason_message=None):
         import copy
         candidate = copy.deepcopy(self.operation)
         if candidate['execution_state'] not in TERMINAL:
@@ -200,7 +200,7 @@ class HostingAttempt:
                 'reason': {'code': 'effect_unknown' if uncertain else 'none' if succeeded else 'failed',
                            'message': 'Original hosting effects remain uncertain.' if uncertain else
                                'The original hosting owner reported success.' if succeeded else
-                               'The original hosting owner reported failure.'}})
+                               (reason_message or 'The original hosting owner reported failure.')[:200]}})
         candidate.update(execution_state='unknown' if uncertain else 'succeeded' if succeeded else 'failed',
             finished_at=None if uncertain else now(), updated_at=now(),
             phase='unknown' if uncertain else 'terminal', failure_stage=failure_stage)

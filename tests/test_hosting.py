@@ -1346,7 +1346,8 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertIn("--force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[0])
+        self.assertTrue(commands[0].endswith(" build web worker"))
+        self.assertIn("up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[1])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
     @patch("sandbox.commands.hosting._write_remote_text")
@@ -1508,8 +1509,10 @@ class TestHostingManifest(unittest.TestCase):
             validated = hosting.validate_manifest(directory)
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
-        command = remote_checked.call_args_list[0].args[1]
-        self.assertIn("up -d --build", command)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertTrue(commands[0].endswith(" build web"))
+        self.assertEqual(remote_checked.call_args_list[0].kwargs["log_phase"], "compose_build")
+        self.assertIn("up -d --no-build --force-recreate", commands[1])
 
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
@@ -1643,9 +1646,30 @@ class TestHostingManifest(unittest.TestCase):
         ])
         build_call = next(
             call for call in remote_checked.call_args_list
-            if "--build" in call.args[1]
+            if call.args[1].endswith(" build web")
         )
         self.assertEqual(build_call.kwargs["log_path"], "/srv/runtime/apply.log")
+
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_nonzero_remote_exit_is_a_typed_known_failure(self, ssh_run):
+        ssh_run.return_value = subprocess.CompletedProcess(
+            "cmd", 17, stdout="", stderr="step 1\nERROR: failed to solve: exit code 1\n")
+        with self.assertRaises(hosting_cmd.HostRemoteCommandFailed) as caught:
+            hosting_cmd._remote_checked({}, "docker compose build web", log_phase="compose_build")
+        self.assertEqual(caught.exception.exit_code, 17)
+        self.assertEqual(caught.exception.phase, "compose_build")
+        self.assertIn("compose_build", hosting_cmd._PRE_EFFECT_PHASES)
+        self.assertNotIn("compose_recreate", hosting_cmd._PRE_EFFECT_PHASES)
+        self.assertIn("failed to solve", str(caught.exception))
+
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_ssh_transport_loss_is_not_a_known_failure(self, ssh_run):
+        ssh_run.return_value = subprocess.CompletedProcess(
+            "cmd", 255, stdout="#49 [web] resolving provenance\n", stderr="")
+        with self.assertRaises(RuntimeError) as caught:
+            hosting_cmd._remote_checked({}, "docker compose build web", log_phase="compose_build")
+        self.assertNotIsInstance(caught.exception, hosting_cmd.HostRemoteCommandFailed)
+        self.assertIn("SSH connection lost during remote phase compose_build", str(caught.exception))
 
     @patch("sandbox.commands.hosting._observe_host_runtime")
     def test_apply_rejects_a_stale_running_service_revision(self, observe):

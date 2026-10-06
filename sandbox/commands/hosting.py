@@ -5860,6 +5860,12 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
                         stderr = getattr(result, "stderr", "")
                         if (getattr(result, "returncode", 1) != 0 or stderr
                                 or type(stdout) is not str or len(stdout.encode()) > max_output_bytes):
+                            try:
+                                _authenticated_machine_identity(args.remote, allow_partial=True)
+                            except RecoveryAuthorityError as exc:
+                                cause = exc.__cause__
+                                if getattr(cause, "code", None) == "remote_runtime_revision_mismatch":
+                                    raise ValueError("remote_runtime_revision_mismatch") from None
                             raise ValueError("observation_unavailable")
                         return json.loads(stdout)
                     def identity():

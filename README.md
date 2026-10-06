@@ -334,6 +334,63 @@ speckit-refine → Sol High validation → speckit-specify → speckit-clarify
 → speckit-plan → speckit-tasks → speckit-analyze → speckit-implement
 ```
 
+## Feature specifications index
+
+| # | Feature | Status | Origin |
+|---|---------|--------|--------|
+| 001 | Per-project-first instance model & modular `sb` | Complete | Internal rewrite |
+| 002 | Snapshot & restore from the WP dashboard | Complete | Internal |
+| 003 | In-instance WordPress Abilities + MCP Adapter layer | In progress | Novamira parity #1 |
+| 004 | Async / background WP-CLI jobs | In progress | Novamira parity #2 |
+| 006 | In-product skill authoring (auto-matched playbooks) | Complete | Novamira parity #4 |
+| 007 | Headless debugging tools: Query Monitor + dump/dd + Xdebug | Complete | Debugging ask |
+| 008 | DB-only snapshots & reset-to-fresh-install (extends 002) | In progress | Snapshot/reset ask |
+| 009 | Single Swappable Per-User Base for All Sandbox Machine-State | In progress | Feature ask |
+| 010 | Unified Slug-Keyed Plugin Config Map | In progress | Feature ask |
+| 013 | First-class WordPress Plugin Check support | In progress | Feature ask |
+| 014 | Remote VPS hosting for sandbox instances | In progress | Remote development ask |
+| 015 | Managed Hosting with Cloudflare DNS and TLS | In progress | Feature ask |
+| 016 | Remote Hermes Agent Integration | In progress | Remote development ask |
+| 017 | Hermes State Sync | In progress | Feature ask |
+| 018 | Google Drive Full Backup | In progress | Feature ask |
+| 019 | Hermes Public Dashboard Access | In progress | Feature ask |
+| 020 | Reproducible Hermes Worker Routing | In progress | Feature ask |
+| 021 | Generic Project Instances | In progress | Internal rewrite |
+| 022 | Sandbox Modular Boundaries | In progress | Feature ask |
+| 023 | Scoped Recovery Profiles | In progress | Feature ask |
+| 024 | Default Reader.md Bootstrap | In progress | Remote development ask |
+| 025 | Reliable Hermes Scheduled Work | In progress | Feature ask |
+| 026 | Lenzora TODO Worker | In progress | Feature ask |
+| 027 | Hermes Authorization Controls | In progress | Feature ask |
+| 028 | Test Execution Modes | In progress | Feature ask |
+| 029 | Generic Remote Deploy | In progress | Remote development ask |
+| 030 | CLI-first Sandbox operation | In progress | Feature ask |
+| 031 | Remote and Hermes Operations Hardening | In progress | Remote development ask |
+| 032 | Remote Job Runtime | In progress | Remote development ask |
+| 033 | Agent-aware incremental remote sync | In progress | Remote development ask |
+| 034 | Google Drive Backups for Permanent Instances | In progress | Feature ask |
+| 035 | Resource Monitoring and Safe Cleanup | In progress | Feature ask |
+| 036 | Deep Disk Attribution | In progress | Feature ask |
+| 037 | Host Ingress Adoption | In progress | Feature ask |
+| 038 | TLD and DNS Adoption | In progress | Feature ask |
+| 039 | Native Runtime Adoption | In progress | Feature ask |
+| 040 | xCloud API Adoption | In progress | Feature ask |
+| 041 | Safe Secret Inspection | In progress | Feature ask |
+| 042 | Sandbox Config Subdirectory | In progress | Feature ask |
+| 042 | One-Click Host Storage Reclamation | In progress | Remote development ask |
+| 043 | Scheduled storage-pressure monitor and safe-tier reaper | In progress | Remote development ask |
+| 044 | Shared node store and hardlinked git workspaces | In progress | Remote development ask |
+| 045 | Managed Credential Vault and Isolation Evidence | In progress | Feature ask |
+| 046 | Remote Host Swap and Memory Monitor Commands | In progress | Remote development ask |
+| 047 | Host Resource Governance | In progress | Feature ask |
+| 048 | Observation-Only Hosting Recovery | In progress | Feature ask |
+| 049 | OCI Trust and Verification | In progress | Feature ask |
+| 050 | Secure Private Image Staging | In progress | Feature ask |
+| 051 | Immutable Activation and Recovery | In progress | Feature ask |
+| 052 | Owned Storage Authority | In progress | Remote development ask |
+| 053 | Instance-Scoped Server Configuration Fragments | In progress | Feature ask |
+| 054 | Recoverable Delivery Outcomes | In progress | Feature ask |
+
 **Verify a UI flow.** `visit` is URL-scoped (WordPress or generic Compose), opens
 a real admin or frontend URL, and returns a screenshot, DOM, and console errors
 without you switching tabs.

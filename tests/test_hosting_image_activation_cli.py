@@ -527,5 +527,56 @@ class ActivationCliTests(unittest.TestCase):
         self.assertNotIn("private-test-value", result["stdout"] + result["stderr"])
         self.assertIn("DATABASE_URL", captured["command"])
 
+    def test_settlement_observe_runner_surfaces_revision_mismatch(self):
+        from sandbox.commands.hosting import _cmd_host_image_settle
+        from sandbox.hosting.recovery.service import RecoveryAuthorityError
+        from tests.fixtures.hosting_image_activation import DIGEST_A
+
+        args = SimpleNamespace(
+            remote="synthetic",
+            settlement_phase="observe",
+            request_id="req-1",
+            expected_generation=0,
+            activation_transaction=DIGEST_A,
+            confirm=False,
+        )
+        validated = {"project": "widget", "environment": "development"}
+        cause = Exception("controller revision mismatch")
+        cause.code = "remote_runtime_revision_mismatch"
+        mismatch_exc = RecoveryAuthorityError("recovery_target_identity_unavailable")
+        mismatch_exc.__cause__ = cause
+
+        captured_output = StringIO()
+        with patch("sandbox.commands.hosting.hosting.state_key", return_value="target-a"), \
+                patch("sandbox.commands.hosting.RecoveryRepository"), \
+                patch("sandbox.commands.hosting.remote.registered_remote_lock", return_value=nullcontext()), \
+                patch("sandbox.commands.hosting.remote.get_remote", return_value={"name": "synthetic"}), \
+                patch("sandbox.commands.hosting.personal_secrets.hosting_binding_key", return_value=(b"k" * 32, "v1")), \
+                patch("sandbox.commands.hosting.remote.ssh_run", return_value=SimpleNamespace(returncode=1, stdout="", stderr="error")), \
+                patch("sandbox.commands.hosting._authenticated_machine_identity", side_effect=mismatch_exc), \
+                patch("sandbox.hosting.images.activation.repository.ActivationRepository") as mock_repo_cls, \
+                redirect_stdout(captured_output), self.assertRaises(SystemExit):
+            repo = mock_repo_cls.return_value
+            repo.operation_transaction.return_value = nullcontext()
+            repo.snapshot.return_value = {
+                "generation": 0,
+                "active": {
+                    "phase": "uncertain",
+                    "effect_entered": True,
+                    "transaction_digest": DIGEST_A,
+                    "recovery_context": {
+                        "target": {"machine_identity": "machine-a", "target_identity": "target-a"},
+                        "compose_project": "widget",
+                    },
+                },
+                "recovery_provisional": None,
+            }
+            _cmd_host_image_settle(validated, args)
+
+        import json
+        payload = json.loads(captured_output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["code"], "remote_runtime_revision_mismatch")
+
 
 if __name__ == "__main__": unittest.main()

@@ -158,6 +158,18 @@ class TestRemoteResourceAdapter(unittest.TestCase):
                 "ok": True, "data": {"jobs": []},
             })
 
+    def test_remote_program_uses_bounded_job_list_fallback_limit(self):
+        program = _program({
+            "action": "observe",
+            "thorough": False,
+            "deep": False,
+            "budget_seconds": 30,
+            "managed_host": True,
+            "remote_name": "remote-a",
+        })
+        self.assertIn('[str(SB), "job-list", "--limit", "50", "--json"]', program)
+        self.assertNotIn('[str(SB), "job-list", "--limit", "200", "--json"]', program)
+
     def test_remote_deep_probe_is_read_only_and_uses_installed_tool_fallbacks(self):
         program = _program({
             "action": "observe",

@@ -1690,7 +1690,7 @@ def lifecycle_evidence():
         )
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
         code, out, _err = run(
-            [str(SB), "job-list", "--limit", "200", "--json"], 20,
+            [str(SB), "job-list", "--limit", "50", "--json"], 20,
         )
         if code == 0:
             try:
@@ -1698,7 +1698,7 @@ def lifecycle_evidence():
                 rows = parse_job_list_payload(payload)
                 job_index = {"jobs": rows, "artifacts": []}
                 artifacts_complete = False
-                if len(rows) >= 200:
+                if len(rows) >= 50:
                     jobs_ok = False
             except (json.JSONDecodeError, ValueError) as exc:
                 job_index = None

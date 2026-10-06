@@ -6124,6 +6124,11 @@ def cmd_host(cfg, args) -> None:
         if not all_ok:
             raise SystemExit(1)
         return
+    # Refuse a missing --remote before reading the manifest, so a plain usage
+    # error never depends on (or races with) manifest or Compose generation.
+    if (args.action not in {"validate", "secrets", "image"}
+            and not getattr(args, "remote", None)):
+        die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, logs, sync, and login-url")
     try:
         validated = hosting.validate_manifest(args.project_dir or ".", args.environment)
         # Preserve command provenance separately from the manifest's source root.

@@ -4233,3 +4233,15 @@ class TestEdgeFailureDetail(unittest.TestCase):
         self.assertEqual(hosting_cmd._edge_failure_detail(
             urllib.error.URLError(ConnectionRefusedError())), "connection refused")
         self.assertEqual(hosting_cmd._edge_failure_detail(ValueError("x")), "route unavailable")
+
+
+class TestHostRemoteRequiredFirst(unittest.TestCase):
+    def test_plan_without_remote_refuses_before_reading_manifest(self):
+        args = types.SimpleNamespace(action="plan", remote=None, project_dir="/tmp/x",
+                                     environment="production", json=False, initializer=None)
+        with patch.object(hosting_cmd.hosting, "validate_manifest") as validate, \
+                patch.object(hosting_cmd, "die", side_effect=SystemExit(2)) as die:
+            with self.assertRaises(SystemExit):
+                hosting_cmd.cmd_host({}, args)
+        validate.assert_not_called()
+        self.assertIn("--remote is required", die.call_args[0][0])

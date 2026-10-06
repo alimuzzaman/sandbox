@@ -441,8 +441,9 @@ def cmd_up(cfg: dict, args) -> None:
             extension_status = php_extension_status(inst_cfg, instance=inst)
         if extension_status and extension_status.get("drift", {}).get("state") != "ready":
             issues = extension_status.get("drift", {}).get("issues") or []
-            detail = issues[0].get("message", "PHP extension planes are not verified") \
-                if isinstance(issues[0], dict) else "PHP extension planes are not verified"
+            detail = (issues[0].get("message")
+                      if issues and isinstance(issues[0], dict)
+                      else "PHP extension planes are not verified")
             die(f"PHP extension verification blocked: {detail}")
     # Re-assert the mail-capture mu-plugin on every up so it survives
     # down/up and any wp-content reset. Cheap + idempotent; only touches the

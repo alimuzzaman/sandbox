@@ -467,3 +467,20 @@ class TestDoctorJson(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["exit_code"], 1)
+
+    def test_cmd_up_php_extension_drift_empty_issues(self):
+        inst_cfg = {"php_extensions": {"profile": "wordpress@1"}, "server": "nginx"}
+        cfg = {"instances": {"fixture": inst_cfg}}
+        args = SimpleNamespace(resolved_instance="fixture", quiet=True, json=True)
+
+        with patch.object(lifecycle, "resolve_instances", return_value={"fixture": inst_cfg}), \
+                patch.object(lifecycle, "_web_services", return_value=["wp"]), \
+                patch.object(lifecycle, "_compose_up"), \
+                patch.object(lifecycle, "php_extension_status", return_value={"drift": {"state": "drift", "issues": []}}), \
+                self.assertRaises(SystemExit) as raised:
+            lifecycle.cmd_up(cfg, args)
+        self.assertEqual(raised.exception.code, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

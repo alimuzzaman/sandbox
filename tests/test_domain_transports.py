@@ -146,16 +146,18 @@ class TestDomainTransports(unittest.TestCase):
         from unittest import mock
 
         service = Service()
-        for action in ("detect", "status", "plan", "apply", "cleanup", "reconsider"):
-            args = SimpleNamespace(
-                action=action, project_dir="/tmp/project", label="preview",
-                resolver="resolved:host", json=True, tld=None,
-            )
-            output = io.StringIO()
-            with mock.patch("sandbox.application.context.domain_service",
-                            return_value=service), redirect_stdout(output):
-                domains.cmd_domains({}, args)
-            self.assertIsInstance(json.loads(output.getvalue()), dict)
+        with mock.patch("sandbox.application.context.domain_service",
+                        return_value=service), \
+                mock.patch("sys.stdin.isatty", return_value=False):
+            for action in ("detect", "status", "plan", "apply", "cleanup", "reconsider"):
+                args = SimpleNamespace(
+                    action=action, project_dir="/tmp/project", label="preview",
+                    resolver="resolved:host", json=True, tld=None,
+                )
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    domains.cmd_domains({}, args)
+                self.assertIsInstance(json.loads(output.getvalue()), dict)
         self.assertIn(("status", "/tmp/project", "preview"), service.calls)
         self.assertIn(("apply", "/tmp/project", "preview", False), service.calls)
         self.assertIn(("cleanup", "/tmp/project", "preview", False), service.calls)

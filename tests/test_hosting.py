@@ -4014,3 +4014,15 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
         self.assertIs(error.detail, reason)
         self.assertIn("unproven_staged_revision", str(error))
         self.assertIsInstance(error, RuntimeError)
+
+    def test_host_recovery_eligibility_surfaces_revision_mismatch(self):
+        from sandbox.resources.host_memory.remote import RemoteProtocolError
+        with patch("sandbox.commands.hosting._durable_host_context", return_value={"job_id": "j" * 32, "request_id": "r" * 32}), \
+             patch("sandbox.delivery.context.require_delivery_capabilities"), \
+             patch("sandbox.resources.context.authenticated_target_identity",
+                   side_effect=RemoteProtocolError("remote_runtime_revision_mismatch", "mismatch")):
+            eligibility = hosting_cmd._host_recovery_eligibility(
+                {"project_root": "/path/to/project", "project": "proj", "environment": "env"}, "myvps")
+            self.assertFalse(eligibility["eligible"])
+            self.assertEqual(eligibility["code"], "remote_runtime_revision_mismatch")
+            self.assertIn("remote_runtime_revision_mismatch", eligibility["prerequisite_failures"])

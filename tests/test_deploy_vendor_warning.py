@@ -27,7 +27,11 @@ class DeployVendorWarningTests(unittest.TestCase):
 
     def test_warns_when_vendor_is_ignored_and_not_included(self):
         with tempfile.TemporaryDirectory() as temp:
-            self.assertIn("--include vendor", self._warning(self._repo(temp)))
+            root = self._repo(temp)
+            self.assertIn("--include vendor", self._warning(root))
+            with redirect_stderr(io.StringIO()):
+                codes = deploy._warn_unstaged_composer_vendor(root, [], as_json=True)
+            self.assertEqual(codes, ["composer_vendor_not_staged"])
 
     def test_silent_when_vendor_included_or_tracked(self):
         with tempfile.TemporaryDirectory() as temp:

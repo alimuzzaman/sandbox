@@ -181,8 +181,9 @@ def _cmd_deploy(cfg, args) -> None:
         include_paths = sr.validate_deploy_include_paths(root, include_paths)
     except (ValueError, OSError) as exc:
         _fail(remote_name, str(exc), as_json, source_ref=source_ref)
+    advisories = []
     if is_wordpress:
-        _warn_unstaged_composer_vendor(root, include_paths, as_json=as_json)
+        advisories = _warn_unstaged_composer_vendor(root, include_paths, as_json=as_json)
 
     if not remote_name:
         _fail(
@@ -438,7 +439,8 @@ def _cmd_deploy(cfg, args) -> None:
              "uncommitted_files_applied": applied, "instance": instance,
              "included_paths": include_paths,
              "pro_plugins": pro_plugins,
-             "url": public_url, "error": None, "delivery": delivery_summary}
+             "url": public_url, "error": None, "delivery": delivery_summary,
+             "advisories": advisories}
     if as_json:
         print(json.dumps(result))
     else:
@@ -449,6 +451,8 @@ def _cmd_deploy(cfg, args) -> None:
             source_label = "detached HEAD" if branch is None else "HEAD"
             print(f"  pushed {source_label} ({pushed_sha[:7]}) -> {remote_name}")
             print(f"  applied {applied} uncommitted file(s)")
+        for advisory in advisories:
+            print(f"  advisory: {advisory} (see the warning above)")
         if include_paths:
             print(f"  explicitly included {len(include_paths)} ignored artifact file(s)")
         if pro_plugins and not pro_plugins.get("ok"):
@@ -476,7 +480,7 @@ def _cmd_deploy(cfg, args) -> None:
         ok(f"Deployed. {remote_name} now reflects {source_label} as of this command.")
 
 
-def _warn_unstaged_composer_vendor(root, include_paths, *, as_json: bool) -> None:
+def _warn_unstaged_composer_vendor(root, include_paths, *, as_json: bool) -> list[str]:
     """Warn when a Composer plugin's vendor/ is git-ignored and not included.
 
     Deploy stages tracked and untracked-but-not-ignored files only, so an
@@ -485,17 +489,18 @@ def _warn_unstaged_composer_vendor(root, include_paths, *, as_json: bool) -> Non
     """
     root_p = Path(root)
     if not (root_p / "composer.json").is_file():
-        return
+        return []
     if any(str(path).split("/", 1)[0] == "vendor" for path in include_paths or ()):
-        return
+        return []
     ignored = subprocess.run(["git", "-C", str(root_p), "check-ignore", "-q", "vendor/"],
                              capture_output=True, check=False)
     if ignored.returncode != 0:
-        return
+        return []
     message = ("warning: composer.json is present but vendor/ is git-ignored and not "
                "staged, so the deployed plugin may fail to load its autoloader. Commit "
                "vendor/, build it on the remote, or pass --include vendor.")
     print(message, file=sys.stderr)
+    return ["composer_vendor_not_staged"]
 
 def cmd_deploy(cfg, args):
     if getattr(args, 'ensure', False) or getattr(args, 'expose', False):

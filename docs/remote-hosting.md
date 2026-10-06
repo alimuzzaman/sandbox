@@ -375,6 +375,9 @@ Sandbox expands the directory to regular files, rejects machine-local or secret-
 paths (`.env*`, private-key files, `.git`, and `.sandbox`), and caps the transfer at
 10,000 files/512 MiB. The JSON result reports the exact included relative files under
 `included_paths`; the option is explicit and is never inferred from `.gitignore`.
+When a WordPress project has `composer.json`, a git-ignored `vendor/`, and no
+`--include vendor/`, deploy warns on stderr and lists `composer_vendor_not_staged` under
+`advisories` in the result, because the plugin will usually fail to load its autoloader.
 
 Before the remote instance is considered ready, `ensure` reconciles each instance's
 published WordPress, database, and Mailpit ports against listeners already present on

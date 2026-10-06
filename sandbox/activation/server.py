@@ -32,7 +32,13 @@ def serve(application: ActivationHTTPApplication, *, host: str = "127.0.0.1",
         def log_message(self, _format: str, *_args: object) -> None:
             return
 
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    class Server(ThreadingHTTPServer):
+        # Caddy may open many parallel forward_auth checks per host; the
+        # default backlog of 5 refuses bursts of wp-admin asset requests.
+        request_queue_size = 128
+        daemon_threads = True
+
+    Server((host, port), Handler).serve_forever()
 
 
 __all__ = ["serve"]

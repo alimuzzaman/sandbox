@@ -180,6 +180,30 @@ class TestActivationCoordinator(unittest.TestCase):
         self.assertEqual(coordinator.due_for_suspend(), ("site-a",))
         self.assertEqual(coordinator.snapshot("site-a")["state"], ActivationState.DRAINING.value)
 
+    def test_ready_route_admits_bursts_beyond_pending_bound(self):
+        from sandbox.activation.coordinator import ActivationCoordinator, ActivationPolicy
+        coordinator = ActivationCoordinator(clock=lambda: 1000.0)
+        coordinator.register("site-a", ActivationPolicy(
+            mode="idle_stop", idle_after_seconds=60, max_pending_requests=1,
+        ))
+        self.assertTrue(coordinator.begin_request("site-a"))
+        self.assertFalse(coordinator.begin_request("site-a"))
+        coordinator.mark_ready("site-a")
+        self.assertTrue(all(coordinator.begin_request("site-a") for _ in range(100)))
+
+    def test_activation_server_uses_large_backlog(self):
+        from unittest import mock
+        from sandbox.activation import server
+        created = []
+
+        def fake_init(self, *_args, **_kwargs):
+            created.append(self)
+        with mock.patch.object(server.ThreadingHTTPServer, "__init__", fake_init), \
+                mock.patch.object(server.ThreadingHTTPServer, "serve_forever"):
+            server.serve(mock.Mock(), port=18766)
+        self.assertGreaterEqual(type(created[0]).request_queue_size, 128)
+        self.assertTrue(type(created[0]).daemon_threads)
+
     def test_lease_prevents_suspend_until_expiry(self):
         from sandbox.activation.coordinator import ActivationCoordinator, ActivationPolicy
 

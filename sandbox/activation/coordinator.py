@@ -122,7 +122,11 @@ class ActivationCoordinator:
     def claim_activation(self, route_id: str, *, now: float | None = None) -> ActivationClaim:
         with self._lock:
             route = self._routes[self._route(route_id)]
-            if route.pending >= route.policy.max_pending_requests:
+            # The pending bound protects a waking/sleeping backend. A READY
+            # route answers each forward_auth check at once, so a burst of
+            # parallel asset requests must not be refused there.
+            if (route.state != ActivationState.READY
+                    and route.pending >= route.policy.max_pending_requests):
                 return ActivationClaim(False, False, route.generation)
             route.pending += 1
             route.last_activity = self._clock() if now is None else float(now)

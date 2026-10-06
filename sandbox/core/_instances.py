@@ -652,14 +652,15 @@ def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
 
 def _is_mailpit_response(headers, body: bytes = b"") -> bool:
     """True if response headers or body match Mailpit's signature."""
-    if headers:
-        server = (headers.get("Server") or "").lower()
-        if "mailpit" in server:
+    if headers and hasattr(headers, "get"):
+        server = headers.get("Server")
+        if isinstance(server, str) and "mailpit" in server.lower():
             return True
-        if "mailpit" in (headers.get("X-Server") or "").lower():
+        x_server = headers.get("X-Server")
+        if isinstance(x_server, str) and "mailpit" in x_server.lower():
             return True
-    if body:
-        body_lower = body.lower()
+    if body and isinstance(body, (bytes, bytearray)):
+        body_lower = bytes(body).lower()
         if b"<title>mailpit" in body_lower or b"axllent/mailpit" in body_lower:
             return True
     return False
@@ -1083,7 +1084,7 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     # rewrite would drop them, breaking the wp-admin snapshot bridge
     # (bridge_token), MCP REST auth (app_password), and the autologin link.
     _prev = _local_yaml().get("instances", {}).get(name, {})
-    for _secret in ("bridge_token", "app_password", "autologin_token"):
+    for _secret in ("bridge_token", "app_password", "autologin_token", "server_config_mount_id"):
         if _prev.get(_secret) and not block.get(_secret):
             block[_secret] = _prev[_secret]
     return block
@@ -1523,11 +1524,16 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                 if not _wait_reachable(
                         route_cfg, require_application_success=True,
                         canonical_url=advertised_url):
-                    error = sc.ConfigError(
-                        f"instance_route_unavailable: '{existing['instance']}' did not "
-                        "answer successfully at its advertised URL; its state is retained.")
-                    error.code = "instance_route_unavailable"
-                    raise error
+                    advertised_url = site_url(route_cfg, probe=True)
+                    _auto_heal_wp_url(existing["instance"], expected_url=advertised_url)
+                    if not _wait_reachable(
+                            route_cfg, require_application_success=True,
+                            canonical_url=advertised_url, timeout=10):
+                        error = sc.ConfigError(
+                            f"instance_route_unavailable: '{existing['instance']}' did not "
+                            "answer successfully at its advertised URL; its state is retained.")
+                        error.code = "instance_route_unavailable"
+                        raise error
                 return _refresh_registered_url(sc, root, label, existing, cfg,
                                                expected_url=advertised_url)
 
@@ -1585,6 +1591,13 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                  f"(WP={ports['wordpress_port']} server={server}"
                  f"{f' php={php_v}' if php_v else ''}{f' wp={wp_v}' if wp_v else ''})")
 
+            # Attach projected server-config mount early so the block in
+            # sandbox.local.yml and the pending registry entry include it.
+            server_config_attached = _server_config_attached_identity_fields(
+                dict(server_config_identity, **(existing or {})), server=server
+            )
+            server_config_identity.update(server_config_attached)
+
             if creation_context is not None and not existing:
                 receipts = pending_receipts(None, creation_context, name, server_config_identity['instance_incarnation_id'], 'created')
                 existing = sc.registry_put(root, label=label, instance=name, status='pending',
@@ -1593,6 +1606,8 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                     creation_receipts=receipts, **server_config_identity)
                 creation_attempt['selected'] = True
             block = _build_instance_block(cfg, name, root, pconf, ports, server)
+            if server_config_attached.get("server_config_mount_id"):
+                block["server_config_mount_id"] = server_config_attached["server_config_mount_id"]
 
             # Resolve, materialize, and build extension images before writing
             # sandbox.local.yml, generating Compose, or booting a container.  A
@@ -1692,12 +1707,12 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
             _wire_project_themes(name, root, pconf)
 
             final_route = resolve_instances(cfg)[name]
-            _base_url = site_url(final_route, timeout=5.0, retry=True)
+            _base_url = site_url(final_route)
             if secured:
                 _auto_heal_wp_url(name, expected_url=_base_url)
             if not _wait_reachable(final_route, require_application_success=True,
                                    canonical_url=_base_url):
-                _base_url = site_url(final_route, timeout=5.0, retry=True)
+                _base_url = site_url(final_route, probe=True)
                 if secured:
                     _auto_heal_wp_url(name, expected_url=_base_url)
                 if not _wait_reachable(final_route, require_application_success=True,

@@ -171,6 +171,21 @@ class TestServerConfigCLI(unittest.TestCase):
         self.assertEqual(data.get("error_code"), "mount_unattached")
 
     @patch('sandbox.commands.server.sys.stdout')
+    def test_modern_incarnation_mount_auto_resolved(self, mock_stdout):
+        """Modern instance with incarnation_id auto-resolves mount_id instead of failing mount_unattached."""
+        mock_service = MagicMock()
+        mock_service.apply.return_value = {"ok": True, "mutated": True}
+        valid_inc = "inc_" + "a" * 32
+        execute_server_config(MagicMock(
+            config_action="apply", json=True, unattached_mount=False,
+            instance="inst-test", instance_service=mock_service,
+            server_type="nginx"
+        ), cfg={"instances": {"inst-test": {"instance_incarnation_id": valid_inc, "server": "nginx"}}})
+        output = mock_stdout.write.call_args[0][0]
+        data = json.loads(output)
+        self.assertTrue(data.get("ok"))
+
+    @patch('sandbox.commands.server.sys.stdout')
     def test_refusal_omits_raw_content_and_secret(self, mock_stdout):
         """T048: CLI refusal output omits raw content, caller paths, and secrets."""
         secret = "super_secret_payload_12345"

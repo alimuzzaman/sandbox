@@ -484,6 +484,21 @@ def _logged_remote_command(command: str, log_path: str, *, phase: str = "unclass
     )
 
 
+
+def _marked_remote_command(command: str, log_path: str, *, phase: str) -> str:
+    """Write start/finish markers for a phase whose stdout must stay clean."""
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", phase):
+        raise ValueError("invalid apply-log phase")
+    log = shlex.quote(log_path)
+    stamp = "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+    return (
+        "set +e; "
+        f"printf '[Sandbox] apply phase=%s event=started at=%s\\n' {shlex.quote(phase)} {stamp} >> {log}; "
+        f"out=$({command}); rc=$?; "
+        f"printf '[Sandbox] apply phase=%s event=finished at=%s exit=%s\\n' {shlex.quote(phase)} {stamp} \"$rc\" >> {log}; "
+        "printf '%s' \"$out\"; exit \"$rc\""
+    )
+
 def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
                    progress=None, log_path: str | None = None,
                    log_phase: str = "unclassified") -> str:
@@ -1010,16 +1025,19 @@ def _initializer_status_command(prefix: str, service: str, *, not_before: float 
 def _initializer_dependency_evidence(entry: dict, prefix: str, service: str,
                                      *, not_before: float = 0.0,
                                      marker_path: str = "",
-                                     wait_for_completion: bool = True) -> dict:
+                                     wait_for_completion: bool = True,
+                                     log_path: str | None = None) -> dict:
     """Return bounded status and field-level reason for one initializer proof."""
-    raw = _remote_checked(
-        entry,
-        _initializer_status_command(
-            prefix, service, not_before=not_before, marker_path=marker_path,
-            wait_for_completion=wait_for_completion,
-        ),
-        timeout=930 if wait_for_completion else 60,
+    command = _initializer_status_command(
+        prefix, service, not_before=not_before, marker_path=marker_path,
+        wait_for_completion=wait_for_completion,
     )
+    if log_path:
+        command = _marked_remote_command(command, log_path, phase="initializer_proof")
+    try:
+        raw = _remote_checked(entry, command, timeout=930 if wait_for_completion else 60)
+    except RuntimeError as exc:
+        raise RuntimeError(f"initializer {service} proof failed: {exc}") from exc
     try:
         receipt = json.loads((raw or "").strip())
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -1149,7 +1167,7 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     for init_service in init_services if force_recreate else ():
         evidence = _initializer_dependency_evidence(
             entry, f"{prefix} --profile jobs", init_service,
-            marker_path=initializer_marker,
+            marker_path=initializer_marker, log_path=apply_log,
         )
         status = evidence["status"]
         if status == "succeeded":

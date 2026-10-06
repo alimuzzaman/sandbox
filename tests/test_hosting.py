@@ -1,5 +1,6 @@
 """Offline coverage for managed Compose hosting and Cloudflare intent."""
 import base64
+import contextlib
 import json
 import hashlib
 import io
@@ -4160,6 +4161,8 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
         args = types.SimpleNamespace(remote="remote1", json=False, action="apply", project_dir="/tmp/proj", environment="production", confirm=True)
         
         with patch.object(hosting_cmd.remote, "get_remote", return_value={"host": "1.2.3.4"}), \
+             patch.object(hosting_cmd.remote, "registered_remote_lock",
+                          side_effect=lambda **_kw: contextlib.nullcontext()), \
              patch.object(hosting_cmd, "_host_recovery_eligibility", return_value={"eligible": True}), \
              patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
              patch.object(hosting_cmd, "_validate_apply_source", return_value="main"), \

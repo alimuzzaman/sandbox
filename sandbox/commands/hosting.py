@@ -3374,6 +3374,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                           for name in ('workload', 'runtime_identity', 'runtime_health', 'initializer', 'edge_proof')])
         if delivery_holder is not None:
             delivery_holder['attempt'] = attempt
+            delivery_holder['previous_operation'] = (state['hosts'].get(key) or {}).get('hosting_operation')
         attempt.require_previous_snapshot((state['hosts'].get(key) or {}).get('hosting_operation'))
         operation = _accept_hosting_operation(
             state, key, validated=validated, entry=entry, remote_name=remote_name,
@@ -6241,11 +6242,25 @@ def cmd_host(cfg, args) -> None:
             raise SystemExit(1)
         msg = payload['code'] + ': ' + payload['message'] + '; inspect the original delivery and recovery evidence'
         if payload['code'] in {'required_evidence_missing', 'delivery_record_incomplete'} or 'required_evidence_missing' in payload['message']:
+            prev_req_id = "<id>"
+            if isinstance(delivery_holder, dict):
+                prev_op = delivery_holder.get('previous_operation')
+                if isinstance(prev_op, dict) and prev_op.get('request_id'):
+                    prev_req_id = prev_op['request_id']
+            if prev_req_id == "<id>":
+                try:
+                    prior_state = hosting.load_host_state()
+                    prior_key = hosting.state_key(args.remote, validated)
+                    prior_op = (prior_state.get('hosts', {}).get(prior_key) or {}).get('hosting_operation')
+                    if isinstance(prior_op, dict) and prior_op.get('request_id'):
+                        prev_req_id = prior_op['request_id']
+                except Exception:
+                    pass
             msg += (
                 f"; if a previous delivery attempt failed or was interrupted, retire it with: "
                 f"./sb host retire-delivery --project-dir {shlex.quote(validated.get('manifest_root') or validated['project_root'])} "
                 f"--remote {shlex.quote(args.remote)} --environment {shlex.quote(validated['environment'])} "
-                f"--original-request-id <id> --confirm"
+                f"--original-request-id {shlex.quote(prev_req_id)} --confirm"
             )
         die(msg)
     evidence = {

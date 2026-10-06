@@ -437,14 +437,18 @@ def cmd_up(cfg: dict, args) -> None:
         # allowed to run.  The probe is standalone PHP and does not touch the
         # database or uploads; a drift/missing/version error is therefore a
         # safe, actionable startup failure rather than a half-provisioned site.
+        # If WordPress is not yet installed (e.g. bootstrap during ensure),
+        # allow startup to proceed to installation and let ensure's post-install
+        # gate perform the final verification.
         with _suppress_progress_stdout(json_output):
             extension_status = php_extension_status(inst_cfg, instance=inst)
         if extension_status and extension_status.get("drift", {}).get("state") != "ready":
-            issues = extension_status.get("drift", {}).get("issues") or []
-            detail = (issues[0].get("message")
-                      if issues and isinstance(issues[0], dict)
-                      else "PHP extension planes are not verified")
-            die(f"PHP extension verification blocked: {detail}")
+            if wp_is_installed(inst):
+                issues = extension_status.get("drift", {}).get("issues") or []
+                detail = (issues[0].get("message")
+                          if issues and isinstance(issues[0], dict)
+                          else "PHP extension planes are not verified")
+                die(f"PHP extension verification blocked: {detail}")
     # Re-assert the mail-capture mu-plugin on every up so it survives
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
     # shared runtime bind-mount, which exists for any provisioned instance.

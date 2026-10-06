@@ -476,10 +476,30 @@ class TestDoctorJson(unittest.TestCase):
         with patch.object(lifecycle, "resolve_instances", return_value={"fixture": inst_cfg}), \
                 patch.object(lifecycle, "_web_services", return_value=["wp"]), \
                 patch.object(lifecycle, "_compose_up"), \
+                patch.object(lifecycle, "wp_is_installed", return_value=True), \
                 patch.object(lifecycle, "php_extension_status", return_value={"drift": {"state": "drift", "issues": []}}), \
                 self.assertRaises(SystemExit) as raised:
             lifecycle.cmd_up(cfg, args)
         self.assertEqual(raised.exception.code, 1)
+
+    def test_cmd_up_php_extension_drift_ignored_when_wp_not_installed(self):
+        inst_cfg = {
+            "php_extensions": {"profile": "wordpress@1"},
+            "server": "nginx",
+            "wordpress_port": 8080,
+            "mailpit_port": 8025,
+        }
+        cfg = {"instances": {"fixture": inst_cfg}}
+        args = SimpleNamespace(resolved_instance="fixture", quiet=True, json=True)
+
+        with patch.object(lifecycle, "resolve_instances", return_value={"fixture": inst_cfg}), \
+                patch.object(lifecycle, "_web_services", return_value=["wp"]), \
+                patch.object(lifecycle, "_compose_up"), \
+                patch.object(lifecycle, "wp_is_installed", return_value=False), \
+                patch.object(lifecycle, "wp_dir", return_value=Path("/tmp/nonexistent-wp-dir")), \
+                patch.object(lifecycle, "php_extension_status", return_value={"drift": {"state": "drift", "issues": []}}):
+            # Must not raise SystemExit
+            lifecycle.cmd_up(cfg, args)
 
 
 if __name__ == "__main__":

@@ -710,6 +710,10 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("lnzr_dev $2a$hash", rendered)
         self.assertNotIn("BASIC_AUTH_PASSWORD", rendered)
         self.assertNotIn("plain-password", rendered)
+        # The gate credential must not reach the upstream application.
+        self.assertIn("    request_header -Authorization\n", rendered)
+        self.assertLess(rendered.index("basicauth {"),
+                        rendered.index("request_header -Authorization"))
 
     def test_requires_hash_when_rendering_declared_basic_auth(self):
         manifest = _manifest().replace(

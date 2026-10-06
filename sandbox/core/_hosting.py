@@ -904,9 +904,12 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
         elif not basic_auth_hash.startswith("$"):
             raise HostingError("basic_auth_hash must be a Caddy password hash")
         else:
+            # The gate's credential is for Caddy alone; forwarding it makes an
+            # upstream app that reads Authorization reject every request.
             auth_block = ("        basicauth {\n"
                           f"            {auth['username']} {basic_auth_hash}\n"
-                          "        }\n")
+                          "        }\n"
+                          "        request_header -Authorization\n")
             bypass_handlers = ""
             if auth.get("bypass_paths"):
                 public_paths = " ".join(auth["bypass_paths"])
@@ -949,7 +952,8 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
             else:
                 basic = ("    basicauth {\n"
                          f"        {auth['username']} {basic_auth_hash}\n"
-                         "    }\n")
+                         "    }\n"
+                         "    request_header -Authorization\n")
     proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
     # Cloudflare supplies this header only when it is the immediate peer.
     # Direct-origin callers can set it themselves, so remove it before every

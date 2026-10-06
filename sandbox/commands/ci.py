@@ -638,6 +638,9 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                        "--timeout", str(timeout), "--json", "--local"]
             if getattr(args, "runtime", "sandbox") == "none":
                 command += ["--runtime", "none"]
+            event = getattr(args, "event", None) or getattr(args, "if_event", None)
+            if event:
+                command += ["--event", event]
             if getattr(args, "allow_deploy", False):
                 command.append("--allow-deploy")
             if getattr(args, "keep_on_fail", False):

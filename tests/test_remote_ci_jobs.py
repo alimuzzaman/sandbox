@@ -61,6 +61,12 @@ class RemoteCIJobTests(unittest.TestCase):
             self.assertEqual({item.cleanup_policy for item in submissions}, {"ephemeral"})
             self.assertEqual({item.artifact_paths for item in submissions}, {("reports",)})
             self.assertTrue(all("--matrix-filter" in item.argv for item in submissions))
+            self.assertTrue(all("--event" not in item.argv for item in submissions))
+            args.event = "workflow_dispatch"
+            dispatched = _remote_ci_submissions(target, str(root), workflow,
+                                                _plan_workflow(workflow), args)
+            self.assertTrue(all(item.argv[item.argv.index("--event") + 1] == "workflow_dispatch"
+                                for item in dispatched))
             self.assertTrue(all(item.deadline_seconds == 3600 for item in submissions))
             self.assertEqual({item.project_identity for item in submissions}, {"project:ci"})
             self.assertEqual(

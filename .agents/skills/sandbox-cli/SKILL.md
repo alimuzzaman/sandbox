@@ -493,6 +493,12 @@ uncommitted and untracked changes. Named workspaces are reusable; matrix cells
 must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
 server for live remote job status/output operations.
 
+When a project defaults to a remote, plain `sb test` submits a remote job. It
+names the remote on stderr before pushing source, prints the job id on stdout,
+and states that this is not a test result; exit 0 only means accepted. Use
+`sb test --wait` to follow the output and exit with the job's exit code, or
+`--local` for a local instance.
+
 Keep real credentials out of job arguments and project files. Remote submission
 rejects credential-like arguments before deployment. For public helper source or
 synthetic fixtures, place files in the project tree and pass their

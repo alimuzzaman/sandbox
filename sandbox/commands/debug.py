@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -43,6 +44,52 @@ def _local_test_entry(sc, root: str, args):
         return entry
     return sc.registry_get(root, label=getattr(args, "label", None))
 
+
+
+_TERMINAL_JOB_LIFECYCLES = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
+
+
+def _announce_remote_test(remote_name: str | None, cli_json: bool) -> None:
+    """Say on stderr that `sb test` is going remote before any source push."""
+    if cli_json:
+        return
+    print(f"sb test: target is remote '{remote_name}' (project default); "
+          "pushing the current source to it and submitting a durable job. "
+          "Pass --local to run on a local instance instead.", file=sys.stderr)
+
+
+def _report_remote_test(job_id: str, remote_name: str | None, cli_json: bool,
+                        wait: bool, transport) -> None:
+    """Print a remote submission so exit 0 is never mistaken for a pass.
+
+    Without --wait, stdout stays the bare job id (scripts capture it) and
+    stderr states that no test has run yet. With --wait, follow the job and
+    exit with its exit code.
+    """
+    if not wait:
+        if not cli_json:
+            print(f"sb test: job {job_id} queued on remote '{remote_name}'. This is NOT a "
+                  f"test result. Follow it with: ./sb job-output {job_id} --remote "
+                  f"{remote_name} --follow (or rerun with --wait).", file=sys.stderr)
+        return
+    from sandbox.commands.jobs_runtime import cmd_job_output
+    cmd_job_output(None, _types.SimpleNamespace(
+        job_id=job_id, remote=remote_name, cursor=None, stream="combined", offset=None,
+        tail_bytes=None, lines=None, since=None, max_bytes=65536, wait_seconds=5,
+        encoding="utf8", profile="full", json=False, follow=True, job_id_option=None))
+    state = {}
+    for _ in range(30):
+        state = transport.status(remote_name, job_id)
+        if state.get("lifecycle") in _TERMINAL_JOB_LIFECYCLES:
+            break
+        time.sleep(2)
+    lifecycle = state.get("lifecycle", "unknown")
+    exit_code = state.get("exit_code")
+    if lifecycle == "succeeded" and exit_code in (0, None):
+        ok(f"remote job {job_id} succeeded")
+        return
+    die(f"remote job {job_id} ended {lifecycle} (exit {exit_code}); "
+        f"inspect: ./sb job-status {job_id} --remote {remote_name}")
 
 
 def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
@@ -237,6 +284,7 @@ def cmd_test(cfg, args) -> None:
     # ``--``, but consume the documented trailing CLI JSON flag.
     raw_passthrough = list(getattr(args, "passthrough", None) or [])
     cli_json = bool(getattr(args, "json", False))
+    wait = bool(getattr(args, "wait", False))
     passthrough = []
     forwarding = False
     for token in raw_passthrough:
@@ -245,6 +293,8 @@ def cmd_test(cfg, args) -> None:
             passthrough.append(token)
         elif token == "--json" and not forwarding:
             cli_json = True
+        elif token == "--wait" and not forwarding:
+            wait = True
         else:
             passthrough.append(token)
 
@@ -302,10 +352,13 @@ def cmd_test(cfg, args) -> None:
                 execution_policy_provenance=policy.provenance)
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
-            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+            transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit(submission)
+                remote_sb_path=_remote.remote_sb_path)
+            _announce_remote_test(target.remote_name, as_json)
+            accepted = transport.submit(submission)
             print(json.dumps(accepted, sort_keys=True) if as_json else accepted["job_id"])
+            _report_remote_test(accepted["job_id"], target.remote_name, as_json, wait, transport)
             return
         entry = _local_test_entry(sc, pconf["root"], args)
         if not entry:
@@ -382,13 +435,17 @@ def cmd_test(cfg, args) -> None:
                 selected_config_file)
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
-            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+            transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
+                remote_sb_path=_remote.remote_sb_path)
+            _announce_remote_test(selected_target.remote_name, cli_json)
+            accepted = transport.submit_many(submissions)
             if cli_json:
                 print(json.dumps(accepted, sort_keys=True))
             else:
                 print(accepted["parent_job_id"])
+            _report_remote_test(accepted["parent_job_id"], selected_target.remote_name,
+                                cli_json, wait, transport)
             return
         policy = _resolved_execution_policy(selected_target, _types.SimpleNamespace(
             execution_policy_json=None, profile=None, timeout=timeout, stall_seconds=None,
@@ -408,13 +465,17 @@ def cmd_test(cfg, args) -> None:
         )
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
-        accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+        transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
             ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-            remote_sb_path=_remote.remote_sb_path).submit(submission)
+            remote_sb_path=_remote.remote_sb_path)
+        _announce_remote_test(selected_target.remote_name, cli_json)
+        accepted = transport.submit(submission)
         if cli_json:
             print(json.dumps(accepted, sort_keys=True))
         else:
             print(accepted["job_id"])
+        _report_remote_test(accepted["job_id"], selected_target.remote_name,
+                            cli_json, wait, transport)
         return
     entry = _local_test_entry(sc, pconf["root"], args)
     if not entry:

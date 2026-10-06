@@ -672,6 +672,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="durable matrix/declared-plan output profile (overrides the plan profile)")
     ts.add_argument("--json", action="store_true",
         help="print the durable remote submission result as JSON")
+    ts.add_argument("--wait", action="store_true",
+        help="for a remote run: stream the job output and exit with the job's exit code")
     ts.add_argument("passthrough", nargs=argparse.REMAINDER,
         help="args after `--` are passed to phpunit (e.g. --filter foo or tests/Test.php)")
 

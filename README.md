@@ -619,6 +619,14 @@ files remain byte-preserved; ambiguous, malformed, or unattributed records are r
 as `workspace_index_incomplete` instead of an empty inventory. Migration is metadata-only
 and never resets/destroys a workspace or removes a Docker network.
 
+Applying a plan adopts every `adoptable` record and succeeds even when other records
+stay unresolved; a plan with nothing adoptable is a successful no-op. When records
+remain, the result carries `index_complete=false`, `code="workspace_index_incomplete"`,
+`unresolved_by_reason` counts, a `message` naming the plan and counts, and a
+`next_step` (a `WARNING:`/`next:` pair in text output). A record becomes adoptable only
+with exact project-identity evidence (a job record for the same namespace and label);
+retrying the apply does not change an unattributed record.
+
 `workspace list` is a read-only report and stays successful when the index is degraded:
 the payload carries `index.complete=false` with `index.code="workspace_index_incomplete"`
 (mirrored as a top-level `code`/`warning`, and as a `WARNING:` line in text output), plus

@@ -247,6 +247,28 @@ def _json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True, separators=(",", ":"))
 
 
+def _unresolved_apply_report(plan_id: str, adopted: int, unresolved: int,
+                             by_reason: Mapping[str, int]) -> dict[str, Any]:
+    """Explain why an applied migration plan left the index incomplete."""
+    reasons = ", ".join(f"{count} {key}" for key, count in sorted(by_reason.items()))
+    return {
+        "code": "workspace_index_incomplete",
+        "nothing_adopted": adopted == 0,
+        "unresolved_by_reason": dict(sorted(by_reason.items())),
+        "message": (
+            f"plan {plan_id} applied: {adopted} record(s) adopted, {unresolved} left "
+            f"unresolved ({reasons}); the workspace index stays incomplete. Unresolved "
+            "records were only recorded as observed; their directories and metadata "
+            "are unchanged."),
+        "next_step": (
+            "review the plan's records with status other than 'adoptable' (rerun "
+            "'workspace migrate --json' without --plan-id to list them). A record "
+            "becomes adoptable only with exact project-identity evidence (a job "
+            "record for the same namespace and label); unattributed records are "
+            "ignored by workspace selection and need an operator decision, not a retry."),
+    }
+
+
 def _migration_source_key(item: MigrationItem) -> str:
     """Stable per-leaf key; content digests alone collide across workspaces."""
     return hashlib.sha256(f"{item.path}\0{item.digest}".encode("utf-8")).hexdigest()
@@ -1864,6 +1886,7 @@ class WorkspaceRepository:
         relocated = 0
         aliases_added = 0
         unresolved = 0
+        unresolved_by_reason: dict[str, int] = {}
         with _WRITE_LOCK:
             connection = self._connect()
             try:
@@ -1874,6 +1897,9 @@ class WorkspaceRepository:
                 for item in current_items:
                     if item.status != "adoptable":
                         unresolved += 1
+                        reason_key = f"{item.status}/{item.reason or 'unspecified'}"
+                        unresolved_by_reason[reason_key] = (
+                            unresolved_by_reason.get(reason_key, 0) + 1)
                         connection.execute(
                             "INSERT INTO workspace_audit(event_type,workspace_id,payload_json,created_at) "
                             "VALUES(?,?,?,?)",
@@ -1983,15 +2009,21 @@ class WorkspaceRepository:
                 new_generation = self._bump_generation(connection) if (
                     inserted or aliases_added
                 ) else generation
+                # The apply committed: everything adoptable was adopted. Records
+                # it cannot attribute are a report, not a refusal; a plan with
+                # nothing adoptable is a successful no-op that leaves the index
+                # incomplete and says why.
                 result = {
-                    "ok": unresolved == 0, "plan_id": stored.plan_id, "inserted": inserted,
+                    "ok": True, "plan_id": stored.plan_id, "inserted": inserted,
                     "relocated": relocated,
                     "aliases_added": aliases_added,
                     "unresolved": unresolved, "generation": new_generation,
                     "metadata_only": True, "legacy_unchanged": True,
+                    "index_complete": unresolved == 0,
                 }
                 if unresolved:
-                    result["code"] = "workspace_index_incomplete"
+                    result.update(_unresolved_apply_report(
+                        stored.plan_id, inserted, unresolved, unresolved_by_reason))
                 connection.execute("INSERT INTO workspace_plan_applications(plan_id,applied_at,generation,result_json) VALUES(?,?,?,?)",
                                    (stored.plan_id, now_text, new_generation, _json(result)))
                 connection.execute("COMMIT")

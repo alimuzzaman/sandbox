@@ -198,6 +198,16 @@ class WorkspaceRepositoryTests(unittest.TestCase):
         result = self.repo.migration_apply(plan, confirm=True)
         self.assertEqual(result["inserted"], 0)
         self.assertEqual(result["unresolved"], 1)
+        # Nothing adoptable is a successful no-op that explains itself rather
+        # than an opaque refusal; the index stays incomplete.
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["index_complete"])
+        self.assertTrue(result["nothing_adopted"])
+        self.assertEqual(result["code"], "workspace_index_incomplete")
+        self.assertEqual(sum(result["unresolved_by_reason"].values()), 1)
+        self.assertIn("0 record(s) adopted, 1 left unresolved", result["message"])
+        self.assertIn(plan.plan_id, result["message"])
+        self.assertIn("workspace migrate --json", result["next_step"])
         self.assertEqual(self.repo.list(include_legacy=False), [])
         self.assertEqual(self.repo.list()[0].status, "unresolved")
         self.assertEqual(metadata.read_bytes(), before)
@@ -873,7 +883,9 @@ class WorkspaceRepositoryTests(unittest.TestCase):
         plan = self.repo.migration_plan("project:one", evidence=evidence)
         self.assertEqual(plan.summary, {"conflict": 1})
         result = self.repo.migration_apply(plan, confirm=True)
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["index_complete"])
+        self.assertEqual(result["code"], "workspace_index_incomplete")
         self.assertEqual(result["unresolved"], 1)
         self.assertEqual(self.repo.list(include_legacy=False), [])
 

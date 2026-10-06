@@ -232,6 +232,11 @@ def cmd_workspace(_cfg, args) -> None:
     elif args.action == "migrate":
         print(result.get("plan_id", "migration") + ": " +
               ("ok" if result.get("ok") else result.get("code", "failed")))
+        if result.get("index_complete") is False:
+            print("WARNING: " + str(result.get("message") or "workspace index stays incomplete")
+                  + f" [{result.get('code', 'workspace_index_incomplete')}]")
+            if result.get("next_step"):
+                print(f"  next: {result['next_step']}")
     else:
         print(f"{args.workspace}: {'ok' if result.get('ok') else result.get('code', 'failed')}")
     if result.get("ok") is False:

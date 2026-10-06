@@ -324,6 +324,30 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(payload["error"]["code"], "sync_publication_failed")
             self.assertNotIn(protected, output.getvalue())
 
+    def test_migrate_apply_text_output_explains_an_incomplete_index(self):
+        from io import StringIO
+        from sandbox.commands.workspaces import cmd_workspace
+
+        service = mock.Mock()
+        service.migration_apply.return_value = {
+            "ok": True, "plan_id": "wm_x", "inserted": 0, "unresolved": 2,
+            "index_complete": False, "code": "workspace_index_incomplete",
+            "message": "plan wm_x applied: 0 record(s) adopted, 2 left unresolved",
+            "next_step": "review the plan's records",
+        }
+        args = SimpleNamespace(
+            action="migrate", project_dir=".", local=True, remote=None,
+            workspace="default", plan_id="wm_x", confirm=True, json=False)
+        output = StringIO()
+        with mock.patch("sandbox.commands.workspaces.durable_job_dependencies",
+                        return_value={"workspace_service": service}), \
+                mock.patch("sys.stdout", output):
+            cmd_workspace(None, args)
+        text = output.getvalue()
+        self.assertIn("wm_x: ok", text)
+        self.assertIn("WARNING: plan wm_x applied: 0 record(s) adopted, 2 left unresolved", text)
+        self.assertIn("next: review the plan's records", text)
+
     def test_sync_publication_refuses_generations_parent_symlink_swap(self):
         from sandbox.application import workspace_service as workspace_module
 

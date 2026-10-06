@@ -66,6 +66,16 @@ class WorkspaceRepositoryTests(unittest.TestCase):
         with self.assertRaises(WorkspaceIndexError) as binding_error:
             self.repo.bind_resource(other.workspace_id, "compose_project", "sandbox-demo")
         self.assertEqual(binding_error.exception.code, "workspace_alias_collision")
+        self.assertIsNone(self.repo.bind_resource(
+            other.workspace_id, "compose_project", "sandbox-demo", if_unowned=True))
+        connection = sqlite3.connect(self.index)
+        owner = connection.execute(
+            "SELECT workspace_id FROM workspace_bindings WHERE resource_id='sandbox-demo'").fetchone()
+        skipped = connection.execute(
+            "SELECT COUNT(*) FROM workspace_audit WHERE event_type='resource_bind_skipped'").fetchone()
+        connection.close()
+        self.assertEqual(owner[0], record.workspace_id)
+        self.assertEqual(skipped[0], 1)
 
     def test_tombstone_is_indexed_with_reason(self):
         record = self.repo.register("project:tombstone", "default")

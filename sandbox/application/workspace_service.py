@@ -2304,7 +2304,8 @@ class WorkspaceService:
                         "workspace_ownership_drift",
                         "workspace resource binding is invalid")
                 repo.bind_resource(
-                    record.workspace_id, str(binding[0]), str(binding[1]))
+                    record.workspace_id, str(binding[0]), str(binding[1]),
+                    if_unowned=True)
         return record
 
     def terminal_cleanup_context(self) -> dict[str, str] | None:

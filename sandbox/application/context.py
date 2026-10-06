@@ -1483,6 +1483,10 @@ def durable_job_dependencies():
     workspace_repository.reconcile_startup()
 
     def workspace_resource_bindings(submission):
+        # Only the default workspace claims the project's default instance;
+        # ci-*/lint/other labels run beside it and must not compete for it.
+        if getattr(submission, "workspace_label", "default") != "default":
+            return ()
         entry = sc.registry_get(submission.project_root, label="default") or {}
         instance = entry.get("instance")
         if not isinstance(instance, str) or not instance:

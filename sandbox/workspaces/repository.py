@@ -1333,7 +1333,8 @@ class WorkspaceRepository:
         return self.get(workspace_id)  # type: ignore[return-value]
 
     def bind_resource(self, workspace_id: str, resource_type: str, resource_id: str,
-                      *, status: str = "owned", metadata: Mapping[str, Any] | None = None) -> ResourceBinding:
+                      *, status: str = "owned", metadata: Mapping[str, Any] | None = None,
+                      if_unowned: bool = False) -> ResourceBinding | None:
         _name(resource_type, "resource type")
         _name(resource_id, "resource id")
         binding_id = "binding_" + hashlib.sha256(f"{resource_type}\0{resource_id}".encode()).hexdigest()[:32]
@@ -1350,6 +1351,16 @@ class WorkspaceRepository:
                     (resource_type, resource_id),
                 ).fetchone()
                 if owner is not None and owner[0] != workspace_id:
+                    if if_unowned:
+                        # The resource is already protected by its owner; a
+                        # job workspace only records that it saw it.
+                        connection.execute(
+                            "INSERT INTO workspace_audit(event_type,workspace_id,payload_json,created_at) VALUES(?,?,?,?)",
+                            ("resource_bind_skipped", workspace_id, _json({
+                                "resource_type": resource_type, "resource_id": resource_id,
+                                "owner": owner[0]}), now))
+                        connection.execute("COMMIT")
+                        return None
                     raise WorkspaceIndexError(
                         "workspace_alias_collision",
                         "resource binding is already owned by another workspace",

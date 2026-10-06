@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 from types import SimpleNamespace
+import types
 import unittest
 from unittest.mock import patch, call
 
@@ -593,3 +594,44 @@ class TestDoctorJson(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestComposeUpAddressPools(unittest.TestCase):
+    _POOL_ERR = "Error response from daemon: all predefined address pools have been fully subnetted"
+
+    def _result(self, code, stderr=""):
+        return types.SimpleNamespace(returncode=code, stdout="", stderr=stderr)
+
+    def test_reclaims_unused_networks_and_retries_once(self):
+        results = [self._result(1, self._POOL_ERR), self._result(0)]
+        with patch.object(lifecycle, "compose", side_effect=lambda *a, **k: results.pop(0)) as compose, \
+                patch.object(lifecycle, "_reclaim_empty_sandbox_networks",
+                             return_value=["sandbox-old_default"]), \
+                patch.object(lifecycle, "info"):
+            lifecycle._compose_up("fixture", ["wp"], quiet=True)
+        self.assertEqual(compose.call_count, 2)
+
+    def test_reports_typed_error_when_nothing_to_reclaim(self):
+        with patch.object(lifecycle, "compose", return_value=self._result(1, self._POOL_ERR)), \
+                patch.object(lifecycle, "_reclaim_empty_sandbox_networks", return_value=[]), \
+                patch.object(lifecycle, "die", side_effect=SystemExit(1)) as die:
+            with self.assertRaises(SystemExit):
+                lifecycle._compose_up("fixture", ["wp"])
+        self.assertIn("docker_address_pools_exhausted", die.call_args[0][0])
+
+    def test_reclaim_only_removes_sandbox_networks_without_containers(self):
+        calls = []
+
+        def fake_run(argv, **_kw):
+            calls.append(argv)
+            if argv[1:3] == ["network", "ls"]:
+                return types.SimpleNamespace(returncode=0, stdout="sandbox-a_default\nsandbox-b_default\nother\n")
+            if argv[1] == "ps":
+                used = "sandbox-b_default" in argv[-1]
+                return types.SimpleNamespace(returncode=0, stdout="abc\n" if used else "")
+            return types.SimpleNamespace(returncode=0, stdout="")
+        with patch.object(lifecycle.subprocess, "run", side_effect=fake_run):
+            removed = lifecycle._reclaim_empty_sandbox_networks()
+        self.assertEqual(removed, ["sandbox-a_default"])
+        self.assertNotIn(["docker", "network", "rm", "sandbox-b_default"], calls)
+        self.assertNotIn(["docker", "network", "rm", "other"], calls)

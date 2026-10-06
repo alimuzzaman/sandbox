@@ -217,12 +217,47 @@ def _remote_ensure_failure(result) -> dict:
     return payload
 
 
+_ADDRESS_POOL_EXHAUSTED = re.compile(
+    r"address pools have been fully subnetted|could not find an available, "
+    r"non-overlapping IPv4 address pool", re.IGNORECASE)
+
+
+def _reclaim_empty_sandbox_networks() -> list[str]:
+    """Remove Sandbox Compose networks that no container references.
+
+    Only ``sandbox-*`` networks with zero attached containers, running or
+    stopped, are removed; Compose recreates an instance's network on its next
+    ``up``. Any Docker failure removes nothing more and returns what was done.
+    """
+    def docker(*argv: str, timeout: int = 20):
+        return subprocess.run(["docker", *argv], capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    removed: list[str] = []
+    try:
+        listed = docker("network", "ls", "--filter", "name=sandbox-",
+                        "--format", "{{.Name}}")
+        if listed.returncode != 0:
+            return removed
+        for name in listed.stdout.split():
+            if not name.startswith("sandbox-"):
+                continue
+            users = docker("ps", "-aq", "--filter", f"network={name}")
+            if users.returncode != 0 or users.stdout.strip():
+                continue
+            if docker("network", "rm", name).returncode == 0:
+                removed.append(name)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return removed
+
+
 def _compose_up(
     instance: str,
     services: tuple[str, ...] | list[str],
     *,
     quiet: bool = False,
     json_output: bool = False,
+    _pool_retry: bool = False,
 ) -> object:
     """Start one managed stack and classify stale-network failures.
 
@@ -256,6 +291,30 @@ def _compose_up(
             getattr(result, "stdout", ""), getattr(result, "stderr", ""),
         ) if isinstance(value, str) and value
     )
+    if _ADDRESS_POOL_EXHAUSTED.search(output) and not _pool_retry:
+        removed = _reclaim_empty_sandbox_networks()
+        if removed:
+            info(f"Docker address pools were exhausted; removed {len(removed)} "
+                 "unused Sandbox network(s) and retrying.")
+            return _compose_up(instance, services, quiet=quiet,
+                               json_output=json_output, _pool_retry=True)
+    if _ADDRESS_POOL_EXHAUSTED.search(output):
+        message = (
+            "docker_address_pools_exhausted: Docker has no free network address "
+            "pool for instance " + repr(instance) + ", and no unused Sandbox "
+            "network could be removed. Stop instances you do not need with "
+            "`./sb down --instance <name>` (removes their containers and network, "
+            "keeps data), or enlarge Docker's default-address-pools."
+        )
+        if json_output:
+            print(json.dumps({
+                "ok": False, "mutated": False, "command": "up", "instance": instance,
+                "error": {"code": "docker_address_pools_exhausted",
+                          "message": message.removeprefix("docker_address_pools_exhausted: ")},
+                "recovery": {"command": "./sb down --instance <name>"},
+            }, sort_keys=True))
+            raise SystemExit(returncode)
+        die(message, code=returncode)
     if re.search(r"\bnetwork\b[^\n]{0,240}\bnot found\b", output,
                  flags=re.IGNORECASE):
         quoted = shlex.quote(str(instance))

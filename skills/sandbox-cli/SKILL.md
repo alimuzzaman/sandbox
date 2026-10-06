@@ -801,6 +801,12 @@ returns a nonzero, typed `stale_container_network` JSON envelope with the exact
 targeted `down`/`up` recovery command; machine callers must branch on that code,
 not parse the human message.
 
+When Docker reports that its address pools are fully subnetted, `up`/`ensure`
+removes only `sandbox-*` networks that no container (running or stopped)
+references, then retries once. If none can be removed, it returns the typed
+`docker_address_pools_exhausted` code; stop unneeded instances with
+`sb down --instance NAME`.
+
 After source-mount attestation and canonical reachability, `sb ensure` also
 runs a bounded, read-only `wp core is-installed` check. A successful result
 keeps the ready fast path. Only an empty `rc=1` result followed by a successful

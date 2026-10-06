@@ -89,6 +89,19 @@ def node_store_service(remote: str | None = None):
     )
 
 
+def _revision_mismatch_message(installed: object, controller: object) -> str:
+    """Name both runtime revisions (short, hex-only) and the inspection command."""
+    import re
+
+    def short(value: object) -> str:
+        text = str(value or "")
+        return text[:12] if re.fullmatch(r"[0-9a-f]{7,64}", text) else "unknown"
+    return (f"installed remote runtime {short(installed)} does not match this "
+            f"controller {short(controller)}; compare with `sb remote service status NAME`, "
+            f"then `sb remote up NAME --confirm` or use a controller "
+            f"checkout at the installed revision")
+
+
 def _build_host_memory_service(remote: str | None = None):
     """Build the remote-only Feature 046 controller service."""
     if not remote:
@@ -105,7 +118,7 @@ def _build_host_memory_service(remote: str | None = None):
     if service.get("runtime_revision") != local_revision:
         raise RemoteProtocolError(
             "remote_runtime_revision_mismatch",
-            "installed remote runtime does not match this controller",
+            _revision_mismatch_message(service.get("runtime_revision"), local_revision),
         )
 
     def request(selected, payload):
@@ -141,8 +154,11 @@ def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) ->
     record = _remote.get_remote(remote)
     if not isinstance(record, dict):
         raise ValueError("recovery_target_identity_unavailable")
-    if (record.get("mcp_service") or {}).get("runtime_revision") != _remote._remote_mcp_runtime_revision():
-        raise RemoteProtocolError("remote_runtime_revision_mismatch", "controller revision does not match")
+    installed = (record.get("mcp_service") or {}).get("runtime_revision")
+    controller = _remote._remote_mcp_runtime_revision()
+    if installed != controller:
+        raise RemoteProtocolError("remote_runtime_revision_mismatch",
+                                  _revision_mismatch_message(installed, controller))
     adapter = HostMemoryRemote(remote, record, _remote.remote_host_memory_request)
     value = adapter.call("host_memory_status", budget_seconds=budget_seconds)
     identity = value.get("target_identity")

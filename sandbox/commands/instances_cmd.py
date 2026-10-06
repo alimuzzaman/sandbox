@@ -647,6 +647,14 @@ def cmd_ensure(cfg, args) -> None:
             raise SystemExit(1)
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
+        domain = entry.get("domain")
+        if domain and str(entry.get("url", "")).startswith("http://localhost:"):
+            # The clean URL is configured but its proxy route did not answer,
+            # so site_url fell back to the published port. Say so instead of
+            # silently handing out a different URL than the one configured.
+            print(f"  note:    clean URL {domain} did not answer through the Sandbox "
+                  "proxy (another app may hold port 80/443, e.g. OrbStack); using the "
+                  "per-port URL. Diagnose with `./sb doctor`.")
         print(f"  project: {entry['root']}")
         if entry.get("kind") == "compose":
             print(f"  kind:    compose  service={entry.get('service')} http={entry.get('http_port')}")

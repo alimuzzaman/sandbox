@@ -291,6 +291,28 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                 payload = json.loads(output.getvalue())
                 self.assertFalse(payload.get("ok", True))
 
+    def test_cli_ensure_text_explains_localhost_fallback_for_configured_domain(self):
+        import sandbox.commands.instances_cmd as commands
+        from sandbox.runtimes.base import OperationResult
+        entry = {"ok": True, "status": "ready", "instance": "fixture",
+                 "url": "http://localhost:8123", "domain": "fixture.tst",
+                 "root": "/tmp/project", "wordpress_port": 8123, "db_port": 1,
+                 "mailpit_port": 2, "server": "nginx"}
+
+        class MockService:
+            def invoke(self, request):
+                return OperationResult(True, "ensure", request.project_root, "wordpress", entry)
+
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=False)
+        output = io.StringIO()
+        with mock.patch.object(commands, "wordpress_runtime_service",
+                               return_value=MockService()), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            commands.cmd_ensure({}, args)
+        self.assertIn("clean URL fixture.tst did not answer", output.getvalue())
+        self.assertIn("sb doctor", output.getvalue())
+
     def _ensure_json_payload(self, login_url, **overrides):
         """Run `cmd_ensure --json` over one fixture record and parse its line."""
         import sandbox.commands.instances_cmd as commands

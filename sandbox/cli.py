@@ -204,6 +204,7 @@ _TEST_ROUTING_OPTIONS = {
     "--project-dir": True,
     "--config-file": True,
     "--label": True,
+    "--instance": True,
     "--provision-only": False,
     "--local": False,
     "--remote": True,
@@ -211,6 +212,7 @@ _TEST_ROUTING_OPTIONS = {
     "--timeout": True,
     "--output-profile": True,
     "--json": False,
+    "--wait": False,
 }
 _TEST_MODE_OMITTED_SENTINEL = "__sandbox_test_mode_omitted__"
 

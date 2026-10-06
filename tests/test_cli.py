@@ -104,6 +104,15 @@ class TestResolutionGate(unittest.TestCase):
             if action is not None:
                 self.assertEqual(observed[0].action, action)
 
+    def test_instance_and_wait_after_mode_are_routed_not_forwarded(self):
+        import sandbox.cli as cli
+        argv = ["test", "unit", "--instance", "other-1", "--wait", "--", "--filter", "X"]
+        normalized = cli._normalize_test_routing_options(argv)
+        delimiter = normalized.index("--")
+        self.assertLess(normalized.index("--instance"), normalized.index("unit"))
+        self.assertLess(normalized.index("--wait"), normalized.index("unit"))
+        self.assertEqual(normalized[delimiter:], ["--", "--filter", "X"])
+
     def test_test_routing_options_after_mode_are_not_forwarded_to_phpunit(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

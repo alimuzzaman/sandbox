@@ -9,6 +9,8 @@ import secrets
 import subprocess
 import base64
 import shlex
+import socket
+import ssl
 import stat
 import time
 import urllib.error
@@ -3215,6 +3217,27 @@ def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
     return receipt
 
 
+
+def _edge_failure_detail(error: BaseException) -> str:
+    """Name the edge failure class without stringifying the exception."""
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {getattr(error, 'code', 'error')}"
+    reason = getattr(error, "reason", error)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return ("TLS certificate not trusted; if the origin uses a Cloudflare "
+                "Origin CA certificate, this machine's DNS likely resolves the "
+                "host to the origin instead of Cloudflare (flush the local DNS "
+                "cache and retry)")
+    if isinstance(reason, ssl.SSLError):
+        return "TLS handshake failed"
+    if isinstance(reason, socket.gaierror):
+        return "DNS resolution failed"
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return "connection timed out"
+    if isinstance(reason, ConnectionRefusedError):
+        return "connection refused"
+    return "route unavailable"
+
 def _verify_edge(
     routes: list[dict],
     *,
@@ -3264,11 +3287,7 @@ def _verify_edge(
             # Do not stringify an exception carrying a request object: some
             # urllib implementations include its headers in ``repr``.  The
             # public error is intentionally bounded and credential-free.
-            detail = (
-                f"HTTP {getattr(last_error, 'code', 'error')}"
-                if isinstance(last_error, urllib.error.HTTPError)
-                else "route unavailable"
-            )
+            detail = _edge_failure_detail(last_error)
             raise RuntimeError(
                 f"edge verification failed for {route['hostname']}: {detail}"
             )

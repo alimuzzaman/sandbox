@@ -4190,3 +4190,18 @@ class TestComposeServiceStates(unittest.TestCase):
     def test_unobservable_states_return_empty(self):
         with patch.object(hosting_cmd, "_remote_checked", side_effect=RuntimeError("ssh")):
             self.assertEqual(hosting_cmd._compose_service_states({}, "docker compose"), "")
+
+
+class TestEdgeFailureDetail(unittest.TestCase):
+    def test_classifies_without_leaking_exception_text(self):
+        import socket
+        import ssl
+        import urllib.error
+        cert = urllib.error.URLError(ssl.SSLCertVerificationError("secret-host detail"))
+        self.assertIn("Origin CA", hosting_cmd._edge_failure_detail(cert))
+        self.assertNotIn("secret-host", hosting_cmd._edge_failure_detail(cert))
+        self.assertEqual(hosting_cmd._edge_failure_detail(
+            urllib.error.URLError(socket.gaierror())), "DNS resolution failed")
+        self.assertEqual(hosting_cmd._edge_failure_detail(
+            urllib.error.URLError(ConnectionRefusedError())), "connection refused")
+        self.assertEqual(hosting_cmd._edge_failure_detail(ValueError("x")), "route unavailable")

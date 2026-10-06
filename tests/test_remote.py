@@ -60,11 +60,14 @@ class _patched_config_local:
     binding, even though both started out pointing at the same object. A
     single patch.object on just one module leaves the other reading/writing
     the REAL sandbox.local.yml. Patch both together so reads and writes in a
-    test agree on the same temp path."""
+    test agree on the same temp path. RUNTIME_DIR moves beside it too, so the
+    remote-registration lock is per-test instead of the machine's real lock,
+    which a running Sandbox process may hold."""
     def __init__(self, path):
         self._patches = [
             patch.object(sr, "CONFIG_LOCAL", path),
             patch.object(_cfgmod, "CONFIG_LOCAL", path),
+            patch.object(sr, "RUNTIME_DIR", Path(path).parent / "runtime"),
         ]
 
     def __enter__(self):

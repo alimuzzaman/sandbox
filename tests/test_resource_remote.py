@@ -15,6 +15,7 @@ from sandbox.resources.remote import (
 )
 from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
+from tests.subprocess_support import synthetic_environment
 from tests.resource_fixtures import deep_attribution
 from tests.resource_fixtures import observation
 from sandbox.resources.models import (
@@ -1071,8 +1072,11 @@ class TestThoroughProbeBudget(unittest.TestCase):
                 "budget_seconds": 14, "managed_host": True,
                 "remote_name": "remote-a",
             })
-            env = dict(os.environ, SANDBOX_HOME=str(home),
-                       PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))
+            env = synthetic_environment({
+                "SANDBOX_HOME": str(home),
+                "PATH": os.pathsep.join((str(fake_bin), "/opt/homebrew/bin",
+                                         "/usr/local/bin", "/usr/bin", "/bin")),
+            })
             started = time.monotonic()
             completed = subprocess.run(
                 [sys.executable, "-c", program], capture_output=True, text=True,

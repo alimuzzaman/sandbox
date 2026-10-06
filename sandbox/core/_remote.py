@@ -1167,7 +1167,8 @@ def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
                              *, deployed_path: str | None = None) -> str:
     """Copy one deployed exact tree into a deterministic isolated workspace."""
     from sandbox.transports.remote_jobs import (
-        _materialization_failure, workspace_refresh_command,
+        OWNERSHIP_REPAIR_TIMEOUT, _materialization_failure, refresh_with_self_heal,
+        workspace_refresh_command,
     )
 
     source = deployed_path or deploy_target_path(remote, project_root)
@@ -1180,7 +1181,10 @@ def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
     command = workspace_refresh_command(
         source, target, sandbox_root=sandbox_root,
     )
-    result = ssh_run(remote, command, timeout=120)
+    result, _repaired = refresh_with_self_heal(
+        lambda text: ssh_run(remote, text, timeout=OWNERSHIP_REPAIR_TIMEOUT + 60
+                             if "repair-workspace-ownership" in text else 120),
+        command, f"{sandbox_root}/sb", target)
     if result.returncode != 0:
         failure = _materialization_failure(getattr(result, "stdout", ""))
         raise RuntimeError("could not prepare remote workspace" +

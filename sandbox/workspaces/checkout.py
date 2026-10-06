@@ -92,8 +92,9 @@ def _failure_detail(exc: BaseException, stage: str,
         detail["next_step"] = (
             f"the entry is owned by uid {owner}, not the Sandbox user (uid "
             f"{os.geteuid()}); a container running as root most likely wrote "
-            "it into the workspace. Remove it or chown it to the Sandbox user "
-            "as root on that host, then retry.")
+            "it into the workspace. Sandbox retries once after an in-container "
+            "ownership repair; if that did not clear it, remove it or chown it "
+            "to the Sandbox user as root on that host, then retry.")
     elif detail.get("errno") in {"ENOSPC", "EDQUOT"}:
         detail["next_step"] = "free disk space on that host, then retry."
     else:

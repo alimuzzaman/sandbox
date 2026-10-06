@@ -138,6 +138,93 @@ class TestGenericComposeAdapter(unittest.TestCase):
             http.probe = lambda *args, **kwargs: False
             self.assertEqual(adapter.invoke(OperationRequest(str(root), "status")).data["status"], "unhealthy")
 
+    def _repair_adapter(self, root, volumes, *, run_rc=0, config_rc=0):
+        (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+        adapter, process, _, _ = self.make_adapter(root)
+        self.assertTrue(adapter.invoke(OperationRequest(str(root), "ensure")).ok)
+        calls = []
+
+        def run(argv, *, cwd=None, env=None, timeout=None):
+            calls.append((tuple(argv), timeout))
+            if "--format" in argv and "config" in argv:
+                return ProcessResult(tuple(argv), config_rc, json.dumps(
+                    {"services": {"web": {"volumes": volumes}}}), "bad config" if config_rc else "")
+            if "run" in argv:
+                return ProcessResult(tuple(argv), run_rc, "", "chown: denied" if run_rc else "")
+            return ProcessResult(tuple(argv), 0, "", "")
+
+        process.run = run
+        return adapter, calls
+
+    def test_ownership_repair_remounts_only_workspace_sources_without_nested_volumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "data").mkdir()
+            volumes = [
+                {"type": "bind", "source": str(root), "target": "/work"},
+                {"type": "bind", "source": str(root / "cache"), "target": "/cache"},
+                {"type": "volume", "source": "nm", "target": "/work/node_modules"},
+                {"type": "bind", "source": str(root.parent / "other"), "target": "/other"},
+                {"type": "bind", "source": "/var/run/docker.sock", "target": "/work/docker.sock"},
+            ]
+            adapter, calls = self._repair_adapter(root, volumes)
+            result = adapter.invoke(OperationRequest(str(root), "ownership_repair", arguments={
+                "uid": 1001, "gid": 1002, "timeout": 120}))
+            self.assertTrue(result.ok)
+            # The nested cache bind is covered by the outer workspace source.
+            self.assertEqual(result.data["targets"], [str(root)])
+            argv, timeout = calls[-1]
+            self.assertEqual(timeout, 120.0)
+            run = list(argv[argv.index("run"):])
+            self.assertEqual(run, [
+                "run", "--rm", "--no-deps", "-T", "--user", "0:0",
+                "--volume", f"{root}:/sandbox-ownership-repair/0",
+                "--entrypoint", "find", "web", "/sandbox-ownership-repair/0",
+                "(", "!", "-user", "1001", "-o", "!", "-group", "1002", ")",
+                "-exec", "chown", "-h", "1001:1002", "{}", "+"])
+            self.assertFalse(any("other" in item or "docker.sock" in item for item in run))
+
+            adapter, calls = self._repair_adapter(root, [
+                {"type": "bind", "source": str(root / "a"), "target": "/a"},
+                {"type": "bind", "source": str(root / "b"), "target": "/b"}])
+            result = adapter.invoke(OperationRequest(str(root), "ownership_repair"))
+            self.assertEqual(result.data["targets"], [str(root / "a"), str(root / "b")])
+            self.assertIn(f"{root / 'b'}:/sandbox-ownership-repair/1", calls[-1][0])
+
+    def test_ownership_repair_without_workspace_bind_is_a_successful_skip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            adapter, calls = self._repair_adapter(root, [
+                {"type": "bind", "source": "/srv/data", "target": "/data"}])
+            result = adapter.invoke(OperationRequest(str(root), "ownership_repair"))
+            self.assertTrue(result.ok)
+            self.assertEqual(result.data["reason"]["code"], "no_workspace_bind_mount")
+            self.assertFalse(any("run" in call[0] for call in calls))
+
+    def test_ownership_repair_reports_config_and_run_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            bind = [{"type": "bind", "source": str(root), "target": "/work"}]
+            adapter, _ = self._repair_adapter(root, bind, config_rc=1)
+            result = adapter.invoke(OperationRequest(str(root), "ownership_repair"))
+            self.assertEqual((result.ok, result.data["reason"]["code"]),
+                             (False, "compose_config_unavailable"))
+            adapter, _ = self._repair_adapter(root, bind, run_rc=1)
+            result = adapter.invoke(OperationRequest(str(root), "ownership_repair"))
+            self.assertEqual((result.ok, result.data["reason"]["code"], result.data["exit_code"]),
+                             (False, "ownership_repair_failed", 1))
+            with self.assertRaisesRegex(ValueError, "timeout"):
+                adapter.invoke(OperationRequest(str(root), "ownership_repair",
+                                                arguments={"timeout": 0}))
+
+    def test_ownership_repair_requires_a_provisioned_instance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, _, _, _ = self.make_adapter(root)
+            with self.assertRaisesRegex(ValueError, "provisioned"):
+                adapter.invoke(OperationRequest(str(root), "ownership_repair"))
+
     def test_exec_requires_argument_list_and_never_accepts_shell_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

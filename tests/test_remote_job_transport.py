@@ -855,6 +855,87 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("/srv/sandbox/sb-src/sb ensure --local --json", controller)
         self.assertIn("/srv/sandbox/sb-src/sb exec --local --in-instance --timeout 60 -- npm test", controller)
 
+    def test_remote_job_commands_repair_workspace_ownership_and_keep_exit_status(self):
+        for kind, argv in (("runtime-exec", ("npm", "test")),
+                           ("test", ("sb", "test", "--local", "integration"))):
+            with self.subTest(kind=kind):
+                calls = []
+                transport = RemoteJobTransport(
+                    deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc",
+                                                 "dirty": False, "dirty_digest": "",
+                                                 "identity": "sha256:id"},
+                    ssh_run=lambda remote, command, timeout: calls.append(command) or SimpleNamespace(
+                        returncode=0, stdout='{"ok":true,"status":"accepted","job_id":"abc","execution_policy":{"profile":"exec","deadline_seconds":60,"deadline_source":"explicit","deadline_reminder":null,"stall_seconds":300,"cancel_grace_seconds":20,"cancel_on_stall":false,"cleanup_policy":"retain","provenance":{}}}\n'),
+                    remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
+                    remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+                )
+                transport.submit(JobSubmission(kind, "/p", "p", "remote", "workspace", argv, 60,
+                    SourceIdentity("ignored"), remote_name="r"))
+                self.assertIn("sb exec --local --repair-workspace-ownership --project-dir "
+                              "/srv/project-workspace-", calls[-1])
+                self.assertIn("|| true", calls[-1])
+                self.assertIn("exit $sandbox_rc", calls[-1])
+
+    def test_ownership_repair_wrapper_preserves_status_even_when_repair_fails(self):
+        import subprocess
+        from sandbox.transports.remote_jobs import with_ownership_repair
+        for status in (0, 7):
+            for repair in ("true", "false"):
+                with self.subTest(status=status, repair=repair):
+                    command = with_ownership_repair(f"exit {status}" if status else "true",
+                                                    repair, "/ws")
+                    command = command.replace("timeout -k 5 330 ", "")
+                    result = subprocess.run(["sh", "-c", command], capture_output=True,
+                                            timeout=10)
+                    self.assertEqual(result.returncode, status)
+
+    def test_workspace_prepare_self_heals_root_owned_entries_once(self):
+        refusal = json.dumps({"ok": False, "code": "workspace_materialization_failed",
+                              "detail": {"stage": "publish", "errno": "EACCES",
+                                         "entry": "node_modules", "owner_uid": 0,
+                                         "process_uid": 1000}}) + "\n"
+        for retry_ok in (True, False):
+            with self.subTest(retry_ok=retry_ok):
+                commands = []
+
+                def run(remote, command, timeout):
+                    commands.append(command)
+                    if "repair-workspace-ownership" in command:
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+                    if len(commands) > 1 and retry_ok:
+                        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+                    return SimpleNamespace(returncode=1, stdout=refusal, stderr="")
+
+                transport = RemoteJobTransport(
+                    deploy=lambda *_: {}, ssh_run=run,
+                    remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
+                    remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+                )
+                if retry_ok:
+                    transport._prepare_workspace({}, "/srv/project", "workspace")
+                else:
+                    with self.assertRaises(RemoteJobTransportError) as caught:
+                        transport._prepare_workspace({}, "/srv/project", "workspace")
+                    payload = caught.exception.to_payload(remote="r", operation="exec")
+                    self.assertIn("ownership repair was attempted", payload["error"])
+                self.assertEqual(len(commands), 3)
+                self.assertIn("--repair-workspace-ownership --project-dir /srv/project-workspace-",
+                              commands[1])
+
+    def test_workspace_prepare_does_not_repair_other_refusals(self):
+        commands = []
+        refusal = json.dumps({"ok": False, "code": "workspace_materialization_failed",
+                              "detail": {"errno": "ENOSPC", "process_uid": 1000}})
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=1, stdout=refusal, stderr=""),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
+        )
+        with self.assertRaises(RemoteJobTransportError):
+            transport._prepare_workspace({}, "/srv/project", "workspace")
+        self.assertEqual(len(commands), 1)
+
     def test_remote_nested_cli_uses_the_staged_path(self):
         calls = []
         transport = RemoteJobTransport(

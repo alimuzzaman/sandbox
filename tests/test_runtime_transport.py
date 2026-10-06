@@ -1515,3 +1515,56 @@ class TestStatusJsonRedaction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWorkspaceOwnershipRepairCommand(unittest.TestCase):
+    def _run(self, service_result, *, json_output=False):
+        import sandbox.commands.runtime as commands
+
+        service = mock.Mock()
+        if isinstance(service_result, Exception):
+            service.invoke.side_effect = service_result
+        else:
+            service.invoke.return_value = service_result
+        args = types.SimpleNamespace(
+            project_dir="/work/ws", repair_workspace_ownership=True, label=None,
+            timeout=9999, json=json_output, command=[])
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with mock.patch.object(commands, "runtime_service", return_value=service), \
+                mock.patch.object(commands, "_core", return_value=types.SimpleNamespace(
+                    find_project_root=lambda path: path)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                commands.cmd_exec({}, args)
+            except SystemExit as exc:
+                code = exc.code
+        return service, code, out.getvalue(), err.getvalue()
+
+    def test_repair_invokes_the_bounded_operation_and_reports_one_line(self):
+        service, code, out, err = self._run(OperationResult(
+            True, "ownership_repair", "/work/ws", "compose",
+            {"repaired": True, "targets": ["/work"]}))
+        request = service.invoke.call_args.args[0]
+        self.assertEqual((request.operation, request.label, request.project_root),
+                         ("ownership_repair", "default", "/work/ws"))
+        self.assertEqual(request.arguments["timeout"], 600)
+        self.assertEqual((code, out), (0, ""))
+        self.assertIn("workspace ownership repair: repaired", err)
+
+    def test_repair_failure_is_reported_and_exits_nonzero_without_raising(self):
+        for result in (RuntimeError("docker missing"), OperationResult(
+                False, "ownership_repair", "/work/ws", "compose",
+                {"repaired": False, "reason": {"code": "ownership_repair_failed"}})):
+            with self.subTest(result=type(result).__name__):
+                _, code, _, err = self._run(result)
+                self.assertEqual(code, 1)
+                self.assertIn("workspace ownership repair: failed", err)
+
+    def test_runtime_without_the_capability_is_a_skip(self):
+        _, code, out, _ = self._run(RejectingService().invoke(
+            types.SimpleNamespace(operation="ownership_repair")), json_output=True)
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual((payload["ok"], payload["reason"]["code"]),
+                         (True, "unsupported_capability"))

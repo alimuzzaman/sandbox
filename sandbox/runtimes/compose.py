@@ -107,8 +107,9 @@ class ComposeAdapter:
         self.timeout = timeout
         self.capabilities = frozenset({"instance_creation_receipt_v1",
             "ensure", "status", "start", "stop", "resume", "suspend", "logs",
-            "exec", "apply", "destroy", "open",
+            "exec", "apply", "destroy", "open", "ownership_repair",
         })
+        self.optional_capabilities = frozenset({"ownership_repair"})
 
     @staticmethod
     def _runtime_id(root: str, label: str, taken: set[str], *,
@@ -257,6 +258,88 @@ class ComposeAdapter:
         overlay = self._overlay(descriptor, runtime_id, int(self._record_port(descriptor, runtime_id)))
         return ["--file", descriptor["compose_file"], "--file", str(overlay), *args]
 
+    def _ownership_repair(self, request: OperationRequest, descriptor: dict[str, Any],
+                          project_args: list[str], service: str,
+                          runtime_id: str) -> OperationResult:
+        """Give entries a root container wrote back to the Sandbox user.
+
+        Scope is the host sources of the service's bind mounts that lie inside
+        the project root, nothing else: they are re-mounted at fresh paths so
+        no named volume or outside path is nested beneath them, ``find`` does
+        not follow symlinks, and ``chown -h`` never dereferences one. Only entries not already owned by the target
+        uid:gid are touched. A one-off container from the service image runs
+        as root without starting dependencies, so a stopped instance can still
+        be repaired.
+        """
+        uid = request.arguments.get("uid", os.geteuid())
+        gid = request.arguments.get("gid", os.getegid())
+        if (isinstance(uid, bool) or isinstance(gid, bool) or not isinstance(uid, int)
+                or not isinstance(gid, int) or uid < 0 or gid < 0):
+            raise ValueError("ownership repair requires a numeric uid and gid")
+        timeout = request.arguments.get("timeout", 300)
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not 1 <= timeout <= 3600):
+            raise ValueError("ownership repair timeout is invalid")
+        base = {"instance": runtime_id, "root": descriptor["root"], "kind": "compose",
+                "adapter": self.adapter_id, "service": service, "uid": uid, "gid": gid}
+        config = self.dependencies.process.run(
+            ["docker", "compose", *project_args, "config", "--format", "json"],
+            cwd=descriptor["root"], timeout=30,
+        )
+        try:
+            volumes = json.loads(config.stdout or "{}")["services"][service].get("volumes") or []
+        except (KeyError, TypeError, ValueError, AttributeError):
+            volumes = None
+        if config.returncode != 0 or not isinstance(volumes, list):
+            return OperationResult(False, "ownership_repair", descriptor["root"], "compose", {
+                **base, "repaired": False, "reason": {"code": "compose_config_unavailable"},
+                "stderr": _bounded_exec_output(config.stderr)})
+        root = Path(descriptor["root"]).resolve(strict=False)
+        sources = set()
+        for volume in volumes:
+            if not isinstance(volume, dict) or volume.get("type") != "bind":
+                continue
+            source = volume.get("source")
+            if not isinstance(source, str) or not source:
+                continue
+            resolved = Path(source).resolve(strict=False)
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                continue
+            sources.add(resolved)
+        # Keep only outermost sources; a nested bind is covered by its parent.
+        sources = sorted(item for item in sources
+                         if not any(other != item and other in item.parents for other in sources))
+        if not sources:
+            return OperationResult(True, "ownership_repair", descriptor["root"], "compose", {
+                **base, "repaired": False, "targets": [],
+                "reason": {"code": "no_workspace_bind_mount"}})
+        # Each host source is mounted again at a fresh path with nothing nested
+        # beneath it, so entries hidden under a named volume in the service's
+        # normal layout (an empty root-owned node_modules mountpoint, say) are
+        # repaired too, and no volume content outside the workspace is reached.
+        mounts, paths = [], []
+        for index, source in enumerate(sources):
+            path = f"/sandbox-ownership-repair/{index}"
+            mounts += ["--volume", f"{source}:{path}"]
+            paths.append(path)
+        owner = f"{uid}:{gid}"
+        argv = [*paths, "(", "!", "-user", str(uid), "-o", "!", "-group", str(gid), ")",
+                "-exec", "chown", "-h", owner, "{}", "+"]
+        result = self.dependencies.process.run(
+            ["docker", "compose", *project_args, "run", "--rm", "--no-deps", "-T",
+             "--user", "0:0", *mounts, "--entrypoint", "find", service, *argv],
+            cwd=descriptor["root"], timeout=float(timeout),
+        )
+        ok = result.returncode == 0
+        targets = [str(item) for item in sources]
+        return OperationResult(ok, "ownership_repair", descriptor["root"], "compose", {
+            **base, "repaired": ok, "targets": targets,
+            "exit_code": int(result.returncode),
+            **({} if ok else {"reason": {"code": "ownership_repair_failed"},
+                              "stderr": _bounded_exec_output(result.stderr)})})
+
     def _record_port(self, descriptor: dict[str, Any], runtime_id: str) -> int:
         record = self.registry.registry_find_instance(runtime_id) or {}
         if record.get("http_port"):
@@ -395,6 +478,10 @@ class ComposeAdapter:
             raise ValueError(f"Compose {op} requires a provisioned instance")
         if op == "suspend" and descriptor["instanceLifecycle"]["mode"] != "idle_stop":
             raise ValueError("Compose suspend requires instanceLifecycle.mode idle_stop")
+        if op == "ownership_repair":
+            if record is None:
+                raise ValueError("Compose ownership repair requires a provisioned instance")
+            return self._ownership_repair(request, descriptor, project_args, service, runtime_id)
 
         if op == "ensure":
             config = self.dependencies.process.run(["docker", "compose", *project_args, "config", "--services"], cwd=descriptor["root"], timeout=30)

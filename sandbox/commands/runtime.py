@@ -127,6 +127,10 @@ def configure_exec_parser(parser) -> None:
     # invoke the project Compose service directly without recursively creating
     # another durable job because that project's policy is remote-first.
     parser.add_argument("--in-instance", action="store_true", help=argparse.SUPPRESS)
+    # Internal controller step: hand entries a root container wrote into the
+    # workspace bind mount back to the Sandbox user. Fail-soft by contract.
+    parser.add_argument("--repair-workspace-ownership", action="store_true",
+                        help=argparse.SUPPRESS)
 
 
 def _exec_exit_code(data: dict) -> int:
@@ -202,9 +206,53 @@ def _require_matching_remote_instance(args, target) -> None:
     die(f"remote_instance_mismatch: {message}", 2)
 
 
+def _repair_workspace_ownership(cfg, args, project_dir: str) -> None:
+    """Run the bounded, fail-soft ownership repair for one Compose workspace.
+
+    Prints one summary line on stderr (or one JSON document with --json) and
+    exits 0 when ownership is repaired or there is nothing to repair, 1 when
+    the repair could not run. Callers chain it with ``|| true``; it never
+    replaces the exit status of the command it follows.
+    """
+    try:
+        root = str(_core().find_project_root(Path(project_dir)))
+        # A fixed find/chown maintenance operation, not a project payload: it
+        # carries no caller argv, so the execution gateway does not apply.
+        service = runtime_service(cfg)
+        result = service.invoke(OperationRequest(
+            project_root=root, operation="ownership_repair",
+            label=getattr(args, "label", None) or "default",
+            arguments={"timeout": min(int(getattr(args, "timeout", None) or 300), 600)},
+        ))
+    except Exception as exc:  # fail-soft: the repair must never crash a job
+        result = OperationError("ownership_repair_failed",
+                                f"{type(exc).__name__}: {str(exc)[:300]}")
+    if isinstance(result, OperationError):
+        # A runtime without the capability (WordPress, Herd) has nothing to
+        # repair this way; that is a skip, not a failure line on every job.
+        skipped = result.code in {"unsupported_capability", "unsupported_kind"}
+        data = {"ok": skipped, "repaired": False,
+                "reason": {"code": result.code, "message": result.message}}
+    else:
+        data = {"ok": bool(result.ok), **dict(result.data)}
+    if getattr(args, "json", False):
+        print(json.dumps(data))
+    else:
+        reason = (data.get("reason") or {}).get("code")
+        state = ("repaired" if data.get("repaired") else
+                 "skipped" if data.get("ok") else "failed")
+        print(f"[sandbox] workspace ownership repair: {state}"
+              + (f" ({reason})" if reason else ""), file=sys.stderr)
+    if not data.get("ok"):
+        raise SystemExit(1)
+
+
 def cmd_exec(cfg, args) -> None:
     """Execute explicit argv in a generic Compose service without MCP."""
     project_dir = getattr(args, "project_dir", None) or str(Path.cwd())
+    if getattr(args, "repair_workspace_ownership", False):
+        _repair_workspace_ownership(cfg, args, project_dir)
+        return
     command = list(getattr(args, "command", ()) or ())
     # argparse REMAINDER deliberately retains the conventional separator. It
     # is syntax, not part of the command passed to the container.

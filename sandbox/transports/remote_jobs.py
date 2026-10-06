@@ -424,6 +424,56 @@ def _decode_job_page(payload: object) -> dict:
     return payload
 
 
+# Bound for the post-run and pre-refresh ownership repair (seconds).
+OWNERSHIP_REPAIR_TIMEOUT = 300
+
+
+def ownership_repair_command(sb: str, workspace_path: str) -> str:
+    """Fail-soft repair of root-owned entries in one workspace bind mount.
+
+    Always exits 0: a failed repair reports one stderr line and never replaces
+    the status of the command it follows or the refresh it precedes.
+    """
+    return (shlex.join(["timeout", "-k", "5", str(OWNERSHIP_REPAIR_TIMEOUT + 30), sb,
+                        "exec", "--local", "--repair-workspace-ownership",
+                        "--project-dir", workspace_path,
+                        "--timeout", str(OWNERSHIP_REPAIR_TIMEOUT)])
+            + " || true")
+
+
+def with_ownership_repair(command: str, sb: str, workspace_path: str) -> str:
+    """Run ``command``, repair workspace ownership, and keep its exit status."""
+    return (f"{{ {command}; }}; sandbox_rc=$?; "
+            f"{ownership_repair_command(sb, workspace_path)} >&2; exit $sandbox_rc")
+
+
+def _foreign_owner_refusal(stdout: object) -> bool:
+    """Whether a materializer refusal is the root-owned-entry case."""
+    payload = _last_json(stdout if isinstance(stdout, str) else "")
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if not isinstance(detail, dict):
+        return False
+    owner, process = detail.get("owner_uid"), detail.get("process_uid")
+    return (detail.get("errno") in {"EACCES", "EPERM"} and isinstance(owner, int)
+            and not isinstance(owner, bool) and owner != process)
+
+
+def refresh_with_self_heal(run: Callable[[str], object], refresh: str, sb: str,
+                           workspace_path: str) -> tuple[object, bool]:
+    """Refresh a workspace; on a root-owned-entry refusal repair once and retry.
+
+    A workspace polluted before post-run repair existed (or by a run that was
+    killed before it) heals on its next refresh instead of failing forever.
+    Returns the final result and whether a repair was attempted.
+    """
+    result = run(refresh)
+    if getattr(result, "returncode", 1) == 0 or not _foreign_owner_refusal(
+            getattr(result, "stdout", "")):
+        return result, False
+    run(ownership_repair_command(sb, workspace_path))
+    return run(refresh), True
+
+
 def workspace_refresh_command(source_path: str, workspace_path: str, *,
                               sandbox_root: str | None = None) -> str:
     """Render the shared materializer with shell-safe argument quoting."""
@@ -718,11 +768,18 @@ class RemoteJobTransport:
         command = workspace_refresh_command(
             source_path, workspace_path, sandbox_root=sandbox_root,
         )
-        result = self._run(remote, command, timeout=120)
+        result, repaired = refresh_with_self_heal(
+            lambda text: self._run(
+                remote, text, timeout=OWNERSHIP_REPAIR_TIMEOUT + 60
+                if "repair-workspace-ownership" in text else 120),
+            command, self.remote_sb_path(remote), workspace_path)
         if getattr(result, "returncode", 1) != 0:
             failure = _materialization_failure(getattr(result, "stdout", ""))
             if failure is not None:
                 message, retryable, detail = failure
+                if repaired:
+                    message += " (an ownership repair was attempted and did not clear it)"
+                    detail["ownership_repair_attempted"] = 1
                 raise RemoteJobTransportError(
                     f"remote workspace preparation failed: {message}",
                     retryable=retryable, detail=detail)
@@ -796,8 +853,10 @@ class RemoteJobTransport:
                 # This controller already runs on the selected VPS. Explicitly
                 # select that host's local runtime so a remote-first project
                 # policy cannot recursively submit to the same named remote.
-                shlex.join([sb, "exec", "--local", "--in-instance", "--timeout",
-                            str(submission.deadline_seconds), "--", *argv]),
+                with_ownership_repair(
+                    shlex.join([sb, "exec", "--local", "--in-instance", "--timeout",
+                                str(submission.deadline_seconds), "--", *argv]),
+                    sb, workspace_path),
             ))
             argv = ["sh", "-lc", controller]
         elif argv[:1] == ["sb"]:
@@ -811,7 +870,7 @@ class RemoteJobTransport:
             controller = " && ".join((
                 f"cd {shlex.quote(workspace_path)}",
                 shlex.join([sb, "ensure", "--local", "--json"]),
-                shlex.join(argv),
+                with_ownership_repair(shlex.join(argv), sb, workspace_path),
             ))
             argv = ["sh", "-lc", controller]
         args += ["--json", "--", *argv]

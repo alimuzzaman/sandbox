@@ -80,8 +80,26 @@ When the remote workspace copy cannot be refreshed, the error names the failed
 stage, the OS cause, the blocking entry with its owner uid, and a `next_step`.
 The common case is a container that wrote root-owned files (for example
 `node_modules` or `.pnpm-store`) into the workspace; the Sandbox user cannot
-move them, so the refusal is not retryable until they are removed or chowned
-as root on that host.
+move them.
+
+Sandbox repairs that ownership itself, in two places. After every remote
+`exec` and `sb ...` job command, the controller runs
+`sb exec --local --repair-workspace-ownership` in the workspace: a one-off
+container of the instance's service (`--user 0:0`, `--no-deps`) runs
+`find ... -exec chown -h UID:GID` over only the host sources of compose bind
+mounts that lie inside that workspace. Each source is mounted again at a fresh
+path with nothing nested beneath it, so a root-owned mountpoint hidden under a
+named volume (for example `node_modules`) is repaired, and no volume content or
+path outside the workspace is reached.
+It is bounded (300 s), prints one stderr line, and always exits 0, so the job
+keeps the exit status of the command it followed. Before a refresh, a refusal
+whose detail is `EACCES`/`EPERM` on an entry not owned by the Sandbox user
+triggers the same repair once and one retry, so a workspace polluted earlier
+(or by a run killed before its repair) heals on its next run. If the retry
+still fails, the error says a repair was attempted. The repair needs the
+workspace's instance to be provisioned (its compose config resolvable) and an
+image with `find` and `chown`; otherwise the refusal stands and the entry must
+be removed or chowned as root on that host.
 
 `workspace status|reset|destroy --remote` select the one record with the label
 that belongs to the project. Unattributed legacy records are listed under

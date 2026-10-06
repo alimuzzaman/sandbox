@@ -221,7 +221,13 @@ transport keeps the richest record it received. A probe that is killed
 mid-measurement therefore still reports capacity as a `partial` result with
 `remote_probe: probe_incomplete_capacity_only`, instead of failing the whole
 command with `measurement_unavailable`. A probe that raises reports the phase
-it failed in (`probe_failed_in_<phase>`).
+it failed in (`probe_failed_in_<phase>`) and still returns every resource and
+category outcome measured before the failure. A Docker storage or host
+filesystem step that raises is isolated: that category alone reports
+`unavailable` with `reason: category_failure_isolated`, an `error_type`, and a
+`next_step`, and the rest of the scan continues. Root-only paths such as
+`/var/lib/docker` are treated as present when the probe user cannot stat them,
+so the elevated walk measures them instead of the scan crashing.
 
 Human output leads with the unattributed share of used capacity, and shouts it
 when it is 10% or more. Category outcomes that are not complete carry

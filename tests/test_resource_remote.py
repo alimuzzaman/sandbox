@@ -1093,3 +1093,55 @@ class TestThoroughProbeBudget(unittest.TestCase):
         self.assertEqual(host["reason"], "probe_budget_exhausted")
         self.assertIn("--remote remote-a", host["next_step"])
         self.assertIn("--refresh", host["next_step"])
+
+    def _scan_namespace(self, home, request):
+        import io
+        import os
+        from contextlib import redirect_stdout
+        source = _program(request).split("\nACTIONS = {", 1)[0]
+        namespace = {}
+        with mock.patch.dict(os.environ, {"SANDBOX_HOME": str(home)}), \
+                redirect_stdout(io.StringIO()):
+            exec(source, namespace)
+        return namespace
+
+    def test_unreadable_docker_root_is_present_and_category_failures_are_isolated(self):
+        """A root-only /var/lib/docker crashed the scan and lost every category."""
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "sandbox"
+            (home / "deploy-src" / "beta").mkdir(parents=True)
+            (home / "runtime").mkdir(parents=True)
+            namespace = self._scan_namespace(home, {
+                "action": "observe", "thorough": True, "deep": False,
+                "budget_seconds": 20, "managed_host": True,
+                "remote_name": "remote-a",
+            })
+
+            class Unreadable:
+                def exists(self):
+                    raise PermissionError(13, "Permission denied")
+            self.assertTrue(namespace["path_present"](Unreadable()))
+
+            def crash(_thorough):
+                raise PermissionError(13, "Permission denied")
+            namespace["docker_storage_resources"] = crash
+            namespace["docker_inventory"] = lambda: ({
+                "containers": [], "volumes": [], "networks": [], "images": [],
+                "build_cache": [],
+            }, [{"category": "docker_networks", "status": "complete"}])
+            namespace["run"] = lambda argv, timeout: (127, "", "unavailable")
+            with redirect_stdout(io.StringIO()):
+                result = namespace["scan"]()
+        outcomes = {item["category"]: item for item in result["category_outcomes"]}
+        self.assertEqual(outcomes["docker_storage"]["status"], "unavailable")
+        self.assertEqual(outcomes["docker_storage"]["reason"], "category_failure_isolated")
+        self.assertIn("next_step", outcomes["docker_storage"])
+        for kept in ("docker_networks", "host_filesystem", "deploy_worktrees",
+                     "sandbox_runtime", "job_artifacts"):
+            self.assertIn(kept, outcomes)
+        self.assertTrue(any(item["kind"] == "worktree" for item in result["resources"]))

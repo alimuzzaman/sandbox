@@ -44,6 +44,9 @@ BUDGET_SECONDS = max(float(REQUEST.get("budget_seconds", 15)), 0.5)
 DEADLINE = time.monotonic() + max(BUDGET_SECONDS - 2, 0.25)
 PHASE = "startup"
 ENVELOPE = None
+# (resources, outcomes) measured so far, so a crash later in the scan still
+# reports every category that already finished.
+PROGRESS = None
 DIRECTORY_CACHE_PATH = RUNTIME / "resources" / "directory-index.json"
 DIRECTORY_CACHE_TTL = max(float(REQUEST.get("directory_cache_ttl") or 21600), 0)
 DIRECTORY_CACHE_MODE = str(REQUEST.get("directory_cache") or "auto")
@@ -346,6 +349,17 @@ def index_paths(paths, seconds, elevated=False, count_links=False):
     return missing, deadline_hit
 
 
+def path_present(path):
+    # Path.exists() raises PermissionError for a path under a root-only
+    # directory (/var/lib/docker/*); such a path exists for an elevated du.
+    try:
+        return path.exists()
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def budget_share(fraction, reserve=3.0):
     remaining = DEADLINE - time.monotonic()
     return max(min(remaining * fraction, remaining - reserve), 0.5)
@@ -378,6 +392,19 @@ def cached_directory_size(path):
                     except (TypeError, ValueError):
                         continue
     return _CACHED_DIRECTORY_ROWS.get(str(path))
+
+
+def failed_outcome(category, exc):
+    # One category's failure is reported on its own; the probe keeps going.
+    return {
+        "category": category, "status": "unavailable",
+        "reason": "category_failure_isolated",
+        "error_type": type(exc).__name__,
+        "next_step": "retry sb resources status"
+        + ((" --remote " + str(REQUEST.get("remote_name")))
+           if REQUEST.get("remote_name") else "")
+        + " --thorough; if it fails again, file sb feedback naming this category",
+    }
 
 
 def budget_outcome(category, status):
@@ -1853,7 +1880,7 @@ def host_capacity_resources(thorough):
         (Path("/boot"), "host /boot"),
         (Path("/etc"), "host /etc"),
     )
-    roots = tuple((path, display) for path, display in roots if path.exists())
+    roots = tuple((path, display) for path, display in roots if path_present(path))
     if not FAST:
         pending = [path for path, _display in roots
                    if indexed_size(path) is None and cached_directory_size(path) is None]
@@ -1926,7 +1953,7 @@ def docker_storage_resources(thorough):
     if not FAST:
         pending = [path for path, _display in roots
                    if indexed_size(path) is None and cached_directory_size(path) is None
-                   and path.exists()]
+                   and path_present(path)]
         # Leave the host breakdown that follows a share of what remains.
         index_paths(pending, budget_share(0.5), elevated=True)
     for path, display in roots:
@@ -2659,6 +2686,8 @@ def scan():
         "reason": "workspace_index_unavailable" if workspace_projection is None else None,
     })
     resources = []
+    global PROGRESS
+    PROGRESS = (resources, outcomes)
     deep = None
     if not targeted and focus is None and deep_requested:
         PHASE = "deep_attribution"
@@ -2674,18 +2703,20 @@ def scan():
             })
     def host_breakdown():
         global PHASE
-        PHASE = "docker_storage"
-        storage_resources, storage_outcomes = docker_storage_resources(
-            thorough or deep_requested,
-        )
-        resources.extend(storage_resources)
-        outcomes.extend(storage_outcomes)
-        PHASE = "host_filesystem"
-        host_resources, host_outcomes = host_capacity_resources(
-            thorough or deep_requested,
-        )
-        resources.extend(host_resources)
-        outcomes.extend(host_outcomes)
+        for category, measure in (
+            ("docker_storage", docker_storage_resources),
+            ("host_filesystem", host_capacity_resources),
+        ):
+            PHASE = category
+            try:
+                category_resources, category_outcomes = measure(
+                    thorough or deep_requested,
+                )
+            except Exception as exc:
+                outcomes.append(failed_outcome(category, exc))
+                continue
+            resources.extend(category_resources)
+            outcomes.extend(category_outcomes)
 
     # In deep mode these are answered from the directory index, so the engine
     # and host breakdown costs nothing extra and one command reports the whole
@@ -3178,7 +3209,7 @@ def scan():
                 continue
             path = (RUNTIME / "jobs" / job_id / relative).resolve(strict=False)
             if inside(path, RUNTIME / "jobs") and indexed_size(path) is None \
-                    and (path.exists() or path.is_symlink()):
+                    and (path_present(path) or path.is_symlink()):
                 artifact_paths.append(path)
         index_paths(artifact_paths, budget_share(0.5), count_links=True)
     for artifact in artifacts:
@@ -3383,7 +3414,16 @@ except Exception as exc:
         "error_phase": PHASE,
         "error_type": type(exc).__name__,
     })
-    failure["category_outcomes"] = [{
+    measured_resources, measured_outcomes = PROGRESS or ((), ())
+    failure["resources"] = list(measured_resources)
+    failure["category_outcomes"] = [
+        item for item in measured_outcomes
+        if isinstance(item, dict) and item.get("category") != str(PHASE)
+    ] + [{
+        "category": str(PHASE), "status": "unavailable",
+        "reason": "category_failure_isolated",
+        "error_type": type(exc).__name__,
+    }, {
         "category": "remote_probe", "status": "unavailable",
         "reason": "probe_failed_in_" + str(PHASE),
     }]

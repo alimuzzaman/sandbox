@@ -454,7 +454,17 @@ def cmd_job_start(_cfg, args) -> None:
         _require_local_executable(command, target.project_root,
                                   getattr(args, "cwd_relative", ".") or ".",
                                   as_json=bool(getattr(args, "json", False)))
-        accepted = dependencies["job_service"].submit(submission)
+        from sandbox.workspaces.repository import WorkspaceIndexError
+        try:
+            accepted = dependencies["job_service"].submit(submission)
+        except WorkspaceIndexError as exc:
+            # A workspace ownership refusal is a typed outcome, not a crash:
+            # over SSH a traceback becomes an unreadable transport error.
+            if getattr(args, "json", False):
+                _emit_json_line({"ok": False, "code": exc.code, "error": str(exc)[:500],
+                                 "operation": "job-start", "status": "refused"})
+                raise SystemExit(1)
+            _die(f"{exc.code}: {exc}")
         read_state = lambda job_id: dependencies["job_service"].get(job_id)
         interval = .2
     waited = bool(getattr(args, "wait", False))

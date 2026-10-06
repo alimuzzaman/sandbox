@@ -300,6 +300,28 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(submitted, [])
         self.assertEqual(json.loads(output.getvalue())["code"], "executable_unavailable")
 
+    def test_start_reports_workspace_ownership_refusal_as_typed_json(self):
+        from sandbox.workspaces.repository import WorkspaceIndexError
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args(["--project-dir", "/project", "--local", "--json", "--", "true"])
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="default", runtime_policy={},
+                                 sources={"identity": "project:cli"})
+
+        def refuse(_submission):
+            raise WorkspaceIndexError("workspace_alias_collision",
+                                      "resource binding is already owned by another workspace")
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                "target_service": SimpleNamespace(resolve=lambda _request: target),
+                "job_service": SimpleNamespace(submit=refuse),
+            }), redirect_stdout(output), self.assertRaises(SystemExit):
+            cmd_job_start(None, args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["code"], "workspace_alias_collision")
+        self.assertFalse(payload["ok"])
+
     def _wait_start(self, lifecycle, exit_code):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)

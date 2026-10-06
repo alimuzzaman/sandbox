@@ -115,6 +115,19 @@ class TestHostedRecoveryMaterializer(unittest.TestCase):
         self.assertNotIn("private/path", str(result))
         self.assertNotIn("password", str(result))
 
+    def test_controller_error_code_is_named_as_cause_with_hint(self):
+        class FailingController(_Controller):
+            def observe(self, remote, plan):
+                raise RecoveryError("ssh://user:password@host/private/path", "remote_unavailable")
+
+        service, _ = self._service(FailingController())
+        result = service.create_materialized("hosted-set", ("site",), confirm=True,
+                                             remote="scaleway-sandbox")
+        self.assertEqual(result["error"]["code"], "materialization_observe_failed")
+        self.assertIn("cause: remote_unavailable", result["error"]["message"])
+        self.assertIn("sb remote status", result["error"]["message"])
+        self.assertNotIn("private/path", str(result))
+
     def test_request_identity_changes_with_capture_declaration_and_replays_stably(self):
         controller = _Controller()
         materializer = HostedRecoveryMaterializer(controller)

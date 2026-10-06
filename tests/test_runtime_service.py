@@ -162,6 +162,18 @@ class TestRuntimeService(unittest.TestCase):
         self.assertIs(actual, expected)
         self.assertEqual(adapter.capabilities, frozenset({"status", "wp_cli"}))
 
+    def test_capability_envelope_stop_alternative_suggests_instance_delete(self):
+        from sandbox.runtimes.wordpress import capability_envelope
+
+        class DummyAdapter:
+            capabilities = ("status",)
+
+        envelope = capability_envelope(DummyAdapter())
+        self.assertEqual(
+            envelope["optional"]["stop"]["alternative"],
+            "Use instance delete for an explicit managed teardown.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

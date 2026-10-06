@@ -75,6 +75,7 @@ class TestRenderCompose(unittest.TestCase):
         self.assertIn("chown www-data:www-data /var/www/html/wp-content", out)
         self.assertIn("chmod 0777 /var/www/html/wp-content", out)
         self.assertIn("docker-entrypoint.sh php-fpm", out)  # FPM must repair permissions before serving
+        self.assertIn("fpm-sandbox.conf:/usr/local/etc/php-fpm.d/zz-sandbox.conf:ro", out)
 
     def test_litespeed_compose(self):
         out = self._render("litespeed")

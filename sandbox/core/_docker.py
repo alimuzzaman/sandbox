@@ -350,6 +350,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg)}
       - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
       - {ROOT}/config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+      - {ROOT}/config/fpm-sandbox.conf:/usr/local/etc/php-fpm.d/zz-sandbox.conf:ro
       # Built-in wp-cli: shared host phar → exec `wp` in the fpm container.
       - {RUNTIME_DIR}/bin/wp-cli.phar:/usr/local/bin/wp:ro
 

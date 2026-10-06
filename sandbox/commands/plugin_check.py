@@ -155,7 +155,8 @@ def _resolve_plugin_check_config(pconf: dict) -> dict:
     }
 
 
-def _run_wp_plugin_check(instance: str, slug: str, exclude_dirs: list[str]) -> str:
+def _run_wp_plugin_check(instance: str, slug: str, exclude_dirs: list[str],
+                          timeout: float | None = None) -> str:
     """Run `wp plugin check` against the instance and return its raw stdout.
 
     `wp plugin check`'s own exit code is NOT a pass/fail signal here — findings
@@ -167,7 +168,7 @@ def _run_wp_plugin_check(instance: str, slug: str, exclude_dirs: list[str]) -> s
     args = ["plugin", "check", slug, "--format=json"]
     if exclude_dirs:
         args.append(f"--exclude-directories={','.join(exclude_dirs)}")
-    res = wpcli(args, instance=instance, check=False, capture=True)
+    res = wpcli(args, instance=instance, check=False, capture=True, timeout=timeout)
     out = res.stdout or ""
     if not out.strip():
         die(
@@ -589,10 +590,23 @@ def cmd_plugin_check(cfg, args) -> None:
     pc = _resolve_plugin_check_config(pconf)
     if getattr(args, "archive", None):
         return _cmd_plugin_check_archive(cfg, args, pconf, root, pc)
-    entry = ensure_instance(cfg, str(root), create=True)
-    instance = entry["instance"]
+    timeout = getattr(args, "timeout", None)
+    try:
+        entry = ensure_instance(cfg, str(root), create=True)
+        instance = entry["instance"]
+    except Exception as exc:
+        if getattr(exc, "code", None) == "instance_route_unavailable":
+            rec = resolve_registered_instance(root)
+            if rec and rec.get("instance") and _instance_running(rec["instance"]):
+                instance = rec["instance"]
+            else:
+                die(str(exc))
+        elif isinstance(exc, (sc.ConfigError if hasattr(sc, "ConfigError") else Exception)):
+            die(str(exc))
+        else:
+            raise
 
-    raw = _run_wp_plugin_check(instance, pc["slug"], pc["exclude_directories"])
+    raw = _run_wp_plugin_check(instance, pc["slug"], pc["exclude_directories"], timeout=timeout)
     try:
         findings = _parse_findings(raw, root=root)
     except PluginCheckOutputError as exc:

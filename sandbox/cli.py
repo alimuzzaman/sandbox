@@ -776,6 +776,8 @@ Per-project (each plugin carries its own sandbox.config.json):
              "the archive target is never installed into the caller instance")
     pcheck.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
+    pcheck.add_argument("--timeout", type=int, default=300,
+        help="timeout in seconds for wp plugin check (default: 300)")
 
     zp = sub.add_parser("zip",
         help="Build a distributable plugin zip from .distignore, with guards and a "

@@ -598,7 +598,12 @@ be combined with `--environment` and is rejected for mutating or remote actions.
 ```bash
 ./sb host validate --project-dir /path/to/site
 ./sb host plan --project-dir /path/to/site --environment production --remote myvps
-./sb host apply --project-dir /path/to/site --environment production --remote myvps --confirm
+
+# Feature 054 fences host apply with recovery admission prerequisites. Direct host apply
+# requires durable job context; prepare and run apply inside sb job-start:
+./sb job-start --local --project-dir /path/to/site --request-id <req-id> --source-commit HEAD --timeout 900 -- \
+  ./sb host apply --project-dir /path/to/site --environment production --remote myvps --confirm
+
 ./sb host logs --project-dir /path/to/site --environment production --remote myvps --lines 200
 ```
 

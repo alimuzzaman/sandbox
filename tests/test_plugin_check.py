@@ -581,6 +581,42 @@ class TestRunPluginCheckMcpWrapper(unittest.TestCase):
         self.assertFalse(result["baseline_exists"])
         self.assertIn("no baseline exists", result["message"])
 
+    def test_cmd_plugin_check_passes_timeout(self):
+        args = SimpleNamespace(project_dir="/tmp/project", update=False, archive=None, json=True, timeout=120)
+        pconf = {"root": "/tmp/project", "slug": "demo"}
+        cfg = {"instances": {}}
+        resolved_pc = {"slug": "demo", "exclude_directories": [], "version_file": "demo.php", "baseline_file": "plugin-check-baseline.json"}
+        with patch("sandbox.commands.plugin_check._core") as mock_core, \
+             patch("sandbox.commands.plugin_check._resolve_plugin_check_config", return_value=resolved_pc), \
+             patch("sandbox.commands.plugin_check.ensure_instance", return_value={"instance": "demo-inst"}), \
+             patch("sandbox.commands.plugin_check._read_version_header", return_value="1.0.0"), \
+             patch("sandbox.commands.plugin_check._run_wp_plugin_check", return_value="[]") as mock_run:
+            mock_core.return_value.load_project_config.return_value = pconf
+            with patch("pathlib.Path.mkdir"), patch("pathlib.Path.write_text"), patch("sandbox.commands.plugin_check.render_report", return_value=""):
+                with patch("builtins.print"):
+                    pc.cmd_plugin_check(cfg, args)
+            mock_run.assert_called_once_with("demo-inst", "demo", [], timeout=120)
+
+    def test_cmd_plugin_check_degraded_route_fallback(self):
+        args = SimpleNamespace(project_dir="/tmp/project", update=False, archive=None, json=True, timeout=300)
+        pconf = {"root": "/tmp/project", "slug": "demo"}
+        cfg = {"instances": {}}
+        resolved_pc = {"slug": "demo", "exclude_directories": [], "version_file": "demo.php", "baseline_file": "plugin-check-baseline.json"}
+        route_err = pc._core().ConfigError("instance_route_unavailable")
+        route_err.code = "instance_route_unavailable"
+        with patch("sandbox.commands.plugin_check._core") as mock_core, \
+             patch("sandbox.commands.plugin_check._resolve_plugin_check_config", return_value=resolved_pc), \
+             patch("sandbox.commands.plugin_check.ensure_instance", side_effect=route_err), \
+             patch("sandbox.commands.plugin_check.resolve_registered_instance", return_value={"instance": "demo-inst"}), \
+             patch("sandbox.commands.plugin_check._instance_running", return_value=True), \
+             patch("sandbox.commands.plugin_check._read_version_header", return_value="1.0.0"), \
+             patch("sandbox.commands.plugin_check._run_wp_plugin_check", return_value="[]") as mock_run:
+            mock_core.return_value.load_project_config.return_value = pconf
+            with patch("pathlib.Path.mkdir"), patch("pathlib.Path.write_text"), patch("sandbox.commands.plugin_check.render_report", return_value=""):
+                with patch("builtins.print"):
+                    pc.cmd_plugin_check(cfg, args)
+            mock_run.assert_called_once_with("demo-inst", "demo", [], timeout=300)
+
 
 if __name__ == "__main__":
     unittest.main()

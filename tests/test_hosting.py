@@ -4141,3 +4141,37 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
         self.assertEqual(error.code, "unproven_staged_revision")
         self.assertIn("unproven_staged_revision", str(error))
         self.assertIsInstance(error, RuntimeError)
+
+    def test_host_recovery_eligibility_surfaces_revision_mismatch(self):
+        from sandbox.resources.host_memory.remote import RemoteProtocolError
+        with patch("sandbox.commands.hosting._durable_host_context", return_value={"job_id": "j" * 32, "request_id": "r" * 32}), \
+             patch("sandbox.delivery.context.require_delivery_capabilities"), \
+             patch("sandbox.resources.context.authenticated_target_identity",
+                   side_effect=RemoteProtocolError("remote_runtime_revision_mismatch", "mismatch")):
+            eligibility = hosting_cmd._host_recovery_eligibility(
+                {"project_root": "/path/to/project", "project": "proj", "environment": "env"}, "myvps")
+            self.assertFalse(eligibility["eligible"])
+            self.assertEqual(eligibility["code"], "remote_runtime_revision_mismatch")
+            self.assertIn("remote_runtime_revision_mismatch", eligibility["prerequisite_failures"])
+
+    def test_cmd_host_required_evidence_missing_advice_formats_previous_request_id(self):
+        exc = hosting_cmd.DeliveryError("required_evidence_missing")
+        validated = {"project_root": "/tmp/proj", "project": "proj", "environment": "production"}
+        args = types.SimpleNamespace(remote="remote1", json=False, action="apply", project_dir="/tmp/proj", environment="production", confirm=True)
+        
+        with patch.object(hosting_cmd.remote, "get_remote", return_value={"host": "1.2.3.4"}), \
+             patch.object(hosting_cmd, "_host_recovery_eligibility", return_value={"eligible": True}), \
+             patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
+             patch.object(hosting_cmd, "_validate_apply_source", return_value="main"), \
+             patch.object(hosting_cmd, "RecoveryRepository"), \
+             patch.object(hosting_cmd, "_guarded_host_apply_plan", return_value={"records": []}), \
+             patch.object(hosting_cmd.hosting, "load_host_state", return_value={"hosts": {"remote1/proj/production": {"hosting_operation": {"request_id": "req-prev-12345"}}}}), \
+             patch.object(hosting_cmd.hosting, "desired_runtime", return_value={}), \
+             patch.object(hosting_cmd, "_apply_host", side_effect=exc), \
+             patch.object(hosting_cmd, "die", side_effect=SystemExit(1)) as mock_die:
+            with self.assertRaises(SystemExit):
+                hosting_cmd.cmd_host({}, args)
+            self.assertTrue(mock_die.called)
+            die_msg = mock_die.call_args[0][0]
+            self.assertIn("--original-request-id req-prev-12345", die_msg)
+            self.assertIn("retire-delivery", die_msg)

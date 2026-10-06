@@ -243,6 +243,14 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
             except Exception:
                 pass
             mount_id = (record.get("server_config_mount_id") if record else None) or inst_cfg.get("server_config_mount_id")
+            incarnation_id = (record.get("instance_incarnation_id") if record else None) or inst_cfg.get("instance_incarnation_id")
+            if not mount_id and incarnation_id and server_type in ("nginx", "litespeed"):
+                try:
+                    from sandbox.core._paths import RUNTIME_DIR
+                    from sandbox.server_config.context import project_mount
+                    mount_id = project_mount(RUNTIME_DIR / "server-config", incarnation_id).mount_id
+                except Exception:
+                    pass
             if not server_type:
                 server_type = (record.get("server") if record else None) or inst_cfg.get("server")
             if server_type in ("nginx", "litespeed") and not mount_id:
@@ -617,6 +625,6 @@ def handle(args: Any) -> int:
     return _exit_status(str(outcome)) if outcome else 1
 
 
-def execute_server_config(args: Any) -> None:
+def execute_server_config(args: Any, cfg: Any = None) -> None:
     """Execute a server config operation (test stub for JSON schema tests)."""
-    _handle_config(None, args)
+    _handle_config(cfg, args)

@@ -38,6 +38,7 @@ from sandbox.hosting.recovery.models import (
 )
 from sandbox.hosting.recovery.repository import RecoveryRepository
 from sandbox.hosting.recovery.service import RecoveryAuthorityError, RecoveryService
+from sandbox.resources.host_memory.remote import RemoteProtocolError
 
 
 _HOST_SYNC_WATCH_EXCLUDES = frozenset({
@@ -1789,6 +1790,10 @@ def _authenticated_machine_identity(remote_name: str, *, allow_partial: bool = F
     from sandbox.resources.context import authenticated_target_identity
     try:
         return authenticated_target_identity(remote_name)["target_identity"]
+    except RemoteProtocolError as exc:
+        if exc.code == "remote_runtime_revision_mismatch":
+            raise
+        raise RecoveryAuthorityError("recovery_target_identity_unavailable") from exc
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RecoveryAuthorityError("recovery_target_identity_unavailable") from exc
 
@@ -1895,6 +1900,11 @@ def _host_recovery_eligibility(validated: dict, remote_name: str) -> dict:
             failures.append(exc.code)
     try:
         identity = authenticated_target_identity(remote_name)
+    except RemoteProtocolError as exc:
+        if exc.code == "remote_runtime_revision_mismatch":
+            failures.append("remote_runtime_revision_mismatch")
+        else:
+            failures.append("recovery_target_identity_unavailable")
     except (OSError, RuntimeError, ValueError, TypeError):
         failures.append('recovery_target_identity_unavailable')
     try:
@@ -3421,6 +3431,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                           for name in ('workload', 'runtime_identity', 'runtime_health', 'initializer', 'edge_proof')])
         if delivery_holder is not None:
             delivery_holder['attempt'] = attempt
+            delivery_holder['previous_operation'] = (state['hosts'].get(key) or {}).get('hosting_operation')
         attempt.require_previous_snapshot((state['hosts'].get(key) or {}).get('hosting_operation'))
         operation = _accept_hosting_operation(
             state, key, validated=validated, entry=entry, remote_name=remote_name,
@@ -5917,6 +5928,12 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
                         stderr = getattr(result, "stderr", "")
                         if (getattr(result, "returncode", 1) != 0 or stderr
                                 or type(stdout) is not str or len(stdout.encode()) > max_output_bytes):
+                            try:
+                                _authenticated_machine_identity(args.remote, allow_partial=True)
+                            except RecoveryAuthorityError as exc:
+                                cause = exc.__cause__
+                                if getattr(cause, "code", None) == "remote_runtime_revision_mismatch":
+                                    raise ValueError("remote_runtime_revision_mismatch") from None
                             raise ValueError("observation_unavailable")
                         return json.loads(stdout)
                     def identity():
@@ -6065,6 +6082,9 @@ def cmd_host(cfg, args) -> None:
             if args.json:
                 print(json.dumps({"ok": False, **eligibility}, sort_keys=True))
                 raise SystemExit(1)
+            if eligibility["code"] == "remote_runtime_revision_mismatch":
+                die(eligibility["code"] + "; controller runtime revision does not match remote; "
+                    f"run from a checkout matching the remote revision, or update the remote with: ./sb remote up --remote {args.remote}")
             die(eligibility["code"] + "; prepare with: " + shlex.join(eligibility["prepare_argv"]))
     entry = remote.get_remote(args.remote)
     if not entry:
@@ -6290,8 +6310,29 @@ def cmd_host(cfg, args) -> None:
         if args.json:
             print(json.dumps(payload, sort_keys=True))
             raise SystemExit(1)
-        die(payload['code'] + ': ' + payload['message'] +
-            '; inspect the original delivery and recovery evidence')
+        msg = payload['code'] + ': ' + payload['message'] + '; inspect the original delivery and recovery evidence'
+        if payload['code'] in {'required_evidence_missing', 'delivery_record_incomplete'} or 'required_evidence_missing' in payload['message']:
+            prev_req_id = "<id>"
+            if isinstance(delivery_holder, dict):
+                prev_op = delivery_holder.get('previous_operation')
+                if isinstance(prev_op, dict) and prev_op.get('request_id'):
+                    prev_req_id = prev_op['request_id']
+            if prev_req_id == "<id>":
+                try:
+                    prior_state = hosting.load_host_state()
+                    prior_key = hosting.state_key(args.remote, validated)
+                    prior_op = (prior_state.get('hosts', {}).get(prior_key) or {}).get('hosting_operation')
+                    if isinstance(prior_op, dict) and prior_op.get('request_id'):
+                        prev_req_id = prior_op['request_id']
+                except Exception:
+                    pass
+            msg += (
+                f"; if a previous delivery attempt failed or was interrupted, retire it with: "
+                f"./sb host retire-delivery --project-dir {shlex.quote(validated.get('manifest_root') or validated['project_root'])} "
+                f"--remote {shlex.quote(args.remote)} --environment {shlex.quote(validated['environment'])} "
+                f"--original-request-id {shlex.quote(prev_req_id)} --confirm"
+            )
+        die(msg)
     evidence = {
         "ok": True,
         "project": validated["project"],

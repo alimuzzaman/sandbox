@@ -34,6 +34,7 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
 MAX_AGGREGATE_RESULT_BYTES = 262_144
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
+QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
 CHILD_IDENTITY_PUBLISH_WAIT_SECONDS = 1.0
 
 
@@ -808,6 +809,27 @@ class JobService:
         query = dict(query or {})
         return self.repository.list(**query)
 
+    @staticmethod
+    def _queue_expired(row: dict, *, now: datetime | None = None) -> bool:
+        """Whether an accepted/queued job is past any point it could still matter.
+
+        A queued job's deadline measures execution, so the queue wait is not
+        bounded by it; a job that has not started within its deadline plus
+        ``QUEUE_EXPIRY_GRACE_SECONDS`` is abandoned inventory, not pending work.
+        Sync-owned queue states have their own owner checks above.
+        """
+        if str(row.get("queue_reason") or "").startswith("sync_generation"):
+            return False
+        try:
+            accepted = datetime.fromisoformat(str(row.get("accepted_at", "")).replace("Z", "+00:00"))
+            deadline = int(row.get("deadline_seconds") or 0)
+        except (TypeError, ValueError):
+            return False
+        if accepted.tzinfo is None or deadline <= 0:
+            return False
+        age = (now or datetime.now(timezone.utc)) - accepted
+        return age > timedelta(seconds=deadline + QUEUE_EXPIRY_GRACE_SECONDS)
+
     def reconcile_startup(self, *, limit: int = 200) -> dict:
         """Reconcile active jobs whose supervisor or child identity is gone.
 
@@ -825,7 +847,15 @@ class JobService:
             Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
             Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
         )}
-        for row in self.repository.list(limit=limit):
+        # The newest page alone misses old active rows on a busy host, so scan
+        # active rows separately and keep the newest page for terminal sync.
+        rows, seen = [], set()
+        for row in (*self.repository.list(limit=limit, active_only=True),
+                    *self.repository.list(limit=limit)):
+            if row["job_id"] not in seen:
+                seen.add(row["job_id"])
+                rows.append(row)
+        for row in rows:
             if (
                 row["lifecycle"] in terminal
                 and row.get("sync_relationship_id") is not None
@@ -876,6 +906,21 @@ class JobService:
                 )
                 self._finalize_terminal_workspace(row["job_id"])
                 interrupted.append(row["job_id"])
+                continue
+            if row["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
+                if self._queue_expired(row):
+                    try:
+                        self.repository.transition(row["job_id"], Lifecycle.INTERRUPTED,
+                            termination_reason="queue_expired", output_completeness="unknown",
+                            result_json=__import__("json").dumps({
+                                "reconciled": True,
+                                "evidence": "job never started within its deadline plus the queue grace",
+                            }, sort_keys=True))
+                        if self.scheduler is not None:
+                            self.scheduler.release(row["job_id"])
+                        interrupted.append(row["job_id"])
+                    except ValueError:
+                        pass
                 continue
             if row["lifecycle"] not in {Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value}:
                 continue

@@ -35,6 +35,35 @@ class JobReconciliationTests(unittest.TestCase):
         self.repository.transition(row["job_id"], "running")
         return row
 
+    def _queued(self, *, age_seconds):
+        row, _ = self.repository.accept(JobSubmission(
+            "test", self.temp.name, "project", "local", "default", ("echo", "ok"), 60,
+            SourceIdentity("source")))
+        self.repository.transition(row["job_id"], "queued", queue_reason="workspace_or_capacity_busy")
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat().replace("+00:00", "Z")
+        self.repository.connection.execute(
+            "UPDATE jobs SET accepted_at=? WHERE job_id=?", (stamp, row["job_id"]))
+        self.repository.connection.commit()
+        return row
+
+    def test_queued_job_past_deadline_and_grace_is_interrupted_as_queue_expired(self):
+        stale = self._queued(age_seconds=60 + 25 * 3600)
+        fresh = self._queued(age_seconds=120)
+        result = self.service.reconcile_startup()
+        self.assertEqual(result["interrupted"], [stale["job_id"]])
+        self.assertEqual(self.repository.get(stale["job_id"])["termination_reason"], "queue_expired")
+        self.assertEqual(self.repository.get(fresh["job_id"])["lifecycle"], "queued")
+
+    def test_old_active_rows_beyond_the_newest_page_are_still_reconciled(self):
+        stale = self._queued(age_seconds=60 + 25 * 3600)
+        for _ in range(3):
+            done, _ = self.repository.accept(JobSubmission(
+                "test", self.temp.name, "project", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("source")))
+            self.repository.transition(done["job_id"], "cancelled")
+        result = self.service.reconcile_startup(limit=1)
+        self.assertIn(stale["job_id"], result["interrupted"])
+
     def test_host_boot_change_is_interrupted_without_claiming_success(self):
         row = self._running()
         self.repository.put_process_identity(row["job_id"], host_boot_id=BOOT, supervisor_pid=101,

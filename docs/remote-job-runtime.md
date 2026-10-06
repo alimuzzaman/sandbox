@@ -243,6 +243,10 @@ Reconciliation verifies the recorded boot/PID/start identity. A missing or
 mismatched supervisor becomes `interrupted`, never `succeeded`, and its partial
 output remains available. Expired workspace and capacity leases are released;
 active jobs with a matching supervisor are left untouched.
+An accepted or queued job that never started within its deadline plus 24 hours
+becomes `interrupted` with `termination_reason=queue_expired`, so abandoned rows stop
+counting as active inventory. Active rows are scanned on their own, so an old row is
+reached even when the registry holds more jobs than one reconcile page.
 
 ## Cancellation, retry, and cleanup
 

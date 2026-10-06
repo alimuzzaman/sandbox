@@ -39,7 +39,10 @@ CATALOG = {
         "upload-artifact must declare if-no-files-found: error for Sandbox collection parity"),
     "sandbox.artifact-options-unsupported": Difference(
         "sandbox.artifact-options-unsupported", "block",
-        "upload-artifact options beyond name, path, and if-no-files-found are unsupported"),
+        "upload-artifact options beyond name, path, if-no-files-found, and retention-days are unsupported"),
+    "sandbox.artifact-retention-ignored": Difference(
+        "sandbox.artifact-retention-ignored", "warn",
+        "upload-artifact retention-days is ignored; Sandbox job retention applies"),
 }
 
 
@@ -98,6 +101,8 @@ def detect(workflow: dict[str, Any]) -> list[dict[str, str]]:
                 add("sandbox.artifact-pattern-unsupported", f"{location}.path")
             if options.get("if-no-files-found") != "error":
                 add("sandbox.artifact-missing-semantics", f"{location}.if-no-files-found")
-            if set(options) - {"name", "path", "if-no-files-found"}:
+            if "retention-days" in options:
+                add("sandbox.artifact-retention-ignored", f"{location}.retention-days")
+            if set(options) - {"name", "path", "if-no-files-found", "retention-days"}:
                 add("sandbox.artifact-options-unsupported", location)
     return differences

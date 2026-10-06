@@ -74,6 +74,13 @@ class WorkflowTests(unittest.TestCase):
                 "if-no-files-found: error", "if-no-files-found: error\n          compression-level: 9"))
             result = preflight(root, options.name)
             self.assertIn("sandbox.artifact-options-unsupported", result["blocking"])
+            retention = root / "retention.yml"
+            retention.write_text(supported.read_text().replace(
+                "if-no-files-found: error", "if-no-files-found: error\n          retention-days: 3"))
+            result = preflight(root, retention.name)
+            self.assertTrue(result["ok"])
+            self.assertIn("sandbox.artifact-retention-ignored",
+                          [item["id"] for item in result["differences"]])
 
     def test_selected_job_ignores_unrelated_artifact_differences_but_includes_dependencies(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -127,3 +134,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(ci._resolve_secret("TOKEN", {
             "ci_secrets": {"TOKEN": "configured-value"},
         }), "configured-value")
+
+    def test_mutation_markers_ignore_flags_and_embedded_words(self):
+        from sandbox.ci.workflow import _has_marker, _KNOWN_MUTATION_MARKERS, _UNKNOWN_MUTATION_MARKERS
+        self.assertFalse(_has_marker("cargo package --no-check-publish", _KNOWN_MUTATION_MARKERS))
+        self.assertFalse(_has_marker("docker build immutable-image", _UNKNOWN_MUTATION_MARKERS))
+        self.assertTrue(_has_marker("npm publish", _KNOWN_MUTATION_MARKERS))
+        self.assertTrue(_has_marker("softprops/action-gh-release@v2", _KNOWN_MUTATION_MARKERS))
+        self.assertTrue(_has_marker("git push origin main", _KNOWN_MUTATION_MARKERS))
+        self.assertTrue(_has_marker("node mutate.js", _UNKNOWN_MUTATION_MARKERS))

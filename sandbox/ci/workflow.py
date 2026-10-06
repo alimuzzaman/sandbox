@@ -1,6 +1,7 @@
 """Side-effect-free remote CI workflow loading, graphing, and preflight."""
 
 from __future__ import annotations
+import re
 
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,18 @@ from .compatibility import CATALOG_VERSION, detect
 
 _KNOWN_MUTATION_MARKERS = ("deploy", "release", "publish", "git push", "svn commit")
 _UNKNOWN_MUTATION_MARKERS = ("mutat", "webhook", "issue-comment", "pull-request-comment")
+
+
+
+def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """Match a marker at a word start, ignoring command-line flags.
+
+    Plain substring matching blocked `--no-check-publish` and `immutable`.
+    Flag tokens are dropped, and a marker must not follow a letter, digit or
+    underscore (a hyphen is allowed, as in `action-gh-release`).
+    """
+    words = " ".join(token for token in text.split() if not token.startswith("-"))
+    return any(re.search(r"(?<![A-Za-z0-9_])" + re.escape(marker), words) for marker in markers)
 
 
 class WorkflowError(ValueError):
@@ -79,7 +92,7 @@ def preflight(project_root: str | Path, workflow_path: str | Path, *, selected_j
         for index, step in enumerate(jobs[job_id].get("steps") or []):
             text = str(step.get("uses") or step.get("run") or "").lower()
             location = f"jobs.{job_id}.steps[{index}]"
-            if any(word in text for word in _UNKNOWN_MUTATION_MARKERS):
+            if _has_marker(text, _UNKNOWN_MUTATION_MARKERS):
                 difference_id = f"safe-mode-unknown-mutation:{job_id}:{index}"
                 safe_actions.append({"id": difference_id, "location": location, "action": "blocked"})
                 differences.append({"id": difference_id, "workflow": str(workflow_path),
@@ -87,7 +100,7 @@ def preflight(project_root: str | Path, workflow_path: str | Path, *, selected_j
                     "detail": "unknown external mutation is blocked before execution",
                     "catalog_version": CATALOG_VERSION})
                 blocking.append(difference_id)
-            elif any(word in text for word in _KNOWN_MUTATION_MARKERS):
+            elif _has_marker(text, _KNOWN_MUTATION_MARKERS):
                 difference_id = f"safe-mode:{job_id}:{index}"
                 safe_actions.append({"id": difference_id, "location": location,
                                      "action": "neutralized" if safe_mode else "allowed"})

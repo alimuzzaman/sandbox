@@ -733,6 +733,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     ci_p.add_argument("--if-event", dest="if_event", default=None,
         help="only run if the workflow's `on:` triggers mention this event "
              "(e.g. push, pull_request); otherwise print 'nothing to run' and exit 0")
+    ci_p.add_argument("--event", dest="event", default=None,
+        help="GitHub event name act simulates (e.g. workflow_dispatch); "
+             "default: the --if-event value, else act's default (push)")
     ci_p.add_argument("--label-prefix", dest="label_prefix", default=None,
         help="prefix for the ephemeral per-cell instance labels (default: 'ci')")
     ci_p.add_argument("--concurrency", type=int, default=None,

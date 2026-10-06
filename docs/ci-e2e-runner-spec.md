@@ -248,7 +248,7 @@ needing time to propagate to OTHER containers after a fresh boot. A throwaway-co
 ```
 ./sb ci plan <workflow.yml> [--json]
 ./sb ci run <workflow.yml> --project-dir DIR \
-       [--job ID ...] [--matrix-filter k=v ...] [--if-event NAME] \
+       [--job ID ...] [--matrix-filter k=v ...] [--if-event NAME] [--event NAME] \
        [--label-prefix P] [--concurrency N] \
        [--allow-deploy] [--list-secrets] [--keep-on-fail] [--strict-provision] \
        [--local | --remote NAME] [--workspace LABEL] [--timeout N] \
@@ -260,6 +260,11 @@ needing time to propagate to OTHER containers after a fresh boot. A throwaway-co
 dict all handled) — no trigger simulation, just "does this workflow mention this event at
 all." A non-matching event returns `{"ok": true, "skipped": true, "reason": "..."}` and
 runs nothing (not an error — matches how a real trigger mismatch behaves on GitHub).
+
+`--event NAME`: the GitHub event act simulates, passed as act's first argument
+(for example `workflow_dispatch`). It defaults to the `--if-event` value, and
+otherwise act's default of `push`. Steps gated on `github.event_name` only match
+GitHub when this is set to the triggering event.
 
 `--async`: same detached-job model as `./sb e2e --async` (§4.3) for local runs.
 Remote runs are already accepted durably and return a `parent_job_id` immediately;

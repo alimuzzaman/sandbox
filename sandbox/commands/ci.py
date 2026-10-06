@@ -446,7 +446,7 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
                        patched_workflow_path: Path, secrets_path: Path,
                        allow_deploy: bool, timeout: int,
                        extra_act_args: list[str] | None = None,
-                       *, runtime: str = "sandbox") -> dict:
+                       *, runtime: str = "sandbox", event: str | None = None) -> dict:
     """Execute one matrix cell's job via `act` against its own ephemeral
     sandbox instance. `act` handles the FULL step semantics (matrix, if:,
     needs, services:, composite/reusable actions) — this function's only job
@@ -494,7 +494,9 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
                          "(https://github.com/nektos/act); required for the "
                          "CI executor."}
 
-    cmd = [act_bin, "-j", job_id, "-W", str(patched_workflow_path),
+    # act's optional first positional is the simulated event; without it act
+    # uses `push`, so steps gated on workflow_dispatch/pull_request diverge.
+    cmd = [act_bin, *([event] if event else []), "-j", job_id, "-W", str(patched_workflow_path),
            "--directory", str(root),
            # Keep ordinary workflow output in the isolated workspace so the
            # outer durable supervisor can retain declared artifacts. Without
@@ -763,6 +765,9 @@ def cmd_ci(cfg, args) -> None:
 
     as_json = bool(getattr(args, "json", False))
     if_event = getattr(args, "if_event", None)
+    event = getattr(args, "event", None) or if_event
+    if event is not None and not re.fullmatch(r"[a-z_]{1,64}", event):
+        die(f"invalid GitHub event name {event!r}")
     if if_event and not _event_matches(plan.get("on"), if_event):
         msg = f"workflow '{wf_path.name}' does not trigger on '{if_event}' — nothing to run."
         if as_json:
@@ -851,6 +856,8 @@ def cmd_ci(cfg, args) -> None:
             argv += ["--label-prefix", args.label_prefix]
         if getattr(args, "concurrency", None):
             argv += ["--concurrency", str(args.concurrency)]
+        if event:
+            argv += ["--event", event]
         if getattr(args, "allow_deploy", False):
             argv.append("--allow-deploy")
         if getattr(args, "keep_on_fail", False):
@@ -978,7 +985,7 @@ def cmd_ci(cfg, args) -> None:
             cfg, root, specs,
             worker_fn=lambda entry, spec: _run_cell_with_act(
                 entry, spec, Path(root), patched_path, secrets_path,
-                allow_deploy, timeout, runtime=runtime),
+                allow_deploy, timeout, runtime=runtime, event=event),
             concurrency=concurrency, keep_on_fail=keep_on_fail,
             strict_provision=strict_provision, on_progress=_progress,
             provision_instance=provision_instance, teardown_instance=teardown_instance)

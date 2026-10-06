@@ -642,7 +642,16 @@ remote provisioner installs `act`; GitHub's `actions/upload-artifact` is
 converted to Sandbox's retained job-artifact collection because a self-hosted
 `act` runner has no GitHub Actions runtime token. Remote CI preflight accepts only literal
 project-relative upload paths with `if-no-files-found: error`; globs, expressions, and
-unsupported upload options produce named blocking differences before execution. Literal artifact directories are
+unsupported upload options produce named blocking differences before execution. A path
+under `${{ runner.temp }}` blocks with `sandbox.artifact-runner-temp-unsupported`: write
+the file into the workspace instead (for example `.ci-artifacts/<name>`) and upload that
+path. A path that still holds an expression is never collected; the submission reports it
+under `uncollectable_artifacts` instead of retaining an empty phantom directory. Safe mode
+classifies steps by command, not substring: only `git push`, `svn commit`, npm/pnpm/yarn
+`publish`, `gh release create|upload`, `twine upload` and similar publishers, a script or
+target named exactly `deploy`, `publish`, `release` or `release:publish`, and deploy-class
+actions are neutralized; `release:check`, `release-candidate.py` or a `releases/download`
+URL are not. Literal artifact directories are
 stored as deterministic bounded tar archives. CLI `--output-file` retrieval reads
 all bounded pages into a temporary file, validates declared size and SHA-256, then
 atomically publishes it; MCP artifact reads remain one bounded page per call.

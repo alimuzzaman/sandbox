@@ -38,6 +38,7 @@ class RemoteCIAcceptanceFixtures(unittest.TestCase):
         self.assertTrue(safe["ok"])
         self.assertEqual(safe["safe_mode_actions"], [{
             "id": "safe-mode:release:0", "location": "jobs.release.steps[0]", "action": "neutralized",
+            "command": "npm run deploy",
         }])
 
 

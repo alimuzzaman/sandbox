@@ -140,7 +140,7 @@ own code still touches (for planning/mapping/safety) is:
 | `jobs.<id>.strategy.matrix` | Our code | Expanded to cells → one sandbox instance each (§3.5) |
 | `jobs.<id>.if:`, `needs:`, `services:`, composite/reusable actions | **`act`**, for real | Not hand-implemented; verify per-workflow if in doubt |
 | Most `uses:` actions (checkout, setup-*, cache, third-party) | **`act`**, for real | Full fidelity — this is the whole point of adopting it |
-| `actions/upload-artifact` | Sandbox job runtime | Preflight requires literal project-relative paths plus `if-no-files-found: error`; globs, expressions, and unsupported options block with named differences. Accepted steps become a local marker; `act --bind` keeps output in the isolated workspace and the durable supervisor retains files directly and directories as deterministic bounded tar archives because self-hosted `act` has no GitHub runtime token |
+| `actions/upload-artifact` | Sandbox job runtime | Preflight requires literal project-relative paths plus `if-no-files-found: error`; globs, expressions, and unsupported options block with named differences; a `${{ runner.temp }}` path blocks with `sandbox.artifact-runner-temp-unsupported`, whose message says to write into the workspace (for example `.ci-artifacts/<name>`). Expression paths are never collected and are reported as `uncollectable_artifacts`. Accepted steps become a local marker; `act --bind` keeps output in the isolated workspace and the durable supervisor retains files directly and directories as deterministic bounded tar archives because self-hosted `act` has no GitHub runtime token |
 | Deploy/publish-class `uses:` or `run:` | Our safety deny-list | Neutralized BEFORE act sees them, unless `--allow-deploy` (§3.6) |
 | `${{ secrets.* }}` | Resolved from `sandbox.local.yml` `ci_secrets:` / `$SANDBOX_CI_SECRET_*`, fed to act via `--secret-file` | Never GitHub's; unresolved → fail loud before anything runs |
 
@@ -177,6 +177,17 @@ dangerous. `_neutralize_workflow_for_safety` deep-copies the parsed workflow and
 - Scans every `run:` step for raw `git push`/`gh pr merge`/`gh release create`/
   `svn commit` and comments out just the offending line (`_guard_dangerous_commands`,
   unchanged from the original design).
+
+Remote CI preflight (`sandbox/ci/workflow.py::step_mutation`) names the mutating command
+for every neutralized step, so the report says why (`safe_mode_actions[].command`). It
+tokenizes each `run:` line with shell quoting and matches commands, not substrings:
+`git push`, `svn commit|ci`, `npm|pnpm|yarn|bun publish`, `gh release create|upload`,
+`gh pr merge`, `twine upload`, `cargo|poetry|lerna|vsce publish`, `docker|gem push`,
+`semantic-release`, and a script, Make target or executable whose name is exactly
+`deploy`, `publish`, `release` or `release:publish`. Path segments, URLs, quoted text and
+names such as `release:check`, `scripts/release-candidate.py`,
+`tests/release.playwright.config.js` or `wp-cli/releases/download` are not mutations.
+Unknown-mutation markers (`mutat`, `webhook`, comment actions) still fail closed.
 
 The patched workflow is written to a temp file (`_write_patched_workflow`) and is the ONLY
 copy `act` ever sees — the original on disk is never touched, never even read by act.

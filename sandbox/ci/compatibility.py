@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
-CATALOG_VERSION = "2"
+CATALOG_VERSION = "3"
+_RUNNER_TEMP = re.compile(r"^\$\{\{\s*runner\.temp\s*\}\}")
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,11 @@ CATALOG = {
     "sandbox.artifact-pattern-unsupported": Difference(
         "sandbox.artifact-pattern-unsupported", "block",
         "upload-artifact paths must be literal project-relative paths; globs and expressions are unsupported"),
+    "sandbox.artifact-runner-temp-unsupported": Difference(
+        "sandbox.artifact-runner-temp-unsupported", "block",
+        "upload-artifact path uses ${{ runner.temp }}, which Sandbox cannot collect; "
+        "write the file into the workspace instead (for example .ci-artifacts/<name>) "
+        "and upload that project-relative path"),
     "sandbox.artifact-missing-semantics": Difference(
         "sandbox.artifact-missing-semantics", "block",
         "upload-artifact must declare if-no-files-found: error for Sandbox collection parity"),
@@ -94,10 +101,14 @@ def detect(workflow: dict[str, Any]) -> list[dict[str, str]]:
             path_value = options.get("path")
             literals = ([value.strip() for value in path_value.splitlines() if value.strip()]
                         if isinstance(path_value, str) else [])
-            if (not literals or any(
+            runner_temp = [value for value in literals if _RUNNER_TEMP.match(value)]
+            if runner_temp:
+                add("sandbox.artifact-runner-temp-unsupported", f"{location}.path")
+            others = [value for value in literals if value not in runner_temp]
+            if ((not literals) or any(
                     "${{" in value or any(char in value for char in "*?[]") or
                     Path(value).is_absolute() or ".." in Path(value).parts
-                    for value in literals)):
+                    for value in others)):
                 add("sandbox.artifact-pattern-unsupported", f"{location}.path")
             if options.get("if-no-files-found") != "error":
                 add("sandbox.artifact-missing-semantics", f"{location}.if-no-files-found")

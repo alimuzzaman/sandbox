@@ -561,9 +561,15 @@ def _artifact_blocking_differences(gate: dict) -> list[str]:
                    item.get("severity") == "block" and not item.get("accepted")})
 
 
-def _remote_ci_artifacts(job: dict) -> list[str]:
-    """Extract only literal, project-relative upload paths for outer retention."""
-    paths = []
+def _remote_ci_artifacts(job: dict) -> tuple[list[str], list[str]]:
+    """Split upload paths into collectable literals and uncollectable ones.
+
+    Only literal, project-relative paths are retained. A path holding an
+    expression (``${{ runner.temp }}/x``) is reported as uncollectable rather
+    than treated as a relative directory named ``${{ runner.temp }}``, which
+    produced an empty collection even when the difference was accepted.
+    """
+    paths, uncollectable = [], []
     for step in job.get("steps") or []:
         if str(step.get("uses", "")).split("@", 1)[0] != "actions/upload-artifact":
             continue
@@ -571,9 +577,14 @@ def _remote_ci_artifacts(job: dict) -> list[str]:
         if isinstance(value, str):
             for literal in value.splitlines():
                 literal = literal.strip()
-                if literal and not Path(literal).is_absolute() and ".." not in Path(literal).parts:
+                if not literal:
+                    continue
+                if ("${{" in literal or Path(literal).is_absolute() or
+                        ".." in Path(literal).parts):
+                    uncollectable.append(literal)
+                else:
                     paths.append(literal)
-    return sorted(set(paths))
+    return sorted(set(paths)), sorted(set(uncollectable))
 
 
 def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -> list:
@@ -655,6 +666,16 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                     "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
                     "detail": "caller accepted compatibility difference"} for value in
                     (getattr(args, "accepted_differences", None) or ()))
+            artifact_paths, uncollectable = _remote_ci_artifacts(
+                workflow_data.get("jobs", {}).get(job["id"], {}))
+            uncollectable_differences = tuple({
+                "id": f"sandbox.artifact-uncollectable:{number}", "accepted": True,
+                "workflow": relative_workflow, "location": f"jobs.{job['id']}",
+                "severity": "notice", "path": value[:240],
+                "catalog_version": safe_gate.get("catalog_version", "unknown"),
+                "detail": (f"upload-artifact path {value[:240]!r} is not a literal "
+                           "project-relative path and is not collected")}
+                for number, value in enumerate(uncollectable))
             submissions.append(JobSubmission(
                 kind="ci", project_root=target.project_root,
                 project_identity=_resolved_project_identity(target),
@@ -666,12 +687,12 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 stall_seconds=policy.stall_seconds, cancel_grace_seconds=policy.cancel_grace_seconds,
                 cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
                 execution_policy_provenance=policy.provenance,
-                artifact_paths=tuple(_remote_ci_artifacts(
-                    workflow_data.get("jobs", {}).get(job["id"], {}))),
+                artifact_paths=tuple(artifact_paths),
                 depends_on=dependencies,
                 failure_policy="continue" if (job.get("continue_on_error") or not job.get("fail_fast", True))
                 else "fail-fast",
-                compatibility_differences=accepted_compatibility + safe_mode_differences,
+                compatibility_differences=(accepted_compatibility + safe_mode_differences
+                                           + uncollectable_differences),
             ))
     if not submissions:
         die("no matrix cells matched --matrix-filter")
@@ -692,7 +713,11 @@ def _run_remote_ci(target, root: str, wf_path: Path, plan: dict, args, *, as_jso
               "children": result.get("children", []),
               "summary": result.get("summary", {"submitted": len(submissions)}),
               "source": result.get("source"),
-              "observation": "use job-status/job-output with parent_job_id; child logs remain retained remotely"}
+              "observation": "use job-status/job-output with parent_job_id; child logs remain retained remotely",
+              "uncollectable_artifacts": sorted({
+                  item["path"] for submission in submissions
+                  for item in submission.compatibility_differences
+                  if str(item.get("id", "")).startswith("sandbox.artifact-uncollectable:")})}
     if as_json:
         print(json.dumps(report, sort_keys=True))
     else:

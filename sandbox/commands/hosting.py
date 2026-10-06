@@ -1188,14 +1188,36 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
             timeout=900, progress=progress, log_path=apply_log,
             log_phase="initializer_run",
         )
-    _remote_checked(
-        entry,
-        f"{prefix} up -d{' --no-build' if not build else ''} --no-deps {service_args}",
-        timeout=300,
-        progress=progress, log_path=apply_log,
-        log_phase="runtime_start",
-    )
+    # Dependent services wait on their dependencies' healthchecks here, so a
+    # fixed 300s budget left slow stacks half-started. Use the manifest's
+    # Compose budget, and on failure name each service's container state.
+    start_timeout = max(300, int(build_timeout))
+    try:
+        _remote_checked(
+            entry,
+            f"{prefix} up -d{' --no-build' if not build else ''} --no-deps {service_args}",
+            timeout=start_timeout,
+            progress=progress, log_path=apply_log,
+            log_phase="runtime_start",
+        )
+    except RuntimeError as exc:
+        states = _compose_service_states(entry, prefix)
+        if not states:
+            raise
+        raise RuntimeError(f"{exc}; service states: {states}") from exc
 
+
+
+def _compose_service_states(entry: dict, prefix: str) -> str:
+    """Return a bounded `service=state` summary, or "" when unobservable."""
+    try:
+        raw = _remote_checked(
+            entry, f"{prefix} ps -a --format '{{{{.Service}}}}={{{{.State}}}}'", timeout=30)
+    except RuntimeError:
+        return ""
+    pairs = [line.strip() for line in raw.splitlines()
+             if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}=[a-z]{1,16}", line.strip())]
+    return ", ".join(sorted(pairs)[:32])
 
 def _verify_remote_derived_environment(entry: dict, validated: dict,
                                        source_dir: str, runtime_dir: str,

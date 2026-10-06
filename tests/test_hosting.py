@@ -4178,3 +4178,15 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
             die_msg = mock_die.call_args[0][0]
             self.assertIn("--original-request-id req-prev-12345", die_msg)
             self.assertIn("retire-delivery", die_msg)
+
+
+class TestComposeServiceStates(unittest.TestCase):
+    def test_summarizes_bounded_service_states(self):
+        raw = "web=created\ndb=running\nbad line with spaces\n"
+        with patch.object(hosting_cmd, "_remote_checked", return_value=raw):
+            self.assertEqual(hosting_cmd._compose_service_states({}, "docker compose"),
+                             "db=running, web=created")
+
+    def test_unobservable_states_return_empty(self):
+        with patch.object(hosting_cmd, "_remote_checked", side_effect=RuntimeError("ssh")):
+            self.assertEqual(hosting_cmd._compose_service_states({}, "docker compose"), "")

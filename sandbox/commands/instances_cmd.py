@@ -225,7 +225,10 @@ def _load_exact_init_config(sc, project_root: Path) -> dict:
         raise sc.ConfigError(f"project dir does not exist: {project_root}")
     allowed = getattr(sc, "_is_allowed", None)
     if callable(allowed) and not allowed(project_root):
-        raise sc.ConfigError(f"path not allowed: {project_root}")
+        raise sc.ConfigError(
+            f"path not allowed: {project_root}; projects must live under an allowed "
+            "root. Move it under one, or add its parent to SANDBOX_PROJECT_ROOTS "
+            "(see docs/cli-first-operation.md).")
 
     native, wp_env = _exact_init_sources(project_root)
     if native is not None or wp_env is not None or (project_root / ".git").exists():

@@ -1600,7 +1600,10 @@ Per-project (each plugin carries its own sandbox.config.json):
                     die(
                         f"no sandbox instance for project directory "
                         f"{Path(getattr(args, 'project_dir', '')).expanduser().resolve()}; "
-                        "run `sb ensure --project-dir DIR` to create one.",
+                        "run `sb ensure --project-dir DIR` to create one"
+                        + ("; to run a host command without an instance, use "
+                           "`sb job-start --local --project-dir DIR -- <argv>`"
+                           if args.cmd == "exec" else "") + ".",
                         2,
                     )
                 chosen = selected.get("instance")

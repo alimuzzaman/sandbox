@@ -35,6 +35,17 @@ from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 MAX_AGGREGATE_RESULT_BYTES = 262_144
 SYNC_LAUNCH_HANDOFF_GRACE_SECONDS = 30
 QUEUE_EXPIRY_GRACE_SECONDS = 24 * 60 * 60
+
+
+def _launch_failure(stage: str, exc: BaseException) -> dict:
+    """Bounded launch-failure evidence: stage, exception class, errno only.
+
+    The message is withheld because it can carry paths or argv; the class and
+    errno are enough to tell a missing interpreter from a full disk.
+    """
+    errno = getattr(exc, "errno", None)
+    return {"stage": stage, "error_class": type(exc).__name__[:64],
+            "errno": errno if isinstance(errno, int) else None}
 CHILD_IDENTITY_PUBLISH_WAIT_SECONDS = 1.0
 
 
@@ -134,6 +145,7 @@ class JobService:
         if submission.compatibility_differences:
             self.repository.record_compatibility_differences(
                 row["job_id"], list(submission.compatibility_differences))
+        stage = "storage"
         try:
             self.storage.job_dir(row["job_id"], create=True)
             if pending_sync:
@@ -149,8 +161,10 @@ class JobService:
                 return self._accepted(row, replay=False)
             if submission.sync_relationship_id is not None:
                 self.sync_gateway.pin_job(row, submission)
+            stage = "descriptor"
             descriptor = self._descriptor(row, submission)
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
+            stage = "scheduling"
             dependency_state, dependency_reason = self._dependency_state(row)
             if dependency_state == "blocked":
                 row = self.repository.transition(row["job_id"], Lifecycle.CANCELLED,
@@ -178,11 +192,14 @@ class JobService:
                     )
                     row["_queue_details"] = queue
                     return self._accepted(row, replay=False)
+            stage = "supervisor_spawn"
             self._launch(descriptor_path)
         except BaseException as exc:
             if self.scheduler is not None:
                 self.scheduler.release(row["job_id"])
-            self.repository.transition(row["job_id"], "failed", termination_reason="supervisor_launch_failed")
+            self.repository.transition(row["job_id"], "failed", termination_reason="supervisor_launch_failed",
+                result_json=__import__("json").dumps({"launch_failure": _launch_failure(stage, exc)},
+                                                     sort_keys=True))
             self._finalize_terminal_workspace(row["job_id"])
             raise RuntimeError("supervisor_launch_failed") from exc
         return self._accepted(row, replay=False)

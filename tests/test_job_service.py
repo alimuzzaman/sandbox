@@ -1,4 +1,5 @@
 import json
+import json
 import tempfile
 import threading
 import unittest
@@ -794,6 +795,9 @@ class JobServiceTests(unittest.TestCase):
             row = repository.list(limit=1)[0]
             self.assertEqual(row["lifecycle"], "failed")
             self.assertEqual(row["termination_reason"], "supervisor_launch_failed")
+            detail = json.loads(repository.get(row["job_id"])["result_json"])["launch_failure"]
+            self.assertEqual(detail, {"stage": "supervisor_spawn", "error_class": "OSError",
+                                      "errno": None})
             repository.close()
 
     def test_reconcile_marks_lost_supervisor_interrupted(self):

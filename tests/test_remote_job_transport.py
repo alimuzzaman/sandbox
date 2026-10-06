@@ -815,6 +815,30 @@ class RemoteJobTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "(?s)permission denied.*copy failed"):
             transport._prepare_workspace({}, "/srv/project", "workspace")
 
+    def test_workspace_prepare_reports_materializer_stage_cause_and_entry(self):
+        document = {"ok": False, "code": "workspace_materialization_failed",
+                    "error": "workspace materialization failed during publish",
+                    "detail": {"stage": "publish", "errno": "EACCES",
+                               "reason": "Permission denied", "entry": ".pnpm-store",
+                               "owner_uid": 0, "process_uid": 1000,
+                               "next_step": "remove it as root, then retry."}}
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=1, stdout=json.dumps(document) + "\n", stderr=""),
+            remote_lookup=lambda name: {"provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]},
+        )
+        with self.assertRaises(RemoteJobTransportError) as caught:
+            transport._prepare_workspace({}, "/srv/project", "workspace")
+        payload = caught.exception.to_payload(remote="r", operation="exec")
+        self.assertFalse(payload["retryable"])
+        self.assertIn("during publish", payload["error"])
+        self.assertIn("EACCES", payload["error"])
+        self.assertIn("'.pnpm-store', owner uid 0", payload["error"])
+        self.assertIn("next: remove it as root", payload["error"])
+        self.assertEqual(payload["detail"]["stage"], "publish")
+        self.assertEqual(payload["detail"]["owner_uid"], 0)
+
     def test_remote_runtime_exec_ensures_and_executes_in_the_deployed_instance(self):
         calls = []
         transport = RemoteJobTransport(

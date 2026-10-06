@@ -1589,6 +1589,14 @@ Per-project (each plugin carries its own sandbox.config.json):
                 chosen = selected.get("instance") if selected else None
             elif args.cmd == "wp" and getattr(args, "remote", None):
                 chosen = None
+            elif args.cmd == "exec" and not getattr(args, "in_instance", False) and (
+                    getattr(args, "remote", None) or getattr(args, "local", False)
+                    or getattr(args, "detach", False)):
+                # Durable exec resolves its own target from the project root;
+                # a remote instance lives in the remote registry, never the
+                # local one, so requiring a local record here refused every
+                # `exec --project-dir DIR --remote` after `ensure --remote`.
+                chosen = None
             elif args.cmd in {"wp", "exec"}:
                 try:
                     selected = resolve_registered_instance(

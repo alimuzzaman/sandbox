@@ -833,6 +833,38 @@ class TestRemoteInstanceControl(unittest.TestCase):
         delete.assert_called_once_with(entry, "preview-a")
 
 
+class TestRemoteExecInstanceSelection(unittest.TestCase):
+    def _target(self):
+        return types.SimpleNamespace(kind="remote", project_root="/work/probe",
+                                     workspace_label="default")
+
+    def test_explicit_instance_for_another_project_is_refused_not_ignored(self):
+        from sandbox.commands import runtime
+        import sandbox.core._remote as remote
+
+        args = types.SimpleNamespace(instance="lenzora-workspace-37a8eec1ce1968", json=True)
+        output = io.StringIO()
+        with mock.patch.object(remote, "deploy_target_slug", return_value="probe"), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stop:
+            runtime._require_matching_remote_instance(args, self._target())
+        self.assertEqual(stop.exception.code, 2)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["code"], "remote_instance_mismatch")
+        self.assertEqual(payload["resolved_instance"], "probe-workspace-37a8eec1ce1968")
+        self.assertIn("--project-dir", payload["error"])
+
+    def test_matching_instance_and_absent_selector_proceed(self):
+        from sandbox.commands import runtime
+        import sandbox.core._remote as remote
+
+        with mock.patch.object(remote, "deploy_target_slug", return_value="probe"):
+            runtime._require_matching_remote_instance(
+                types.SimpleNamespace(instance="probe-workspace-37a8eec1ce1968", json=True),
+                self._target())
+            runtime._require_matching_remote_instance(
+                types.SimpleNamespace(instance=None, json=True), self._target())
+
+
 class TestStatusJsonRedaction(unittest.TestCase):
     def _status_args(self):
         return types.SimpleNamespace(json=True, resolved_instance="fixture")

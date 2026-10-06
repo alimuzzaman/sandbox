@@ -39,9 +39,66 @@ def materialization_lock_name(source_path: str | Path) -> str:
 class WorkspaceMaterializationError(RuntimeError):
     """Bounded checkout materialization failure."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str,
+                 detail: dict[str, object] | None = None) -> None:
         self.code = code
+        self.detail = dict(detail or {})
         super().__init__(message)
+
+
+def _failure_detail(exc: BaseException, stage: str,
+                    roots: tuple[Path, ...]) -> dict[str, object]:
+    """Describe an OS-level failure without echoing file contents.
+
+    The entry is reported relative to the workspace parent so the caller can
+    see which file blocked the step; the owner uid explains the common case of
+    a container that wrote root-owned files into a bind-mounted workspace.
+    """
+    detail: dict[str, object] = {"stage": stage, "error_type": type(exc).__name__}
+    source = exc
+    if isinstance(exc, shutil.Error) and exc.args and isinstance(exc.args[0], list):
+        first = exc.args[0][0] if exc.args[0] else None
+        if isinstance(first, tuple) and len(first) == 3:
+            detail["entry_count"] = len(exc.args[0])
+            source = OSError(errno.EIO, str(first[2])[:200], str(first[0]))
+    if isinstance(source, OSError):
+        if source.errno is not None:
+            detail["errno"] = errno.errorcode.get(source.errno, str(source.errno))
+        if source.strerror:
+            detail["reason"] = str(source.strerror)[:200]
+        name = source.filename
+        if isinstance(name, (str, bytes, os.PathLike)):
+            candidate = Path(os.fsdecode(name))
+            paths = ([candidate] if candidate.is_absolute()
+                     else [root / candidate for root in roots])
+            for path in paths:
+                try:
+                    observed = os.lstat(path)
+                except OSError:
+                    continue
+                detail["owner_uid"] = observed.st_uid
+                break
+            parent = roots[0].parent if roots else None
+            try:
+                entry = (candidate.relative_to(parent) if candidate.is_absolute() and parent
+                         else candidate)
+            except ValueError:
+                entry = Path(candidate.name)
+            detail["entry"] = entry.as_posix()[:240]
+    detail["process_uid"] = os.geteuid()
+    owner = detail.get("owner_uid")
+    if detail.get("errno") in {"EACCES", "EPERM"} and isinstance(owner, int) \
+            and owner != os.geteuid():
+        detail["next_step"] = (
+            f"the entry is owned by uid {owner}, not the Sandbox user (uid "
+            f"{os.geteuid()}); a container running as root most likely wrote "
+            "it into the workspace. Remove it or chown it to the Sandbox user "
+            "as root on that host, then retry.")
+    elif detail.get("errno") in {"ENOSPC", "EDQUOT"}:
+        detail["next_step"] = "free disk space on that host, then retry."
+    else:
+        detail["next_step"] = "retry once; if it fails again, file sb feedback with this detail."
+    return detail
 
 
 @dataclass(frozen=True)
@@ -440,6 +497,7 @@ def materialize(plan: MaterializationPlan, *,
     fallback_reason = None
     staging_created = False
     receipt_fields = None
+    stage = "staging"
     try:
         try:
             os.mkdir(staging_name, mode=0o700, dir_fd=parent_fd)
@@ -453,8 +511,10 @@ def materialize(plan: MaterializationPlan, *,
         # support traversing a directory through /dev/fd, so copying uses the
         # plan-bound paths and rechecks both open descriptors before publication.
         _require_source_identity(parent_fd, plan)
+        stage = "copy_worktree"
         _copy_worktree(source_view, staging)
         _require_source_identity(parent_fd, plan)
+        stage = "copy_git_history"
         source_git = source_view / ".git"
         if source_git.is_dir() and not source_git.is_symlink():
             _reject_git_symlinks(source_git)
@@ -488,6 +548,7 @@ def materialize(plan: MaterializationPlan, *,
         if _identity(os.fstat(source_fd)) != plan.source_identity_fs:
             raise WorkspaceMaterializationError("workspace_identity_changed", "source identity changed")
         _require_source_identity(parent_fd, plan)
+        stage = "publish"
         _publish(staging_name, plan, parent_fd, rename=publish_rename)
         receipt_fields = (
             1, str(plan.workspace_path), plan.source_identity, history_mode,
@@ -495,9 +556,13 @@ def materialize(plan: MaterializationPlan, *,
         )
     except WorkspaceMaterializationError:
         raise
-    except (OSError, shutil.Error, subprocess.SubprocessError):
+    except (OSError, shutil.Error, subprocess.SubprocessError) as exc:
+        roots = ((plan.workspace_path, plan.source_path) if stage == "publish"
+                 else (plan.source_path, staging))
+        detail = _failure_detail(exc, stage, roots)
         raise WorkspaceMaterializationError(
-            "workspace_materialization_failed", "workspace materialization failed"
+            "workspace_materialization_failed",
+            f"workspace materialization failed during {stage}", detail,
         ) from None
     finally:
         active_exception = sys.exc_info()[0] is not None
@@ -552,7 +617,9 @@ def _main(argv: list[str] | None = None) -> int:
             source_identity=args.source_identity,
         ))
     except WorkspaceMaterializationError as exc:
-        print(json.dumps({"ok": False, "code": exc.code}, separators=(",", ":")))
+        print(json.dumps({"ok": False, "code": exc.code, "error": str(exc),
+                          **({"detail": exc.detail} if exc.detail else {})},
+                         separators=(",", ":")))
         return 1
     print(json.dumps({"ok": True, "receipt": receipt.to_dict()}, separators=(",", ":")))
     return 0

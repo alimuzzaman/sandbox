@@ -108,6 +108,48 @@ class WorkspaceGitDedupTests(unittest.TestCase):
             self.assertEqual((victim / "keep.txt").read_text(), "keep")
             self.assertFalse((victim / "new.txt").exists())
 
+    def test_publish_failure_names_stage_cause_and_blocking_entry(self):
+        """A container-written root-owned entry used to fail with no detail."""
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from sandbox.workspaces import checkout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            workspace = root / "workspace"
+            source.mkdir()
+            (source / "app.txt").write_text("app")
+            materialize(plan_materialization(source, workspace))
+            (workspace / ".pnpm-store").mkdir()
+
+            def rename(src, dst, **kwargs):
+                if src == ".pnpm-store":
+                    raise PermissionError(errno.EACCES, "Permission denied", src)
+                return os.rename(src, dst, **kwargs)
+
+            with self.assertRaises(WorkspaceMaterializationError) as caught:
+                materialize(plan_materialization(source, workspace),
+                            publish_rename=rename)
+            detail = caught.exception.detail
+            self.assertEqual(caught.exception.code, "workspace_materialization_failed")
+            self.assertEqual(detail["stage"], "publish")
+            self.assertEqual(detail["errno"], "EACCES")
+            self.assertEqual(detail["entry"], ".pnpm-store")
+            self.assertEqual(detail["owner_uid"], os.geteuid())
+            self.assertIn("next_step", detail)
+            self.assertTrue((workspace / ".pnpm-store").is_dir())
+            self.assertEqual((workspace / "app.txt").read_text(), "app")
+
+            with patch.object(checkout, "materialize", side_effect=caught.exception), \
+                    redirect_stdout(io.StringIO()) as output:
+                code = checkout._main(["materialize", "--source", str(source),
+                                       "--workspace", str(workspace)])
+            self.assertEqual(code, 1)
+            printed = json.loads(output.getvalue())
+            self.assertEqual(printed["detail"]["entry"], ".pnpm-store")
+
     def test_source_identity_replacement_after_plan_is_refused(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

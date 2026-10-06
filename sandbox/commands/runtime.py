@@ -167,6 +167,41 @@ def configure_guide_parser(parser) -> None:
     parser.add_argument("--json", action="store_true", help="emit a machine-readable command catalog")
 
 
+def _require_matching_remote_instance(args, target) -> None:
+    """Refuse an explicit --instance that names another project's workspace.
+
+    Remote exec deploys the caller's working tree first, so it runs in the
+    instance derived from the resolved project and workspace label. An
+    explicit --instance used to be ignored, sending the command into whatever
+    project the cwd belonged to. An explicit selector must match or fail.
+    """
+    requested = getattr(args, "instance", None)
+    if not requested:
+        return
+    from sandbox.core import _remote
+    try:
+        expected = _remote.remote_workspace_instance_name(
+            target.project_root, target.workspace_label)
+    except ValueError as exc:
+        die(f"remote_instance_mismatch: {exc}")
+    if requested == expected:
+        return
+    message = (
+        f"--instance {requested} is not the remote instance for project "
+        f"{target.project_root} (workspace '{target.workspace_label}' runs in "
+        f"{expected}). Remote exec deploys the project's working tree, so select "
+        "the project, not just the instance: pass --project-dir <that project> "
+        "and, for a non-default workspace, --workspace <label>.")
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": False, "code": "remote_instance_mismatch",
+                          "error": message, "requested_instance": requested,
+                          "resolved_instance": expected,
+                          "project_root": str(target.project_root),
+                          "workspace": target.workspace_label}))
+        raise SystemExit(2)
+    die(f"remote_instance_mismatch: {message}", 2)
+
+
 def cmd_exec(cfg, args) -> None:
     """Execute explicit argv in a generic Compose service without MCP."""
     project_dir = getattr(args, "project_dir", None) or str(Path.cwd())
@@ -224,6 +259,8 @@ def cmd_exec(cfg, args) -> None:
                 ))
             except TargetResolutionError as exc:
                 die(f"{exc.code}: {exc}")
+        if target.kind == "remote":
+            _require_matching_remote_instance(args, target)
         policy = _resolved_execution_policy(target, args)
         output_profile = _resolved_output_profile(target, args.output_profile)
         source = _source_identity(target.project_root)

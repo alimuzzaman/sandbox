@@ -63,6 +63,31 @@ credentials out of both argv and every transferred project file.
 
 The helper and fixture must already be in the submitted project tree; a path in
 argv does not upload an external file.
+
+### Selecting the remote instance and workspace
+
+`exec --remote` runs in the instance that `ensure --remote` created for the
+same project and workspace label. The remote instance lives in the remote
+registry, so `exec --project-dir DIR --remote NAME` does not need a local
+instance. Because remote exec deploys the project's working tree first, the
+project is the selector: an explicit `--instance` must name that project's
+instance (`<project>-workspace-<hash>`, as printed by `ensure --remote`), and a
+different one is refused with `remote_instance_mismatch` instead of running in
+the cwd's project. Pass `--project-dir` (and `--workspace` for a non-default
+label) to target another project.
+
+When the remote workspace copy cannot be refreshed, the error names the failed
+stage, the OS cause, the blocking entry with its owner uid, and a `next_step`.
+The common case is a container that wrote root-owned files (for example
+`node_modules` or `.pnpm-store`) into the workspace; the Sandbox user cannot
+move them, so the refusal is not retryable until they are removed or chowned
+as root on that host.
+
+`workspace status|reset|destroy --remote` select the one record with the label
+that belongs to the project. Unattributed legacy records are listed under
+every project and are not candidates. If more than one attributed record
+remains, the refusal lists `candidates` with status and source; rerun with
+`--workspace-id <id>`.
 ## Ordinary hosted apply admission
 
 Process observation uses a real boot-session identity. An active record written

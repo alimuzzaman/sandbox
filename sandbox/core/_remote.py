@@ -1150,10 +1150,25 @@ def remote_workspace_path(remote: dict, project_root, workspace_label: str) -> s
     return f"{deploy_target_path(remote, project_root)}-workspace-{suffix}"
 
 
+def remote_workspace_instance_name(project_root, workspace_label: str) -> str:
+    """Name of the remote instance a project's workspace label runs in.
+
+    The co-located CLI derives the instance name from the workspace directory
+    name, so this is ``basename(remote_workspace_path(...))`` computed without
+    contacting the remote.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", workspace_label or ""):
+        raise ValueError("invalid remote workspace label")
+    suffix = hashlib.sha256(workspace_label.encode()).hexdigest()[:14]
+    return f"{deploy_target_slug(project_root)}-workspace-{suffix}"
+
+
 def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
                              *, deployed_path: str | None = None) -> str:
     """Copy one deployed exact tree into a deterministic isolated workspace."""
-    from sandbox.transports.remote_jobs import workspace_refresh_command
+    from sandbox.transports.remote_jobs import (
+        _materialization_failure, workspace_refresh_command,
+    )
 
     source = deployed_path or deploy_target_path(remote, project_root)
     target = remote_workspace_path(remote, project_root, workspace_label)
@@ -1167,7 +1182,9 @@ def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
     )
     result = ssh_run(remote, command, timeout=120)
     if result.returncode != 0:
-        raise RuntimeError("could not prepare remote workspace")
+        failure = _materialization_failure(getattr(result, "stdout", ""))
+        raise RuntimeError("could not prepare remote workspace" +
+                           (f": {failure[0]}" if failure else ""))
     return target
 
 

@@ -32,6 +32,13 @@ class RemoteJobTransportError(RuntimeError):
     code = "remote_job_transport_error"
     retryable = True
 
+    def __init__(self, message: str = "", *, retryable: bool | None = None,
+                 detail: dict | None = None) -> None:
+        super().__init__(message)
+        if retryable is not None:
+            self.retryable = retryable
+        self.detail = dict(detail) if isinstance(detail, dict) else None
+
     def to_payload(self, *, remote: str | None = None,
                    operation: str | None = None) -> dict:
         """Return a redacted envelope when a remote control call has no receipt."""
@@ -49,6 +56,7 @@ class RemoteJobTransportError(RuntimeError):
             "operation": operation,
             "retryable": bool(self.retryable),
             "acceptance": "unknown" if operation in {"exec", "test"} else None,
+            **({"detail": self.detail} if self.detail else {}),
         }
 
 
@@ -262,6 +270,51 @@ def _last_json(text: str) -> dict | None:
             sanitized = redact_structure(value)
             return sanitized if isinstance(sanitized, dict) else None
     return None
+
+
+_MATERIALIZATION_DETAIL_KEYS = (
+    "stage", "error_type", "errno", "reason", "entry", "entry_count",
+    "owner_uid", "process_uid", "next_step",
+)
+
+
+def _materialization_failure(stdout: object) -> tuple[str, bool, dict] | None:
+    """Render the shared materializer's typed refusal as an actionable message.
+
+    The materializer prints one JSON line naming the failed stage, the OS
+    cause, and the blocking entry. Only those finite fields are carried; an
+    ownership or disk failure is not retryable as-is, a held lock is.
+    """
+    payload = _last_json(stdout if isinstance(stdout, str) else "")
+    if not isinstance(payload, dict) or payload.get("ok") is not False:
+        return None
+    code = payload.get("code")
+    if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+        return None
+    raw = payload.get("detail") if isinstance(payload.get("detail"), dict) else {}
+    detail = {"code": code}
+    for key in _MATERIALIZATION_DETAIL_KEYS:
+        value = raw.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            detail[key] = value
+        elif isinstance(value, str) and value:
+            detail[key] = _safe_remote_detail(value, limit=400)
+    parts = [code]
+    if detail.get("stage"):
+        parts.append(f"during {detail['stage']}")
+    cause = " ".join(str(detail[key]) for key in ("errno", "reason") if detail.get(key))
+    if cause:
+        parts.append(f"({cause})")
+    if detail.get("entry"):
+        owner = (f", owner uid {detail['owner_uid']}" if "owner_uid" in detail else "")
+        parts.append(f"on '{detail['entry']}'{owner}")
+    message = " ".join(parts)
+    if detail.get("next_step"):
+        message += f"; next: {detail['next_step']}"
+    retryable = code == "workspace_materialization_busy"
+    return message, retryable, detail
 
 
 def _control_succeeded(payload: dict) -> bool:
@@ -667,6 +720,12 @@ class RemoteJobTransport:
         )
         result = self._run(remote, command, timeout=120)
         if getattr(result, "returncode", 1) != 0:
+            failure = _materialization_failure(getattr(result, "stdout", ""))
+            if failure is not None:
+                message, retryable, detail = failure
+                raise RemoteJobTransportError(
+                    f"remote workspace preparation failed: {message}",
+                    retryable=retryable, detail=detail)
             detail = "\n".join(part.strip() for part in (
                 getattr(result, "stderr", ""), getattr(result, "stdout", ""),
             ) if part.strip())

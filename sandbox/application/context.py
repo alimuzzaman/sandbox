@@ -8,6 +8,11 @@ from typing import Any
 from sandbox.runtimes.base import OperationRequest
 
 
+_UNATTRIBUTED_WORKSPACE_STATUSES = frozenset({
+    "unresolved", "conflict", "incomplete", "invalid", "indeterminate",
+})
+
+
 def resolve_project_identity(
     project_dir: str | Path,
     *,
@@ -1333,17 +1338,38 @@ def _remote_workspace_control(resolved_target, action, request=None):
         listing = transport.list(
             resolved_target.remote_name, project_identity=identity)
         matches = [item for item in listing.get("workspaces", ())
-                   if item.get("label") == resolved_target.workspace_label]
+                   if isinstance(item, dict)
+                   and item.get("label") == resolved_target.workspace_label]
+        # The controller lists unattributed legacy records under every
+        # project so an incomplete index stays visible. They are not
+        # candidates for this project's lifecycle control: when exactly one
+        # attributed record carries the label, it is the workspace.
+        attributed = [item for item in matches
+                      if item.get("status") not in _UNATTRIBUTED_WORKSPACE_STATUSES]
+        if len(matches) != 1 and len(attributed) == 1:
+            matches = attributed
         if len(matches) != 1 or not matches[0].get("workspace_id"):
             if listing.get("ok") is False:
                 return listing
             workspace_ids = sorted({
                 item["workspace_id"] for item in matches
-                if isinstance(item, dict) and isinstance(item.get("workspace_id"), str)
+                if isinstance(item.get("workspace_id"), str)
             })
+            candidates = [
+                {key: item.get(key) for key in ("workspace_id", "status", "source",
+                                                "lifecycle", "created_at")}
+                for item in sorted(matches, key=lambda entry: str(entry.get("workspace_id")))
+                if isinstance(item.get("workspace_id"), str)
+            ]
             return {"ok": False, "code": "workspace_identity_ambiguous",
-                    "error": "workspace ID is required for remote lifecycle control",
-                    "workspace_ids": workspace_ids}
+                    "error": ("workspace ID is required for remote lifecycle control: "
+                              f"{len(workspace_ids)} records carry label "
+                              f"'{resolved_target.workspace_label}' and "
+                              f"{len(attributed)} of them belong to this project"),
+                    "workspace_ids": workspace_ids, "candidates": candidates,
+                    "next_step": ("rerun with --workspace-id <id>; records with status "
+                                  "'unresolved' are legacy entries not attributed to "
+                                  "this project")}
         workspace_id = matches[0]["workspace_id"]
     if action == "status":
         return transport.status(

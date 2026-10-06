@@ -134,6 +134,49 @@ class WorkspaceContractTests(unittest.TestCase):
         self.assertEqual(result["code"], "workspace_identity_ambiguous")
         self.assertEqual(result["workspace_ids"], ["ws-one", "ws-two"])
 
+    def test_remote_label_selects_the_single_attributed_record_over_legacy(self):
+        """Unattributed legacy records are listed under every project."""
+        target = SimpleNamespace(
+            remote_name="vps", project_root="/project",
+            workspace_label="default", sources={"identity": "project-id"},
+        )
+        listing = {"ok": True, "workspaces": [
+            {"label": "default", "workspace_id": "ws-legacy-a", "status": "unresolved",
+             "source": "legacy"},
+            {"label": "default", "workspace_id": "ws-legacy-b", "status": "unresolved",
+             "source": "legacy"},
+            {"label": "default", "workspace_id": "ws-mine", "status": "ready",
+             "source": "job-reference"},
+        ]}
+        with patch("sandbox.core._remote.get_remote",
+                   return_value={"provisioned": True}), \
+             patch("sandbox.transports.remote_workspaces.RemoteWorkspaceTransport.list",
+                   return_value=listing), \
+             patch("sandbox.transports.remote_workspaces.RemoteWorkspaceTransport.status",
+                   return_value={"ok": True, "workspace_id": "ws-mine"}) as status:
+            result = _remote_workspace_control(
+                target, "status", SimpleNamespace(
+                    project_identity="project-id", workspace_id=None,
+                    migration_plan_id=None, confirm=False,
+                ))
+        self.assertTrue(result["ok"])
+        self.assertEqual(status.call_args.args[1], "ws-mine")
+
+        listing["workspaces"].pop()
+        with patch("sandbox.core._remote.get_remote",
+                   return_value={"provisioned": True}), \
+             patch("sandbox.transports.remote_workspaces.RemoteWorkspaceTransport.list",
+                   return_value=listing):
+            refused = _remote_workspace_control(
+                target, "status", SimpleNamespace(
+                    project_identity="project-id", workspace_id=None,
+                    migration_plan_id=None, confirm=False,
+                ))
+        self.assertEqual(refused["code"], "workspace_identity_ambiguous")
+        self.assertIn("--workspace-id", refused["next_step"])
+        self.assertEqual([item["status"] for item in refused["candidates"]],
+                         ["unresolved", "unresolved"])
+
     def test_cli_lifecycle_forwards_one_explicit_target_request(self):
         service = _WorkspaceService()
         output = StringIO()

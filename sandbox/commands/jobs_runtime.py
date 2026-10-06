@@ -7,6 +7,7 @@ import hashlib
 import base64
 import json
 import os
+import shutil
 import re
 import tempfile
 import time
@@ -374,6 +375,31 @@ def configure_matrix_parser(parser) -> None:
     parser.add_argument("command", nargs="...")
 
 
+def _require_local_executable(command, project_root: str, cwd_relative: str,
+                              *, as_json: bool) -> None:
+    """Refuse a local job whose program cannot be found before accepting it.
+
+    A durable job for a missing executable used to be accepted and then fail
+    in the supervisor, which reads like a launched job to the caller.
+    """
+    if not command:
+        return
+    program = str(command[0])
+    if "/" in program:
+        candidate = Path(program) if Path(program).is_absolute() \
+            else Path(project_root) / cwd_relative / program
+        found = candidate.is_file() and os.access(candidate, os.X_OK)
+    else:
+        found = shutil.which(program) is not None
+    if found:
+        return
+    payload = {"ok": False, "code": "executable_unavailable",
+               "error": f"executable {program!r} was not found or is not executable"}
+    if as_json:
+        _emit_json_line(payload)
+        raise SystemExit(1)
+    _die(f"{payload['code']}: {payload['error']}")
+
 def cmd_job_start(_cfg, args) -> None:
     command = list(getattr(args, "command", ()) or ())
     if command[:1] == ["--"]:
@@ -425,6 +451,9 @@ def cmd_job_start(_cfg, args) -> None:
         read_state = lambda job_id: transport.status(target.remote_name, job_id)
         interval = 2.0
     else:
+        _require_local_executable(command, target.project_root,
+                                  getattr(args, "cwd_relative", ".") or ".",
+                                  as_json=bool(getattr(args, "json", False)))
         accepted = dependencies["job_service"].submit(submission)
         read_state = lambda job_id: dependencies["job_service"].get(job_id)
         interval = .2

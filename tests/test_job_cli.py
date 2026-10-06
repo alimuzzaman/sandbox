@@ -282,6 +282,24 @@ class JobCliTests(unittest.TestCase):
             with self.assertRaises(SystemExit), redirect_stderr(StringIO()):
                 parser.parse_args(["a" * 32, "--local", "--remote", "r"])
 
+    def test_start_refuses_missing_local_executable_before_submission(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args(["--project-dir", "/project", "--local", "--json", "--",
+                                  "definitely-not-a-real-binary-xyz"])
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="default", runtime_policy={},
+                                 sources={"identity": "project:cli"})
+        submitted = []
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                "target_service": SimpleNamespace(resolve=lambda _request: target),
+                "job_service": SimpleNamespace(submit=lambda s: submitted.append(s)),
+            }), redirect_stdout(output), self.assertRaises(SystemExit):
+            cmd_job_start(None, args)
+        self.assertEqual(submitted, [])
+        self.assertEqual(json.loads(output.getvalue())["code"], "executable_unavailable")
+
     def _wait_start(self, lifecycle, exit_code):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)
@@ -314,7 +332,7 @@ class JobCliTests(unittest.TestCase):
         configure_start_parser(parser)
         args = parser.parse_args([
             "--project-dir", "/project", "--local", "--workspace", "unit", "--timeout", "120",
-            "--output-profile", "full", "--request-id", "request-1", "--", "python", "-c", "print('ok')",
+            "--output-profile", "full", "--request-id", "request-1", "--", "python3", "-c", "print('ok')",
         ])
         target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
                                  workspace_label="unit", runtime_policy={},
@@ -328,7 +346,7 @@ class JobCliTests(unittest.TestCase):
                 "job_service": SimpleNamespace(submit=lambda submission: captured.append(submission) or accepted),
             }), redirect_stdout(output):
             cmd_job_start(None, args)
-        self.assertEqual(captured[0].argv, ("python", "-c", "print('ok')"))
+        self.assertEqual(captured[0].argv, ("python3", "-c", "print('ok')"))
         self.assertEqual(captured[0].request_id, "request-1")
         self.assertEqual(captured[0].output_profile, "full")
         self.assertEqual(captured[0].project_identity, "project:cli")

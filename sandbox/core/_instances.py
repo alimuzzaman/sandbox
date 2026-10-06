@@ -1835,10 +1835,13 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                 if secured:
                     _auto_heal_wp_url(name, expected_url=_base_url)
                 if not _wait_reachable(final_route, require_application_success=True,
-                                       canonical_url=_base_url, timeout=10):
+                                       canonical_url=_base_url, timeout=30):
                     error = sc.ConfigError(
                         f"instance_route_unavailable: '{name}' did not answer at its "
-                        "advertised URL; its pending state is retained.")
+                        f"advertised URL {_base_url}; its pending state is retained. "
+                        "The site may still be warming up: retry "
+                        f"`./sb ensure --local --project-dir {shlex.quote(str(root))} --label {label}`, "
+                        f"or inspect `./sb status --instance {shlex.quote(name)}`.")
                     error.code = "instance_route_unavailable"
                     raise error
 

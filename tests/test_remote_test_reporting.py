@@ -51,6 +51,16 @@ class RemoteTestReportingTests(unittest.TestCase):
             debug._report_remote_test("c" * 32, "vps", cli_json=False, wait=True,
                                       transport=transport)
 
+    def test_transport_failure_is_rendered_without_traceback(self):
+        from sandbox.transports.remote_jobs import RemoteJobTransportError
+
+        def boom():
+            raise RemoteJobTransportError("supervisor_launch_failed")
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()), \
+                self.assertRaises(SystemExit) as raised:
+            debug._submit_remote_test(boom, "vps", cli_json=False)
+        self.assertNotEqual(raised.exception.code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

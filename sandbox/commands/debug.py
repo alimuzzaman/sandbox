@@ -92,6 +92,17 @@ def _report_remote_test(job_id: str, remote_name: str | None, cli_json: bool,
         f"inspect: ./sb job-status {job_id} --remote {remote_name}")
 
 
+def _submit_remote_test(submit, remote_name: str | None, cli_json: bool):
+    """Run a remote submission, rendering transport failures without a traceback."""
+    from sandbox.commands.jobs_runtime import _remote_job_transport_failure
+    from sandbox.transports.remote_jobs import RemoteJobTransportError
+    try:
+        return submit()
+    except RemoteJobTransportError as exc:
+        _remote_job_transport_failure(
+            exc, _types.SimpleNamespace(remote=remote_name, json=cli_json), "test")
+
+
 def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
                                     workspaces: list[str], timeout: int | None,
                                     output_profile: str,
@@ -356,7 +367,8 @@ def cmd_test(cfg, args) -> None:
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path)
             _announce_remote_test(target.remote_name, as_json)
-            accepted = transport.submit(submission)
+            accepted = _submit_remote_test(lambda: transport.submit(submission),
+                                           target.remote_name, as_json)
             print(json.dumps(accepted, sort_keys=True) if as_json else accepted["job_id"])
             _report_remote_test(accepted["job_id"], target.remote_name, as_json, wait, transport)
             return
@@ -439,7 +451,8 @@ def cmd_test(cfg, args) -> None:
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path)
             _announce_remote_test(selected_target.remote_name, cli_json)
-            accepted = transport.submit_many(submissions)
+            accepted = _submit_remote_test(lambda: transport.submit_many(submissions),
+                                           selected_target.remote_name, cli_json)
             if cli_json:
                 print(json.dumps(accepted, sort_keys=True))
             else:
@@ -469,7 +482,8 @@ def cmd_test(cfg, args) -> None:
             ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
             remote_sb_path=_remote.remote_sb_path)
         _announce_remote_test(selected_target.remote_name, cli_json)
-        accepted = transport.submit(submission)
+        accepted = _submit_remote_test(lambda: transport.submit(submission),
+                                       selected_target.remote_name, cli_json)
         if cli_json:
             print(json.dumps(accepted, sort_keys=True))
         else:

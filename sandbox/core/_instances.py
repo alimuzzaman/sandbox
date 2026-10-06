@@ -1786,18 +1786,6 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                         and _secure_at_create(cfg, name)):
                     secured = True
                     cfg = load_config()
-                if block.get("php_extensions") is not None:
-                    extension_status = php_extension_status(
-                        resolve_instances(cfg)[name], instance=name,
-                    )
-                    drift = (extension_status or {}).get("drift", {})
-                    if drift.get("state") != "ready":
-                        issues = drift.get("issues") or []
-                        detail = (issues[0].get("message")
-                                  if issues and isinstance(issues[0], dict)
-                                  else "PHP extension planes are not verified")
-                        raise sc.ConfigError(
-                            f"PHP extension verification blocked after ensure: {detail}")
             if secured:
                 _auto_heal_wp_url(name)
             # Multisite goes live only when the web tier reboots WITH the MULTISITE
@@ -1818,6 +1806,22 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                         "reachable after recreation; its pending state is retained.")
             _wire_project_plugins(name, root, pconf, error_factory=sc.ConfigError)
             _wire_project_themes(name, root, pconf)
+            # Verify PHP extension planes only after the project is wired, so a
+            # drift refusal leaves a mounted instance to inspect rather than one
+            # stopped before its own plugin was linked.
+            if server != "herd" and block.get("php_extensions") is not None:
+                extension_status = php_extension_status(
+                    resolve_instances(cfg)[name], instance=name,
+                )
+                drift = (extension_status or {}).get("drift", {})
+                if drift.get("state") != "ready":
+                    issues = drift.get("issues") or []
+                    detail = "; ".join(
+                        str(item.get("message")) for item in issues[:3]
+                        if isinstance(item, dict) and item.get("message")
+                    ) or f"PHP extension planes are not verified (state: {drift.get('state')})"
+                    raise sc.ConfigError(
+                        f"PHP extension verification blocked after ensure: {detail}")
 
             final_route = resolve_instances(cfg)[name]
             _base_url = site_url(final_route)

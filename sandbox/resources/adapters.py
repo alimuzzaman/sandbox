@@ -1257,10 +1257,13 @@ class LocalResourceAdapter:
             if not isinstance(job, dict):
                 continue
             root = job.get("project_root")
+            # Mirrors the remote probe: completed retained-data cleanup ends
+            # a terminal job's claim on its workspace.
             protect = (
                 job.get("lifecycle") not in terminal
-                or job.get("cleanup_policy") == "retain"
                 or job.get("cleanup_state") == "retained"
+                or (job.get("cleanup_policy") == "retain"
+                    and job.get("cleanup_state") != "completed")
             )
             if protect and isinstance(root, str) and root:
                 canonical = str(Path(root).resolve(strict=False))

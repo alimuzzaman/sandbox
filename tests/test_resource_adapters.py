@@ -838,6 +838,35 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertEqual(item.classification, "retained")
         self.assertIn("retained_job", item.references)
 
+    def test_terminal_job_with_completed_cleanup_no_longer_protects_workspace(self):
+        workspace = self.home / "deploy-src" / "project-workspace-deadbeef"
+        runner = FakeRunner({
+            ("du", "-sk"): response("1\t/path\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home,
+            runner=runner,
+            job_resource_records=lambda: {
+                "jobs": [{
+                    "project_root": str(workspace),
+                    "lifecycle": "failed",
+                    "cleanup_policy": "retain",
+                    "cleanup_state": "completed",
+                }],
+                "artifacts": [],
+            },
+            clock=lambda: NOW,
+            host_root=self.home,
+        )
+        item = next(
+            resource for resource in adapter.observe(
+                thorough=True,
+                budget_seconds=30,
+            ).resources
+            if resource.kind == "worktree"
+        )
+        self.assertNotIn("retained_job", item.references)
+
     def test_retained_job_reference_protects_matching_workspace_volume(self):
         workspace = self.home / "deploy-src" / "project-workspace-deadbeef"
         volumes = [{

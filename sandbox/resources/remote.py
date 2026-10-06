@@ -1725,10 +1725,13 @@ def lifecycle_evidence():
     }
     for job in jobs:
         root = job.get("project_root")
+        # A terminal job whose retained-data cleanup completed holds nothing
+        # in its workspace any more; its retain policy no longer protects it.
         protect = (
             job.get("lifecycle") not in terminal
-            or job.get("cleanup_policy") == "retain"
             or job.get("cleanup_state") == "retained"
+            or (job.get("cleanup_policy") == "retain"
+                and job.get("cleanup_state") != "completed")
         )
         if protect and isinstance(root, str) and root:
             canonical = str(Path(root).resolve(strict=False))

@@ -489,6 +489,10 @@ def _cmd_service(args, as_json: bool) -> None:
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
             if confirmed:
                 sr.put_remote(name, mcp_service=plan["service"])
+                # Report the post-apply state; the pre-apply observation still
+                # showed the old revision and read as a failed migration.
+                plan["observed"] = sr.remote_mcp_service_status(
+                    {**entry, "mcp_service": plan["service"]})
             payload = {"ok": True, "name": name, "status": plan["status"], "data": plan, "error": None}
         elif operation == "cleanup-broker":
             observed = sr.remote_mcp_service_status(entry)

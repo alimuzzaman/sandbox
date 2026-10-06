@@ -275,8 +275,19 @@ def _parse_output_wait_argument(value: str) -> object:
     return value
 
 
+def _job_list_limit(value: str) -> int:
+    """argparse type: a bounded page size, refused as a usage error."""
+    try:
+        limit = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer between 1 and 200") from None
+    if not 1 <= limit <= 200:
+        raise argparse.ArgumentTypeError("must be between 1 and 200")
+    return limit
+
+
 def configure_list_parser(parser) -> None:
-    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--limit", type=_job_list_limit, default=50)
     project = parser.add_mutually_exclusive_group()
     project.add_argument("--project-dir")
     project.add_argument("--project-identity", help=argparse.SUPPRESS)

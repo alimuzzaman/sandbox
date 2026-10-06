@@ -1391,6 +1391,14 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
         {k: v for k, v in resolved.items() if k != "url"})
     if not fresh:
         return existing
+    # The persisted https clean URL is the only record that `sb secure` ran.
+    # A failed proxy probe (e.g. during another instance's Caddy reload)
+    # falls back to the per-port URL; writing that over the https URL would
+    # permanently drop the instance's HTTPS block on the next Caddy regen.
+    prior = existing.get("url")
+    if (expected_url is None and _is_https_url(prior)
+            and str(fresh).startswith("http://localhost:")):
+        return existing
     block = _local_yaml().get("instances", {}).get(name, {})
     token = block.get("autologin_token", "")
     login_url = f"{fresh}/?sandbox_autologin={token}" if token else ""

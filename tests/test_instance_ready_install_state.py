@@ -219,6 +219,20 @@ class TestReadyEnsureInstallState(_IsolatedInstanceTest):
             "https://fixture.tst/wp-admin/",
         )
 
+    def test_failed_probe_does_not_downgrade_secured_url(self):
+        state = mock.Mock()
+        existing = {"instance": "fixture", "url": "https://fixture.tst",
+                    "admin_url": "https://fixture.tst/wp-admin/"}
+        with mock.patch.object(_instances, "resolve_instances", return_value={
+                "fixture": {"wordpress_port": 8088, "domain": "fixture.tst", "tld": "tst"},
+            }), mock.patch.object(_instances, "site_url",
+                                  return_value="http://localhost:8088"):
+            result = _instances._refresh_registered_url(
+                state, "/project", "default", existing, {},
+            )
+        self.assertEqual(result, existing)
+        state.registry_put.assert_not_called()
+
     def _ready_patches(self, state):
         return (
             mock.patch.object(_instances, "_core", return_value=state),

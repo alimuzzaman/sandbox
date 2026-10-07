@@ -1300,6 +1300,19 @@ def _mount_drift_detail(drift: object) -> str:
     return f" ({', '.join(parts)}{where})"
 
 
+def _start_stopped_instance(instance: str, timeout: int = 300) -> bool:
+    """Run `sb up` for one stopped instance; True when it exited cleanly."""
+    try:
+        result = subprocess.run(
+            [str(ROOT / "sb"), "up", "--instance", instance, "--json"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def _mount_attestation_refusal(code: object, project_dir: str,
                                instance_name: str,
                                label: str = "default", drift: object = None) -> dict:
@@ -1310,9 +1323,9 @@ def _mount_attestation_refusal(code: object, project_dir: str,
     selector = f" --label {label}" if label != "default" else ""
     remedy = f"sb apply --project-dir {project_dir}{selector}"
     message = (
-        "the existing Sandbox instance containers are stopped; "
-        f"run `sb up --instance {instance_name}` to start the full Compose set, "
-        "then retry ensure"
+        "the existing Sandbox instance containers are stopped and `sb up` "
+        f"could not start them; run `sb up --instance {instance_name}` to see "
+        "the failure, then retry ensure"
         if code == "instance_runtime_stopped" else
         "live Sandbox source mounts do not match the declared policy"
         f"{_mount_drift_detail(drift)}; run `{remedy}` to reconcile"
@@ -1609,6 +1622,13 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
                     if desired_sources is not None else
                     {"ok": False, "code": "instance_mount_state_unavailable"}
                 )
+                if attestation.get("code") == "instance_runtime_stopped":
+                    # A stopped, provisioned stack only needs the normal `up`
+                    # path (which also recovers a pruned network); then prove
+                    # the mounts again before reporting ready.
+                    if _start_stopped_instance(str(existing["instance"])):
+                        attestation = attest_source_mounts(
+                            existing["instance"], str(server), desired_sources)
                 if not attestation.get("ok"):
                     return _mount_attestation_refusal(
                         attestation.get("code"), root,

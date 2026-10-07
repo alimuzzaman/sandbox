@@ -115,7 +115,54 @@ class TestSourceMountAttestation(unittest.TestCase):
         )
         self.assertEqual(result["error"]["code"], "instance_runtime_stopped")
         self.assertIn("sb up --instance fixture", result["error"]["message"])
-        self.assertIn("full Compose set", result["error"]["message"])
+        self.assertIn("could not start them", result["error"]["message"])
+
+    def _ensure_stopped(self, attest_results, started):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "plugins-home").mkdir()
+
+            class State:
+                ConfigError = RuntimeError
+
+                @staticmethod
+                @contextlib.contextmanager
+                def project_lock(_value):
+                    yield
+
+                @staticmethod
+                def load_project_config(_project, label=None):
+                    return {"root": str(root), "server": "apache", "plugins": []}
+
+                @staticmethod
+                def registry_get(_root, label=None):
+                    return {"instance": "fixture", "status": "ready", "server": "apache"}
+
+            with mock.patch.object(_instances, "_core", return_value=State()), \
+                    mock.patch.object(_instances, "_desired_source_mounts", return_value={}), \
+                    mock.patch.object(_instances, "attest_source_mounts",
+                                      side_effect=attest_results) as attest, \
+                    mock.patch.object(_instances, "_start_stopped_instance",
+                                      return_value=started) as start, \
+                    mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=AssertionError):
+                result = _instances.ensure_instance(
+                    {"defaults": {"plugins_home": str(root / "plugins-home")}}, str(root))
+        return result, attest, start
+
+    def test_ensure_starts_a_stopped_instance_then_attests_again(self):
+        result, attest, start = self._ensure_stopped(
+            [{"ok": False, "code": "instance_runtime_stopped"},
+             {"ok": False, "code": "instance_mount_drift"}], True)
+        start.assert_called_once_with("fixture")
+        self.assertEqual(attest.call_count, 2)
+        self.assertEqual(result["error"]["code"], "instance_mount_drift")
+
+    def test_ensure_refuses_when_starting_a_stopped_instance_fails(self):
+        result, attest, start = self._ensure_stopped(
+            [{"ok": False, "code": "instance_runtime_stopped"}], False)
+        start.assert_called_once_with("fixture")
+        self.assertEqual(attest.call_count, 1)
+        self.assertEqual(result["error"]["code"], "instance_runtime_stopped")
 
     def test_ready_refusal_precedes_every_write_capable_ensure_step(self):
         missing_plugins_home = Path(tempfile.mkdtemp()) / "not-created"

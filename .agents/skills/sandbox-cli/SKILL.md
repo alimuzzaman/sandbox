@@ -797,8 +797,9 @@ attested, `sb ensure` returns `instance_mount_drift` or
 state, then use the explicit `sb apply --project-dir .`; do not retry ensure as
 a substitute for reconciliation. Herd has no Docker mount attestation.
 
-If a registered Compose instance is stopped, resume it with
-`sb up --instance NAME --json` before retrying ensure. A missing managed network
+If a registered instance is stopped, ensure starts it through `sb up` and
+checks its mounts again; it returns `instance_runtime_stopped` only when that
+start fails. A missing managed network
 is retried once with `--force-recreate` (volumes kept); only if that fails does
 `up` return a nonzero, typed `stale_container_network` JSON envelope with the exact
 targeted `down`/`up` recovery command; machine callers must branch on that code,

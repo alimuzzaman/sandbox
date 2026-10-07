@@ -799,7 +799,8 @@ a substitute for reconciliation. Herd has no Docker mount attestation.
 
 If a registered Compose instance is stopped, resume it with
 `sb up --instance NAME --json` before retrying ensure. A missing managed network
-returns a nonzero, typed `stale_container_network` JSON envelope with the exact
+is retried once with `--force-recreate` (volumes kept); only if that fails does
+`up` return a nonzero, typed `stale_container_network` JSON envelope with the exact
 targeted `down`/`up` recovery command; machine callers must branch on that code,
 not parse the human message.
 

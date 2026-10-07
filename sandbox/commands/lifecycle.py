@@ -258,17 +258,19 @@ def _compose_up(
     quiet: bool = False,
     json_output: bool = False,
     _pool_retry: bool = False,
+    _network_retry: bool = False,
 ) -> object:
     """Start one managed stack and classify stale-network failures.
 
     Compose normally streams its own diagnostics, but a missing network can
     leave an old container attached to a network ID that no longer exists.
-    Capture this bounded startup result so callers get a stable recovery code
-    instead of a raw Docker message.  No cleanup or container mutation is
-    attempted here.
+    That case is retried once with ``--force-recreate``: Compose recreates the
+    network and the containers, and volumes are kept.  A second failure gets a
+    stable recovery code instead of a raw Docker message.
     """
+    recreate = ("--force-recreate",) if _network_retry else ()
     result = compose(
-        "up", "-d", "--remove-orphans", *services,
+        "up", "-d", "--remove-orphans", *recreate, *services,
         instance=instance, check=False, capture=True,
     )
     returncode = getattr(result, "returncode", 0)
@@ -315,19 +317,27 @@ def _compose_up(
             }, sort_keys=True))
             raise SystemExit(returncode)
         die(message, code=returncode)
-    if re.search(r"\bnetwork\b[^\n]{0,240}\bnot found\b", output,
-                 flags=re.IGNORECASE):
+    missing_network = re.search(r"\bnetwork\b[^\n]{0,240}\bnot found\b",
+                                output, flags=re.IGNORECASE)
+    if missing_network and not _network_retry:
+        if not json_output:
+            info(f"The Docker network for instance {instance!r} is missing; "
+                 "recreating its containers once (volumes are kept).")
+        return _compose_up(instance, services, quiet=quiet,
+                           json_output=json_output, _pool_retry=_pool_retry,
+                           _network_retry=True)
+    if missing_network:
         quoted = shlex.quote(str(instance))
         message = (
             "stale_container_network: the managed Docker network for "
-            f"instance {instance!r} is missing; no containers or volumes were "
-            "removed. Recover this instance with: "
+            f"instance {instance!r} is still missing after one container "
+            "recreate; no volumes were removed. Recover this instance with: "
             f"./sb down --instance {quoted} && ./sb up --instance {quoted}"
         )
         if json_output:
             print(json.dumps({
                 "ok": False,
-                "mutated": False,
+                "mutated": True,
                 "command": "up",
                 "instance": instance,
                 "error": {

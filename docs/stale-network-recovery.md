@@ -1,11 +1,13 @@
 # Stale Docker network recovery
 
 When a managed local instance has an old container that refers to a Docker
-network which no longer exists, `./sb up` returns the stable error code
-`stale_container_network`. The command does not remove containers, volumes, or
-other instances automatically.
+network which no longer exists, `./sb up` retries once with
+`docker compose up --force-recreate`. Compose recreates the network and that
+instance's containers; volumes and other instances are not touched. If the
+retry also fails, `up` returns the stable error code `stale_container_network`
+(`mutated: true`, since containers were recreated).
 
-Recover only the named instance after checking that no operation is using it:
+Then recover only the named instance after checking that no operation is using it:
 
 ```sh
 ./sb down --instance NAME && ./sb up --instance NAME

@@ -25,11 +25,27 @@ class TestStaleNetworkRecovery(unittest.TestCase):
         message = output.getvalue()
         self.assertIn("stale_container_network", message)
         self.assertIn("./sb down --instance demo && ./sb up --instance demo", message)
-        self.assertIn("no containers or volumes were removed", message)
-        compose.assert_called_once_with(
-            "up", "-d", "--remove-orphans", "wp", "db", "mailpit",
-            instance="demo", check=False, capture=True,
+        self.assertIn("no volumes were removed", message)
+        self.assertEqual([c.args for c in compose.call_args_list], [
+            ("up", "-d", "--remove-orphans", "wp", "db", "mailpit"),
+            ("up", "-d", "--remove-orphans", "--force-recreate", "wp", "db", "mailpit"),
+        ])
+
+    def test_missing_network_recovers_with_one_force_recreate(self):
+        missing = SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="Error response from daemon: network sandbox-demo_default not found",
         )
+        started = SimpleNamespace(returncode=0, stdout="", stderr="")
+        output = io.StringIO()
+        with patch.object(lifecycle, "compose", side_effect=[missing, started]) as compose, \
+             contextlib.redirect_stdout(output):
+            returned = lifecycle._compose_up("demo", ("wp",), quiet=True, json_output=True)
+
+        self.assertIs(returned, started)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(compose.call_args_list[1].args,
+                         ("up", "-d", "--remove-orphans", "--force-recreate", "wp"))
 
     def test_success_preserves_compose_output(self):
         output = io.StringIO()
@@ -62,7 +78,7 @@ class TestStaleNetworkRecovery(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["error"]["code"], "stale_container_network")
         self.assertEqual(payload["instance"], "demo")
-        self.assertFalse(payload["mutated"])
+        self.assertTrue(payload["mutated"])
         self.assertEqual(
             payload["recovery"]["command"],
             "./sb down --instance demo && ./sb up --instance demo",

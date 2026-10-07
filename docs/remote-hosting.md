@@ -1681,6 +1681,10 @@ target paths, and whether the policy and authority are already installed. It tak
 no target lock, does not open the rollback signer, and writes nothing. The
 stage-bundle and activation-bundle phases still require `--confirm`.
 Activation-bundle provisioning now returns snapshot and grant expiry timestamps.
+A refused provision also reports `phase` and, when known, a value-free `detail`:
+the failing step (`activation_bundle.read`, `.validate` or `.compare`) plus the
+exception class, or `unlisted_code:<code>` / `unclassified:<class>` where the code
+was collapsed to `artifact_invalid`. It never carries messages, paths or values.
 
 `host image forward-review` takes the exact plan, staged proof, request ID and
 expected generation. It returns `not_required`, a native `approval_required`

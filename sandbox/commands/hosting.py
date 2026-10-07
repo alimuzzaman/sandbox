@@ -4993,6 +4993,12 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         grant_expires_at=bundle["rollback_grant"]["expires_at"])
     except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         response["code"] = getattr(exc, "code", "artifact_invalid")
+        response["phase"] = getattr(args, "provision_phase", None)
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, str) and detail:
+            response["detail"] = detail
+        elif not hasattr(exc, "code"):
+            response["detail"] = f"unclassified:{type(exc).__name__}"
         # Preserve the public refusal code while exposing only fixed adapter
         # reasons. Never forward arbitrary exception messages or remote output.
         if isinstance(exc, RemoteActivationError) and str(exc) in {

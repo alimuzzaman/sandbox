@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import json
 import os
 from pathlib import Path
@@ -43,8 +44,15 @@ class ProvisioningError(RuntimeError):
         "preparation_expired",
     })
 
-    def __init__(self, code: str) -> None:
+    _DETAIL = re.compile(r"[a-z][a-z0-9_.:]{0,79}\Z", re.IGNORECASE)
+
+    def __init__(self, code: str, detail: str | None = None) -> None:
         self.code = code if code in self.CODES else "artifact_invalid"
+        if detail is None and code != self.code and isinstance(code, str):
+            detail = f"unlisted_code:{code}"
+        # Value-free diagnostic: a fixed step name plus an exception class
+        # name, never a message, path or document value.
+        self.detail = detail if isinstance(detail, str) and self._DETAIL.match(detail) else None
         super().__init__(self.code)
 
 
@@ -205,6 +213,7 @@ def reuse_activation_bundle(path: Path, *, plan: VerifiedImagePlanSet, proof: St
     retry must not silently rotate the inputs behind an existing snapshot ID.
     """
     from sandbox.hosting.images.plan_set import read_stable_file
+    step = "activation_bundle.read"
     try:
         if input_contract not in {"candidate-v1", "candidate-v2"}:
             raise ProvisioningError("conflict")
@@ -213,7 +222,9 @@ def reuse_activation_bundle(path: Path, *, plan: VerifiedImagePlanSet, proof: St
         except FileNotFoundError:
             return None
         raw = _load_json_bytes(read_stable_file(path, MAX_PROVISIONING_DOCUMENT_BYTES, owner_only=True))
+        step = "activation_bundle.validate"
         snapshot, grant = _validate_activation_bundle(raw)
+        step = "activation_bundle.compare"
         instant = int(time.time()) if now is None else now
         prior = activation_digest("sandbox.hosting.images.activation-genesis.v2",
             {"target": proof.target.as_mapping(), "generation": 0}) if current_generation == 0 else current_generation_digest
@@ -247,10 +258,13 @@ def reuse_activation_bundle(path: Path, *, plan: VerifiedImagePlanSet, proof: St
         if grant.issued_at > instant or min(snapshot.expires_at, grant.expires_at) <= instant:
             raise ProvisioningError("preparation_expired")
         return raw
-    except ProvisioningError:
+    except ProvisioningError as exc:
+        if exc.detail is None:
+            exc.detail = step
         raise
-    except (OSError, ValueError, TypeError, KeyError):
-        raise ProvisioningError("artifact_invalid") from None
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise ProvisioningError("artifact_invalid",
+                                f"{step}:{type(exc).__name__}") from None
 
 
 def install_activation_bundle(path: Path, value: dict[str, Any], *, now: int | None = None) -> str:

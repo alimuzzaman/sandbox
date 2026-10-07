@@ -585,6 +585,12 @@ class ProvisioningTests(unittest.TestCase):
         self.assertRegex(revision, r"^r1_[0-9a-f]{32}$")
         self.assertNotIn("secret-canary", revision)
 
+    def test_provisioning_error_detail_is_value_free(self):
+        self.assertEqual(ProvisioningError("bogus_code").code, "artifact_invalid")
+        self.assertEqual(ProvisioningError("bogus_code").detail, "unlisted_code:bogus_code")
+        self.assertIsNone(ProvisioningError("conflict", "/home/u/secret path").detail)
+        self.assertIsNone(ProvisioningError("conflict").detail)
+
     def test_activation_bundle_uses_exact_ledger_and_verified_signature(self):
         plan = plan_set(); policy = policy_set(plan); request = request_set(plan, policy)
         proof = __import__("sandbox.hosting.images.staging_v2", fromlist=["StagedImageProofSet"]).StagedImageProofSet.create(
@@ -619,8 +625,14 @@ class ProvisioningTests(unittest.TestCase):
                 public_key=signer.public_key, now=200)
             with patch.object(signer, "sign", side_effect=AssertionError("replay cannot sign")):
                 self.assertEqual(reuse_activation_bundle(path, **selectors), bundle)
-            with self.assertRaisesRegex(ProvisioningError, "conflict"):
+            with self.assertRaisesRegex(ProvisioningError, "conflict") as caught:
                 reuse_activation_bundle(path, **{**selectors, "stage_ledger_revision": 8})
+            self.assertEqual(caught.exception.detail, "activation_bundle.compare")
+            corrupt = root / "corrupt.json"
+            corrupt.write_text("{not json"); corrupt.chmod(0o600)
+            with self.assertRaisesRegex(ProvisioningError, "artifact_invalid") as caught:
+                reuse_activation_bundle(corrupt, **selectors)
+            self.assertTrue(caught.exception.detail.startswith("activation_bundle.read:"))
             with self.assertRaisesRegex(ProvisioningError, "expired"):
                 reuse_activation_bundle(path, **{**selectors, "now": 1001})
             retained = path.read_bytes()

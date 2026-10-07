@@ -257,6 +257,16 @@ class PostgresRecoveryTests(unittest.TestCase):
             for options in ({'verify': True}, {'verify': True, 'inspect': True}):
                 with self.assertRaises(RecoveryError): recovery.restore({}, **options)
 
+    def test_register_names_a_conflicting_existing_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _ = self._recovery(Path(directory), FakeTransport(b''))
+            recovery.register(source(), confirm=True)
+            changed = {**source(), 'container_id': 'f' * 64}
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.register(changed, confirm=True)
+            self.assertEqual(raised.exception.code, 'source_binding_conflict')
+            self.assertEqual(recovery.register(source(), confirm=True)['code'], 'replayed')
+
     def test_readiness_uses_verified_ciphertext_channel_without_passphrase(self):
         from sandbox.hosting.images.provisioning import install_owner_only_json
         with tempfile.TemporaryDirectory() as directory:

@@ -179,7 +179,8 @@ Observe an uninstalled descriptor by adding `--source-binding SOURCE.json` to
 registering its matching client image. The observation still uses the registered
 remote and broker, and does not install or replace a source.
 
-Registration does not replace an existing different binding. Requests are
+Registration does not replace an existing different binding; it refuses with
+`source_binding_conflict`. Requests are
 immutable. A lost response reuses the same request; a partial retained operation
 without a terminal record reports uncertainty rather than overwriting data or
 choosing another identity. Run long capture/restore operations through durable

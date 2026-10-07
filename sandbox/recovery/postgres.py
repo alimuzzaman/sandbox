@@ -12,7 +12,7 @@ import re
 import tarfile
 import tempfile
 
-from sandbox.hosting.images.provisioning import install_owner_only_json, _read_owner_only_json, _owned_directory
+from sandbox.hosting.images.provisioning import ProvisioningError, install_owner_only_json, _read_owner_only_json, _owned_directory
 from sandbox.hosting.images.plan_set import read_stable_file
 from .database import DatabaseCapture
 from .errors import RecoveryError
@@ -127,7 +127,13 @@ class PostgresRecovery:
     def register(self, source, *, confirm=False):
         source = recovery_source(source)
         if not confirm: return {'code': 'registration_planned', 'source': source.as_mapping(), 'source_digest': source.source_digest}
-        disposition = install_owner_only_json(self._source_path(source.remote, source.profile), source.as_mapping())
+        try:
+            disposition = install_owner_only_json(self._source_path(source.remote, source.profile), source.as_mapping())
+        except ProvisioningError as exc:
+            if exc.code != 'conflict': raise
+            # Registration never replaces a different binding; name that instead of a generic failure.
+            raise RecoveryError('a different source is already registered for this profile',
+                                'source_binding_conflict') from None
         return {'code': disposition, 'source_digest': source.source_digest}
 
     def source(self, remote, profile):

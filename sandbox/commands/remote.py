@@ -615,7 +615,33 @@ def _provider_label(entry: dict) -> str:
         return "unknown"
 
 
+def _project_selected_remote(project_dir) -> tuple[str | None, str]:
+    """Return (remote name, source) the project's runtime block selects."""
+    from sandbox.application.context import load_project_descriptor
+    from sandbox.config.runtime import normalize_runtime_policy
+    try:
+        descriptor = load_project_descriptor(project_dir)
+    except SystemExit:
+        die(f"could not resolve project at {project_dir}")
+    except Exception as exc:  # noqa: BLE001 - surfaced as a bounded CLI error
+        die(f"could not resolve project at {project_dir}: {exc}")
+    try:
+        runtime = normalize_runtime_policy((descriptor or {}).get("runtime"))
+    except ValueError as exc:
+        die(f"project runtime configuration is invalid: {exc}")
+    remote = runtime.get("remote")
+    if not remote:
+        return None, "none"
+    return remote, ("project-default" if runtime.get("default") == "remote" else "project")
+
+
 def _cmd_list(args, as_json: bool) -> None:
+    project_dir = getattr(args, "project_dir", None)
+    if not isinstance(project_dir, (str, Path)):
+        project_dir = None
+    selected_name = selection_source = None
+    if project_dir:
+        selected_name, selection_source = _project_selected_remote(project_dir)
     remotes = sr.list_remotes()
     rows = []
     for name, entry in sorted(remotes.items()):
@@ -631,8 +657,17 @@ def _cmd_list(args, as_json: bool) -> None:
             "provisioned": bool(entry.get("provisioned")),
             "provider": _provider_label(entry),
         })
+        if project_dir:
+            rows[-1]["selected"] = name == selected_name
     if as_json:
-        print(json.dumps({"ok": True, "remotes": rows, "error": None}))
+        payload = {"ok": True, "remotes": rows, "error": None}
+        if project_dir:
+            payload["selection"] = {
+                "remote": selected_name,
+                "source": selection_source,
+                "registered": selected_name in remotes if selected_name else False,
+            }
+        print(json.dumps(payload))
         return
     if not rows:
         info("no remotes registered — add one with `./sb remote add <name> <ssh_url>`")
@@ -641,7 +676,14 @@ def _cmd_list(args, as_json: bool) -> None:
         reach = "reachable" if r["reachable"] else "unreachable"
         prov = "provisioned" if r["provisioned"] else "not provisioned"
         state = r["reachability"]["state"]
-        print(f"  {r['name']}  {reach} ({state}), {prov}, provider {r['provider']}")
+        marker = "* " if r.get("selected") else "  "
+        suffix = " [selected by project]" if r.get("selected") else ""
+        print(f"{marker}{r['name']}  {reach} ({state}), {prov}, provider {r['provider']}{suffix}")
+    if project_dir:
+        if selected_name and selected_name not in remotes:
+            info(f"project selects remote '{selected_name}', which is not registered")
+        elif not selected_name:
+            info("this project does not select a remote (no runtime.remote)")
 
 
 def _cmd_set_origin(args, as_json: bool) -> None:

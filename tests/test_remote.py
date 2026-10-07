@@ -221,6 +221,77 @@ class TestFeature022FinalRemoteRegression(unittest.TestCase):
         self.assertNotIn("remote-list-secret", output.getvalue())
 
 
+class TestRemoteListProjectSelection(unittest.TestCase):
+    """5bda94d7: --project-dir keeps listing every remote and marks the selected one."""
+
+    REMOTES = {
+        "alpha": {"ssh": "user@alpha.example", "provisioned": True},
+        "beta": {"ssh": "user@beta.example", "provisioned": True},
+    }
+
+    def _run(self, descriptor, as_json=True, project_dir="/tmp/proj"):
+        output = StringIO()
+        with patch.object(sr, "list_remotes", return_value=self.REMOTES), \
+             patch.object(sr, "check_reachable_diagnostic", return_value={
+                 "reachable": True, "state": "reachable", "latency_ms": 1}), \
+             patch("sandbox.application.context.load_project_descriptor",
+                   return_value=descriptor), \
+             redirect_stdout(output):
+            remote_cmd._cmd_list(types.SimpleNamespace(project_dir=project_dir), as_json)
+        return output.getvalue()
+
+    def test_project_selected_remote_is_marked_and_all_remotes_listed(self):
+        payload = json.loads(self._run({"runtime": {"default": "remote", "remote": "beta"}}))
+        self.assertEqual([r["name"] for r in payload["remotes"]], ["alpha", "beta"])
+        self.assertEqual({r["name"]: r["selected"] for r in payload["remotes"]},
+                         {"alpha": False, "beta": True})
+        self.assertEqual(payload["selection"],
+                         {"remote": "beta", "source": "project-default", "registered": True})
+
+    def test_project_without_runtime_remote_selects_nothing(self):
+        payload = json.loads(self._run({}))
+        self.assertTrue(all(r["selected"] is False for r in payload["remotes"]))
+        self.assertEqual(payload["selection"]["source"], "none")
+
+    def test_unregistered_project_remote_is_reported(self):
+        payload = json.loads(self._run({"runtime": {"remote": "gamma"}}))
+        self.assertEqual(payload["selection"],
+                         {"remote": "gamma", "source": "project", "registered": False})
+
+    def test_human_output_marks_selected_remote(self):
+        text = self._run({"runtime": {"default": "remote", "remote": "alpha"}}, as_json=False)
+        self.assertIn("* alpha", text)
+        self.assertIn("[selected by project]", text)
+        self.assertIn("  beta", text)
+        self.assertNotIn("alpha.example", text)
+
+    def test_without_project_dir_rows_have_no_selected_key(self):
+        output = StringIO()
+        with patch.object(sr, "list_remotes", return_value=self.REMOTES), \
+             patch.object(sr, "check_reachable_diagnostic", return_value={
+                 "reachable": True, "state": "reachable", "latency_ms": 1}), \
+             redirect_stdout(output):
+            remote_cmd._cmd_list(types.SimpleNamespace(), True)
+        payload = json.loads(output.getvalue())
+        self.assertNotIn("selection", payload)
+        self.assertTrue(all("selected" not in r for r in payload["remotes"]))
+
+    def test_parser_accepts_project_dir_for_remote_list(self):
+        from sandbox import cli
+        seen = {}
+
+        def capture(args, as_json):
+            seen["project_dir"] = getattr(args, "project_dir", None)
+
+        with patch.object(sys, "argv", ["sb", "remote", "list", "--project-dir", "."]), \
+             patch.object(remote_cmd, "_cmd_list", capture):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                self.assertIn(exc.code, (0, None))
+        self.assertEqual(seen.get("project_dir"), ".")
+
+
 class TestValidateRemoteName(unittest.TestCase):
     def test_valid_names_pass(self):
         for name in ["myvps", "my-vps", "my_vps", "vps1"]:

@@ -855,6 +855,9 @@ Per-project (each plugin carries its own sandbox.config.json):
              "content fingerprint is unchanged since the last push")
     remote_p.add_argument("--dry-run", dest="dry_run", action="store_true",
         help="for `remote plugins`: report what would be mirrored, transfer nothing")
+    remote_p.add_argument("--project-dir", dest="project_dir", default=None,
+        help="for `remote list`: still list every remote, and mark the one this "
+             "project selects (runtime.remote in sandbox.config.json) as selected")
     remote_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
     remote_p.add_argument("--ssh", action="store_true",

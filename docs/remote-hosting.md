@@ -274,6 +274,14 @@ Remote-list JSON also includes a safe `reachability` state (`reachable`, `timeou
 `unreachable`, or `probe_unavailable`) and bounded probe latency. The state is
 diagnostic metadata only; SSH targets and probe output are never returned.
 
+`./sb remote list --project-dir DIR` still lists every registered remote. It also
+marks the remote that project selects through `runtime.remote` in its
+`sandbox.config.json`: each JSON row gains `selected: true|false`, the envelope gains
+`selection: {remote, source, registered}` (`source` is `project-default` when
+`runtime.default` is `remote`, `project` when the remote is only named, and `none`
+when the project names no remote), and text output prefixes the selected row with `*`.
+Without `--project-dir` the output is unchanged.
+
 `provision` asks whether you want Tailscale instead of public HTTPS when run
 interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
 `--control tailscale` to opt into Tailscale explicitly. It is plan-first: omit
@@ -1000,7 +1008,7 @@ reference. Summary:
 | Command | Purpose |
 |---|---|
 | `./sb remote add <name> <ssh_url>` | Register a VPS target |
-| `./sb remote list` | Show configured remotes + reachability + provisioned status |
+| `./sb remote list [--project-dir DIR]` | Show configured remotes + reachability + provisioned status; with `--project-dir`, mark the remote that project selects |
 | `./sb remote provision <name> --control-host <host> --confirm [--upload-timeout <seconds>]` | Fully automated install + start the remote MCP server over public HTTPS |
 | `./sb remote provision <name> --control tailscale --confirm` | Same, but use Tailscale instead of public HTTPS |
 | `./sb remote service status <name> --json` | Read-only owned-service, listener, and recovery evidence |

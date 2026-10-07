@@ -1395,8 +1395,8 @@ def cmd_install(cfg, args) -> None:
               instance=inst, check=False, capture=True)
 
     # One-click autologin URL — token embedded in the mu-plugin file so it
-    # survives container restarts (the WP Docker entrypoint regenerates
-    # wp-config.php from env-vars on every start, wiping `wp config set` values).
+    # survives a recreated wp-config.php (recreate / fresh install). The WP
+    # Docker entrypoint only creates wp-config.php when it is missing.
     import secrets as _secrets
     autologin_token = _secrets.token_hex(16)
     mu_dir = wp_dir(inst) / "wp-content" / "mu-plugins"

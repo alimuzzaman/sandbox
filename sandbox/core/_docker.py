@@ -174,9 +174,11 @@ def _config_extra_php(inst_cfg: dict, docroot: str = "/var/www/html") -> str:
     network constants gated on the conversion marker file. Every define is
     defined()-guarded so literal constants that wp-cli wrote into
     wp-config.php (multisite-convert, litespeed pinning) never double-define.
-    Living in the compose env is what makes the constants survive container
-    restarts — the official entrypoint regenerates wp-config.php from env on
-    start, wiping anything written via `wp config set`."""
+    Living in the compose env is what lets a changed constant take effect on
+    `sb apply` without editing wp-config.php: the generated wp-config.php reads
+    this block at request time. The official entrypoint creates wp-config.php
+    only when it is missing; it never rewrites an existing one, so literals a
+    plugin or `wp config set` writes there persist across restarts."""
     lines = [f"defined('{k}') || define('{k}', {_php_literal(v)});"
              for k, v in _merged_wp_config(inst_cfg).items()]
     mode = _multisite_mode(inst_cfg)

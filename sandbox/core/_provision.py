@@ -108,8 +108,8 @@ def _write_mail_muplugin(instance: str) -> None:
     Lives in the shared runtime/wp-<instance> bind-mount, so it is visible to
     BOTH the web (`wp`) and the `wpcli` tiers — CLI-triggered mail
     (e.g. `./sb wp eval`, cron, tests) is captured too. mu-plugins auto-load
-    with no activation and survive container restarts (unlike `wp config set`,
-    which the entrypoint wipes). Image-agnostic; mirrors _write_ssl_muplugin."""
+    with no activation and survive a recreated wp-config.php (unlike
+    `wp config set`). Image-agnostic; mirrors _write_ssl_muplugin."""
     mu_dir = _ensure_muplugins_dir(instance)
     (mu_dir / "00-sandbox-mail.php").write_text(
         "<?php\n"
@@ -988,8 +988,9 @@ def _convert_multisite(inst: str, inst_cfg: dict) -> None:
     `multisite` config. Idempotent: skips the convert when the network tables
     already exist. The marker file written here is what turns on the MULTISITE
     constants in WORDPRESS_CONFIG_EXTRA (see _config_extra_php) — wp-cli also
-    writes them into wp-config.php, but the official entrypoint wipes that on
-    the next container start."""
+    writes them into wp-config.php, but that file is only ours until a
+    recreate or fresh install. (The official entrypoint creates wp-config.php
+    only when it is missing; it does not rewrite it on start.)"""
     mode = _multisite_mode(inst_cfg)
     if not mode:
         return
@@ -1002,8 +1003,8 @@ def _convert_multisite(inst: str, inst_cfg: dict) -> None:
             cmd.append("--subdomains")
         # apache/nginx get the constants from WORDPRESS_CONFIG_EXTRA (marker-
         # gated) — letting wp-cli ALSO write them into wp-config.php would
-        # double-define ("already defined" warnings on every request until the
-        # next restart wipes the file). litespeed/herd are the opposite: no
+        # double-define ("already defined" warnings on every request; the
+        # entrypoint never rewrites an existing file). litespeed/herd are the opposite: no
         # container env reaches PHP there, so the literal constants wp-cli
         # writes are the only ones that work (and their wp-config is stable).
         if inst_cfg.get("server") not in ("litespeed", "herd"):
@@ -1069,8 +1070,8 @@ def save_local_autologin_token(token: str, instance: str) -> None:
 def _autologin_mu_plugin(token: str) -> str:
     """Render the autologin mu-plugin with the token embedded directly in the
     file. Storing the token here (not in wp-config.php) means it survives
-    container restarts — the WordPress Docker entrypoint regenerates wp-config.php
-    from env-vars on every start, wiping any constants we set via `wp config set`."""
+    a recreate or fresh install that writes a new wp-config.php. (The official
+    entrypoint creates wp-config.php only when it is missing.)"""
     return f"""\
 <?php
 /**
@@ -1078,7 +1079,7 @@ def _autologin_mu_plugin(token: str) -> str:
  * Visit /?sandbox_autologin=<token> to log in as admin without a password.
  * Token is in sandbox.local.yml (gitignored); never committed.
  */
-// Token embedded in file so it survives wp-config.php regeneration on restart.
+// Token embedded in file so it survives a recreated wp-config.php.
 define( 'SANDBOX_AUTOLOGIN_TOKEN', '{token}' );
 
 add_action( 'init', function () {{

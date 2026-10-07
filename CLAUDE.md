@@ -194,7 +194,7 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 7. Xdebug is trigger-gated (`XDEBUG_TRIGGER` required); background traffic skips the debugger.
 8. Pretty permalinks need `AllowOverride All` — compose `command:` override on `wp` service patches Apache default.
 9. Snapshots are local-only; shareable fixtures → WXR seeds or wp-cli scripts.
-10. wp-config constants go in `WORDPRESS_CONFIG_EXTRA` (compose env); `wp config set` is wiped on restart.
+10. wp-config constants go in `WORDPRESS_CONFIG_EXTRA` (compose env). `wp config set` values persist across restarts and `sb apply` (the entrypoint only creates a missing wp-config.php) but are lost on recreate or fresh install.
 11. Mail capture via `00-sandbox-mail.php` mu-plugin (auto-written on `sb up`).
 12. `restore` runs `wp db reset --yes` first — tables created after snapshot are dropped.
 13. Subdomain multisite needs `*.<name>.tst` wildcard Caddy block + SAN (not `*.tst`).

@@ -4674,7 +4674,10 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
     if input_contract not in ("candidate-v1", "candidate-v2") or (
             input_contract != "candidate-v1" and phase != "activation-bundle"):
         die("candidate input contract applies only to activation-bundle provisioning")
-    if not getattr(args, "confirm", False):
+    # Without --confirm, machine-policy provisioning is a read-only plan: it
+    # validates the receipt and target and reports what would be installed.
+    plan_only = not getattr(args, "confirm", False)
+    if plan_only and phase != "machine-policy":
         die("host image provision is protected; pass --confirm after reviewing the exact target")
     selector = hashlib.sha256(
         f"{args.remote}\0{validated['project']}\0{args.environment}".encode()).hexdigest()
@@ -4724,7 +4727,9 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
         if phase == "machine-policy" and not use_installed and not all(explicit_authority):
             raise ValueError("machine policy authority is incomplete")
         recovery = RecoveryRepository()
-        with recovery.target_mutation_port("image-provision").target_mutation_transaction(target_id):
+        from contextlib import nullcontext
+        with (nullcontext() if plan_only else
+              recovery.target_mutation_port("image-provision").target_mutation_transaction(target_id)):
             if phase == "machine-policy":
                 receipt_path = Path(args.signed_receipt_directory).expanduser() / "receipt.json"
                 receipt = read_stable_file(receipt_path, MAX_V2_DOCUMENT_BYTES)
@@ -4748,7 +4753,17 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         args.activation_environment_binding,
                         "activation environment binding"))
                 authority_path = root / "image-activation" / "authorities" / f"{selector}.json"
-                if use_installed:
+                if plan_only:
+                    policy_identity = policy.policy_digest.removeprefix("sha256:")
+                    path = (root / "image-verification" / "policies"
+                            / f"{selector}-{policy_identity}.json")
+                    response.update(ok=True, result_class="planned", code="planned",
+                        receipt_digest=policy.approved_receipt_digest,
+                        policy_digest=policy.policy_digest, installed_path=str(path),
+                        policy_installed=path.is_file(), authority_path=str(authority_path),
+                        authority_source="installed" if use_installed else "explicit",
+                        authority_installed=authority_path.is_file())
+                elif use_installed:
                     authority = read_installed_authority(authority_path)
                 else:
                     signer = SshAgentRollbackSigner(
@@ -4759,16 +4774,17 @@ def _cmd_host_image_provision(cfg: dict, validated: dict, args) -> None:
                         "rollback_public_key_path": str(signer.path),
                         "rollback_public_key": signer.public_key,
                         "compose_provider_revision": args.compose_provider_revision}
-                policy_identity = policy.policy_digest.removeprefix("sha256:")
-                path = (root / "image-verification" / "policies"
-                        / f"{selector}-{policy_identity}.json")
-                authority_disposition, disposition = install_owner_only_json_pair((
-                    (authority_path, authority), (path, policy.as_mapping())))
-                response.update(ok=True, result_class=disposition, code="prepared",
-                    receipt_digest=policy.approved_receipt_digest,
-                    policy_digest=policy.policy_digest, installed_path=str(path),
-                    authority_path=str(authority_path),
-                    authority_result_class=authority_disposition)
+                if not plan_only:
+                    policy_identity = policy.policy_digest.removeprefix("sha256:")
+                    path = (root / "image-verification" / "policies"
+                            / f"{selector}-{policy_identity}.json")
+                    authority_disposition, disposition = install_owner_only_json_pair((
+                        (authority_path, authority), (path, policy.as_mapping())))
+                    response.update(ok=True, result_class=disposition, code="prepared",
+                        receipt_digest=policy.approved_receipt_digest,
+                        policy_digest=policy.policy_digest, installed_path=str(path),
+                        authority_path=str(authority_path),
+                        authority_result_class=authority_disposition)
             else:
                 if not args.verified_plan:
                     raise ValueError("verified plan is required")

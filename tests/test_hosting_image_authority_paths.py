@@ -107,6 +107,50 @@ class AuthorityPathTests(unittest.TestCase):
         self.assertEqual(payload["authority_result_class"], "replayed")
         self.assertEqual(payload["authority_path"], str(authority_path))
 
+    def test_machine_policy_without_confirm_is_a_read_only_plan(self):
+        from sandbox.commands.hosting import _cmd_host_image_provision
+        from tests.test_hosting_image_plan_set import make_bundle, policy_mapping
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(os.path.realpath(directory)); root.chmod(0o700); receipts = root / "receipts"; receipts.mkdir(mode=0o700)
+            digest = make_bundle(receipts); template = policy_mapping(digest)
+            compose = {"service": "lenzora-web",
+                       "background_services": [item for item in template["persistent_services"]
+                                               if item != "lenzora-web"],
+                       "init_services": template["one_shot_services"]}
+            validated = {"project": "lenzora", "environment": "production", "compose": compose}
+            args = SimpleNamespace(
+                remote="production", environment="production", provision_phase="machine-policy",
+                confirm=False, use_installed_authority=False,
+                signed_receipt_directory=str(receipts), policy_authority_id=template["authority_id"],
+                policy_revision=1, rollback_public_key="/no/such.pub",
+                rollback_authority_id="rollback-authority/controller-a",
+                rollback_authority_revision="rollback-v3", compose_provider_revision="compose-provider-v2",
+                service_image_binding=[f"{row['service']}={row['image']}"
+                                       for row in template["service_image_bindings"]],
+                activation_environment_binding=[f"{row['image']}={row['environment_variable']}"
+                                               for row in template["activation_environment_bindings"]],
+            )
+            runtime = root / "runtime"
+
+            class Recovery:
+                def target_mutation_port(self, _name):
+                    raise AssertionError("plan must not take the target lock")
+
+            out = StringIO()
+            with patch("sandbox.commands.hosting.RUNTIME_DIR", runtime), \
+                    patch("sandbox.commands.hosting.RecoveryRepository", return_value=Recovery()), \
+                    patch("sandbox.hosting.images.provisioning.SshAgentRollbackSigner",
+                          side_effect=AssertionError("plan must avoid signer")), \
+                    redirect_stdout(out):
+                _cmd_host_image_provision({}, validated, args)
+            self.assertFalse(runtime.exists())
+        payload = json.loads(out.getvalue())
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["code"], "planned")
+        self.assertFalse(payload["policy_installed"])
+        self.assertTrue(payload["policy_digest"].startswith("sha256:"))
+
     def test_installed_authority_selection_rejects_explicit_authority_inputs_before_target_lock(self):
         from sandbox.commands.hosting import _cmd_host_image_provision
 

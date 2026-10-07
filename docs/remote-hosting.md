@@ -1671,6 +1671,11 @@ returns only configured authority identity, revision and public-key digest.
 `host image provision --provision-phase machine-policy --use-installed-authority`
 reuses that exact target-installed authority. It conflicts with explicit rollback
 key/authority/provider fields and never chooses or generates another key.
+Without `--confirm`, machine-policy provisioning is a read-only plan: it checks
+the receipt and target and returns `planned` with the receipt and policy digests,
+target paths, and whether the policy and authority are already installed. It takes
+no target lock, does not open the rollback signer, and writes nothing. The
+stage-bundle and activation-bundle phases still require `--confirm`.
 Activation-bundle provisioning now returns snapshot and grant expiry timestamps.
 
 `host image forward-review` takes the exact plan, staged proof, request ID and

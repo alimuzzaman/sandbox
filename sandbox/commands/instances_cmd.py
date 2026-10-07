@@ -559,8 +559,11 @@ def _json_progress_guard(args):
     if not getattr(args, "json", False):
         yield
         return
-    from sandbox.commands._output import redacted_output
-    with redacted_output():
+    from sandbox.commands._output import redacted_output, stdout_to_stderr
+    # stdout is reserved for the JSON document: progress from this process
+    # and from child processes (compose, wp-cli) goes to stderr so a caller
+    # that parses the whole of stdout gets exactly one JSON line.
+    with stdout_to_stderr(), redacted_output():
         yield
 
 

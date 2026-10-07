@@ -786,9 +786,10 @@ redacted). A local instance qualifies when its host is loopback-bound; a remote
 ensure record qualifies on the flag, which is forwarded to the VPS so its own
 redaction runs after. A revealed URL for a publicly exposed instance is an
 admin credential — keep it in a gitignored descriptor, out of logs and commits.
-Progress lines that `ensure --json` prints before its final JSON line are
-redacted the same way, with or without `--reveal-login`: the flag only changes
-the final document.
+With `--json`, stdout carries only the final JSON document. Progress from
+`ensure` and from the child processes it runs (compose, wp-cli) goes to stderr,
+so a caller can parse the whole of stdout. That progress is redacted the same
+way, with or without `--reveal-login`: the flag only changes the final document.
 
 If `login_url` carries a `sandbox_autologin` parameter, the same JSON document
 also contains the derived `login_url_redacted` boolean. It remains `true` for

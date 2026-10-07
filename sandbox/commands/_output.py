@@ -60,3 +60,33 @@ def redacted_output():
     finally:
         out.finish()
         err.finish()
+
+
+@contextmanager
+def stdout_to_stderr():
+    """Send Python and child-process stdout to stderr for the block.
+
+    Used by ``--json`` commands whose stdout must carry only the final
+    document. File descriptor 1 is pointed at fd 2 so inherited child
+    output moves too, then restored on exit.
+    """
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        saved = os.dup(1)
+    except (AttributeError, OSError, ValueError):
+        with redirect_stdout(sys.stderr):
+            yield
+        return
+    try:
+        os.dup2(2, 1)
+        with redirect_stdout(sys.stderr):
+            yield
+    finally:
+        try:
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+        os.dup2(saved, 1)
+        os.close(saved)
+

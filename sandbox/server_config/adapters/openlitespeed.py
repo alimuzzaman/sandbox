@@ -233,6 +233,12 @@ class OpenLiteSpeedAdapter:
             or b""
         )
         try:
+            text = content_bytes.decode("utf-8") if isinstance(content_bytes, bytes) else content_bytes
+        except UnicodeDecodeError:
+            raise ValueError("policy_rejected")
+        # Authority refusals carry a closed code the service passes through.
+        validate_common_authority(text, server_type="litespeed")
+        try:
             self.validate(content_bytes)
         except Exception:
             raise ValueError("policy_rejected")

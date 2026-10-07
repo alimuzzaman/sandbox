@@ -217,6 +217,11 @@ class NginxAdapter:
 
         try:
             text = content_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("policy_rejected")
+        # Authority refusals carry a closed code the service passes through.
+        validate_common_authority(text, server_type="nginx")
+        try:
             self.validate(text)
         except Exception:
             raise ValueError("policy_rejected")

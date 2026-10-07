@@ -224,6 +224,18 @@ class ServerConfigPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fragment_set_conflict"):
             validate_set_conflicts((alpha, {"name": "beta-cache", "variable": ("xspeed_alpha",)}))
 
+    def test_adapter_policy_keeps_the_authority_refusal_code(self):
+        from types import SimpleNamespace
+        from sandbox.server_config.adapters.nginx import NginxAdapter
+        from sandbox.server_config.adapters.openlitespeed import OpenLiteSpeedAdapter
+
+        fragment = SimpleNamespace(content=b"rewrite ^ /tmp/other last;", created_at=None)
+        for adapter in (NginxAdapter(), OpenLiteSpeedAdapter()):
+            with self.assertRaises(ValueError) as raised:
+                adapter.policy(fragment, None)
+            self.assertIn(str(raised.exception),
+                          {"authority_path_forbidden", "authority_scope_forbidden"})
+
     def test_adversarial_forbidden_directives_matrix(self):
         """T047: Deny-by-default rejects upstream, resolver, tls, caddy, autologin, health, login, outside-docroot for both adapters."""
         from sandbox.server_config.policy import validate_common_authority

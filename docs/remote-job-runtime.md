@@ -61,6 +61,10 @@ Keep public helper code and synthetic fixtures inside the project tree, then
 pass their project-relative paths and use `--cwd-relative` when a helper lives
 below the project root. Credential-like command values are refused. Keep real
 credentials out of both argv and every transferred project file.
+Two typed values pass even under a name such as `SANDBOX_SECRET_CANARY_*`,
+because neither can hold a credential: a digest-pinned image reference
+(`NAME=registry/path@sha256:<64 hex>`) and a numeric `NAME_UID=`/`NAME_GID=`.
+A tag reference, or any other value under a secret-like name, is still refused.
 
 ```sh
 ./sb job-start --remote NAME --project-dir . --workspace pg-reopen-canary \

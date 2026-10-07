@@ -105,6 +105,18 @@ class SharedRedactionTests(unittest.TestCase):
         self.assertTrue(all(argv_contains_credentials(item) for item in unsafe))
         self.assertFalse(argv_contains_credentials(["tool", "--mode", "safe"]))
 
+    def test_typed_public_assignments_pass_under_secret_like_names(self):
+        digest = "ghcr.io/org/canary@sha256:" + "a" * 64
+        self.assertFalse(argv_contains_credentials([
+            "env", f"SANDBOX_SECRET_CANARY_IMAGE={digest}",
+            "SANDBOX_SECRET_CANARY_UID=1000", "SANDBOX_SECRET_CANARY_GID=1000", "true"]))
+        for refused in (
+                "SANDBOX_SECRET_CANARY_IMAGE=ghcr.io/org/canary:1",
+                "DB_SECRET=1000", "API_TOKEN_UID=abc",
+                f"X_SECRET={digest}x", f"api_key={ASSIGNMENT_TOKEN}"):
+            with self.subTest(refused=refused):
+                self.assertTrue(argv_contains_credentials(["env", refused]))
+
     def test_argv_classification_ignores_safe_url_normalization(self):
         allowed = [
             ["tool", "https://example.test/path#safe-section"],

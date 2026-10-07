@@ -199,6 +199,15 @@ def redact_structure(value: Any, *, exact_values: Iterable[str | bytes] = ()) ->
         return REDACTION_FAILED
 
 
+# Typed values that cannot carry a credential, even under a name such as
+# SANDBOX_SECRET_CANARY_*: a digest-pinned OCI image reference, and a numeric
+# UID/GID. Each is matched whole, so nothing else may ride along.
+_PUBLIC_TYPED_ASSIGNMENT = re.compile(
+    r"[A-Z][A-Z0-9_]{0,127}=[a-z0-9][a-z0-9.-]{0,252}(?::[0-9]{1,5})?"
+    r"(?:/[a-z0-9][a-z0-9._-]{0,127}){1,8}@sha256:[0-9a-f]{64}"
+    r"|[A-Z][A-Z0-9_]{0,123}_(?:UID|GID)=[0-9]{1,10}")
+
+
 def argv_contains_credentials(argv: object) -> bool:
     """Return true when argv would persist recognizable credential material."""
     try:
@@ -208,6 +217,8 @@ def argv_contains_credentials(argv: object) -> bool:
         if any(not isinstance(item, str) for item in items):
             return True
         for index, item in enumerate(items):
+            if _PUBLIC_TYPED_ASSIGNMENT.fullmatch(item):
+                continue
             if _text_contains_credentials(item):
                 return True
             if _SENSITIVE_FLAG.fullmatch(item) and index + 1 < len(items):

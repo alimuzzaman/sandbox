@@ -1121,8 +1121,8 @@ Per-project (each plugin carries its own sandbox.config.json):
              "exist yet (guards against typo-spawning an extra stack)")
     en.add_argument("--reveal-login", dest="reveal_login", action="store_true",
         help="emit the usable autologin login_url in --json output instead of "
-             "the redacted placeholder (LOCAL instances only; the token is a "
-             "loopback-only dev credential already stored in sandbox.local.yml)")
+             "the redacted placeholder (local loopback instances, or the "
+             "instance on the selected --remote)")
     ensure_target = en.add_mutually_exclusive_group()
     ensure_target.add_argument("--local", action="store_true", help="force local execution")
     ensure_target.add_argument("--remote", help="ensure on a provisioned remote")

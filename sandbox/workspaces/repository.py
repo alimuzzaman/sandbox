@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace as _replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -267,6 +268,28 @@ def _unresolved_apply_report(plan_id: str, adopted: int, unresolved: int,
             "record for the same namespace and label); unattributed records are "
             "ignored by workspace selection and need an operator decision, not a retry."),
     }
+
+
+RETIRE_PLAN_PREFIX = "wr_"
+_RETIRED_REASON = "operator_retired_unattributed"
+_LEGACY_ID = re.compile(r"ws_[0-9a-f]{32}")
+_MAX_RETIRE_RECORDS = 200
+
+
+def _legacy_workspace_id(path: str) -> str:
+    """The opaque id a migration plan shows for one legacy metadata leaf."""
+    return "ws_" + hashlib.sha256(path.encode()).hexdigest()[:32]
+
+
+def _leaf_source_key(path: str, digest: str) -> str:
+    return hashlib.sha256(f"{path}\0{digest}".encode("utf-8")).hexdigest()
+
+
+def _retirable(item: LegacyWorkspace) -> bool:
+    """Only an unresolved leaf that declares no identity or id of its own."""
+    payload = item.payload or {}
+    return (item.status == "unresolved" and not payload.get("project_identity")
+            and not payload.get("workspace_id"))
 
 
 def _migration_source_key(item: MigrationItem) -> str:
@@ -1423,13 +1446,14 @@ class WorkspaceRepository:
             return indexed
         evidence = self._read_evidence()
         scan = scan_legacy(self.legacy_root)
-        correlated = correlate(self._records_with_findings(scan), evidence,
-                               project_identity=project_identity)
+        correlated = self._settle(correlate(self._records_with_findings(scan), evidence,
+                                            project_identity=project_identity),
+                                  self._settled())
         known_keys = {(item.namespace, item.label) for item in indexed}
         synthetic = []
         observed_at = _timestamp(self.clock)
         for item in correlated:
-            if item.status == "excluded":
+            if item.status in {"excluded", "already_indexed", "retired"}:
                 continue
             if (item.namespace, item.label) in known_keys:
                 continue
@@ -1459,11 +1483,59 @@ class WorkspaceRepository:
             ))
         return tuple(records)
 
+    def _settled(self, *, read_only: bool = False) -> tuple[dict[str, tuple], frozenset[str]]:
+        """Index rows by id and the source keys of retired legacy leaves."""
+        indexed = {item.workspace_id: (item.project_identity, item.label, item.path)
+                   for item in self._indexed(read_only=read_only)}
+        connection = self._connect_read_only() if read_only else self._connect()
+        if connection is None:
+            return indexed, frozenset()
+        try:
+            rows = connection.execute(
+                "SELECT source_digest FROM workspace_migrations WHERE decision='retired'"
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            connection.close()
+        return indexed, frozenset(row[0] for row in rows)
+
+    @staticmethod
+    def _settle(records: Iterable[LegacyWorkspace],
+                settled: tuple[Mapping[str, tuple], frozenset[str]] | None,
+                ) -> tuple[LegacyWorkspace, ...]:
+        """Mark leaves the index already owns, or an operator retired.
+
+        A ``workspace.json`` written by the index itself (same workspace id,
+        project identity, label and path as an index row) is ``already_indexed``,
+        not a legacy record awaiting attribution. A leaf retired by a confirmed
+        retire plan stays ``retired`` only while its bytes are unchanged.
+        """
+        if settled is None:
+            return tuple(records)
+        indexed, retired = settled
+        result = []
+        for item in records:
+            payload = item.payload or {}
+            if item.status in {"unresolved", "adoptable"}:
+                row = indexed.get(payload.get("workspace_id"))
+                if row is not None and row == (payload.get("project_identity"),
+                                               item.label, item.path):
+                    item = _replace(item, status="already_indexed",
+                                    reason="matches_index_record",
+                                    project_identity=payload.get("project_identity"))
+                elif (item.status == "unresolved" and
+                      _leaf_source_key(item.path, item.digest) in retired):
+                    item = _replace(item, status="retired", reason=_RETIRED_REASON)
+            result.append(item)
+        return tuple(result)
+
     @staticmethod
     def _scoped_migration_records(
         scan: LegacyScan,
         evidence: Iterable[Any] | None,
         project_identity: str | None,
+        settled: tuple[Mapping[str, tuple], frozenset[str]] | None = None,
     ) -> tuple[LegacyWorkspace, ...]:
         """Correlate one scope and omit only records proven unrelated.
 
@@ -1472,11 +1544,11 @@ class WorkspaceRepository:
         ``excluded`` result, on the other hand, is outside the requested
         project scope and must be omitted from both the plan and apply rescan.
         """
-        correlated = correlate(
+        correlated = WorkspaceRepository._settle(correlate(
             WorkspaceRepository._records_with_findings(scan),
             evidence,
             project_identity=project_identity,
-        )
+        ), settled)
         return tuple(item for item in correlated if item.status != "excluded")
 
     def list_records(self, project_identity: str | None = None, **kwargs: Any) -> list[WorkspaceRecord]:
@@ -1505,12 +1577,14 @@ class WorkspaceRepository:
         evidence = self._read_evidence()
         projection_jobs = self._read_projection_jobs()
         scan = scan_legacy(self.legacy_root)
-        correlated = correlate(self._records_with_findings(scan), evidence)
+        correlated = self._settle(correlate(self._records_with_findings(scan), evidence),
+                                  self._settled(read_only=True))
         known_keys = {(item.namespace, item.label) for item in indexed}
         synthetic = []
         observed_at = _timestamp(self.clock)
         for item in correlated:
-            if item.status == "excluded" or (item.namespace, item.label) in known_keys:
+            if (item.status in {"excluded", "already_indexed", "retired"}
+                    or (item.namespace, item.label) in known_keys):
                 continue
             synthetic.append(WorkspaceRecord(
                 workspace_id="ws_" + hashlib.sha256(item.path.encode()).hexdigest()[:32],
@@ -1720,7 +1794,8 @@ class WorkspaceRepository:
         inventory_scan = scan_legacy(self.legacy_root)
         scan = (inventory_scan if expected_legacy_namespace is None else
                 scan_legacy(self.legacy_root, expected_namespace=expected_legacy_namespace))
-        correlated = self._scoped_migration_records(scan, evidence_rows, project_identity)
+        correlated = self._scoped_migration_records(
+            scan, evidence_rows, project_identity, self._settled())
         items = items_from_scan(correlated)
         inventory_items = items_from_scan(self._records_with_findings(inventory_scan))
         inventory_digest = plan_digest(inventory_items)
@@ -1772,6 +1847,10 @@ class WorkspaceRepository:
             payload = json.loads(row[0])
         finally:
             connection.close()
+        if payload.get("kind") == "retire":
+            raise WorkspaceIndexError(
+                "plan_not_found",
+                f"{plan_id!r} is a retire plan; apply it with 'workspace retire --plan-id'")
         items = tuple(MigrationItem(**item) for item in payload.get("items", ()))
         return MigrationPlan(
             plan_id=payload["plan_id"], digest=payload["digest"],
@@ -1871,7 +1950,7 @@ class WorkspaceRepository:
         scan = (inventory_scan if namespace is None else
                 scan_legacy(self.legacy_root, expected_namespace=namespace))
         current_items = items_from_scan(
-            self._scoped_migration_records(scan, evidence_rows, identity)
+            self._scoped_migration_records(scan, evidence_rows, identity, self._settled())
         )
         current_inventory_digest = plan_digest(items_from_scan(
             self._records_with_findings(inventory_scan)))
@@ -1895,6 +1974,10 @@ class WorkspaceRepository:
                 if generation != stored.generation:
                     raise MigrationStaleError("workspace index generation changed during apply")
                 for item in current_items:
+                    if item.status in {"already_indexed", "retired"}:
+                        # Owned by the index, or retired by an operator:
+                        # neither awaits attribution, so neither is counted.
+                        continue
                     if item.status != "adoptable":
                         unresolved += 1
                         reason_key = f"{item.status}/{item.reason or 'unspecified'}"
@@ -2038,6 +2121,178 @@ class WorkspaceRepository:
         return result
 
     apply_migration = migration_apply
+
+    # ---- Retiring unattributed legacy records ------------------------------
+    def _legacy_by_id(self) -> dict[str, LegacyWorkspace]:
+        scan = scan_legacy(self.legacy_root)
+        correlated = self._settle(
+            correlate(self._records_with_findings(scan), self._read_evidence()),
+            self._settled())
+        return {_legacy_workspace_id(item.path): item for item in correlated}
+
+    def retire_plan(self, workspace_ids: Iterable[str], *,
+                    ttl_seconds: int | None = None) -> dict[str, Any]:
+        """Plan a metadata-only retirement of exact unattributed legacy records.
+
+        The plan binds each record's opaque id, its ``workspace.json`` digest,
+        and the index generation. Nothing on disk is touched now or at apply.
+        """
+        ids = list(workspace_ids or ())
+        if (not ids or len(ids) > _MAX_RETIRE_RECORDS or len(set(ids)) != len(ids)
+                or any(not isinstance(i, str) or not _LEGACY_ID.fullmatch(i) for i in ids)):
+            raise WorkspaceIndexError(
+                "workspace_request_invalid",
+                f"retire needs 1-{_MAX_RETIRE_RECORDS} distinct legacy workspace ids (ws_ + 32 hex)")
+        current = self._legacy_by_id()
+        missing = [i for i in ids if i not in current]
+        refused = [f"{i} ({current[i].status}"
+                   + (", declares an identity" if current[i].status == "unresolved" else "")
+                   + ")" for i in ids if i in current and not _retirable(current[i])]
+        if missing or refused:
+            parts = ([f"not a legacy record: {', '.join(missing)}"] if missing else []) + (
+                [f"not unattributed: {', '.join(refused)}"] if refused else [])
+            raise WorkspaceIndexError(
+                "workspace_retire_refused",
+                "; ".join(parts) + ". Only unresolved records that declare no project "
+                "identity or workspace id can be retired; list them with "
+                "'workspace migrate --json'.")
+        records = sorted(({
+            "workspace_id": i, "namespace": current[i].namespace,
+            "label": current[i].label, "digest": current[i].digest,
+            "path": current[i].path,
+        } for i in ids), key=lambda item: item["workspace_id"])
+        generation = self.schema_generation()
+        digest = "sha256:" + hashlib.sha256(_json({
+            "records": records, "generation": generation}).encode()).hexdigest()
+        now = _timestamp(self.clock)
+        ttl = self.plan_ttl_seconds if ttl_seconds is None else ttl_seconds
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl <= 0:
+            raise ValueError("ttl_seconds must be a positive integer")
+        expires = (_utc(now) + timedelta(seconds=ttl)).isoformat().replace("+00:00", "Z")
+        plan_id = RETIRE_PLAN_PREFIX + uuid.uuid4().hex
+        payload = {"kind": "retire", "plan_id": plan_id, "digest": digest,
+                   "generation": generation, "created_at": now, "expires_at": expires,
+                   "records": records}
+        with _WRITE_LOCK:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO workspace_plans(plan_id,digest,generation,created_at,expires_at,payload_json) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (plan_id, digest, generation, now, expires, _json(payload)))
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.close()
+        return {
+            "ok": True, "plan_id": plan_id, "digest": digest, "generation": generation,
+            "created_at": now, "expires_at": expires, "metadata_only": True,
+            "records": [{key: value for key, value in item.items() if key != "path"}
+                        for item in records],
+            "next_step": f"review the records, then: workspace retire --plan-id {plan_id} --confirm",
+        }
+
+    def retire_apply(self, plan_id: str, *, confirm: bool = False) -> dict[str, Any]:
+        """Retire exactly the planned records if none changed since planning."""
+        if confirm is not True:
+            raise WorkspaceIndexError(
+                "confirmation_required", "workspace retire apply requires confirmation")
+        if not isinstance(plan_id, str) or not plan_id.startswith(RETIRE_PLAN_PREFIX):
+            raise WorkspaceIndexError(
+                "workspace_retire_plan_required", "a retire plan id (wr_...) is required")
+        with _WRITE_LOCK:
+            with self._migration_guard():
+                connection = self._connect()
+                try:
+                    row = connection.execute(
+                        "SELECT payload_json FROM workspace_plans WHERE plan_id=?",
+                        (plan_id,)).fetchone()
+                    applied = connection.execute(
+                        "SELECT result_json FROM workspace_plan_applications WHERE plan_id=?",
+                        (plan_id,)).fetchone()
+                finally:
+                    connection.close()
+                payload = json.loads(row[0]) if row else {}
+                if payload.get("kind") != "retire":
+                    raise WorkspaceIndexError(
+                        "plan_not_found", f"retire plan {plan_id!r} was not found")
+                if applied:
+                    return {**json.loads(applied[0]), "already_applied": True}
+                now = _timestamp(self.clock)
+                if _utc(now) >= _utc(payload["expires_at"]):
+                    raise WorkspaceIndexError(
+                        "workspace_retire_plan_stale", "retire plan has expired; plan again")
+                if self.schema_generation() != int(payload["generation"]):
+                    raise WorkspaceIndexError(
+                        "workspace_retire_plan_stale",
+                        "workspace index generation changed since planning; plan again")
+                current = self._legacy_by_id()
+                changed = []
+                for record in payload["records"]:
+                    item = current.get(record["workspace_id"])
+                    if item is None or item.path != record["path"]:
+                        changed.append(f"{record['workspace_id']} (missing)")
+                    elif item.digest != record["digest"]:
+                        changed.append(f"{record['workspace_id']} (workspace.json changed)")
+                    elif not _retirable(item):
+                        changed.append(f"{record['workspace_id']} (now {item.status})")
+                if changed:
+                    raise WorkspaceIndexError(
+                        "workspace_retire_plan_stale",
+                        "records changed since planning: " + ", ".join(changed)
+                        + "; nothing was retired. Plan again.")
+                retired = [{key: record[key] for key in
+                            ("workspace_id", "namespace", "label", "digest")}
+                           for record in payload["records"]]
+                connection = self._connect()
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    generation = int(connection.execute(
+                        "SELECT value FROM workspace_meta WHERE key='generation'").fetchone()[0])
+                    if generation != int(payload["generation"]):
+                        raise WorkspaceIndexError(
+                            "workspace_retire_plan_stale",
+                            "workspace index generation changed during apply; plan again")
+                    for record in payload["records"]:
+                        namespace_digest = hashlib.sha256(
+                            record["namespace"].encode()).hexdigest()
+                        connection.execute(
+                            "INSERT INTO workspace_migrations(source_digest,decision,reason,workspace_id,"
+                            "project_identity,namespace_digest,label,first_observed_at,last_observed_at) "
+                            "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source_digest) DO UPDATE SET "
+                            "decision='retired',reason=excluded.reason,last_observed_at=excluded.last_observed_at",
+                            (_leaf_source_key(record["path"], record["digest"]), "retired",
+                             _RETIRED_REASON, None, None, namespace_digest, record["label"],
+                             now, now))
+                        connection.execute(
+                            "INSERT INTO workspace_audit(event_type,workspace_id,payload_json,created_at) "
+                            "VALUES(?,?,?,?)",
+                            ("legacy_workspace_retired", None, _json({
+                                "plan_id": plan_id, "legacy_workspace_id": record["workspace_id"],
+                                "namespace_digest": namespace_digest, "label": record["label"],
+                                "legacy_digest": record["digest"]}), now))
+                    new_generation = self._bump_generation(connection)
+                    result = {
+                        "ok": True, "plan_id": plan_id, "retired": retired,
+                        "retired_count": len(retired), "generation": new_generation,
+                        "metadata_only": True, "legacy_unchanged": True,
+                    }
+                    connection.execute(
+                        "INSERT INTO workspace_plan_applications(plan_id,applied_at,generation,result_json) "
+                        "VALUES(?,?,?,?)", (plan_id, now, new_generation, _json(result)))
+                    connection.execute("COMMIT")
+                except Exception:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    raise
+                finally:
+                    connection.close()
+                return result
 
     def scan_legacy(self, **kwargs: Any) -> LegacyScan:
         return scan_legacy(self.legacy_root, **kwargs)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import sys
 import tempfile
@@ -888,6 +889,132 @@ class WorkspaceRepositoryTests(unittest.TestCase):
         self.assertEqual(result["code"], "workspace_index_incomplete")
         self.assertEqual(result["unresolved"], 1)
         self.assertEqual(self.repo.list(include_legacy=False), [])
+
+
+class LegacySettlementTests(WorkspaceRepositoryTests.__base__):
+    """Option 1 (already indexed) and option 2 (retire unattributed records)."""
+
+    setUp = WorkspaceRepositoryTests.setUp
+    tearDown = WorkspaceRepositoryTests.tearDown
+    _legacy = WorkspaceRepositoryTests._legacy
+
+    def _indexed_sidecar(self, label="unit", identity="project:one"):
+        workspace_id = "ws_" + "a" * 32
+        directory = (self.legacy / "project-1" / label)
+        directory.mkdir(parents=True, exist_ok=True)
+        metadata = self._legacy("project-1", label, json.dumps({
+            "label": label, "namespace": "project:1", "path": str(directory.resolve()),
+            "project_identity": identity, "workspace_id": workspace_id,
+            "target": "local", "mode": "persistent"}).encode() + b"\n").resolve()
+        self.repo.register(identity, label, namespace="project-1", path=str(metadata),
+                           workspace_id=workspace_id, source="job")
+        return metadata
+
+    @staticmethod
+    def _id(metadata):
+        return "ws_" + hashlib.sha256(str(metadata.resolve()).encode()).hexdigest()[:32]
+
+    def test_index_owned_sidecar_is_already_indexed_not_unresolved(self):
+        sidecar = self._indexed_sidecar()
+        self._legacy()  # one genuine unattributed record
+        plan = self.repo.migration_plan()
+        self.assertEqual(dict(plan.summary), {"already_indexed": 1, "unresolved": 1})
+        result = self.repo.migration_apply(plan, confirm=True)
+        self.assertEqual((result["unresolved"], result["inserted"]), (1, 0))
+        self.assertEqual(sum(result["unresolved_by_reason"].values()), 1)
+        legacy = [item for item in self.repo.list() if item.source == "legacy"]
+        self.assertEqual([item.label for item in legacy], ["default"])
+        self.assertTrue(sidecar.exists())
+
+    def test_sidecar_that_differs_from_its_index_row_stays_unresolved(self):
+        sidecar = self._indexed_sidecar()
+        sidecar.write_bytes(sidecar.read_bytes().replace(b"project:one", b"project:two"))
+        plan = self.repo.migration_plan()
+        self.assertEqual(dict(plan.summary), {"unresolved": 1})
+
+    def test_retire_plan_apply_hides_record_and_preserves_bytes(self):
+        metadata = self._legacy()
+        before = metadata.read_bytes()
+        workspace_id = self._id(metadata)
+        plan = self.repo.retire_plan([workspace_id])
+        self.assertTrue(plan["plan_id"].startswith("wr_"))
+        self.assertEqual([item["workspace_id"] for item in plan["records"]], [workspace_id])
+        self.assertNotIn("path", plan["records"][0])
+        result = self.repo.retire_apply(plan["plan_id"], confirm=True)
+        self.assertEqual(result["retired_count"], 1)
+        self.assertEqual(result["retired"][0]["label"], "default")
+        self.assertTrue(result["legacy_unchanged"])
+        self.assertEqual(metadata.read_bytes(), before)
+        self.assertEqual([item for item in self.repo.list() if item.source == "legacy"], [])
+        self.assertEqual(dict(self.repo.migration_plan().summary), {"retired": 1})
+        replay = self.repo.retire_apply(plan["plan_id"], confirm=True)
+        self.assertTrue(replay["already_applied"])
+        # Changed bytes are a different record: it reappears as unresolved.
+        metadata.write_bytes(b'{"label":"default","note":1}\n')
+        self.assertEqual(dict(self.repo.migration_plan().summary), {"unresolved": 1})
+
+    def test_retire_requires_confirmation_and_a_retire_plan_id(self):
+        metadata = self._legacy()
+        plan = self.repo.retire_plan([self._id(metadata)])
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            self.repo.retire_apply(plan["plan_id"])
+        self.assertEqual(caught.exception.code, "confirmation_required")
+        migration = self.repo.migration_plan()
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            self.repo.retire_apply(migration.plan_id, confirm=True)
+        self.assertEqual(caught.exception.code, "workspace_retire_plan_required")
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            self.repo.migration_apply(plan["plan_id"], confirm=True)
+        self.assertEqual(caught.exception.code, "plan_not_found")
+
+    def test_retire_refuses_attributed_indexed_or_unknown_records(self):
+        sidecar = self._indexed_sidecar()
+        declared = self._legacy("local:abc", "declared",
+                                b'{"label":"declared","project_identity":"project:x"}\n')
+        for ids, fragment in (([self._id(sidecar)], "already_indexed"),
+                              ([self._id(declared)], "declares an identity"),
+                              (["ws_" + "0" * 32], "not a legacy record")):
+            with self.subTest(fragment=fragment):
+                with self.assertRaises(WorkspaceIndexError) as caught:
+                    self.repo.retire_plan(ids)
+                self.assertEqual(caught.exception.code, "workspace_retire_refused")
+                self.assertIn(fragment, str(caught.exception))
+        with self.assertRaises(WorkspaceIndexError):
+            self.repo.retire_plan(["not-an-id"])
+
+    def test_retire_refuses_when_a_record_changed_or_generation_moved(self):
+        metadata = self._legacy()
+        plan = self.repo.retire_plan([self._id(metadata)])
+        metadata.write_bytes(b'{"label":"default","changed":true}\n')
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            self.repo.retire_apply(plan["plan_id"], confirm=True)
+        self.assertEqual(caught.exception.code, "workspace_retire_plan_stale")
+        self.assertIn("workspace.json changed", str(caught.exception))
+
+        plan = self.repo.retire_plan([self._id(metadata)])
+        self.repo.register("project:z", "other")
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            self.repo.retire_apply(plan["plan_id"], confirm=True)
+        self.assertIn("generation changed", str(caught.exception))
+
+        plan = self.repo.retire_plan([self._id(metadata)])
+        metadata.unlink()
+        metadata.parent.rmdir()
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            self.repo.retire_apply(plan["plan_id"], confirm=True)
+        self.assertIn("missing", str(caught.exception))
+
+    def test_retire_plan_expires(self):
+        from datetime import datetime, timedelta, timezone
+        metadata = self._legacy()
+        clock = [datetime(2026, 10, 7, tzinfo=timezone.utc)]
+        repo = WorkspaceRepository(self.index, self.legacy, clock=lambda: clock[0],
+                                   plan_ttl_seconds=60)
+        plan = repo.retire_plan([self._id(metadata)])
+        clock[0] += timedelta(seconds=61)
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            repo.retire_apply(plan["plan_id"], confirm=True)
+        self.assertIn("expired", str(caught.exception))
 
 
 if __name__ == "__main__":

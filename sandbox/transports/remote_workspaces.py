@@ -408,6 +408,24 @@ class RemoteWorkspaceTransport:
             args += ["--project-identity", self._project_identity(project_identity)]
         return self._control(remote_name, args)
 
+    def retire_plan(self, remote_name: str, workspace_ids) -> dict[str, Any]:
+        ids = tuple(workspace_ids or ())
+        if not ids or len(ids) > 200:
+            raise RemoteWorkspaceError("workspace_request_invalid",
+                                       "retire needs 1-200 legacy workspace ids")
+        args = ["workspace", "retire"]
+        for item in ids:
+            args += ["--legacy-workspace-id", self._workspace_id(item)]
+        return self._control(remote_name, args)
+
+    def retire_apply(self, remote_name: str, plan_id: str, *,
+                     confirm: bool = False) -> dict[str, Any]:
+        if confirm is not True:
+            raise RemoteWorkspaceError("confirmation_required",
+                                       "workspace retire apply requires confirmation")
+        return self._control(remote_name, ["workspace", "retire", "--plan-id",
+                                           self._plan_id(plan_id), "--confirm"])
+
     def reset(
         self,
         remote_name: str,

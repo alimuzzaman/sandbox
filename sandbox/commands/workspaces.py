@@ -11,7 +11,7 @@ from sandbox.registry import CommandSpec, register_specs
 
 def configure_parser(parser) -> None:
     parser.add_argument("action", choices=(
-        "create", "list", "status", "migrate", "reset", "destroy",
+        "create", "list", "status", "migrate", "retire", "reset", "destroy",
         "release", "ttl", "reap", "publish-sync", "reconcile-sync",
     ))
     parser.add_argument("name", nargs="?", default=None,
@@ -24,6 +24,9 @@ def configure_parser(parser) -> None:
     parser.add_argument("--project-identity")
     parser.add_argument("--workspace-id")
     parser.add_argument("--plan-id")
+    parser.add_argument("--legacy-workspace-id", action="append", default=None,
+                        dest="legacy_workspace_ids",
+                        help="retire: exact unattributed legacy record id (repeatable)")
     parser.add_argument("--expected-legacy-namespace", help="scope a migration plan to one exact legacy namespace")
     parser.add_argument("--deployment-receipt", help=__import__("argparse").SUPPRESS)
     parser.add_argument("--generation-id", help=__import__("argparse").SUPPRESS)
@@ -117,7 +120,7 @@ def cmd_workspace(_cfg, args) -> None:
         cmd_retention(args)
         return
     if (args.action in {"reset", "destroy"} or
-            args.action == "migrate" and args.plan_id) and not args.confirm:
+            args.action in {"migrate", "retire"} and args.plan_id) and not args.confirm:
         from sandbox.core import die
         die(f"workspace {args.action} requires --confirm")
     service = durable_job_dependencies()["workspace_service"]
@@ -162,11 +165,14 @@ def cmd_workspace(_cfg, args) -> None:
                 active_only=getattr(args, "active_only", False),
                 measure_sizes=getattr(args, "measure_sizes", False),
                 mode=getattr(args, "mode", "persistent"),
+                legacy_workspace_ids=tuple(getattr(args, "legacy_workspace_ids", None) or ()),
             )
         method = ("publish_sync" if args.action == "publish-sync"
                   else "reconcile_sync" if args.action == "reconcile-sync"
                   else "migration_apply" if args.action == "migrate" and args.plan_id
                   else "migration_plan" if args.action == "migrate"
+                  else "retire_apply" if args.action == "retire" and args.plan_id
+                  else "retire_plan" if args.action == "retire"
                   else args.action)
         result = getattr(service, method)(request)
     except Exception as exc:
@@ -237,6 +243,14 @@ def cmd_workspace(_cfg, args) -> None:
                   + f" [{result.get('code', 'workspace_index_incomplete')}]")
             if result.get("next_step"):
                 print(f"  next: {result['next_step']}")
+    elif args.action == "retire":
+        print(result.get("plan_id", "retire") + ": " +
+              ("ok" if result.get("ok") else result.get("code", "failed")))
+        for item in result.get("records") or result.get("retired") or ():
+            print(f"  {'retired' if 'retired' in result else 'planned'} "
+                  f"{item.get('workspace_id')} {item.get('namespace')}/{item.get('label')}")
+        if result.get("next_step"):
+            print(f"  next: {result['next_step']}")
     else:
         print(f"{args.workspace}: {'ok' if result.get('ok') else result.get('code', 'failed')}")
     if result.get("ok") is False:

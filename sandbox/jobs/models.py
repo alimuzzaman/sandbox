@@ -301,6 +301,8 @@ class TargetRequest:
     active_only: bool = False
     measure_sizes: bool = False
     mode: str = "persistent"
+    # Exact opaque ids of legacy records for a retire plan (``ws_`` + 32 hex).
+    legacy_workspace_ids: tuple[str, ...] = ()
     # Whether this operation may infer the single configured remote when no
     # target is selected (spec 014: "operations that permit target inference").
     # Instance lifecycle opts out: booting a dev instance is a local action
@@ -346,6 +348,11 @@ class TargetRequest:
         if not isinstance(self.measure_sizes, bool):
             raise ValueError("workspace size-measurement selector must be boolean")
         _safe_name(self.mode, "workspace mode")
+        ids = self.legacy_workspace_ids
+        if (not isinstance(ids, tuple) or len(ids) > 200 or any(
+                not isinstance(item, str) or not re.fullmatch(r"ws_[0-9a-f]{32}", item)
+                for item in ids)):
+            raise ValueError("legacy workspace ids must be up to 200 ws_ ids")
 
 
 @dataclass(frozen=True)

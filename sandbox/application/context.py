@@ -1296,6 +1296,11 @@ def _remote_workspace_control(resolved_target, action, request=None):
             inventory_digest=getattr(request, "inventory_digest", None),
             index_generation=getattr(request, "index_generation", None),
         )
+    if action == "retire_plan":
+        return transport.retire_plan(
+            resolved_target.remote_name, getattr(request, "legacy_workspace_ids", ()))
+    if action == "retire_apply":
+        return transport.retire_apply(resolved_target.remote_name, plan_id, confirm=confirm)
     if action == "migration_apply":
         return transport.migration_apply(
             resolved_target.remote_name, plan_id, confirm=confirm,

@@ -32,6 +32,8 @@ class WorkspaceServiceProtocol(Protocol):
     def status(self, request): ...
     def migration_plan(self, request): ...
     def migration_apply(self, request): ...
+    def retire_plan(self, request): ...
+    def retire_apply(self, request): ...
     def reset(self, request): ...
     def destroy(self, request): ...
     def publish_sync(self, request): ...
@@ -3481,6 +3483,31 @@ class WorkspaceService:
             expected_legacy_namespace=getattr(
                 request, "expected_legacy_namespace", None),
         )
+
+    def _retire_target(self, request):
+        """Retirement is index-wide: it needs a host, never a project."""
+        remote = getattr(request, "remote", None)
+        return SimpleNamespace(project_root=getattr(request, "project_dir", "."),
+                               kind="remote" if remote else "local", remote_name=remote,
+                               workspace_label="default", namespace=None, sources={})
+
+    def retire_plan(self, request):
+        target = self._retire_target(request)
+        remote = self._remote(target, "retire_plan", request)
+        if remote is not None:
+            return remote
+        return self._repo().retire_plan(getattr(request, "legacy_workspace_ids", ()))
+
+    def retire_apply(self, request):
+        if getattr(request, "confirm", False) is not True:
+            raise WorkspaceIndexError(
+                "confirmation_required", "workspace retire apply requires confirmation")
+        target = self._retire_target(request)
+        remote = self._remote(target, "retire_apply", request)
+        if remote is not None:
+            return remote
+        return self._repo().retire_apply(
+            getattr(request, "migration_plan_id", None), confirm=True)
 
     def _mutate(self, request, action: str):
         if getattr(request, "confirm", False) is not True:

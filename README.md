@@ -600,6 +600,9 @@ same separate evidence.
 ./sb workspace migrate --remote scaleway-sandbox --project-identity <id> --json
 # Apply only the exact unexpired metadata-only plan after reviewing all records:
 ./sb workspace migrate --remote scaleway-sandbox --plan-id <plan-id> --confirm --json
+# Retire exact unattributed legacy records (metadata only; bytes on disk are kept):
+./sb workspace retire --remote scaleway-sandbox --legacy-workspace-id <ws_id> [...] --json
+./sb workspace retire --remote scaleway-sandbox --plan-id <wr_plan-id> --confirm --json
 ./sb remote docker-pool scaleway-sandbox --json             # read-only plan
 ./sb remote docker-pool scaleway-sandbox --confirm --json   # backup, validate, restart, verify
 ./sb remote docker-pool scaleway-sandbox --recover-interrupted --expected-running 72 --json # evidence-bound recovery plan
@@ -626,6 +629,18 @@ remain, the result carries `index_complete=false`, `code="workspace_index_incomp
 `next_step` (a `WARNING:`/`next:` pair in text output). A record becomes adoptable only
 with exact project-identity evidence (a job record for the same namespace and label);
 retrying the apply does not change an unattributed record.
+
+A `workspace.json` the index wrote itself (same workspace id, project identity, label and
+path as an index row) is reported as `already_indexed` and does not count as unresolved.
+An unresolved record that declares no project identity or workspace id of its own can be
+retired: `workspace retire --legacy-workspace-id <id>` (ids as shown by
+`workspace migrate --json`) writes an expiring `wr_` plan bound to each record's id, its
+`workspace.json` digest and the index generation. `--plan-id <wr_id> --confirm` refuses if
+any record changed, disappeared, became attributed, or the generation moved, and otherwise
+records the retirement in the index and reports each retired record. Nothing on disk is
+deleted or rewritten. A retired record is left out of `workspace list`, migration plans
+(shown as `retired`) and the completeness count only while its `workspace.json` bytes are
+unchanged; edited bytes make it a new unresolved record.
 
 `workspace list` is a read-only report and stays successful when the index is degraded:
 the payload carries `index.complete=false` with `index.code="workspace_index_incomplete"`

@@ -94,6 +94,21 @@ class TestRemoteWorkspaceTransport(unittest.TestCase):
         self.assertIn("--confirm", command)
         self.assertNotIn("--project-dir", command)
 
+    def test_retire_plan_and_apply_are_path_free_and_confirmed(self):
+        ids = ("ws_" + "a" * 32, "ws_" + "b" * 32)
+        self.transport.retire_plan("remote-a", ids)
+        command = self._command()
+        self.assertIn("workspace retire --legacy-workspace-id ws_" + "a" * 32
+                      + " --legacy-workspace-id ws_" + "b" * 32, command)
+        self.assertNotIn("--project-dir", command)
+        self.calls.clear()
+        self.transport.retire_apply("remote-a", "wr_123", confirm=True)
+        self.assertIn("workspace retire --plan-id wr_123 --confirm", self._command())
+        with self.assertRaises(RemoteWorkspaceError):
+            self.transport.retire_apply("remote-a", "wr_123")
+        with self.assertRaises(RemoteWorkspaceError):
+            self.transport.retire_plan("remote-a", ())
+
     def test_sync_publication_is_path_free_and_bound_to_preflight_generation(self):
         self.transport.publish_sync(
             "remote-a", "ws-123", "project-identity", "gen-123",

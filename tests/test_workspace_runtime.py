@@ -348,6 +348,47 @@ class WorkspaceRuntimeTests(unittest.TestCase):
         self.assertIn("WARNING: plan wm_x applied: 0 record(s) adopted, 2 left unresolved", text)
         self.assertIn("next: review the plan's records", text)
 
+    def test_retire_cli_plans_then_applies_with_confirmation(self):
+        import hashlib
+        from io import StringIO
+        from sandbox.application.workspace_service import WorkspaceService
+        from sandbox.commands.workspaces import cmd_workspace
+        from sandbox.workspaces import WorkspaceRepository
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            legacy = root / "jobs" / "workspaces"
+            leaf = legacy / "local-abc" / "gap-test"
+            leaf.mkdir(parents=True)
+            (leaf / "workspace.json").write_bytes(b'{"label":"gap-test"}\n')
+            before = (leaf / "workspace.json").read_bytes()
+            repository = WorkspaceRepository(root / "workspaces" / "index.sqlite3", legacy)
+            service = WorkspaceService(target_service=None, repository=repository)
+            legacy_id = "ws_" + hashlib.sha256(
+                str(leaf / "workspace.json").encode()).hexdigest()[:32]
+
+            def run(**overrides):
+                args = SimpleNamespace(
+                    action="retire", project_dir=".", local=True, remote=None,
+                    workspace="default", plan_id=None, confirm=False, json=True,
+                    legacy_workspace_ids=None)
+                for key, value in overrides.items():
+                    setattr(args, key, value)
+                output = StringIO()
+                with mock.patch("sandbox.commands.workspaces.durable_job_dependencies",
+                                return_value={"workspace_service": service}), \
+                        mock.patch("sys.stdout", output):
+                    cmd_workspace(None, args)
+                return json.loads(output.getvalue())
+
+            plan = run(legacy_workspace_ids=[legacy_id])
+            self.assertEqual(plan["records"][0]["label"], "gap-test")
+            with self.assertRaises(SystemExit):
+                run(plan_id=plan["plan_id"])
+            applied = run(plan_id=plan["plan_id"], confirm=True)
+            self.assertEqual(applied["retired"][0]["workspace_id"], legacy_id)
+            self.assertEqual((leaf / "workspace.json").read_bytes(), before)
+
     def test_sync_publication_refuses_generations_parent_symlink_swap(self):
         from sandbox.application import workspace_service as workspace_module
 

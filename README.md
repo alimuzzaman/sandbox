@@ -615,6 +615,10 @@ same separate evidence.
   --output-file tmp/report.tar
 ```
 
+Job ids are never prefix-matched. Every `job-*` command that takes an id requires the
+full 16- or 32-character hex id from `job-list`; a shorter value is refused before any
+registry or remote call (`invalid_job_id`, `retryable: false`).
+
 Workspace control is backed by an owner-only durable index under
 `$SANDBOX_HOME/runtime/workspaces/index.sqlite3`. Remote list/status use project or
 workspace identity rather than a deployed checkout path. Legacy `workspace.json`

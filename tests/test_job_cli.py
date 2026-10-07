@@ -609,3 +609,29 @@ class JobCliTests(unittest.TestCase):
                 _download_artifact_file(destination, metadata, fetch)
             self.assertEqual(destination.read_bytes(), b"old")
             self.assertEqual(list(destination.parent.glob(".report.tar.*")), [])
+
+
+class JobIdPrefixRefusalTests(unittest.TestCase):
+    """A job-id prefix is refused up front, not reported as a retryable transport error."""
+
+    def test_status_prefix_is_invalid_job_id_without_transport_call(self):
+        from sandbox.commands import jobs_runtime
+        args = SimpleNamespace(job_id="cdc3a491", job_id_option=None, remote="scaleway-sandbox",
+                               json=True)
+        out = StringIO()
+        with patch("sandbox.transports.remote_jobs.RemoteJobTransport") as transport, \
+             redirect_stdout(out), self.assertRaises(SystemExit):
+            jobs_runtime.cmd_job_status(None, args)
+        transport.assert_not_called()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["code"], "invalid_job_id")
+        self.assertIs(payload["retryable"], False)
+
+    def test_full_ids_pass_and_prefixes_fail_argument_type(self):
+        import argparse
+        from sandbox.commands.jobs_runtime import _job_id_argument
+        self.assertEqual(_job_id_argument("a" * 32), "a" * 32)
+        self.assertEqual(_job_id_argument("b" * 16), "b" * 16)
+        for bad in ("cdc3a491", "A" * 32, "a" * 31, ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                _job_id_argument(bad)

@@ -301,21 +301,21 @@ def configure_list_parser(parser) -> None:
 
 
 def configure_cancel_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", type=_job_id_argument)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_retry_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", type=_job_id_argument)
     parser.add_argument("--request-id")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_cleanup_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", type=_job_id_argument)
     parser.add_argument("--logs", action="store_true")
     parser.add_argument("--artifacts", action="store_true")
     parser.add_argument("--metrics", action="store_true")
@@ -326,20 +326,20 @@ def configure_cleanup_parser(parser) -> None:
 
 
 def configure_metrics_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", type=_job_id_argument)
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_artifacts_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", type=_job_id_argument)
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_artifact_get_parser(parser) -> None:
-    parser.add_argument("job_id")
+    parser.add_argument("job_id", type=_job_id_argument)
     parser.add_argument("artifact_id")
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--max-bytes", type=int, default=1_048_576)
@@ -511,8 +511,32 @@ def _normalize_observation_job_id(args) -> str:
     job_id = option or positional
     if not isinstance(job_id, str) or not job_id.strip():
         _die("a job identifier is required (use JOB_ID or --job-id JOB_ID)")
-    args.job_id = job_id.strip()
+    job_id = job_id.strip()
+    if not _JOB_ID_SHAPE.fullmatch(job_id):
+        invalid = {
+            "ok": False, "code": "invalid_job_id", "retryable": False, "job_id": job_id,
+            "error": "job id must be the full 16- or 32-character lowercase hex id",
+            "hint": "job ids are not prefix-matched; copy the full id from `./sb job-list --json`",
+        }
+        if getattr(args, "json", False):
+            print(json.dumps(invalid, sort_keys=True))
+            raise SystemExit(1)
+        _die(f"{invalid['code']}: {invalid['error']}. {invalid['hint']}")
+    args.job_id = job_id
     return args.job_id
+
+
+_JOB_ID_SHAPE = re.compile(r"(?:[a-f0-9]{16}|[a-f0-9]{32})")
+
+
+def _job_id_argument(value: str) -> str:
+    """argparse type: refuse a job-id prefix before any registry or transport call."""
+    candidate = value.strip() if isinstance(value, str) else ""
+    if not _JOB_ID_SHAPE.fullmatch(candidate):
+        raise argparse.ArgumentTypeError(
+            "must be the full 16- or 32-character lowercase hex job id; ids are not "
+            "prefix-matched (copy it from `./sb job-list --json`)")
+    return candidate
 
 
 def cmd_job_status(_cfg, args) -> None:

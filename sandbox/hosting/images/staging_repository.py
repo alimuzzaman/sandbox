@@ -786,6 +786,53 @@ class StageRepository:
             record = state["records"].get(request_id)
             return dict(record) if type(record) is dict else None
 
+    def discover_request(self, request_id: str, *, max_ledgers: int = 64) -> dict:
+        """Find one request's closed status by ID alone, without its plan.
+
+        Read-only: each ledger is first read for its target identity, then
+        loaded again through the normal owner-checked path under its lock.
+        Returns ``request_not_found`` or ``request_ambiguous`` rather than
+        guessing when the ID is absent or appears under more than one target.
+        """
+        if not isinstance(request_id, str) or _IDENTITY.fullmatch(request_id) is None:
+            raise StageRepositoryError("request_invalid")
+        if not self.ledger_dir.is_dir():
+            return {"code": "request_not_found", "request_id": request_id}
+        paths = sorted(self.ledger_dir.glob("*.json"))
+        if len(paths) > max_ledgers:
+            raise StageRepositoryError("ledger_scan_bounded")
+        matches = []
+        for path in paths:
+            try:
+                target = json.loads(path.read_bytes()[:MAX_LEDGER_BYTES + 1]).get("target_identity")
+            except (OSError, ValueError, AttributeError):
+                raise StageRepositoryError("ledger_invalid") from None
+            if not isinstance(target, str) or path.stem != self._target_name(target):
+                raise StageRepositoryError("ledger_invalid")
+            with self.target_lock(target):
+                state = self._load_unlocked(target)
+                tombstone = state["tombstones"].get(request_id)
+                record = state["records"].get(request_id)
+                if tombstone is None and record is None:
+                    continue
+                summary = {"code": "request_found", "request_id": request_id,
+                           "target_identity": target, "target_generation": state["generation"],
+                           "tombstoned": tombstone is not None}
+                if record is not None:
+                    result = record.get("result")
+                    summary.update(
+                        request_digest=record["request_digest"], generation=record["generation"],
+                        phase=record["phase"], effect_entered=record["effect_entered"],
+                        result_code=result.get("code") if type(result) is dict else None,
+                        result_class=result.get("result_class") if type(result) is dict else None)
+                matches.append(summary)
+        if not matches:
+            return {"code": "request_not_found", "request_id": request_id}
+        if len(matches) > 1:
+            return {"code": "request_ambiguous", "request_id": request_id,
+                    "targets": [item["target_identity"] for item in matches]}
+        return matches[0]
+
     def target_revision(self, target_identity: str) -> tuple[int, int]:
         """Return the exact generation and ledger revision through repository custody."""
         with self.target_lock(target_identity):

@@ -3934,6 +3934,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
 
 def _cmd_host_stage(args) -> None:
     """Static Feature 050 dispatch with no manifest/Compose/runtime preflight."""
+    if getattr(args, "stage_status", False) and not getattr(args, "verified_plan", None):
+        _cmd_host_stage_discover(args)
+        return
     required = {
         "--project-dir": getattr(args, "project_dir", None),
         "--environment": getattr(args, "environment", None),
@@ -4078,6 +4081,24 @@ def _cmd_host_stage(args) -> None:
     if not result.ok and result.result_class != "in_progress" \
             and not (reconcile and result.code in {
                 "precredential_bootstrap_failed", "cleanup_reconciled"}):
+        raise SystemExit(1)
+
+
+def _cmd_host_stage_discover(args) -> None:
+    """Read one stage request's ledger status by ID when its plan is gone."""
+    request_id = getattr(args, "request_id", None)
+    if not isinstance(request_id, str) or not request_id.strip():
+        die("host stage --stage-status requires --request-id; no staging state was opened")
+    from sandbox.hosting.images.staging_repository import StageRepository, StageRepositoryError
+    try:
+        found = StageRepository().discover_request(request_id)
+        payload = {"schema_version": 2, "ok": found["code"] == "request_found",
+                   "result_class": "discovered", **found}
+    except StageRepositoryError as exc:
+        payload = {"schema_version": 2, "ok": False, "result_class": "refused",
+                   "code": exc.code, "request_id": request_id[:256]}
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    if payload["ok"] is not True:
         raise SystemExit(1)
 
 

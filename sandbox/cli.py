@@ -997,7 +997,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--settlement-predecessor", default=None, metavar="DIGEST",
         help="exact terminal settlement receipt for the successor activation")
     host_p.add_argument("--stage-status", action="store_true",
-        help="read the exact Feature 050 request status without helper or credential access")
+        help="read the exact Feature 050 request status without helper or credential access; without --verified-plan, look the request up by --request-id")
     host_p.add_argument("--reconcile", action="store_true",
         help="with confirmed host stage, close only a fully proven v2 cleanup uncertainty")
     host_p.add_argument("--job-id", default=None,

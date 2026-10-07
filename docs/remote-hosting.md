@@ -1413,6 +1413,11 @@ envelope inside the 16-MiB ledger before effects, so a terminal commit cannot di
 capacity only after pulling.
 An exact replay of that owner returns `in_progress/accepted`, not `target_busy`. Read-only
 `--stage-status` reports the same authority without opening a credential source or helper.
+When the verified plan is no longer available, `host stage --stage-status
+--request-id ID` without `--verified-plan` reads the local stage ledgers
+(bounded to 64) for that exact ID and returns `request_found` with its digest,
+phase, generation and result code, or `request_not_found` / `request_ambiguous`.
+It is read-only and does not replace the plan-bound status for retry decisions.
 For a confirmed v2 stage retry, the CLI also recognizes an already successful request
 when policy provisioning has returned the ledger's advanced generation. It reconstructs
 the original accepted generation from the retained proof and requires exact plan, policy,

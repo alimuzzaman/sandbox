@@ -19,6 +19,34 @@ from tests.test_hosting_image_staging_v2 import (
 
 
 class StageRetryCliTests(unittest.TestCase):
+    def test_status_without_plan_discovers_the_exact_request(self):
+        from sandbox.commands.hosting import _cmd_host_stage
+
+        plan = plan_set()
+        policy = policy_set(plan)
+        request = request_set(plan, policy)
+        with tempfile.TemporaryDirectory() as directory:
+            repository = StageRepository(Path(directory))
+            ImagePlanSetStagingService(repository=repository, broker=FakeBroker(),
+                worker=FakeBatchWorker()).stage(request, policy)
+            found = repository.discover_request(request.request_id)
+            self.assertEqual(found["code"], "request_found")
+            self.assertEqual(found["request_digest"], request.request_digest)
+            self.assertIsNotNone(found["result_code"])
+            self.assertEqual(found["phase"], "succeeded")
+            self.assertEqual(repository.discover_request("other-request")["code"],
+                             "request_not_found")
+
+            output = StringIO()
+            args = SimpleNamespace(stage_status=True, verified_plan=None,
+                                   request_id=request.request_id)
+            with patch("sandbox.hosting.images.staging_repository.StageRepository",
+                       return_value=repository), redirect_stdout(output):
+                _cmd_host_stage(args)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["request_id"], request.request_id)
+
     def _invoke(self, repository, plan, policy, generation, *, reconcile=False):
         from sandbox.commands.hosting import _cmd_host_stage
 

@@ -186,7 +186,8 @@ binding with `rebind`: preview without `--confirm`, then confirm with a fresh
 observation request ID. Rebind changes only `container_id`; any other difference
 refuses with `source_binding_conflict`. It first observes the new binding through the
 registered remote, archives the previous descriptor under `sources/rebound/`, then
-replaces it. Retained requests stay bound to the previous source digest, so new
+replaces it. A capture channel recorded for the previous source digest moves to
+`channels/rebound/`, including on an exact rebind replay. Retained requests stay bound to the previous source digest, so new
 capture and restore requests use new IDs. Requests are
 immutable. A lost response reuses the same request; a partial retained operation
 without a terminal record reports uncertainty rather than overwriting data or

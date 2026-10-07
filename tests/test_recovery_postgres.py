@@ -286,6 +286,23 @@ class PostgresRecoveryTests(unittest.TestCase):
             self.assertEqual(len(list((recovery.root / 'sources' / 'rebound').iterdir())), 1)
             self.assertEqual(recovery.rebind(moved)['code'], 'replayed')
 
+    def test_rebind_retires_the_previous_capture_channel(self):
+        from sandbox.hosting.images.provisioning import install_owner_only_json
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _ = self._recovery(Path(directory), FakeTransport(b''))
+            recovery.register(source(), confirm=True)
+            old = PostgresSource.from_mapping(source()).source_digest
+            channel = recovery.root / 'channels' / 'scaleway-sandbox-lenzora-dev.json'
+            install_owner_only_json(channel, {'schema_version': 1, 'source_digest': old, 'destination': 'gdrive:x'})
+            moved = {**source(), 'container_id': 'f' * 64}
+            with patch.object(recovery, 'observe'):
+                recovery.rebind(moved, 'observe-a', confirm=True)
+            self.assertFalse(channel.exists())
+            self.assertTrue((recovery.root / 'channels' / 'rebound').is_dir())
+            install_owner_only_json(channel, {'schema_version': 1, 'source_digest': old, 'destination': 'gdrive:x'})
+            self.assertEqual(recovery.rebind(moved, confirm=True)['code'], 'replayed')
+            self.assertFalse(channel.exists())
+
     def test_rebind_refuses_when_observation_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             recovery, _ = self._recovery(Path(directory), FakeTransport(b''))

@@ -149,6 +149,7 @@ class PostgresRecovery:
         current = recovery_source(installed)
         changed = sorted(k for k, v in source.as_mapping().items() if current.as_mapping()[k] != v)
         if changed == []:
+            self._retire_channel(source, confirm=confirm)
             return {'code': 'replayed', 'source_digest': source.source_digest}
         if changed != ['container_id']:
             raise RecoveryError('rebind may change only the container', 'source_binding_conflict')
@@ -163,7 +164,19 @@ class PostgresRecovery:
         if temporary.exists(): temporary.unlink()
         install_owner_only_json(temporary, source.as_mapping())
         os.replace(temporary, path)
+        self._retire_channel(source, confirm=True)
         return {'code': 'rebound', **result}
+
+    def _retire_channel(self, source, *, confirm):
+        # A capture channel names the source digest it was published for; a rebound
+        # source must not inherit it, or the next capture cannot record its own.
+        path = self.root / 'channels' / f'{source.remote}-{source.profile}.json'
+        channel = _read_owner_only_json(path)
+        if not confirm or channel is None or channel.get('source_digest') == source.source_digest:
+            return
+        archive = path.parent / 'rebound' / f"{path.stem}-{str(channel.get('source_digest', ''))[7:]}.json"
+        install_owner_only_json(archive, channel)
+        path.unlink()
 
     def source(self, remote, profile):
         return recovery_source(_read_owner_only_json(self._source_path(remote, profile)))

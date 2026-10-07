@@ -69,6 +69,13 @@ _HOST_POST_COMPOSE_OBSERVATION_DEADLINE_SECONDS = 120.0
 _HOST_POST_COMPOSE_OBSERVATION_ATTEMPT_SECONDS = 45
 _HOST_POST_COMPOSE_OBSERVATION_INITIAL_BACKOFF_SECONDS = 1.0
 _HOST_POST_COMPOSE_OBSERVATION_MAX_BACKOFF_SECONDS = 4.0
+# The apply controller usually runs on a laptop. If the machine sleeps after
+# Compose has finished, the read-only poll wakes with a dead network and would
+# spend its whole budget on transport errors, then report a successful apply
+# as failed. A wall-clock jump the monotonic clock did not see means the
+# process was suspended; renew the read-only budget a bounded number of times.
+_HOST_SUSPEND_GAP_SECONDS = 15.0
+_HOST_POST_COMPOSE_OBSERVATION_MAX_RENEWALS = 3
 _HOST_NO_BUILD_CONFIG_MAX_BYTES = 1_048_576
 _HOST_SOURCE_SNAPSHOT_MAX_FILES = 4096
 _HOST_SOURCE_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
@@ -1732,7 +1739,16 @@ def _poll_post_compose_host_observation(
     last_observation = _unavailable_host_observation()
     last_classified = _classify_host_observation(
         validated, last_observation, expected_revision)
+    renewals = 0
+    last_wall, last_mono = time.time(), time.monotonic()
     while True:
+        wall, mono = time.time(), time.monotonic()
+        if ((wall - last_wall) - (mono - last_mono) > _HOST_SUSPEND_GAP_SECONDS
+                and renewals < _HOST_POST_COMPOSE_OBSERVATION_MAX_RENEWALS):
+            renewals += 1
+            end = mono + float(deadline_seconds)
+            backoff = float(initial_backoff_seconds)
+        last_wall, last_mono = wall, mono
         remaining = end - time.monotonic()
         if remaining < 1:
             break
@@ -3453,6 +3469,38 @@ def _prepare_host_source_artifact(validated: dict, commit: str) -> tuple[dict, P
     # local subtree object preparation. This does not grant a different job.
     _durable_host_context(validated['project_root'])
     return artifact, checkout
+
+@contextmanager
+def _hold_controller_awake():
+    """Keep a macOS controller from idle or system sleep during one apply.
+
+    A deploy controller frozen by sleep after the remote phases have finished
+    leaves the runtime and the deploy record out of sync. ``caffeinate -w``
+    also exits on its own if this process dies. Lid-close sleep on battery
+    cannot be prevented; the post-Compose poll handles that case. Elsewhere,
+    or when caffeinate is unavailable, this is a no-op.
+    """
+    holder = None
+    if os.uname().sysname == "Darwin":
+        try:
+            holder = subprocess.Popen(
+                ["caffeinate", "-i", "-s", "-w", str(os.getpid())],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+        except OSError:
+            holder = None
+    try:
+        yield
+    finally:
+        if holder is not None:
+            holder.terminate()
+            try:
+                holder.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.wait(timeout=5)
+
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
@@ -6413,13 +6461,14 @@ def cmd_host(cfg, args) -> None:
                 state = hosting.load_host_state()
                 runtime = hosting.desired_runtime(validated, args.remote, state)
                 runtime["records"] = current_plan["records"]
-                result = _apply_host(
-                    validated, current_entry, args.remote, runtime, state,
-                    bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
-                    recovery_repository=recovery_repository,
-                    purge_edge_cache=bool(getattr(args, "purge_edge_cache", False)),
-                    delivery_holder=delivery_holder,
-                )
+                with _hold_controller_awake():
+                    result = _apply_host(
+                        validated, current_entry, args.remote, runtime, state,
+                        bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
+                        recovery_repository=recovery_repository,
+                        purge_edge_cache=bool(getattr(args, "purge_edge_cache", False)),
+                        delivery_holder=delivery_holder,
+                    )
     except RetainedDelivery as exc:
         retained = operation_summary(exc.operation) if exc.operation else None
         payload = {'ok': bool(exc.status == 'existing' and retained and retained['delivery_succeeded']),

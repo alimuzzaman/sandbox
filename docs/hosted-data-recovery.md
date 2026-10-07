@@ -46,7 +46,7 @@ only that observed volume read-only in an owned, networkless reader.
 ./sb recovery data --postgres-operation inspect-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --json
 ./sb recovery data --postgres-operation reopen-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --reopen-plan REOPEN.json --confirm --json
 ./sb recovery data --postgres-operation verify-restore --remote REMOTE --profile lenzora-dev --restore-plan PLAN.json --confirm --json
-./sb recovery data --postgres-operation readiness --remote REMOTE --profile PROFILE --target-volume VOLUME --json
+./sb recovery data --postgres-operation readiness --remote REMOTE --profile PROFILE [--target-volume VOLUME] --json
 ```
 
 `status` inspects the original retained request without consuming database credentials
@@ -72,6 +72,11 @@ markers, isolated configuration and sole owned data volume before startup.
 It starts only that existing container and PostgreSQL data directory. It never
 imports, initializes a database, recreates a target, removes a PID file, or
 recreates the transient initialization password.
+
+A drill that already verified also leaves its target stopped, so a later
+`inspect-restore` still reports the live `restore_target_stopped` state but adds
+`verified_receipt` (code, backup ID, plan digest) and `reopen_available=false`.
+That drill is complete; `reopen-restore` refuses it with `restore_already_verified`.
 
 Once an inspect request reaches the remote recovery transport, its response includes
 `data.inspection_diagnostic`, a closed value-free record with the native request
@@ -226,7 +231,9 @@ activate the application or overwrite an existing production database.
 `readiness` returns a source-bound verified backup/restore receipt for the volume
 selected by deployment. For the legacy production profile it requires the
 confirmed production transfer receipt. For development and retained storage it
-requires a verified isolated drill for the same observed source volume. These
+requires a verified isolated drill for the same observed source volume, and
+`--target-volume` defaults to the registered source volume. The legacy production
+profile has no default and refuses with `target_volume_required`. These
 receipts prove the recorded checkpoint, not arbitrary subsequent writes.
 
 ## Source verification

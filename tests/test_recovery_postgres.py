@@ -331,6 +331,8 @@ class PostgresRecoveryTests(unittest.TestCase):
                 result = readonly.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
             self.assertEqual(result['code'], 'data_ready')
             self.assertEqual(configured.call_args.args[1], 'gdrive:synthetic-recovery')
+            with patch('sandbox.recovery.drive.RcloneDrive', return_value=capture.drive):
+                self.assertEqual(readonly.readiness('scaleway-sandbox', 'lenzora-dev', None)['volume'], value.volume)
             capture.drive.objects.clear()
             with patch('sandbox.recovery.drive.RcloneDrive', return_value=capture.drive), self.assertRaises(RecoveryError):
                 readonly.readiness('scaleway-sandbox', 'lenzora-dev', value.volume)
@@ -816,8 +818,31 @@ class PostgresRecoveryTests(unittest.TestCase):
             })
             with self.assertRaises(RecoveryError) as raised:
                 recovery.restore(plan, confirm=True, reopen=True, reopen_plan=self._reopen_plan(plan))
-            self.assertEqual(raised.exception.code, "request_invalid")
+            self.assertEqual(raised.exception.code, "restore_already_verified")
             self.assertEqual([call[1] for call in transport.calls], ["capture"])
+
+    def test_stopped_inspection_of_a_verified_drill_reports_the_retained_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _capture, transport, plan, archive = self._prepared_plan(Path(directory))
+            _same_archive, evidence = capture_archive(plan["source_digest"])
+            transport.responses["restore"] = json.dumps(restore_receipt(plan, evidence)).encode()
+            recovery.restore(plan, confirm=True)
+            reopen_plan = self._reopen_plan(plan)
+            transport.responses["inspect-restore"] = json.dumps({
+                "schema_version": 1, "ok": True, "code": "restore_target_stopped",
+                "target": plan["target"], "container_id": reopen_plan["container_id"],
+                "database_available": False, "all_match": False, "reopen_plan": reopen_plan,
+                "inspection_diagnostic": inspection_diagnostic(
+                    plan, archive, code="restore_target_stopped",
+                    phase="target_state", status="refused"),
+            }).encode()
+
+            result = recovery.restore(plan, inspect=True)
+
+            self.assertEqual(result["code"], "restore_target_stopped")
+            self.assertEqual(result["verified_receipt"]["code"], "restore_verified")
+            self.assertEqual(result["verified_receipt"]["plan_digest"], plan["plan_digest"])
+            self.assertIs(result["reopen_available"], False)
 
     def test_reopen_failure_is_closed_and_does_not_write_a_receipt(self):
         with tempfile.TemporaryDirectory() as directory:

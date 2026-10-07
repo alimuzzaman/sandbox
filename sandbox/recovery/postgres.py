@@ -281,6 +281,11 @@ class PostgresRecovery:
 
     def readiness(self, remote, profile, target_volume):
         source = self.source(remote, profile)
+        if target_volume is None:
+            # Only a production transfer names a volume other than the source's own.
+            if profile == 'lenzora-prod-legacy':
+                raise RecoveryError('production transfer readiness requires the target volume', 'target_volume_required')
+            target_volume = source.volume
         if self.capture is not None:
             drive = self.capture.drive
         else:
@@ -360,7 +365,7 @@ class PostgresRecovery:
         retained = _read_owner_only_json(receipt_path)
         manifest = verify_manifest(self.capture.drive, plan['backup_id'])
         if retained is not None and not inspect:
-            if reopen: raise RecoveryError('restore is already verified', 'request_invalid')
+            if reopen: raise RecoveryError('restore is already verified', 'restore_already_verified')
             if plan['profile'] != 'lenzora-prod-storage':
                 _validate_database_receipt(retained, source, manifest, plan['native_request_id'],
                     target_volume=plan['target_volume'])
@@ -426,6 +431,13 @@ class PostgresRecovery:
                         'restore_inspected', 'restore_verified', 'restore_target_stopped',
                         'restore_database_unavailable'} or result.get('target') != plan['target']:
                     raise RecoveryError('restore inspection is unavailable', 'restore_verification_failed')
+                if retained is not None:
+                    # Inspection observes the live target, which a finished drill
+                    # leaves stopped; report the retained proof so that state does
+                    # not read as a failed drill, and do not offer a reopen.
+                    result['verified_receipt'] = {'code': retained.get('code'), 'backup_id': retained.get('backup_id'),
+                        'plan_digest': retained.get('plan_digest')}
+                    result['reopen_available'] = False
                 return result
             if not result.get('ok') or result.get('code') not in {'restore_verified', 'storage_restore_verified'} or result.get('target') != plan['target']:
                 raise RecoveryError('restore evidence is incomplete', 'restore_verification_failed')

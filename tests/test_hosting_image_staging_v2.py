@@ -1205,7 +1205,25 @@ class TestV2BatchStaging(unittest.TestCase):
                     projected_identity_reader=lambda: next(projection_epochs), remover=shutil.rmtree)
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["code"], "observation_invalid")
-                self.assertEqual(set(result["payload"]), {"process", "cleanup"})
+                self.assertEqual(set(result["payload"]),
+                                 {"process", "cleanup", "observation_step"})
+                self.assertEqual(result["payload"]["observation_step"], "target_identity")
+
+    def test_observation_step_is_closed_and_round_trips_through_the_ledger(self):
+        from sandbox.hosting.images.staging_v2 import StageResultSet
+        from sandbox.hosting.images.staging_repository import _result_from
+        from sandbox.hosting.images.staging_models import StagingContractError
+        result = StageResultSet(2, False, "failed", "observation_invalid", "request-a", 3,
+                                observation_step="inspect")
+        stored = result.as_mapping()
+        self.assertEqual(stored["observation_step"], "inspect")
+        self.assertEqual(_result_from(stored, "request-a"), result)
+        for bad in ({"observation_step": "/var/lib/docker"},
+                    {"observation_step": "inspect", "code": "pull_failed"}):
+            fields = {"code": "observation_invalid", **bad}
+            with self.assertRaises(StagingContractError):
+                StageResultSet(2, False, "failed", fields["code"], "request-a", 3,
+                               observation_step=fields["observation_step"])
 
 
 if __name__ == "__main__":

@@ -175,14 +175,14 @@ def _result_from(raw: object, request_id: str, proof=None):
         pull_failure = PullFailure.from_mapping(raw["pull_failure"]) \
             if "pull_failure" in raw else None
         if raw.get("schema_version") == 1:
-            if pull_failure is not None:
+            if pull_failure is not None or "observation_step" in raw:
                 raise StagingContractError()
             return StageResult(raw["schema_version"], raw["ok"], raw["result_class"],
                                raw["code"], request_id, raw["generation"], proof)
         if raw.get("schema_version") == 2:
             return StageResultSet(raw["schema_version"], raw["ok"], raw["result_class"],
                                   raw["code"], request_id, raw["generation"], proof,
-                                  pull_failure)
+                                  pull_failure, raw.get("observation_step"))
     except (KeyError, TypeError, ValueError, StagingContractError):
         pass
     raise StageRepositoryError("ledger_invalid")
@@ -356,7 +356,8 @@ class StageRepository:
                 result_fields = {"schema_version", "ok", "result_class", "code",
                                  "request_id", "generation"}
                 if type(result) is not dict or frozenset(result) not in {
-                        frozenset(result_fields), frozenset(result_fields | {"pull_failure"})}:
+                        frozenset(result_fields), frozenset(result_fields | {"pull_failure"}),
+                        frozenset(result_fields | {"observation_step"})}:
                     raise ValueError
                 parsed_result = _result_from(result, result["request_id"], proof)
                 if result != self._stored_result(parsed_result) \

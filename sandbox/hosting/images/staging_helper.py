@@ -441,6 +441,7 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
     environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C",
                    "HOME": str(workspace), "DOCKER_CONFIG": str(workspace / "docker")}
     code = "staged"; observation = None; pull_failure = None
+    step = "anonymous_probe"
     try:
         for image in plan["images"]:
             if not anonymous_probe(image["repository"], image["manifest_digest"]):
@@ -449,6 +450,7 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                         "--password-stdin"), environment=environment,
                        input_data=credential + b"\n", timeout=30)
         if login.returncode != 0: raise ValueError("broker_unavailable")
+        step = "daemon_start"
         machine_epoch_start = machine_epoch_reader()
         projected_identity = projected_identity_reader()
         daemon_start_result = runner(("docker", "info", "--format", "{{.ID}}"),
@@ -473,11 +475,13 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
         if (workspace / "docker").exists(): raise ValueError("cleanup_unproven")
         observations = []
         for image in plan["images"]:
+            step = "inspect"
             inspect = runner(("docker", "image", "inspect",
                 image["repository_qualified_digest"], "--format", "{{json .}}"),
                 environment=environment, timeout=30)
             if inspect.returncode != 0: raise ValueError("observation_invalid")
             raw = json.loads(inspect.stdout)
+            step = "repo_digest"
             local_image_id = raw.get("Id")
             if type(raw.get("RepoDigests")) is not list \
                     or raw["RepoDigests"].count(image["repository_qualified_digest"]) != 1 \
@@ -485,6 +489,7 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                         image["config_digest"], image["manifest_digest"],
                         image["repository_qualified_digest"]}:
                 raise ValueError("observation_invalid")
+            step = "platform"
             platform = f'{raw.get("Os")}/{raw.get("Architecture")}'
             if raw.get("Variant"): platform += f'/{raw["Variant"]}'
             if platform != image["platform"]: raise ValueError("observation_invalid")
@@ -493,12 +498,14 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
                 "config_digest": image["config_digest"], "platform": platform,
                 "local_image_id": local_image_id, "anonymous_exact_manifest": "denied",
                 "authenticated_exact_manifest": "succeeded"})
+        step = "daemon_end"
         daemon_end_result = runner(("docker", "info", "--format", "{{.ID}}"),
                                    environment=environment, timeout=15)
         machine_epoch_end = machine_epoch_reader()
         projected_identity_end = projected_identity_reader()
         if daemon_end_result.returncode != 0: raise ValueError("observation_invalid")
         daemon_end = daemon_end_result.stdout.decode().strip()
+        step = "target_identity"
         if not machine_epoch_start or machine_epoch_start != machine_epoch_end \
                 or projected_identity != projected_identity_end \
                 or projected_identity != plan["target"]["machine_identity"] \
@@ -531,6 +538,8 @@ def execute_v2(plan: dict, credential: bytes, *, run_root: Path | None = None,
     if not cleanup_complete: code = "cleanup_unproven"
     if code == "pull_failed" and pull_failure is not None:
         payload["pull_failure"] = pull_failure
+    if code == "observation_invalid":
+        payload["observation_step"] = step
     return {"schema_version": 2, "ok": False, "code": code, "payload": payload}
 
 

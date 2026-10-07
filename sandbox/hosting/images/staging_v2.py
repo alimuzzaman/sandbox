@@ -338,6 +338,16 @@ class StagedImageProofSet:
             raw["staging_generation"], raw["proof_digest"])
 
 
+# Value-free step names for an observation_invalid result. Helper steps come
+# from the remote staging helper frame; controller_* steps from the local
+# validation of a frame the helper reported as staged.
+OBSERVATION_STEPS = frozenset({
+    "anonymous_probe", "daemon_start", "inspect", "repo_digest", "platform",
+    "daemon_end", "target_identity",
+    "controller_frame", "controller_schema", "controller_target", "controller_image",
+})
+
+
 @dataclass(frozen=True, slots=True)
 class PullFailure:
     image: str
@@ -368,6 +378,7 @@ class StageResultSet:
     generation: int
     proof: StagedImageProofSet | None = None
     pull_failure: PullFailure | None = None
+    observation_step: str | None = None
 
     def __post_init__(self) -> None:
         from .staging_models import _RESULT_CLASSES, _RESULT_CODES
@@ -384,6 +395,10 @@ class StageResultSet:
                 type(self.pull_failure) is not PullFailure or self.ok
                 or self.result_class != "failed" or self.code != "pull_failed"):
             raise StagingContractError()
+        if self.observation_step is not None and (
+                self.observation_step not in OBSERVATION_STEPS or self.ok
+                or self.result_class != "failed" or self.code != "observation_invalid"):
+            raise StagingContractError()
         _text(self.request_id, identity=True)
 
     def as_mapping(self) -> dict[str, Any]:
@@ -393,6 +408,8 @@ class StageResultSet:
         if self.proof is not None: value["proof"] = self.proof.as_mapping()
         if self.pull_failure is not None:
             value["pull_failure"] = self.pull_failure.as_mapping()
+        if self.observation_step is not None:
+            value["observation_step"] = self.observation_step
         return value
 
 

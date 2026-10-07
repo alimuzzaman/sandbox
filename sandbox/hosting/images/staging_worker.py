@@ -17,11 +17,13 @@ from .staging_models import (
 class StageWorkerError(RuntimeError):
     def __init__(self, code: str, *, process: dict | None = None,
                  cleanup: dict | None = None,
-                 pull_failure: dict | None = None) -> None:
+                 pull_failure: dict | None = None,
+                 observation_step: str | None = None) -> None:
         self.code = code
         self.process = process
         self.cleanup = cleanup
         self.pull_failure = pull_failure
+        self.observation_step = observation_step
         super().__init__(code)
 
 
@@ -41,6 +43,7 @@ class StageDeliveryFailure:
     process: dict | None = None
     cleanup: dict | None = None
     pull_failure: dict | None = None
+    observation_step: str | None = None
 
 
 def unit_name(request_id: str, request_digest: str) -> str:
@@ -152,7 +155,7 @@ class _PreparedWorkerV2:
         self.channel = channel; self.frame = frame
 
     def deliver(self, credential: bytes):
-        from .staging_v2 import BatchObservation
+        from .staging_v2 import BatchObservation, OBSERVATION_STEPS
         response = self.channel.deliver(credential)
         if response.schema_version != 2:
             raise StageWorkerError("observation_invalid")
@@ -186,25 +189,35 @@ class _PreparedWorkerV2:
                             "denied", "not_found", "network", "timeout", "no_space", "daemon"}:
                     raise StageWorkerError("observation_invalid", process=process, cleanup=cleanup)
                 pull_failure = dict(raw_failure)
+            observation_step = None
+            if response.code == "observation_invalid" and "observation_step" in response.payload:
+                # Diagnostic only: an unknown step is dropped, never fatal.
+                fields.add("observation_step")
+                raw_step = response.payload["observation_step"]
+                if type(raw_step) is str and raw_step in OBSERVATION_STEPS:
+                    observation_step = raw_step
             if set(response.payload) != fields:
                 raise StageWorkerError("observation_invalid", process=process, cleanup=cleanup)
             raise StageWorkerError(response.code, process=process, cleanup=cleanup,
-                                   pull_failure=pull_failure)
+                                   pull_failure=pull_failure,
+                                   observation_step=observation_step)
         if set(response.payload) != {"observation", "process", "cleanup"}:
-            raise StageWorkerError("observation_invalid")
+            raise StageWorkerError("observation_invalid", observation_step="controller_frame")
         try:
             observation = BatchObservation.from_mapping(response.payload["observation"])
         except (TypeError, StagingContractError):
-            raise StageWorkerError("observation_invalid") from None
+            raise StageWorkerError("observation_invalid",
+                                   observation_step="controller_schema") from None
         expected = {item.name: item for item in self.request.plan_set.receipt.images}
         actual = {item.name: item for item in observation.images}
         if observation.target != self.policy.target or set(actual) != set(expected):
-            raise StageWorkerError("observation_invalid")
+            raise StageWorkerError("observation_invalid", observation_step="controller_target")
         for name, image in expected.items():
             item = actual[name]
             if (item.repository, item.repo_digest, item.config_digest, item.platform) != (
                     image.repository, image.image_ref, image.config_digest, image.platform):
-                raise StageWorkerError("observation_invalid")
+                raise StageWorkerError("observation_invalid",
+                                       observation_step="controller_image")
         return observation, process, cleanup
 
     def cancel(self) -> dict:

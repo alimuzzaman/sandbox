@@ -1383,6 +1383,10 @@ For a v2 `pull_failed` result, `host stage` and `--stage-status` include only
 `pull_failure: {"image":"database|queue|web|worker","class":"denied|not_found|network|timeout|no_space|daemon"}`.
 The helper uses bounded Docker output only to choose that class; raw stdout,
 stderr, registry detail, and credentials are never placed in the result or ledger.
+A v2 `observation_invalid` result also carries `observation_step`, one fixed name:
+helper steps `anonymous_probe|daemon_start|inspect|repo_digest|platform|daemon_end|target_identity`,
+or controller checks `controller_frame|controller_schema|controller_target|controller_image`.
+An unknown step from the helper is dropped, never fatal.
 The wrapper does not open `/`: `ProtectControlGroups=yes` can deny that operation in the
 user manager. It instead opens the first absolute path component without following links.
 Only that component may report systemd's mapped UID `65534`; the service home and every

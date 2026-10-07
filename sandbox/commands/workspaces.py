@@ -55,6 +55,11 @@ def configure_parser(parser) -> None:
                              "(default 7d for workspaces and one-shot bases)")
     parser.add_argument("--dry-run", action="store_true",
                         help="reap: report what would be reclaimed, change nothing")
+    parser.add_argument("--tier", choices=("safe", "tmp", "all"), default="all",
+                        help="reap: highest reclaim tier to include (default all)")
+    parser.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                        help="reap: keep candidates whose name matches GLOB (repeatable); "
+                             "added to resources.reclaim_exclude from config")
     parser.add_argument("--budget", type=float, default=None)
     parser.add_argument("--json", action="store_true")
 
@@ -66,7 +71,15 @@ _REMOTE_REVISION_STATES = frozenset({"match", "mismatch", "unavailable", "unknow
 _REMOTE_OWNERSHIP_STATES = frozenset({"proven", "missing", "ambiguous", "unknown"})
 
 
-def cmd_retention(args) -> None:
+def _reclaim_excludes(cfg, args) -> tuple[str, ...]:
+    configured = ((cfg or {}).get("resources") or {}).get("reclaim_exclude") or ()
+    if isinstance(configured, str):
+        configured = (configured,)
+    patterns = [*configured, *(getattr(args, "exclude", None) or ())]
+    return tuple(item for item in patterns if isinstance(item, str) and item)
+
+
+def cmd_retention(args, cfg=None) -> None:
     """Agent-facing retention: declare done, extend, or reap what expired."""
     from sandbox.resources.context import reclaim_service
     from sandbox.resources.models import redact
@@ -77,6 +90,8 @@ def cmd_retention(args) -> None:
             dry_run=bool(args.dry_run) or not args.confirm,
             ttl=args.ttl, confirm=bool(args.confirm),
             budget_seconds=args.budget if args.budget is not None else 900,
+            tier=getattr(args, "tier", "all") or "all",
+            exclude_names=_reclaim_excludes(cfg, args),
         )
     elif not args.name:
         from sandbox.core import die
@@ -117,7 +132,7 @@ def cmd_retention(args) -> None:
 
 def cmd_workspace(_cfg, args) -> None:
     if args.action in _RETENTION_ACTIONS:
-        cmd_retention(args)
+        cmd_retention(args, _cfg)
         return
     if (args.action in {"reset", "destroy"} or
             args.action in {"migrate", "retire"} and args.plan_id) and not args.confirm:

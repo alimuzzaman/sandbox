@@ -38,8 +38,9 @@ class Recorder:
                 "data": {"expires_at": "2030-01-01T00:00:00Z",
                          "ttl_seconds": 1209600}}
 
-    def reap(self, *, dry_run, ttl, confirm, budget_seconds):
+    def reap(self, *, dry_run, ttl, confirm, budget_seconds, tier="all", exclude_names=()):
         self.calls.append(("reap", dry_run, ttl, confirm))
+        self.reap_options = (tier, exclude_names)
         return {**self.payload, "action": "reap",
                 "data": {"dry_run": dry_run, "candidates": [], "tier": "all"}}
 
@@ -89,6 +90,14 @@ class TestRetentionCommands(unittest.TestCase):
         with run(recorder):
             workspaces.cmd_workspace(None, args(action="reap"))
         self.assertEqual(recorder.calls, [("reap", True, None, False)])
+
+    def test_reap_merges_configured_and_flag_exclusions(self):
+        recorder = Recorder()
+        cfg = {"resources": {"reclaim_exclude": ["lenzora*"]}}
+        with run(recorder):
+            workspaces.cmd_workspace(cfg, args(action="reap", tier="safe",
+                                               exclude=["keep-*"]))
+        self.assertEqual(recorder.reap_options, ("safe", ("lenzora*", "keep-*")))
 
     def test_reap_with_confirmation_is_not_a_dry_run(self):
         recorder = Recorder()

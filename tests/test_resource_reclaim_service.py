@@ -359,6 +359,18 @@ class TestRetention(ServiceCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "confirmation_required")
 
+    def test_reap_name_globs_drop_candidates_and_report_them(self):
+        provider = FakeProvider()
+        everything = self.service(provider).reap(dry_run=True)["data"]["candidates"]
+        self.assertTrue(everything)
+        name = everything[0]["display_name"]
+        payload = self.service(FakeProvider()).reap(dry_run=True, exclude_names=(name[:3] + "*",))
+        kept = {item["display_name"] for item in payload["data"]["candidates"]}
+        self.assertFalse(any(item.startswith(name[:3]) for item in kept))
+        skipped = [item for item in payload["data"].get("skipped", ())
+                   if item.get("reason") == "excluded_by_request"]
+        self.assertTrue(any(item["display_name"] == name for item in skipped))
+
     def test_reap_excludes_disposable_scratch(self):
         provider = FakeProvider()
         provider.block["scratch"] = [{

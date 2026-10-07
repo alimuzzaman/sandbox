@@ -594,6 +594,11 @@ one-shot base deployments. Leases live in
 `$SANDBOX_HOME/runtime/resources/leases/<name>.json` (mode `0600`); the name
 grammar is path-free. `reap` is a dry run unless `--confirm` is passed, and it
 never touches disposable runtime scratch — that stays with `--tier tmp`.
+`reap --tier safe|tmp|all` narrows the sweep (default `all`). `--exclude GLOB`
+(repeatable) keeps candidates whose name matches, and `resources.reclaim_exclude`
+in `sandbox.local.yml` holds a persistent list (for example `["lenzora*"]`).
+Excluded items are reported as skipped with reason `excluded_by_request`.
+Exclusions only remove candidates; PROTECTED and LIVE entries stay protected.
 
 ### Threshold alerting
 

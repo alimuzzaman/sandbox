@@ -9,6 +9,8 @@ never decides a protection rule of its own, so there is exactly one place where
 
 from __future__ import annotations
 
+import fnmatch
+
 from dataclasses import replace as _replace
 from datetime import timedelta, timezone
 import hashlib
@@ -477,7 +479,8 @@ class ReclaimService:
     # -- planning ---------------------------------------------------------
 
     def _selection(self, tier: str, *, budget_seconds: float,
-                   directory_cache: str | None, exclude_kinds=()) -> tuple:
+                   directory_cache: str | None, exclude_kinds=(),
+                   exclude_names=()) -> tuple:
         block, capacity = self._evidence(
             budget_seconds=budget_seconds, directory_cache=directory_cache,
         )
@@ -485,10 +488,16 @@ class ReclaimService:
         selection = policy.tier_candidates(
             block, tier, now=now, hosted_sites=block.get("hosted_sites") or (),
         )
-        if exclude_kinds:
+        def excluded(item) -> bool:
+            # Name globs let an operator keep whole projects (e.g. lenzora*)
+            # out of a sweep; they only ever remove candidates.
+            return item.kind in exclude_kinds or any(
+                fnmatch.fnmatchcase(str(item.display_name or ""), pattern)
+                for pattern in exclude_names)
+
+        if exclude_kinds or exclude_names:
             kept = tuple(
-                item for item in selection.candidates
-                if item.kind not in exclude_kinds
+                item for item in selection.candidates if not excluded(item)
             )
             dropped = tuple(
                 {
@@ -496,7 +505,7 @@ class ReclaimService:
                     "display_name": item.display_name, "class": item.lifecycle_class,
                     "reason": "excluded_by_request", "bytes": item.bytes,
                 }
-                for item in selection.candidates if item.kind in exclude_kinds
+                for item in selection.candidates if excluded(item)
             )
             selection = _replace(
                 selection,
@@ -509,7 +518,8 @@ class ReclaimService:
         return selection, block, capacity
 
     def plan(self, tier: str, *, budget_seconds: float = 60,
-             directory_cache: str | None = None, exclude_kinds=()) -> dict:
+             directory_cache: str | None = None, exclude_kinds=(),
+             exclude_names=()) -> dict:
         try:
             policy.tier_rank(tier)
         except policy.ReclaimPolicyError as exc:
@@ -519,6 +529,7 @@ class ReclaimService:
             selection, block, _capacity = self._selection(
                 tier, budget_seconds=budget_seconds,
                 directory_cache=directory_cache, exclude_kinds=exclude_kinds,
+                exclude_names=exclude_names,
             )
             target = self.target()
             stored = CleanupPlan.create(
@@ -579,7 +590,7 @@ class ReclaimService:
                 confirm: bool = False, trigger: str = "manual",
                 budget_seconds: float = 900,
                 directory_cache: str | None = None,
-                exclude_kinds=()) -> dict:
+                exclude_kinds=(), exclude_names=()) -> dict:
         if not confirm:
             return result(
                 False, "cleanup", status="refused",
@@ -600,6 +611,7 @@ class ReclaimService:
                 planned = self.plan(
                     tier, budget_seconds=min(budget_seconds, 120),
                     directory_cache=directory_cache, exclude_kinds=exclude_kinds,
+                    exclude_names=exclude_names,
                 )
                 if not planned.get("ok"):
                     return {**planned, "action": "cleanup", "status": "refused"}
@@ -775,7 +787,8 @@ class ReclaimService:
 
     def reap(self, *, dry_run: bool = True, ttl: str | None = None,
              confirm: bool = False, budget_seconds: float = 900,
-             directory_cache: str | None = None) -> dict:
+             directory_cache: str | None = None, tier: str = "all",
+             exclude_names=()) -> dict:
         """Reclaim expired, not-in-use workspaces and one-shot base targets."""
         if ttl is not None:
             try:
@@ -784,9 +797,9 @@ class ReclaimService:
                 return result(False, "reap", status="failed",
                               error=ResourceError(str(exc), exc.code))
         if dry_run:
-            planned = self.plan("all", budget_seconds=min(budget_seconds, 120),
+            planned = self.plan(tier, budget_seconds=min(budget_seconds, 120),
                                 directory_cache=directory_cache,
-                                exclude_kinds=("runtime",))
+                                exclude_kinds=("runtime",), exclude_names=exclude_names)
             if planned.get("ok"):
                 planned["action"] = "reap"
                 planned["data"]["dry_run"] = True
@@ -797,10 +810,10 @@ class ReclaimService:
                 error=ResourceError("workspace reap requires --confirm",
                                     "confirmation_required"),
             )
-        outcome = self.cleanup(tier="all", confirm=True, trigger="reap",
+        outcome = self.cleanup(tier=tier, confirm=True, trigger="reap",
                                budget_seconds=budget_seconds,
                                directory_cache=directory_cache,
-                               exclude_kinds=("runtime",))
+                               exclude_kinds=("runtime",), exclude_names=exclude_names)
         outcome["action"] = "reap"
         return outcome
 

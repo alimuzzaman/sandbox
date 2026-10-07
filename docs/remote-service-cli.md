@@ -17,6 +17,12 @@ refreshes the immutable, owner-scoped image staging helper for that exact source
 revision before it changes or restarts the user service. Helper validation failure
 therefore leaves the existing service untouched.
 
+A remote serves one runtime revision. When the installed revision differs from
+this checkout's, `migrate --plan` (and the confirmed result) adds
+`replaces_revision` and a warning: any other checkout or deploy pinned to the
+installed revision fails its runtime check until it migrates again. Check with
+whoever owns that pin before confirming.
+
 `status` bounds each user-systemd probe and returns `probe_state` (`complete`,
 `partial`, or `unavailable`) with a stable `probe_error` when evidence is
 incomplete. SSH transport failures return a degraded JSON result and a nonzero

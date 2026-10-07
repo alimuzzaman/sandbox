@@ -487,6 +487,16 @@ def _cmd_service(args, as_json: bool) -> None:
             )
             plan["observed"] = observed
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
+            if observed.get("runtime_revision_state") == "mismatch":
+                # One remote serves one runtime revision. Replacing it breaks
+                # any other checkout or deploy that requires the installed one.
+                plan["replaces_revision"] = observed.get("installed_runtime_revision")
+                plan["warnings"] = [
+                    "this replaces installed runtime revision "
+                    f"{observed.get('installed_runtime_revision')} with "
+                    f"{observed.get('local_runtime_revision')}; other checkouts or "
+                    "deploys pinned to the installed revision will fail their "
+                    "runtime check until they migrate again"]
             if confirmed:
                 sr.put_remote(name, mcp_service=plan["service"])
                 # Report the post-apply state; the pre-apply observation still

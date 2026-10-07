@@ -3422,6 +3422,26 @@ class TestRemoteServiceCommand(unittest.TestCase):
                     remote_cmd._cmd_service(args, as_json=True)
                 self.assertIsNone(migrate.call_args.args[4])
 
+    def test_service_migration_plan_warns_before_replacing_another_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                              control_transport="tailscale", tailscale_host="100.64.1.2",
+                              bearer_token="a" * 64)
+                args = types.SimpleNamespace(name="migrate", ssh_url="myvps", confirm=False, plan=False)
+                observed = {"legacy_pidfile": "absent", "runtime_revision_state": "mismatch",
+                            "installed_runtime_revision": "pinned-rev",
+                            "local_runtime_revision": "local-rev"}
+                out = StringIO()
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value=observed), \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service",
+                                  return_value={"status": "planned", "service": {}}), \
+                     redirect_stdout(out):
+                    remote_cmd._cmd_service(args, as_json=True)
+                data = json.loads(out.getvalue())["data"]
+                self.assertEqual(data["replaces_revision"], "pinned-rev")
+                self.assertIn("pinned to the installed revision", data["warnings"][0])
+
     def test_service_migration_plan_records_read_only_legacy_evidence(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):

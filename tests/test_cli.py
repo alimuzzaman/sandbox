@@ -255,6 +255,30 @@ class TestResolutionGate(unittest.TestCase):
                 env.assert_not_called()
                 commands["ensure"].assert_not_called()
 
+    def test_ensure_instance_refusal_names_the_exact_retry_for_a_registered_instance(self):
+        """ac14f1c2: the refusal stays, but prints the ensure command for that instance."""
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        core = mock.Mock()
+        core.registry_find_instance.return_value = {
+            "instance": "demo-qa", "root": "/tmp/my project", "label": "qa"}
+        errors = StringIO()
+        with mock.patch.object(sys, "argv", ["sb", "ensure", "--instance", "demo-qa"]), \
+                mock.patch.object(cli, "_core", return_value=core), \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(cli, "load_config") as load_config, \
+                mock.patch.object(cli, "COMMANDS", {"ensure": mock.Mock(name="ensure_handler")}) as commands, \
+                redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("For 'demo-qa' run: sb ensure --project-dir '/tmp/my project' --label qa",
+                      errors.getvalue())
+        auto_migrate.assert_not_called()
+        load_config.assert_not_called()
+        commands["ensure"].assert_not_called()
+
     def test_project_routed_init_rejects_instance_before_side_effects(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

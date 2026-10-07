@@ -120,7 +120,8 @@ routing `--label`. To reconcile an existing named instance, use
 parser cannot otherwise use safely. Select the project with `--project-dir`
 and, when it owns more than one instance, `--label LABEL` (add `--create` when
 minting that label). Reconcile an existing named instance with
-`sb apply --instance NAME`.
+`sb apply --instance NAME`. When NAME is registered, the refusal prints the
+exact `sb ensure --project-dir ROOT [--label LABEL]` command for it.
 
 `sb init` follows the same project-scoped boundary and refuses `--instance
 NAME`; pass `--project-dir DIR` so an initializer cannot mutate the tooling

@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1436,13 +1437,23 @@ Per-project (each plugin carries its own sandbox.config.json):
     # Reject both parser placements before migration, config loading, or any
     # compose/environment/runtime handler can cause a side effect.
     if args.cmd == "ensure" and _explicit_global_option(raw_argv, "--instance"):
-        die(
+        message = (
             "ensure is project-scoped and cannot target --instance NAME; use "
             "`sb ensure --project-dir DIR` with `--label LABEL` (and "
             "`--create` for a new label), or `sb apply --instance NAME` for "
-            "an existing named instance.",
-            2,
+            "an existing named instance."
         )
+        named = getattr(args, "instance", None)
+        try:
+            owner = _core().registry_find_instance(named) if named else None
+        except Exception:  # noqa: BLE001 - the hint is best-effort; the refusal stands
+            owner = None
+        if isinstance(owner, dict) and owner.get("root"):
+            retry = ["sb", "ensure", "--project-dir", str(owner["root"])]
+            if owner.get("label") and owner.get("label") != "default":
+                retry += ["--label", str(owner["label"])]
+            message += f" For '{named}' run: {shlex.join(retry)}"
+        die(message, 2)
 
     # Pure diagnostic transports return before all legacy compatibility writers
     # and instance selection; a missing local runtime/config is not an error.

@@ -37,6 +37,7 @@ only that observed volume read-only in an owned, networkless reader.
 ```sh
 ./sb recovery data --postgres-operation register --remote REMOTE --profile PROFILE --source-binding SOURCE.json --json
 ./sb recovery data --postgres-operation register --remote REMOTE --profile PROFILE --source-binding SOURCE.json --confirm --json
+./sb recovery data --postgres-operation rebind --remote REMOTE --profile PROFILE --source-binding SOURCE.json --request-id OBSERVATION_ID --confirm --json
 ./sb recovery data --postgres-operation observe --remote REMOTE --profile PROFILE --request-id OBSERVATION_ID --json
 ./sb recovery data --postgres-operation status --remote REMOTE --profile PROFILE --request-id CAPTURE_ID --json
 ./sb recovery data --postgres-operation capture --remote REMOTE --profile PROFILE --request-id CAPTURE_ID --backup-id BACKUP_ID --confirm --json
@@ -180,7 +181,13 @@ registering its matching client image. The observation still uses the registered
 remote and broker, and does not install or replace a source.
 
 Registration does not replace an existing different binding; it refuses with
-`source_binding_conflict`. Requests are
+`source_binding_conflict`. When Compose recreates the source container, move the
+binding with `rebind`: preview without `--confirm`, then confirm with a fresh
+observation request ID. Rebind changes only `container_id`; any other difference
+refuses with `source_binding_conflict`. It first observes the new binding through the
+registered remote, archives the previous descriptor under `sources/rebound/`, then
+replaces it. Retained requests stay bound to the previous source digest, so new
+capture and restore requests use new IDs. Requests are
 immutable. A lost response reuses the same request; a partial retained operation
 without a terminal record reports uncertainty rather than overwriting data or
 choosing another identity. Run long capture/restore operations through durable

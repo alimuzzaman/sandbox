@@ -18,6 +18,7 @@ from .database import DatabaseCapture
 from .errors import RecoveryError
 from .integrity import sha256_file
 from .postgres_contract import (
+    PostgresSource,
     recovery_source, digest, valid_restore_inspection_diagnostic,
     restore_inspection_result_matches_diagnostic,
 )
@@ -135,6 +136,34 @@ class PostgresRecovery:
             raise RecoveryError('a different source is already registered for this profile',
                                 'source_binding_conflict') from None
         return {'code': disposition, 'source_digest': source.source_digest}
+
+    def rebind(self, binding, request_id=None, *, confirm=False):
+        """Move a registered source to its recreated container; every other field stays bound."""
+        source = recovery_source(binding)
+        if not isinstance(source, PostgresSource):
+            raise RecoveryError('only PostgreSQL sources can be rebound', 'source_binding_invalid')
+        path = self._source_path(source.remote, source.profile)
+        installed = _read_owner_only_json(path)
+        if installed is None:
+            raise RecoveryError('no source is registered for this profile', 'source_binding_missing')
+        current = recovery_source(installed)
+        changed = sorted(k for k, v in source.as_mapping().items() if current.as_mapping()[k] != v)
+        if changed == []:
+            return {'code': 'replayed', 'source_digest': source.source_digest}
+        if changed != ['container_id']:
+            raise RecoveryError('rebind may change only the container', 'source_binding_conflict')
+        result = {'previous_container_id': current.container_id, 'container_id': source.container_id,
+                  'previous_source_digest': current.source_digest, 'source_digest': source.source_digest}
+        if not confirm: return {'code': 'rebind_planned', **result}
+        # Prove the new container is the live database before moving the binding.
+        self.observe(source.remote, source.profile, request_id, binding=source.as_mapping())
+        archive = path.parent / 'rebound' / f'{source.remote}-{source.profile}-{current.source_digest[7:]}.json'
+        install_owner_only_json(archive, current.as_mapping())
+        temporary = path.with_name('.rebind-' + path.name)
+        if temporary.exists(): temporary.unlink()
+        install_owner_only_json(temporary, source.as_mapping())
+        os.replace(temporary, path)
+        return {'code': 'rebound', **result}
 
     def source(self, remote, profile):
         return recovery_source(_read_owner_only_json(self._source_path(remote, profile)))

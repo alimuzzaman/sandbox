@@ -267,6 +267,35 @@ class PostgresRecoveryTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 'source_binding_conflict')
             self.assertEqual(recovery.register(source(), confirm=True)['code'], 'replayed')
 
+    def test_rebind_moves_only_the_container_after_observing_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _ = self._recovery(Path(directory), FakeTransport(b''))
+            recovery.register(source(), confirm=True)
+            moved = {**source(), 'container_id': 'f' * 64}
+            planned = recovery.rebind(moved)
+            self.assertEqual(planned['code'], 'rebind_planned')
+            self.assertEqual(recovery.source('scaleway-sandbox', 'lenzora-dev').container_id, source()['container_id'])
+            with self.assertRaises(RecoveryError) as raised:
+                recovery.rebind({**moved, 'volume': 'other-volume'}, 'observe-a', confirm=True)
+            self.assertEqual(raised.exception.code, 'source_binding_conflict')
+            observed = []
+            with patch.object(recovery, 'observe', side_effect=lambda *a, **k: observed.append((a, k))):
+                self.assertEqual(recovery.rebind(moved, 'observe-a', confirm=True)['code'], 'rebound')
+            self.assertEqual(observed[0][1]['binding'], moved)
+            self.assertEqual(recovery.source('scaleway-sandbox', 'lenzora-dev').container_id, 'f' * 64)
+            self.assertEqual(len(list((recovery.root / 'sources' / 'rebound').iterdir())), 1)
+            self.assertEqual(recovery.rebind(moved)['code'], 'replayed')
+
+    def test_rebind_refuses_when_observation_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _ = self._recovery(Path(directory), FakeTransport(b''))
+            recovery.register(source(), confirm=True)
+            moved = {**source(), 'container_id': 'f' * 64}
+            with patch.object(recovery, 'observe', side_effect=RecoveryError('no', 'observation_invalid')):
+                with self.assertRaises(RecoveryError):
+                    recovery.rebind(moved, 'observe-a', confirm=True)
+            self.assertEqual(recovery.source('scaleway-sandbox', 'lenzora-dev').container_id, source()['container_id'])
+
     def test_readiness_uses_verified_ciphertext_channel_without_passphrase(self):
         from sandbox.hosting.images.provisioning import install_owner_only_json
         with tempfile.TemporaryDirectory() as directory:

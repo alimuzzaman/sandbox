@@ -6095,6 +6095,18 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
         raise SystemExit(1)
 
 
+def _host_apply_lock_wait(args) -> int:
+    """Seconds apply waits for the host state lock another apply may hold.
+
+    Applies for unrelated projects share one host state lock, so a bounded
+    wait queues them instead of failing operation_busy after 30 seconds.
+    """
+    value = getattr(args, "lock_wait", 600)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 3600:
+        die("--lock-wait must be between 1 and 3600 seconds")
+    return value
+
+
 def cmd_host(cfg, args) -> None:
     if getattr(args, "initializer", None) is not None and args.action != "diagnose":
         die("--initializer is only available with `host diagnose`")
@@ -6372,12 +6384,13 @@ def cmd_host(cfg, args) -> None:
         lambda message: info(f"host apply: {message}")
     )
     delivery_holder = {}
+    lock_wait = _host_apply_lock_wait(args)
     try:
         recovery_repository = RecoveryRepository()
         target_key = hosting.state_key(args.remote, validated)
         with recovery_repository.target_mutation_port(
                 "apply").target_mutation_transaction(target_key), \
-                recovery_repository.state_lock():
+                recovery_repository.state_lock(timeout_seconds=lock_wait):
             with remote.registered_remote_lock():
                 # Resolve registration only after target ownership. Supported
                 # re-registration cannot repoint it before durable authority

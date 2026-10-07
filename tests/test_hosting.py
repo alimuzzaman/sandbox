@@ -3517,6 +3517,14 @@ class TestHostingManifest(unittest.TestCase):
                         malformed, "remote/project/development")
                 self.assertEqual(malformed, snapshot)
 
+    def test_apply_lock_wait_is_bounded_and_defaults_to_ten_minutes(self):
+        from types import SimpleNamespace
+        self.assertEqual(hosting_cmd._host_apply_lock_wait(SimpleNamespace()), 600)
+        self.assertEqual(hosting_cmd._host_apply_lock_wait(SimpleNamespace(lock_wait=5)), 5)
+        for bad in (0, 3601, True, "60"):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                hosting_cmd._host_apply_lock_wait(SimpleNamespace(lock_wait=bad))
+
     def test_sync_and_login_writer_seam_refuses_active_recovery_owner(self):
         from contextlib import nullcontext
 

@@ -623,6 +623,10 @@ it never prunes unrelated DNS records. Before `apply` contacts the remote, Sandb
 checks the local Git branch and clean-tree policy declared for the target environment.
 `apply` is confirmation-gated: it then transfers the approved checkout, runs
 Compose/init health checks, converges Caddy, and updates only declared DNS records.
+Applies to one host share a host state lock, so an apply for another project
+can be holding it. `apply` waits up to `--lock-wait` seconds (default 600, max
+3600) for that lock before it fails with `operation_busy`. Give the wrapping
+`job-start --timeout` room for the wait plus the apply itself.
 Sandbox records the requested source, staged source receipt, recorded revision, and
 observed runtime revision separately. The staged receipt is saved before runtime
 observation, and exact runtime/topology evidence is saved before edge verification.

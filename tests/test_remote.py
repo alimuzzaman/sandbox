@@ -1302,7 +1302,8 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             def git(*argv):
                 subprocess.run(["git", *argv], cwd=directory, check=True, capture_output=True,
-                               env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                               env={"PATH": os.environ.get("PATH", ""), "HOME": directory,
+                                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
             git("init", "-q", "-b", "main")
             Path(directory, "a.txt").write_text("a")

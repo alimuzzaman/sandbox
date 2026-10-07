@@ -6,6 +6,15 @@ stdout, stderr, combined event order, metrics, and terminal integrity metadata t
 the job store. SSH and MCP retrieve bounded retained pages and never own the
 child pipes.
 
+## Source checkout shape
+
+Remote exec, test and job submissions push the project's committed `HEAD` plus a
+snapshot of uncommitted files. A named branch is pushed under its own name. A
+detached `HEAD` (the usual `git worktree add --detach` PR-review checkout) is
+pushed to an immutable `sandbox-source-<sha>` ref, so no branch has to be
+checked out. A project directory that is not a git checkout with a commit is
+refused with a message that says so; use `--local` for those.
+
 ## Normal operation
 
 `job-list --json` returns bounded summaries, not stored command, submission,

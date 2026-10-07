@@ -449,12 +449,15 @@ def deploy_exact_working_tree(
         if network_capacity.get("ok") is not True:
             raise NetworkCapacityAdmissionError(network_capacity)
     target = ensure_deploy_repo(remote, root, home_timeout=push_timeout)
-    branch = current_branch(root) if resolved_source is None else None
+    # A detached HEAD (the normal PR-review checkout) is pushed to an
+    # immutable sandbox-source-<sha> ref; only a named branch is pushed by name.
+    branch = current_branch(root, allow_detached=True) if resolved_source is None else None
     pushed_sha = push_commits(
         remote, root, target, branch,
         source_ref=source_ref, resolved_sha=resolved_source,
         source_root=source_root,
         push_timeout=push_timeout,
+        allow_detached=True,
     )
     applied = update_target_to(
         remote, target, pushed_sha,
@@ -1825,8 +1828,8 @@ def current_branch(project_root, *, allow_detached: bool = False) -> str | None:
     branch = (res.stdout or "").strip()
     if res.returncode != 0 or not branch:
         raise RuntimeError(
-            "could not determine the current git branch (detached HEAD?) -- "
-            "deploy needs a named branch checked out"
+            f"{project_root} is not a git checkout with a commit -- remote "
+            "deploys push committed source; run `git init` and commit, or use --local"
         )
     if branch == "HEAD":
         if allow_detached:

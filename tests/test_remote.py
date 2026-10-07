@@ -1297,6 +1297,35 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         admission.assert_not_called()
         ensure.assert_not_called()
 
+    def test_exact_working_tree_deploy_accepts_detached_head(self):
+        """db90e71e: a detached PR-review checkout deploys to an immutable source ref."""
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*argv):
+                subprocess.run(["git", *argv], cwd=directory, check=True, capture_output=True,
+                               env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+            git("init", "-q", "-b", "main")
+            Path(directory, "a.txt").write_text("a")
+            git("add", ".")
+            git("commit", "-qm", "init")
+            git("checkout", "-q", "--detach")
+            self.assertIsNone(sr.current_branch(directory, allow_detached=True))
+            with patch.object(sr, "remote_network_capacity_admission", return_value={"ok": True}), \
+                 patch.object(sr, "ensure_deploy_repo", return_value="/srv/deploy/proj"), \
+                 patch.object(sr, "push_commits", return_value="e" * 40) as push, \
+                 patch.object(sr, "update_target_to", return_value=0):
+                result = sr.deploy_exact_working_tree(
+                    {"ssh": "example.test", "_remote_name": "myvps"}, directory,
+                )
+        self.assertEqual(result["commit"], "e" * 40)
+        self.assertIsNone(push.call_args.args[3])
+        self.assertTrue(push.call_args.kwargs["allow_detached"])
+
+    def test_current_branch_names_a_non_git_root_plainly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "is not a git checkout"):
+                sr.current_branch(directory)
+
     @patch("sandbox.core._remote.ssh_run")
     def test_dirty_transfer_uses_the_exact_immutable_hashed_artifact(self, ssh_run):
         ssh_run.return_value = _completed(returncode=0)

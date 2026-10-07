@@ -417,10 +417,15 @@ def cmd_apply_config(cfg, args) -> None:
     label = getattr(args, "label", None)
     json_output = bool(getattr(args, "json", False))
     try:
+        if not label:
+            # The root's sole/default instance may carry a non-"default" label
+            # (e.g. minted as `verify`); resolve it rather than assuming.
+            root = sc.load_project_config(pd)["root"]
+            label = sc.registry_default_label(root) or "default"
         request = OperationRequest(
             project_root=pd,
             operation="apply",
-            label=label or "default",
+            label=label,
             arguments={"config_file": getattr(args, "config_file", None),
                        "creation_context": (json.loads(args.creation_context_json)
                            if getattr(args, "creation_context_json", None) else None),

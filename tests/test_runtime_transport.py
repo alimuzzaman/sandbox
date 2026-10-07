@@ -173,6 +173,22 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         legacy.assert_not_called()
         self.assertEqual(service.requests[0].operation, "apply")
 
+    def test_cli_apply_without_label_targets_sole_nondefault_instance(self):
+        import sandbox.commands.config_setup as commands
+
+        service = RejectingService()
+        core = types.SimpleNamespace(
+            ConfigError=RuntimeError,
+            load_project_config=lambda pd: {"root": pd},
+            registry_default_label=lambda root: "verify",
+        )
+        args = types.SimpleNamespace(project_dir="/tmp/project", label=None, json=False)
+        with mock.patch.object(commands, "_core", return_value=core), \
+                mock.patch.object(commands, "wordpress_runtime_service", return_value=service), \
+                self.assertRaises(SystemExit):
+            commands.cmd_apply_config({}, args)
+        self.assertEqual(service.requests[0].label, "verify")
+
     def test_cli_apply_json_redacts_local_instance_credentials(self):
         import sandbox.commands.config_setup as commands
         from sandbox.runtimes.base import OperationResult

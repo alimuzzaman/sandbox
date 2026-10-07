@@ -791,6 +791,9 @@ PHP matters.
 sb apply --project-dir .        # reconciles the LIVE site to the config
 ```
 
+Without `--label`, apply targets the root's sole or default instance, whatever
+its label is (for example a root whose only instance was minted as `verify`).
+
 If a ready Docker instance's source self-binds are drifted or cannot be
 attested, `sb ensure` returns `instance_mount_drift` or
 `instance_mount_state_unavailable` without changing local state. Inspect Docker

@@ -159,7 +159,7 @@ class InstallTests(UnitsCase):
             self.assertIsNone(units.next_run())
 
 
-class HostEnableTests(UnitsCase):
+class HostCase(UnitsCase):
     REV = "f" * 24
 
     def setUp(self):
@@ -187,6 +187,8 @@ class HostEnableTests(UnitsCase):
         payload.update(overrides)
         return payload
 
+
+class HostEnableTests(HostCase):
     def test_enable_installs_records_and_reports(self):
         envelope = self.handle(self.enable())
         self.assertEqual(envelope["resource_schema"], 1)
@@ -239,6 +241,78 @@ class HostEnableTests(UnitsCase):
         self.assertEqual(envelope["result"]["routine"]["cadence"], "weekly")
         self.assertEqual(envelope["result"]["routine"]["exclusions"], [])
         self.assertEqual(len(list(self.unit_dir.glob("*.timer"))), 1)
+
+
+class RemoveTests(UnitsCase):
+    def test_remove_disables_then_unlinks_both_units(self):
+        self.install(FakeSystem())
+        system = FakeSystem()
+        with patch.object(units, "_run", system):
+            units.remove()
+        self.assertIn(["systemctl", "--user", "disable", "--now", units.TIMER], system.calls)
+        self.assertIn(["systemctl", "--user", "daemon-reload"], system.calls)
+        self.assertFalse((self.unit_dir / units.TIMER).exists())
+        self.assertFalse((self.unit_dir / units.SERVICE).exists())
+
+    def test_remove_without_units_is_a_no_op(self):
+        system = FakeSystem()
+        with patch.object(units, "_run", system):
+            units.remove()
+        self.assertEqual(system.calls, [])
+
+    def test_remove_failure_keeps_the_units(self):
+        self.install(FakeSystem())
+        with patch.object(units, "_run", FakeSystem(fail={"disable --now"})), \
+                self.assertRaises(RoutineError) as raised:
+            units.remove()
+        self.assertEqual(raised.exception.code, "routine_remove_failed")
+        self.assertTrue((self.unit_dir / units.TIMER).exists())
+
+
+class HostDisableTests(HostCase):
+    def disable(self, system=None):
+        return self.handle({"action": "cleanup_routine_disable"}, system)
+
+    def test_disable_removes_units_and_keeps_history(self):
+        self.handle(self.enable())
+        self.store.write_run({
+            "schema": 1, "run_id": "a" * 32, "started_at": "2026-10-08T00:00:00Z",
+            "ended_at": "2026-10-08T00:01:00Z", "outcome": "nothing_to_do",
+            "reason": None, "bytes_reclaimed": 0, "removed": 0, "skipped": 0,
+            "skipped_reasons": {}, "runtime_revision": self.REV, "manifest": None,
+        })
+        envelope = self.disable()
+        result = envelope["result"]
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["routine"]["enabled"])
+        self.assertIsNone(result["routine"]["next_run"])
+        self.assertIsNotNone(result["routine"]["disabled_at"])
+        self.assertEqual(result["routine"]["cadence"], "daily")
+        self.assertEqual([item["run_id"] for item in result["runs"]], ["a" * 32])
+        self.assertEqual(list(self.unit_dir.glob("sandbox-cleanup-routine*")), [])
+        stored = self.store.read_config()
+        self.assertFalse(stored["enabled"])
+        self.assertEqual(len(self.store.runs()), 1)
+
+    def test_disable_when_not_enabled_is_an_idempotent_ok(self):
+        system = FakeSystem()
+        result = self.disable(system)["result"]
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["routine"]["enabled"])
+        self.assertIsNone(self.store.read_config())
+        self.handle(self.enable())
+        self.disable()
+        first = self.store.read_config()["disabled_at"]
+        again = self.disable()["result"]
+        self.assertTrue(again["ok"])
+        self.assertEqual(self.store.read_config()["disabled_at"], first)
+
+    def test_disable_failure_is_routine_remove_failed(self):
+        self.handle(self.enable())
+        result = self.disable(FakeSystem(fail={"disable --now"}))["result"]
+        self.assertEqual(result["error"]["code"], "routine_remove_failed")
+        self.assertTrue(self.store.read_config()["enabled"])
+        self.assertTrue((self.unit_dir / units.TIMER).exists())
 
 
 if __name__ == "__main__":

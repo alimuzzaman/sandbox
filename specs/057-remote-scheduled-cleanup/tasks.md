@@ -41,16 +41,16 @@
 **Goal**: status returns config, effective exclusions, enable and last-run revisions, and run history.
 **Independent test**: after reclaimed, nothing-to-do and refused runs, status matches contract.
 
-- [ ] T019 [P] [US2] Extend `tests/test_cleanup_routine_cli.py` and `tests/test_cleanup_routine_run.py`: `cleanup_routine_status` returns enabled state, cadence, effective exclusions, `enabled_revision`, `last_run_revision`, `next_run`, newest-first runs ≤ 30; manifest reference only for runs that attempted removal; a stale open record is finalized on status read
-- [ ] T020 [US2] Implement the status action in `sandbox/resources/cleanup_routine/host.py` and the CLI rendering (human and `--json`) in `sandbox/commands/resources.py`
+- [x] T019 [P] [US2] Extend `tests/test_cleanup_routine_cli.py` and `tests/test_cleanup_routine_run.py`: `cleanup_routine_status` returns enabled state, cadence, effective exclusions, `enabled_revision`, `last_run_revision`, `next_run`, newest-first runs ≤ 30; manifest reference only for runs that attempted removal; a stale open record is finalized on status read
+- [x] T020 [US2] Implement the status action in `sandbox/resources/cleanup_routine/host.py` and the CLI rendering (human and `--json`) in `sandbox/commands/resources.py`
 
 ## Phase 5: User Story 3 — Turn the routine off (P3)
 
 **Goal**: disable removes the timer and keeps history.
 **Independent test**: enable → disable → no timer files, status disabled with history.
 
-- [ ] T021 [P] [US3] Extend `tests/test_cleanup_routine_units.py` and `tests/test_cleanup_routine_cli.py`: disable without `--confirm` refused; disable runs `disable --now`, removes both unit files, sets `enabled: false`, keeps runs; disable when not enabled is idempotent `ok`; failure → `routine_remove_failed`
-- [ ] T022 [US3] Implement the disable action in `sandbox/resources/cleanup_routine/host.py`, `units.py` and the CLI
+- [x] T021 [P] [US3] Extend `tests/test_cleanup_routine_units.py` and `tests/test_cleanup_routine_cli.py`: disable without `--confirm` refused; disable runs `disable --now`, removes both unit files, sets `enabled: false`, keeps runs; disable when not enabled is idempotent `ok`; failure → `routine_remove_failed`
+- [x] T022 [US3] Implement the disable action in `sandbox/resources/cleanup_routine/host.py`, `units.py` and the CLI
 
 ## Phase 6: Polish & Cross-Cutting
 

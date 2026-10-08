@@ -181,5 +181,81 @@ class ModeTests(CliCase):
         self.assertEqual(json.loads(out.getvalue())["error"]["code"], "invalid_mode")
 
 
+class StatusTests(CliCase):
+    RUN = {
+        "schema": 1, "run_id": "b" * 32, "started_at": "2026-10-08T00:03:00Z",
+        "ended_at": "2026-10-08T00:04:00Z", "outcome": "reclaimed", "reason": None,
+        "bytes_reclaimed": 3 * 1024 * 1024, "removed": 4, "skipped": 2,
+        "skipped_reasons": {"excluded_by_request": 2}, "runtime_revision": REV,
+        "manifest": "deletions/" + "b" * 32 + ".jsonl",
+    }
+
+    def test_status_needs_no_confirm_and_requests_full_history(self):
+        self.transport.result = ok_result(runs=[self.RUN])
+        payload = self.run_cli("--remote", "r1", "--status")
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["status"], "enabled")
+        self.assertEqual(self.transport.requests,
+                         [("POST /resources", {"action": "cleanup_routine_status",
+                                               "history": 30})])
+        self.assertEqual(payload["data"]["runs"][0]["run_id"], "b" * 32)
+        self.assertEqual(payload["data"]["last_run_revision"], REV)
+        self.assertEqual(payload["data"]["routine"]["effective_exclusions"],
+                         ["lenzora*", "keep-*"])
+
+    def test_status_refuses_enable_only_flags(self):
+        payload = self.run_cli("--remote", "r1", "--status", "--cadence", "daily")
+        self.assertEqual(payload["error"]["code"], "invalid_mode")
+        self.assertEqual(self.transport.requests, [])
+
+    def test_human_status_shows_config_and_runs(self):
+        self.transport.result = ok_result(runs=[self.RUN])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            command.cmd_resources(None, parse("--remote", "r1", "--status"))
+        text = out.getvalue()
+        for expected in ("enabled", "cadence daily", "timeout 45min",
+                         "lenzora*, keep-*", "2026-10-09T00:03:00Z",
+                         "b" * 32, "reclaimed", "3.0 MiB",
+                         "excluded_by_request=2", "deletions/"):
+            self.assertIn(expected, text)
+        self.assertNotIn("203.0.113.9", text)
+
+    def test_human_status_without_runs_says_so(self):
+        self.transport.result = ok_result(enabled=False)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            command.cmd_resources(None, parse("--remote", "r1", "--status"))
+        self.assertIn("disabled", out.getvalue())
+        self.assertIn("no runs recorded", out.getvalue())
+
+
+class DisableTests(CliCase):
+    def test_disable_without_confirm_is_protected_and_sends_nothing(self):
+        payload = self.run_cli("--remote", "r1", "--disable")
+        self.assertEqual(payload["error"]["code"], "protected_operation")
+        self.assertEqual(self.transport.requests, [])
+
+    def test_disable_sends_only_the_action(self):
+        self.transport.result = ok_result(enabled=False)
+        payload = self.run_cli("--remote", "r1", "--disable", "--confirm")
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["status"], "disabled")
+        self.assertEqual(self.transport.requests,
+                         [("POST /resources", {"action": "cleanup_routine_disable"})])
+
+    def test_disable_refuses_enable_only_flags(self):
+        payload = self.run_cli("--remote", "r1", "--disable", "--confirm",
+                               "--exclude", "x")
+        self.assertEqual(payload["error"]["code"], "invalid_mode")
+        self.assertEqual(self.transport.requests, [])
+
+    def test_remove_failure_is_reported(self):
+        self.transport.result = {"ok": False, "error": {
+            "code": "routine_remove_failed", "message": "systemctl failed"}}
+        payload = self.run_cli("--remote", "r1", "--disable", "--confirm")
+        self.assertEqual(payload["error"]["code"], "routine_remove_failed")
+
+
 if __name__ == "__main__":
     unittest.main()

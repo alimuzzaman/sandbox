@@ -175,6 +175,32 @@ def install(config: Mapping[str, Any], *, sb_path: str, sandbox_home: str,
     return {"next_run": next_elapse, "units": sorted(paths)}
 
 
+def remove() -> None:
+    """Stop and disable the timer, then delete both unit files.
+
+    A host without the unit files is already in the requested state and no
+    command runs.  A failed ``disable --now`` leaves the files in place so the
+    operator can retry.
+    """
+    paths = unit_paths()
+    if not any(os.path.lexists(path) for path in paths.values()):
+        return
+    code, _output = _run(["systemctl", "--user", "disable", "--now", TIMER], timeout=30)
+    if code != 0:
+        raise RoutineError("systemctl --user disable failed; the timer is still installed",
+                           "routine_remove_failed")
+    try:
+        for path in paths.values():
+            path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RoutineError(f"routine unit files could not be removed: {exc}",
+                           "routine_remove_failed") from None
+    code, _output = _run(["systemctl", "--user", "daemon-reload"], timeout=30)
+    if code != 0:
+        raise RoutineError("systemctl --user daemon-reload failed after removal",
+                           "routine_remove_failed")
+
+
 def next_run() -> str | None:
     """Read the installed timer's next elapse, or None when unknown."""
     code, output = _run([
@@ -187,6 +213,6 @@ def next_run() -> str | None:
 
 
 __all__ = [
-    "SERVICE", "TIMER", "UNIT", "check_host", "install", "next_run", "render",
+    "SERVICE", "TIMER", "UNIT", "check_host", "install", "next_run", "remove", "render",
     "unit_dir", "unit_paths", "validate_cadence",
 ]

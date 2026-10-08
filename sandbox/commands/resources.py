@@ -630,8 +630,39 @@ def _emit_routine(payload: dict, as_json: bool) -> None:
     data = payload.get("data") or {}
     run = data.get("run")
     if isinstance(run, dict):
-        print(f"  run {run.get('run_id')}: {run.get('outcome')}"
-              f" reclaimed {_human_bytes(run.get('bytes_reclaimed'))}")
+        _emit_routine_run(run)
+    routine = data.get("routine")
+    if not isinstance(routine, dict):
+        return
+    print(f"  cadence {routine.get('cadence') or '-'}"
+          f"  timeout {routine.get('timeout') or '-'}"
+          f"  jitter {routine.get('randomized_delay') or '-'}")
+    effective = routine.get("effective_exclusions") or []
+    print(f"  exclusions: {', '.join(effective) if effective else 'none'}")
+    if routine.get("enabled"):
+        print(f"  next run: {routine.get('next_run') or 'unknown'}")
+    print(f"  enabled revision: {routine.get('enabled_revision') or '-'}"
+          f"  last run revision: {data.get('last_run_revision') or '-'}")
+    runs = data.get("runs") or []
+    if not runs:
+        print("  no runs recorded")
+    for item in runs:
+        if isinstance(item, dict):
+            _emit_routine_run(item)
+
+
+def _emit_routine_run(run: dict) -> None:
+    reason = f" ({run.get('reason')})" if run.get("reason") else ""
+    print(f"  run {run.get('run_id')} {run.get('started_at') or '-'}:"
+          f" {run.get('outcome')}{reason}"
+          f" reclaimed {_human_bytes(run.get('bytes_reclaimed'))},"
+          f" removed {run.get('removed', 0)}, skipped {run.get('skipped', 0)}")
+    reasons = run.get("skipped_reasons") or {}
+    if isinstance(reasons, dict) and reasons:
+        print("    skipped: " + ", ".join(
+            f"{key}={value}" for key, value in sorted(reasons.items())))
+    if run.get("manifest"):
+        print(f"    manifest: {run.get('manifest')}")
 
 
 def _human_bytes(value) -> str:

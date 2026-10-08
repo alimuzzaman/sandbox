@@ -320,5 +320,92 @@ class ReclaimingRun(RunCase):
         self.assertEqual(len(self.store.runs()), 30)
 
 
+class StatusAfterRuns(RunCase):
+    """US2: status reports what the routine did, newest first (spec 057)."""
+
+    def status(self, **payload):
+        from sandbox.resources.cleanup_routine import host, units
+
+        request = {"action": "cleanup_routine_status", **payload}
+        with patch.object(units, "next_run", return_value="2026-10-09T00:03:12Z"):
+            return host.handle(request, live_revision=REV, store=self.store,
+                               host_config=self.host_config)
+
+    def clock(self, hours):
+        return lambda: NOW + timedelta(hours=hours)
+
+    def test_status_reports_config_revisions_and_newest_first_runs(self):
+        reclaimed = self.run_once(clock=self.clock(1))["run"]
+        self.block["status"] = "partial"
+        refused = self.run_once(clock=self.clock(2))["run"]
+        self.block["status"] = "complete"
+        self.block["entries"] = [item for item in self.block["entries"]
+                                 if item["name"] != "old-workspace-1"]
+        self.block["volumes"] = [item for item in self.block["volumes"]
+                                 if "old-workspace-1" not in item["name"]]
+        empty = self.run_once(clock=self.clock(3))["run"]
+
+        envelope = self.status()
+        self.assertEqual(envelope["service"], {"runtime_revision": REV})
+        result = envelope["result"]
+        self.assertTrue(result["ok"], result)
+        routine = result["routine"]
+        self.assertTrue(routine["enabled"])
+        self.assertEqual(routine["cadence"], "daily")
+        self.assertEqual(routine["exclusions"], ["lenzora*"])
+        self.assertEqual(routine["effective_exclusions"], ["lenzora*", "keep-*"])
+        self.assertEqual(routine["enabled_revision"], REV)
+        self.assertEqual(routine["next_run"], "2026-10-09T00:03:12Z")
+        self.assertEqual(result["last_run_revision"], REV)
+        runs = result["runs"]
+        self.assertEqual([item["run_id"] for item in runs],
+                         [empty["run_id"], refused["run_id"], reclaimed["run_id"]])
+        self.assertEqual([item["outcome"] for item in runs],
+                         ["nothing_to_do", "refused", "reclaimed"])
+        # A manifest reference only where removal was attempted.
+        self.assertIsNone(runs[0]["manifest"])
+        self.assertIsNone(runs[1]["manifest"])
+        self.assertEqual(runs[2]["manifest"], f"deletions/{reclaimed['run_id']}.jsonl")
+        self.assertNotIn("timeout_seconds", runs[2])
+
+    def test_status_history_is_capped_and_honours_the_request(self):
+        for index in range(31):
+            self.store.write_run({
+                "schema": 1, "run_id": f"{index:032x}",
+                "started_at": (NOW - timedelta(days=40 - index)).isoformat().replace("+00:00", "Z"),
+                "ended_at": None, "outcome": "nothing_to_do", "reason": None,
+                "bytes_reclaimed": 0, "removed": 0, "skipped": 0,
+                "skipped_reasons": {}, "runtime_revision": REV, "manifest": None,
+            })
+        runs = self.status()["result"]["runs"]
+        self.assertEqual(len(runs), 30)
+        self.assertEqual(runs[0]["run_id"], f"{30:032x}")
+        self.assertEqual(len(self.status(history=5)["result"]["runs"]), 5)
+        self.assertEqual(self.status(history=31)["result"]["error"]["code"],
+                         "invalid_request")
+
+    def test_status_finalizes_a_stale_open_record(self):
+        self.store.write_run({
+            "schema": 1, "run_id": "e" * 32,
+            "started_at": "2026-10-07T00:00:00Z", "ended_at": None,
+            "outcome": "running", "reason": None, "bytes_reclaimed": 0,
+            "removed": 0, "skipped": 0, "skipped_reasons": {},
+            "runtime_revision": REV, "manifest": None, "timeout_seconds": 1800,
+        })
+        runs = self.status()["result"]["runs"]
+        self.assertEqual(runs[0]["outcome"], "timed_out")
+        self.assertEqual(runs[0]["reason"], "run_bound_exceeded")
+        self.assertEqual(self.store.runs()[0]["outcome"], "timed_out")
+
+    def test_status_without_a_routine_is_disabled_and_empty(self):
+        self.store.config_path.unlink()
+        result = self.status()["result"]
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["routine"]["enabled"])
+        self.assertIsNone(result["routine"]["next_run"])
+        self.assertEqual(result["runs"], [])
+        self.assertIsNone(result["last_run_revision"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from .contract import (
     envelope,
     error_result,
     routine_result,
+    span_seconds,
     validate_request,
 )
 from .run import _host_config, _host_revision, effective_exclusions
@@ -87,6 +88,37 @@ def _enable(request: Mapping[str, Any], *, revision: str, store: RoutineStore,
                           next_run=next_run)
 
 
+def _disable(*, store: RoutineStore, host_config: Mapping[str, Any]) -> dict:
+    """Remove the timer and mark the routine off; run history is kept (FR-002)."""
+    config = store.read_config()
+    units.remove()
+    if config is not None and config.get("enabled") is not False:
+        config = {**config, "enabled": False, "disabled_at": utc_iso(utc_now())}
+        try:
+            store.write_config(config)
+        except OSError as exc:
+            raise RoutineError(
+                f"the timer was removed but the routine config could not be updated: {exc}",
+                "routine_remove_failed",
+            ) from None
+    return _status_result(store, config, host_config, history=30, next_run=None)
+
+
+def _status(request: Mapping[str, Any], *, store: RoutineStore,
+            host_config: Mapping[str, Any]) -> dict:
+    """Report config and history; finalize a run whose bound passed (FR-016)."""
+    config = store.read_config()
+    timeout = (config or {}).get("timeout")
+    try:
+        default_bound = span_seconds(timeout) if isinstance(timeout, str) else 1800
+    except RoutineError:
+        default_bound = 1800
+    store.finalize_stale(now=utc_now(), default_timeout_seconds=default_bound)
+    enabled = bool(config and config.get("enabled") is True)
+    return _status_result(store, config, host_config, history=request["history"],
+                          next_run=units.next_run() if enabled else None)
+
+
 def handle(
     payload: Any,
     *,
@@ -109,8 +141,12 @@ def handle(
                 sandbox_home=sandbox_home or str(host_runtime().parent),
                 host_config=config_source,
             )
+        elif request["action"] == "cleanup_routine_disable":
+            result = _disable(store=store, host_config=config_source)
+        elif request["action"] == "cleanup_routine_status":
+            result = _status(request, store=store, host_config=config_source)
         else:
-            raise RoutineError("cleanup routine action is not available yet")
+            raise RoutineError("unknown cleanup routine action")
     except RoutineError as exc:
         result = error_result(exc.code, str(exc))
     return envelope(result, runtime_revision=revision)

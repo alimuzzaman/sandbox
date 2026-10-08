@@ -472,10 +472,12 @@ def _remote_failure_message(text: str, limit: int = 2000) -> str:
 class HostRemoteCommandFailed(RuntimeError):
     """A remote command exited non-zero: a known result, not an uncertain one."""
 
-    def __init__(self, message: str, *, phase: str, exit_code: int):
+    def __init__(self, message: str, *, phase: str, exit_code: int,
+                 kill_evidence: dict | None = None):
         super().__init__(message)
         self.phase = phase
         self.exit_code = exit_code
+        self.kill_evidence = kill_evidence
 
 
 # Phases that only build images. A failure here changes nothing the running
@@ -523,6 +525,111 @@ def _marked_remote_command(command: str, log_path: str, *, phase: str) -> str:
         "printf '%s' \"$out\"; exit \"$rc\""
     )
 
+# Build, compose, and init phases where a SIGKILL (137 / -9) is worth a
+# bounded memory probe. Other remote calls keep the bare failure.
+_KILL_CLASSIFIED_PHASES = frozenset({
+    "initializer_build", "compose_build", "compose_recreate", "compose_converge",
+    "initializer_run", "runtime_start",
+})
+_KILL_EXIT_CODES = frozenset({137, -9})
+_KILL_PROBE_TIMEOUT = 30
+_OOM_OUTPUT_PATTERN = re.compile(r"out of memory|\boom[-_ ]?kill|OOMKilled", re.IGNORECASE)
+# One read-only command: exited/dead containers with State.OOMKilled, a
+# time-bounded kernel OOM-killer count (journal first, dmesg as a fallback;
+# both may be denied without sudo, which reports "unavailable"), and three
+# /proc/meminfo fields. Nothing here writes, signals, or reads env/config.
+_KILL_PROBE_SCRIPT = r"""set +e
+ids=$(timeout 8 docker ps -aq --filter status=exited --filter status=dead 2>/dev/null | head -n 50)
+if [ -n "$ids" ]; then
+  timeout 8 docker inspect --format '{{.Name}} {{.State.OOMKilled}}' $ids 2>/dev/null \
+    | awk '$2=="true"{sub(/^\//,"",$1); print "oom_container " $1}' | head -n 5
+fi
+pat='out of memory|oom-kill|killed process'
+if out=$(timeout 5 journalctl -k --since '-30min' --no-pager -q 2>/dev/null); then
+  printf 'kernel_source journal\nkernel_oom %s\n' "$(printf '%s\n' "$out" | grep -ciE "$pat")"
+elif out=$(timeout 5 dmesg 2>/dev/null); then
+  printf 'kernel_source dmesg\nkernel_oom %s\n' "$(printf '%s\n' "$out" | tail -n 300 | grep -ciE "$pat")"
+else
+  echo 'kernel_source unavailable'
+fi
+awk '/^(MemTotal|MemAvailable|SwapFree):/{sub(":","",$1); print "mem " $1 " " $2}' /proc/meminfo 2>/dev/null
+exit 0"""
+
+
+def _parse_kill_probe(raw: str, output_tail: str) -> dict:
+    """Turn bounded probe lines into a classification; ignore anything else."""
+    containers: list[str] = []
+    memory: dict[str, int] = {}
+    kernel_source = "unavailable"
+    kernel_oom = 0
+    for line in (raw or "").splitlines()[:64]:
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "oom_container" and re.fullmatch(
+                r"[A-Za-z0-9_.-]{1,128}", parts[1]) and len(containers) < 5:
+            containers.append(parts[1])
+        elif len(parts) == 2 and parts[0] == "kernel_source" and parts[1] in {
+                "journal", "dmesg", "unavailable"}:
+            kernel_source = parts[1]
+        elif len(parts) == 2 and parts[0] == "kernel_oom" and parts[1].isdigit():
+            kernel_oom = min(int(parts[1]), 1_000_000)
+        elif len(parts) == 3 and parts[0] == "mem" and parts[1] in {
+                "MemTotal", "MemAvailable", "SwapFree"} and parts[2].isdigit():
+            memory[parts[1]] = int(parts[2])
+    if containers or _OOM_OUTPUT_PATTERN.search(output_tail or ""):
+        classification = "container_oom"
+    elif kernel_oom > 0:
+        classification = "host_memory_pressure"
+    else:
+        classification = "process_killed"
+    return {
+        "classification": classification,
+        "oom_containers": containers,
+        "kernel_source": kernel_source,
+        "kernel_oom_lines": kernel_oom,
+        "memory_kb": memory,
+    }
+
+
+def _kill_evidence_summary(evidence: dict) -> str:
+    parts = [f"kill_classification={evidence['classification']}"]
+    if evidence.get("oom_containers"):
+        parts.append("oom_containers=" + ",".join(evidence["oom_containers"]))
+    parts.append(f"kernel_source={evidence.get('kernel_source', 'unavailable')}")
+    for key in ("MemTotal", "MemAvailable", "SwapFree"):
+        if key in evidence.get("memory_kb", {}):
+            parts.append(f"{key}={evidence['memory_kb'][key]}kB")
+    return " ".join(parts)
+
+
+def _classify_remote_kill(entry: dict, output_tail: str,
+                          log_path: str | None, phase: str) -> dict:
+    """Best-effort OOM classification; never raises into the failure path."""
+    try:
+        result = remote.ssh_run(
+            entry,
+            f"timeout {_KILL_PROBE_TIMEOUT - 5} sh -c {shlex.quote(_KILL_PROBE_SCRIPT)}",
+            timeout=_KILL_PROBE_TIMEOUT,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("kill probe failed")
+        evidence = _parse_kill_probe(result.stdout or "", output_tail)
+    except Exception:  # noqa: BLE001 - the original failure must win
+        evidence = {"classification": "classification_unavailable",
+                    "oom_containers": [], "kernel_source": "unavailable",
+                    "kernel_oom_lines": 0, "memory_kb": {}}
+    if log_path:
+        try:
+            remote.ssh_run(entry, (
+                "printf '[Sandbox] apply phase=%s event=kill_classification at=%s %s\\n' "
+                f"{shlex.quote(phase)} \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" "
+                f"{shlex.quote(_kill_evidence_summary(evidence))} "
+                f">> {shlex.quote(log_path)}"
+            ), timeout=15)
+        except Exception:  # noqa: BLE001 - logging is best effort
+            pass
+    return evidence
+
+
 def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
                    progress=None, log_path: str | None = None,
                    log_phase: str = "unclassified") -> str:
@@ -556,9 +663,16 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
             + _remote_failure_message(result.stderr or result.stdout, limit=800)
         )
     if result.returncode != 0:
+        message = _remote_failure_message(result.stderr or result.stdout)
+        evidence = None
+        if (result.returncode in _KILL_EXIT_CODES
+                and log_phase in _KILL_CLASSIFIED_PHASES):
+            tail = "\n".join((result.stderr or result.stdout or "").splitlines()[-40:])
+            evidence = _classify_remote_kill(entry, tail, log_path, log_phase)
+            message = f"{message}\n{_kill_evidence_summary(evidence)}"
         raise HostRemoteCommandFailed(
-            _remote_failure_message(result.stderr or result.stdout),
-            phase=log_phase, exit_code=result.returncode,
+            message, phase=log_phase, exit_code=result.returncode,
+            kill_evidence=evidence,
         )
     return result.stdout or ""
 

@@ -766,6 +766,26 @@ entries label each logged phase and record UTC start/finish times plus the remot
 code. Older unlabelled entries are not upgraded into historical phase evidence. If the
 protected log is absent or unreadable, the command reports that condition directly.
 
+When a build, Compose up, or initializer phase (`initializer_build`, `compose_build`,
+`compose_recreate`, `compose_converge`, `initializer_run`, `runtime_start`) exits 137
+or -9 (SIGKILL), apply runs one read-only remote probe (30 s SSH budget, 25 s inner
+`timeout`) and appends a `kill_classification=...` line to the error and an
+`event=kill_classification` line to the apply log:
+
+- `container_oom`: an exited/dead container reports `State.OOMKilled=true`, or the
+  failed command's output tail mentions out-of-memory / OOM kill (BuildKit steps do
+  not run as inspectable containers, so the tail is their only signal).
+- `host_memory_pressure`: kernel OOM-killer lines in `journalctl -k --since -30min`,
+  or in the last 300 `dmesg` lines when the journal is not readable. Both run without
+  sudo; when neither is permitted the line reports `kernel_source=unavailable`.
+- `process_killed`: no OOM evidence. Something else (an operator, a supervisor, a
+  timeout wrapper) may have sent the signal.
+- `classification_unavailable`: the probe itself failed or timed out. The original
+  failure is still raised unchanged.
+
+The line also carries `MemTotal`, `MemAvailable`, and `SwapFree` from `/proc/meminfo`
+in kB. The probe reads no environment, config, or container arguments.
+
 The apply controller runs where `sb` runs, often a laptop. On macOS, `host apply`
 holds a `caffeinate -i -s` assertion for the whole apply so idle sleep cannot freeze it
 between the remote phases and the deploy record. Lid-close sleep on battery cannot be

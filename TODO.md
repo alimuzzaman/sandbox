@@ -326,10 +326,14 @@ and not-applicable records must not be reimplemented without fresh evidence.
   with a read-only image preflight that fails closed instead of building
   missing images, and init runs use `--no-build --pull never` (f30bbb5;
   `7ab76b8b`); durable jobs classify SIGKILL/137 as `process_killed` without
-  claiming OOM (8a541c2; `5978c11e4`). Remaining, all needing a reachable
+  claiming OOM (8a541c2; `5978c11e4`); host apply build/compose/init kills
+  (137/-9) now carry a bounded read-only probe classifying `container_oom`,
+  `host_memory_pressure`, `process_killed`, or `classification_unavailable`
+  plus a `/proc/meminfo` snapshot, in the error and apply log (`5978c11e4`;
+  unit-tested only). Remaining, all needing a reachable
   remote or a design decision: a live retry of the `7ab76b8b` hosted-dev path
   (record still `blocked`), a cold 30-35 min build under a raised timeout,
-  host/cgroup memory-pressure evidence to tell OOM from host kills, and
+  a live OOM run to confirm the probe's journal/dmesg/OOMKilled reads, and
   trimming large build contexts (for example `.pnpm-store`) when
   `build=true`.
 - [ ] **Hermes dashboard/public/provider/repository lifecycle:** distinguish

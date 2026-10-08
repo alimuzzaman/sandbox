@@ -275,9 +275,9 @@ not close the external or human gates listed below.
 - [ ] Spec 036: local CLI/service/collector cancellation propagation and
   synthetic MCP cancellation coverage are done. Remaining: real MCP lifecycle
   cancellation/disconnect propagation and the `T045` live evidence gate.
-- [ ] Reconcile `specs/README.md` statuses with the ledgers: several features
-  still say “In progress”/“Draft” even where implementation is complete but live
-  proof remains pending.
+- [x] Reconcile `specs/README.md` statuses with the ledgers: the index now lists
+  every feature directory with its counted task-ledger status and the gates
+  tracked outside the ledger (2026-10-08).
 
 ## Feedback themes reconciled 2026-08-23
 

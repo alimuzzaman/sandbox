@@ -260,7 +260,21 @@ def cmd_remote(cfg, args) -> None:
         "ssh": _cmd_ssh,
         "edge": _cmd_edge,
     }
-    dispatch[action](args, as_json)
+    try:
+        dispatch[action](args, as_json)
+    except TimeoutError as exc:
+        if str(exc) != "remote_registration_busy":
+            raise
+        # Another process (usually a running `sb host apply`) holds the
+        # remote registration lock past the wait budget.
+        message = "another Sandbox command is updating the remote registry"
+        hint = ("retry after it finishes; check running work with "
+                "`./sb job-status --json`")
+        if as_json:
+            print(json.dumps({"ok": False, "error": {
+                "code": "remote_registration_busy", "message": message, "hint": hint}}))
+            raise SystemExit(1)
+        die(f"remote_registration_busy: {message}; {hint}")
 
 
 def _cmd_ssh(args, as_json: bool) -> None:
@@ -644,8 +658,17 @@ def _cmd_add(args, as_json: bool) -> None:
     fields = {"ssh": ssh_target, "provisioned": False}
     if front_door is not None:
         fields["front_door"] = front_door
+    # Same fields as `remote set-origin`: hosted DNS needs a public origin.
+    ipv4, ipv6 = _arg_str(args, "ipv4"), _arg_str(args, "ipv6")
+    if ipv4:
+        fields["origin_ipv4"] = ipv4
+    if ipv6:
+        fields["origin_ipv6"] = ipv6
     entry = sr.put_remote(name, **fields)
     result = {"ok": True, "name": name, "ssh_configured": bool(entry.get("ssh")), "error": None}
+    if ipv4 or ipv6:
+        result["origin_ipv4_configured"] = bool(entry.get("origin_ipv4"))
+        result["origin_ipv6_configured"] = bool(entry.get("origin_ipv6"))
     if entry.get("front_door"):
         result["front_door"] = entry["front_door"]
     if as_json:

@@ -1749,6 +1749,34 @@ class TestCmdRemoteAdd(unittest.TestCase):
                 self.assertNotIn("ubuntu@1.2.3.4", output)
                 self.assertTrue(json.loads(output)["ssh_configured"])
 
+    def test_add_records_origin_addresses(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                args = MagicMock(ssh_url="ssh://ubuntu@1.2.3.4", json=True,
+                                 ipv4="203.0.113.7", ipv6="2001:db8::7", front_door=None)
+                args.name = "myvps"
+                with patch("builtins.print") as mock_print:
+                    remote_cmd._cmd_add(args, as_json=True)
+                entry = sr.get_remote("myvps")
+                self.assertEqual(entry["origin_ipv4"], "203.0.113.7")
+                self.assertEqual(entry["origin_ipv6"], "2001:db8::7")
+                result = json.loads(mock_print.call_args[0][0])
+                self.assertTrue(result["origin_ipv4_configured"])
+                self.assertTrue(result["origin_ipv6_configured"])
+
+    def test_registration_busy_is_a_structured_error(self):
+        args = MagicMock(action="add", json=True)
+        with patch.object(remote_cmd, "_cmd_add",
+                          side_effect=TimeoutError("remote_registration_busy")), \
+             patch("builtins.print") as mock_print:
+            with self.assertRaises(SystemExit) as raised:
+                remote_cmd.cmd_remote({}, args)
+        self.assertNotEqual(raised.exception.code, 0)
+        result = json.loads(mock_print.call_args[0][0])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "remote_registration_busy")
+        self.assertIn("retry", result["error"]["hint"])
+
     def test_list_never_returns_ssh_target(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):

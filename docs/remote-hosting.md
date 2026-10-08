@@ -668,7 +668,9 @@ the deployed Compose configuration, the output includes a bounded `[missing serv
 NAME]` diagnostic and still returns logs for the services that are present.
 Configure Cloudflare with `./sb connect cloudflare`, which
 stores the token in `~/.zshrc.secrets` (owner-only and outside Git), and record the VPS
-public address with `./sb remote set-origin myvps --ipv4 <address>`.
+public address with `./sb remote set-origin myvps --ipv4 <address>` (or pass `--ipv4`/`--ipv6`
+to `./sb remote add`). If another command holds the remote registry lock, `remote` actions
+exit with `remote_registration_busy`; retry once that work finishes.
 
 Permanent projects may declare public values plus required/generated secret mappings in
 `sandbox.hosting.yml`. `./sb host secrets --project-dir /path --environment production`

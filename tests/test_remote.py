@@ -4539,3 +4539,24 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RemoteRemoveDryRunTests(unittest.TestCase):
+    def test_dry_run_reports_and_keeps_the_registration(self):
+        with patch.object(sr, "get_remote", return_value={"ssh": "alim@example"}), \
+                patch.object(sr, "remove_remote") as remove:
+            out = StringIO()
+            with redirect_stdout(out):
+                remote_cmd._cmd_remove(
+                    types.SimpleNamespace(name="old", dry_run=True), True)
+        remove.assert_not_called()
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["would_remove"], True)
+        self.assertEqual(payload["removed"], False)
+
+    def test_without_dry_run_removes(self):
+        with patch.object(sr, "remove_remote", return_value=True) as remove:
+            with redirect_stdout(StringIO()):
+                remote_cmd._cmd_remove(
+                    types.SimpleNamespace(name="old", dry_run=False), True)
+        remove.assert_called_once_with("old")

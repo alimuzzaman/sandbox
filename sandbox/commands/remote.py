@@ -816,6 +816,17 @@ def _cmd_set_origin(args, as_json: bool) -> None:
 
 def _cmd_remove(args, as_json: bool) -> None:
     name = _require_name(args)
+    if getattr(args, "dry_run", False) is True:
+        registered = sr.get_remote(name) is not None
+        result = {"ok": True, "name": name, "removed": False, "dry_run": True,
+                  "would_remove": registered, "error": None}
+        if as_json:
+            print(json.dumps(result))
+        elif registered:
+            info(f"dry run: would forget remote '{name}' locally; nothing changed")
+        else:
+            info(f"dry run: no remote named '{name}' is registered")
+        return
     existed = sr.remove_remote(name)
     result = {"ok": True, "name": name, "removed": existed, "error": None}
     if as_json:

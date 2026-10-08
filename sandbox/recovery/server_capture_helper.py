@@ -405,6 +405,13 @@ def stale_slot(directory):
             and lock_free(os.path.join(directory, "job.lock")))
 
 
+def reclaim_stale_slot(directory):
+    """Remove a crash leftover; caller holds ``active.lock``. Re-checks first
+    so this never deletes a slot that gained an owner or a request."""
+    if stale_slot(directory):
+        remove_path(directory)
+
+
 def existing_result(root, slot, request):
     directory = slot_dir(root, slot)
     if not os.path.lexists(directory):
@@ -497,7 +504,7 @@ def op_start(root, slot, request_text):
             raise Refusal("capture_in_progress", active_backup_id=active_backup_id(root))
         if os.path.lexists(directory):
             if stale_slot(directory):
-                shutil.rmtree(directory)
+                reclaim_stale_slot(directory)
             else:
                 os.close(active)
                 active = None

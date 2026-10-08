@@ -336,6 +336,27 @@ class TestRetention(unittest.TestCase):
         self.assertEqual(outcome["error"]["code"], "retire_candidate_changed")
         self.assertEqual(transport.retired, [])
 
+    def test_retire_plan_previews_the_candidate_without_deleting(self):
+        transport = self.transport()
+        svc = service(transport, now=8 * DAY)
+        for backup_id in ("promoted", "failed", "residue"):
+            with self.subTest(backup_id=backup_id):
+                outcome = svc.retire_plan("r", backup_id)
+                self.assertTrue(outcome["ok"], outcome)
+                self.assertEqual(outcome["status"], "planned")
+                self.assertTrue(outcome["data"]["requires_confirmation"])
+                self.assertTrue(outcome["data"]["retirable"])
+                self.assertEqual(outcome["data"]["candidate"],
+                                 transport.retire_plan("r", slot_for("r", backup_id)))
+        for backup_id, state in (("complete", "complete"), ("running", "running")):
+            outcome = svc.retire_plan("r", backup_id)
+            self.assertEqual(outcome["error"]["code"], "not_retirable")
+            self.assertEqual(outcome["data"]["state"], state)
+        self.assertEqual(svc.retire_plan("r", "legacy")["error"]["code"], "capture_not_found")
+        self.assertEqual(svc.retire_plan(None, "failed")["error"]["code"], "missing_remote")
+        self.assertEqual(transport.retired, [])
+        self.assertNotIn("retire", transport.calls)
+
     def test_retire_path_sends_the_reviewed_plan(self):
         for backup_id in ("promoted", "failed", "residue"):
             with self.subTest(backup_id=backup_id):
@@ -367,7 +388,10 @@ class TestRetention(unittest.TestCase):
                 name = ast.unparse(call.func)
                 if name in ("os.unlink", "os.remove", "shutil.rmtree", "os.rmdir", "remove_path"):
                     deleting.add(function.name)
-        self.assertEqual(deleting, {"write_private", "remove_path", "op_retire", "run_job"})
+        # reclaim_stale_slot removes only a slot with no request and no lock
+        # holder (a start that crashed before its first write), under active.lock.
+        self.assertEqual(deleting, {"write_private", "remove_path", "op_retire", "run_job",
+                                    "reclaim_stale_slot"})
         service_source = (ROOT / "sandbox" / "recovery" / "server_capture.py").read_text()
         transport_methods = {node.attr for node in ast.walk(ast.parse(service_source))
                              if isinstance(node, ast.Attribute)

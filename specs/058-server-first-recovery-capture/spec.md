@@ -10,6 +10,23 @@
 
 **Amends**: spec 023 (scoped recovery profiles) FR-012 (plaintext staging), FR-014 (archive-first publication) and FR-016 (locally pending). Spec 023's encryption, ciphertext-only Drive, manifest-last and no-raw-SSH (FR-026) rules continue to hold.
 
+## Clarifications
+
+### Session 2026-10-08
+
+Product decisions were delegated to an independent reviewer who was not
+available in this session. Each answer below follows from the PRD, spec 023,
+the current code or the constitution, and cites that evidence. The open product
+choice (FR-034) is deferred, not guessed.
+
+- Q: Is the free-space refusal made synchronously by capture start, or by the server job before it dumps? → A: By the server job, as its first phase (`preflight`), before any dump; the capture ends `failed` with `insufficient_space` and the need, available and shortfall. Evidence: the PRD requires both a 30-second start (Acceptance Outcomes) and a refusal "before dumping"; sizing the WordPress tree can exceed 30 seconds, while the PRD only requires the refusal to precede the dump.
+- Q: May two captures run at once on the same remote? → A: No. One active capture per remote; a second start refuses with `capture_in_progress`. Evidence: spec 023 FR-022 requires a single-run lock and no overlap; the free-space check (FR-006) is meaningless if two captures share the space; the current controller already serializes per operation with an exclusive lock (`sandbox/transports/remote_recovery.py`).
+- Q: Which server captures count toward the `retention_exceeded` block? → A: Only complete, unpromoted captures made by this feature. Failed captures hold no plaintext (FR-012); interrupted residue and archives left by the earlier one-shot `recovery create --remote` path are listed with their size but do not block. Evidence: the PRD bounds "an unpromoted archive"; docs/recovery.md states old request-named archives "remain retained and are never adopted as a fresh capture", so they are not captures of this feature and cannot be promoted.
+- Q: What is the capture's runtime bound? → A: 3600 seconds for the whole job, with each dump/archive step keeping its existing 1800-second bound; exceeding either ends `failed` with `capture_timeout`. Evidence: the current controller bounds the whole capture call at 3600 seconds and each `mariadb-dump`/`tar` step at 1800 seconds (`sandbox/transports/remote_recovery.py`); the PRD describes today's capture as "up to an hour".
+- Q: What key identifies a capture for start, status and promote? → A: The remote plus the backup id: one capture per backup id per remote. The request id (derived from backup id, remote, declaration and source binding, as today) is stored with it, and a differing binding is a `capture_binding_conflict`. Evidence: the PRD states "the capture identity derives from the backup id and target"; `HostedRecoveryMaterializer._request_id` already derives the request id from backup operation id, remote, binding and declaration.
+
+**Deferred** (pending decision, see FR-034): whether this feature enables a confirmed retirement of a server capture or keeps retirement review-only. The PRD routes retirement through "the existing reviewed-and-confirmed retention path", but that path's apply is refused today (`recovery retention --confirm` returns `protected_operation`), so the evidence does not settle it.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Start a capture on the server and walk away (Priority: P1)
@@ -38,7 +55,7 @@ archive with its hashes and table inventory.
 3. **Given** a backup id that already has a capture with the same source binding, **When** the operator starts a capture for it again, **Then** the existing identity and current state are returned and no second capture runs.
 4. **Given** a backup id that already has a capture whose source binding (profile declaration, remote identity, runtime revision) differs, **When** the operator starts a capture for it, **Then** it refuses with `capture_binding_conflict` and never overwrites the existing capture.
 5. **Given** a remote whose installed runtime revision mismatches, **When** the operator starts a capture, **Then** it refuses with `remote_runtime_stale` before any server work.
-6. **Given** a remote whose free space in the capture location is below the estimated capture size, **When** the operator starts a capture, **Then** it refuses with `insufficient_space` naming the estimated need, the available space and the shortfall, before any dump begins.
+6. **Given** a remote whose free space in the capture location is below the estimated capture size, **When** the operator starts a capture, **Then** the capture's first phase ends it `failed` with `insufficient_space`, naming the estimated need, the available space and the shortfall, before any dump begins.
 7. **Given** the source database's table set at dump start differs from the table set present in the finished dump, **When** the capture runs, **Then** it ends `failed` with reason `inventory_mismatch` and the differing table names, and no archive is reported complete.
 8. **Given** a capture that completes, **Then** its receipt lists every base table and view the source database reported at dump start with a row-count estimate per table, the archive hash, and a hash and size for each archive member.
 
@@ -162,16 +179,16 @@ unpromoted capture is older than the bound.
 
 - **FR-001**: The system MUST provide a confirmed capture command that starts a capture of a supported hosted profile on a registered remote as a server-side job and returns its identity without waiting for the capture to finish.
 - **FR-002**: Capture start MUST NOT require the recovery passphrase or a Drive destination, and MUST NOT transfer archive bytes over the operator's connection.
-- **FR-003**: The capture identity MUST derive from the backup id, remote and selected profile declaration, so a repeated request for the same backup id is recognized rather than duplicated.
+- **FR-003**: A capture MUST be keyed by remote plus backup id (one capture per backup id per remote), and its request id MUST derive from the backup id, remote, selected profile declaration and source binding, so a repeated request for the same backup id is recognized rather than duplicated.
 - **FR-004**: A repeated start for a backup id with an existing capture MUST return the existing identity and state when the source binding matches and MUST refuse with `capture_binding_conflict` when it differs; it MUST never overwrite or recapture.
 - **FR-005**: Capture start MUST refuse with `remote_runtime_stale` when the remote's installed runtime revision does not match, before any server work.
-- **FR-006**: Capture start MUST compare an estimate of the capture's on-server size (database plus files, including temporary space the capture needs) with free space at the capture location and refuse with `insufficient_space`, naming need, available and shortfall, before dumping.
+- **FR-006**: Before dumping, the capture's first phase (`preflight`) MUST compare an estimate of the capture's on-server size (database plus files, including temporary space the capture needs) with free space at the capture location and end the capture `failed` with `insufficient_space`, naming need, available and shortfall, when the estimate exceeds it.
 - **FR-007**: At most one capture MUST be active per remote; a second start refuses with `capture_in_progress`.
 - **FR-008**: The capture MUST take a table inventory at dump start listing every base table and view the source database reports, with a row-count estimate per table.
 - **FR-009**: The capture MUST compare the table set present in the finished dump with the inventory and end `failed` with `inventory_mismatch` and the differing names when they disagree.
 - **FR-010**: A complete capture's receipt MUST record the archive hash and size, a hash and size for each archive member, the table inventory, the request id, the backup operation id, the source binding and start and end times.
 - **FR-011**: The receipt MUST be written after the archive; an archive with a missing or malformed receipt MUST be treated as `incomplete`.
-- **FR-012**: A failed capture MUST remove its partial plaintext; a capture MUST end `failed` with `capture_timeout` when it exceeds its runtime bound.
+- **FR-012**: A failed capture MUST remove its partial plaintext; a capture MUST end `failed` with `capture_timeout` when the whole job exceeds 3600 seconds or a single dump or archive step exceeds 1800 seconds.
 - **FR-013**: The database credential MUST reach the capture only through the brokered secret channel and MUST NOT appear in arguments, command text, logs, retained records or output; it MUST NOT be written to the server's disk.
 - **FR-014**: Server capture files and records MUST be owner-only.
 
@@ -200,8 +217,8 @@ unpromoted capture is older than the bound.
 
 **Retention bound**
 
-- **FR-032**: Each complete unpromoted server capture MUST carry a retention bound, 7 days by default and overridable per remote; past it, status and listing MUST report `retention_exceeded`.
-- **FR-033**: Capture start MUST refuse with `retention_exceeded`, naming the blocking backup ids, while the remote holds a complete unpromoted capture past its bound.
+- **FR-032**: Each complete unpromoted server capture made by this feature MUST carry a retention bound, 7 days by default and overridable per remote; past it, status and listing MUST report `retention_exceeded`. Interrupted residue and legacy one-shot archives are listed with their size but carry no bound.
+- **FR-033**: Capture start MUST refuse with `retention_exceeded`, naming the blocking backup ids, while the remote holds a complete unpromoted capture made by this feature past its bound; no other server file blocks a capture.
 - **FR-034**: Removing a server capture MUST go only through the reviewed-and-confirmed retention path; nothing is deleted automatically. [NEEDS CLARIFICATION: Does this feature enable confirmed retirement of a server capture, or does server-capture retirement stay review-only so that only promotion clears a `retention_exceeded` block?]
 
 **Surfaces and safety**
@@ -213,13 +230,13 @@ unpromoted capture is older than the bound.
 
 ### Key Entities
 
-- **Server capture**: one capture of one backup id on one remote. Identity (request id derived from backup id, remote and declaration), backup operation id, source binding, state, phase, acceptance/start/end times, failure reason, promoted flag, retention flag.
+- **Server capture**: one capture of one backup id on one remote (key: remote + backup id). Identity (request id derived from backup id, remote and declaration), backup operation id, source binding, state, phase, acceptance/start/end times, failure reason, promoted flag, retention flag.
 - **Capture receipt**: written after the archive on the server. Archive hash and size, member records (name, hash, size), table inventory, request id, backup operation id, source binding, times.
 - **Table inventory**: each base table and view at dump start with its type and row-count estimate; summary counts.
 - **Promotion**: the operator-side transfer, verification, encryption and publication of one capture; resumable transfer progress keyed to the capture identity.
 - **Published recovery set**: the existing 023 Drive set (ciphertext then manifest), whose manifest now also carries the server capture's identifiers, hashes and inventory summary.
 - **Locally pending ciphertext**: the existing 023 state, now with an exit through promote.
-- **Retention bound**: per-remote age limit for complete unpromoted captures; default 7 days.
+- **Retention bound**: per-remote age limit for complete unpromoted captures made by this feature; default 7 days.
 
 ## Success Criteria *(mandatory)*
 

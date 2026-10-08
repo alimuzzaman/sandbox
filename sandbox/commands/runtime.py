@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import argparse
+import re
 import shlex
 import shutil
 import sys
@@ -139,6 +140,201 @@ def _exec_exit_code(data: dict) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return 1
+
+
+_REMOTE_EXEC_TERMINAL_STATES = frozenset({
+    "succeeded", "failed", "timed_out", "cancelled", "interrupted",
+})
+_REMOTE_EXEC_ACTIVE_STATES = frozenset({"accepted", "queued", "running", "cancelling"})
+_REMOTE_EXEC_OUTPUT_PAGE_BYTES = 65_536
+_REMOTE_EXEC_STATUS_TIMEOUT_SECONDS = 5
+_REMOTE_EXEC_OUTPUT_TIMEOUT_SECONDS = 25
+_REMOTE_EXEC_OBSERVATION_GRACE_SECONDS = 5
+
+
+def _remote_exec_failure(remote_name: str, message: str, *, job_id: str | None = None,
+                         accepted: bool = False, as_json: bool = False) -> None:
+    """Report a bounded follow failure without converting acceptance into success."""
+    if as_json:
+        payload = {
+            "ok": False,
+            "status": "unknown",
+            "acceptance": "accepted" if accepted else "unknown",
+            "operation": "exec",
+            "target": {"kind": "remote", "remote": remote_name},
+            "error": message[:500],
+        }
+        if job_id:
+            payload["job_id"] = job_id
+            payload["recovery"] = shlex.join([
+                "./sb", "job-status", job_id, "--remote", remote_name, "--json",
+            ])
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        if job_id:
+            command = shlex.join(["./sb", "job-status", job_id, "--remote", remote_name, "--json"])
+            recovery = f" Accepted job {job_id}; inspect it with `{command}`."
+        else:
+            recovery = ""
+        print(f"error: {message}.{recovery}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _validate_remote_exec_acceptance(accepted: object, remote_name: str,
+                                     *, as_json: bool) -> str:
+    """Require the durable receipt before any remote follow can claim success."""
+    from sandbox.jobs.models import validate_ack_job_id
+
+    if not isinstance(accepted, dict) or accepted.get("ok") is not True or \
+            accepted.get("status") != "accepted":
+        _remote_exec_failure(remote_name,
+                             "remote exec acceptance is unknown or malformed",
+                             as_json=as_json)
+    try:
+        job_id = validate_ack_job_id(accepted.get("job_id"))
+    except ValueError:
+        _remote_exec_failure(remote_name,
+                             "remote exec acceptance is unknown or malformed",
+                             as_json=as_json)
+    return job_id
+
+
+def _validate_remote_exec_status(state: object, job_id: str) -> tuple[str, dict]:
+    """Accept only the selected job's successful status envelope and known lifecycle."""
+    if not isinstance(state, dict) or state.get("ok") is not True or \
+            state.get("job_id") != job_id:
+        raise ValueError("remote job status is unknown or malformed")
+    lifecycle = state.get("lifecycle")
+    if not isinstance(lifecycle, str) or lifecycle not in (
+            _REMOTE_EXEC_ACTIVE_STATES | _REMOTE_EXEC_TERMINAL_STATES):
+        raise ValueError("remote job status is unknown or malformed")
+    if lifecycle == "succeeded":
+        exit_code = state.get("exit_code")
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code != 0:
+            raise ValueError("remote job success status is missing exit_code=0")
+    return lifecycle, state
+
+
+def _validate_remote_exec_output(page: object, job_id: str) -> dict:
+    """Validate one bounded retained-output page before rendering or advancing its cursor."""
+    cursor = page.get("cursor") if isinstance(page, dict) else None
+    if not isinstance(page, dict) or page.get("ok") is not True or \
+            page.get("job_id") != job_id or not isinstance(page.get("data"), str) or \
+            not isinstance(cursor, str) or len(cursor) > 4096 or \
+            re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", cursor) is None or \
+            type(page.get("has_more")) is not bool:
+        raise ValueError("remote job output page is unknown or malformed")
+    if len(page["data"].encode("utf-8", errors="replace")) > _REMOTE_EXEC_OUTPUT_PAGE_BYTES:
+        raise ValueError("remote job output page exceeded its requested bound")
+    return page
+
+
+def _follow_remote_exec(transport, remote_name: str, accepted: dict, job_id: str,
+                        policy, output_profile: str, *, as_json: bool) -> None:
+    """Wait for one remote exec within its resolved deadline and read bounded output pages."""
+    from sandbox.transports.remote_jobs import RemoteJobTransportError
+
+    started = time.monotonic()
+    wait_deadline = started + policy.deadline_seconds + _REMOTE_EXEC_OBSERVATION_GRACE_SECONDS
+    attached_human = bool(sys.stdout.isatty() and not as_json)
+    cursor = None
+    page = None
+    terminal_state = None
+
+    while terminal_state is None:
+        remaining = wait_deadline - time.monotonic()
+        if remaining < 1:
+            _remote_exec_failure(
+                remote_name,
+                "remote exec did not reach a terminal status within its resolved deadline",
+                job_id=job_id, accepted=True, as_json=as_json,
+            )
+        try:
+            state = transport.status(
+                remote_name, job_id,
+                timeout=min(_REMOTE_EXEC_STATUS_TIMEOUT_SECONDS, int(remaining)),
+            )
+        except RemoteJobTransportError as exc:
+            _remote_exec_failure(remote_name, str(exc), job_id=job_id,
+                                 accepted=True, as_json=as_json)
+        except Exception:
+            _remote_exec_failure(remote_name, "remote job status observation failed",
+                                 job_id=job_id, accepted=True, as_json=as_json)
+        try:
+            lifecycle, state = _validate_remote_exec_status(state, job_id)
+        except ValueError as exc:
+            _remote_exec_failure(remote_name, str(exc), job_id=job_id,
+                                 accepted=True, as_json=as_json)
+        if lifecycle in _REMOTE_EXEC_TERMINAL_STATES:
+            terminal_state = state
+            break
+
+        # Each transport request has its own finite timeout. Leave enough room
+        # for the 25-second bounded output read before the resolved wait deadline.
+        remaining = wait_deadline - time.monotonic()
+        if attached_human and remaining > _REMOTE_EXEC_OUTPUT_TIMEOUT_SECONDS:
+            try:
+                page = _validate_remote_exec_output(transport.read_output(
+                    remote_name, job_id, cursor=cursor,
+                    max_bytes=_REMOTE_EXEC_OUTPUT_PAGE_BYTES,
+                    wait_seconds=2, profile=output_profile,
+                ), job_id)
+            except RemoteJobTransportError as exc:
+                _remote_exec_failure(remote_name, str(exc), job_id=job_id,
+                                     accepted=True, as_json=as_json)
+            except Exception:
+                _remote_exec_failure(remote_name, "remote job output observation failed",
+                                     job_id=job_id, accepted=True, as_json=as_json)
+            if page["data"]:
+                print(page["data"], end="", flush=True)
+            cursor = page["cursor"]
+        else:
+            time.sleep(min(2.0, max(0.0, remaining)))
+
+    # JSON and non-terminal callers get one bounded final page. Attached human
+    # callers resume from the last acknowledged cursor and print that page too.
+    try:
+        page = _validate_remote_exec_output(transport.read_output(
+            remote_name, job_id, cursor=cursor,
+            max_bytes=_REMOTE_EXEC_OUTPUT_PAGE_BYTES,
+            wait_seconds=0, profile=output_profile,
+        ), job_id)
+    except RemoteJobTransportError as exc:
+        _remote_exec_failure(remote_name, str(exc), job_id=job_id,
+                             accepted=True, as_json=as_json)
+    except Exception:
+        _remote_exec_failure(remote_name, "remote job output observation failed",
+                             job_id=job_id, accepted=True, as_json=as_json)
+
+    if as_json:
+        payload = {**accepted, "ok": terminal_state["lifecycle"] == "succeeded",
+                   "result": terminal_state, "output": page}
+        print(json.dumps(payload, sort_keys=True))
+    elif not attached_human and page["data"]:
+        print(page["data"], end="")
+    elif attached_human and page["data"]:
+        print(page["data"], end="", flush=True)
+    if page["has_more"]:
+        command = shlex.join([
+            "./sb", "job-output", job_id, "--remote", remote_name,
+            "--cursor", page["cursor"],
+        ])
+        print(
+            f"remote exec output continues; resume with `{command}`.",
+            file=sys.stderr,
+        )
+
+    if terminal_state["lifecycle"] != "succeeded":
+        code = terminal_state.get("exit_code")
+        if isinstance(code, bool) or not isinstance(code, int) or not 1 <= code <= 255:
+            code = 1
+        if not as_json:
+            print(
+                f"remote exec job {job_id} {terminal_state['lifecycle']} "
+                f"(exit={terminal_state.get('exit_code')})",
+                file=sys.stderr,
+            )
+        raise SystemExit(code)
 
 
 def _emit_exec_result(data: dict, *, as_json: bool) -> None:
@@ -326,13 +522,23 @@ def cmd_exec(cfg, args) -> None:
         if target.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
-            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+            transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit(submission)
+                remote_sb_path=_remote.remote_sb_path)
+            accepted = transport.submit(submission)
         else:
             service = durable_job_dependencies()["job_service"]
             accepted = service.submit(submission)
-        if args.detach or target.kind == "remote":
+        if target.kind == "remote":
+            job_id = _validate_remote_exec_acceptance(
+                accepted, target.remote_name, as_json=bool(args.json))
+            if not args.detach:
+                _follow_remote_exec(
+                    transport, target.remote_name, accepted, job_id, policy,
+                    output_profile, as_json=bool(args.json),
+                )
+                return
+        if args.detach:
             if args.json:
                 print(json.dumps(accepted))
             else:

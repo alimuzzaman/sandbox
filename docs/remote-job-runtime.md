@@ -49,6 +49,19 @@ development, and isolated labels for matrix cells:
 ./sb job-metrics JOB --remote NAME --limit 500 --json
 ```
 
+Remote `exec` without `--detach` waits for the accepted job's terminal status and
+exits nonzero unless the job succeeded. On an attached human terminal it prints
+bounded retained-output pages as they arrive. JSON and non-terminal callers wait
+the same way, then return one bounded output page with the terminal result; use
+the returned cursor with `job-output` when `has_more` is true. The caller wait is
+limited by the resolved job deadline plus a five-second status-observation
+allowance. Retrieving the final output page can add at most one bounded
+25-second transport call, so the total caller wait is at most the resolved job
+deadline plus 30 seconds after acceptance. Live status and output requests also
+have finite transport timeouts. If the caller cannot observe a terminal result,
+it exits nonzero and prints the accepted job ID for later inspection. `--detach`
+returns the accepted job ID immediately; resume with `job-status` and `job-output`.
+
 `job-output --stream` is for retained `combined`, `stdout`, and `stderr` logs.
 Resource samples are a separate bounded control-plane document retrieved with
 `job-metrics`; use `job-status` for the live health summary.

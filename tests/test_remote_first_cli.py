@@ -32,10 +32,21 @@ class RemoteFirstCliTests(unittest.TestCase):
                                  })
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
         submissions = []
-        remote_transport = SimpleNamespace(submit=lambda submission: submissions.append(submission) or {
-            "job_id": "a" * 32, "target": submission.target_kind,
-            "remote": submission.remote_name,
-        })
+        status_calls, output_calls = [], []
+        accepted = {"ok": True, "status": "accepted", "job_id": "a" * 32,
+                    "target": {"kind": "remote", "remote": "vps"}, "remote": "vps"}
+        remote_transport = SimpleNamespace(
+            submit=lambda submission: submissions.append(submission) or accepted,
+            status=lambda remote, job_id, *, timeout: status_calls.append(
+                (remote, job_id, timeout)) or {
+                    "ok": True, "job_id": job_id, "lifecycle": "succeeded", "exit_code": 0,
+                },
+            read_output=lambda remote, job_id, **kwargs: output_calls.append(
+                (remote, job_id, kwargs)) or {
+                    "ok": True, "job_id": job_id, "data": "remote-pass\n",
+                    "cursor": "opaque-cursor", "has_more": False,
+                },
+        )
         output = StringIO()
         with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
              patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=remote_transport), \
@@ -45,7 +56,13 @@ class RemoteFirstCliTests(unittest.TestCase):
              patch("sandbox.core._remote.remote_sb_path"), \
              patch("sys.stdout", output):
             cmd_exec(None, self._args(output_profile="agent", request_id="exec-remote-1"))
-        self.assertEqual(json.loads(output.getvalue())["remote"], "vps")
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["target"]["remote"], "vps")
+        self.assertEqual(result["result"]["lifecycle"], "succeeded")
+        self.assertEqual(result["output"]["data"], "remote-pass\n")
+        self.assertEqual(status_calls, [("vps", "a" * 32, 5)])
+        self.assertEqual(output_calls[0][2]["profile"], "agent")
+        self.assertEqual(output_calls[0][2]["max_bytes"], 65536)
         self.assertEqual(submissions[0].output_profile_definition, {"mode": "errors"})
         self.assertEqual(submissions[0].project_identity, "project:remote")
         self.assertEqual(submissions[0].request_id, "exec-remote-1")
@@ -80,7 +97,10 @@ class RemoteFirstCliTests(unittest.TestCase):
         requests = []
         dependencies = {"target_service": SimpleNamespace(
             resolve=lambda request: requests.append(request) or target)}
-        transport = SimpleNamespace(submit=lambda _submission: {"job_id": "d" * 32})
+        transport = SimpleNamespace(submit=lambda _submission: {
+            "ok": True, "status": "accepted", "job_id": "d" * 32,
+            "target": {"kind": "remote", "remote": "named-vps"},
+        })
         with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
                 patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport), \
                 patch("sandbox.core._remote.deploy_exact_working_tree"), \
@@ -93,6 +113,204 @@ class RemoteFirstCliTests(unittest.TestCase):
         self.assertEqual(requests[0].remote, "named-vps")
         self.assertEqual(requests[0].workspace, "qa")
         self.assertEqual(requests[0].required_capability, "job.exec")
+
+    def test_remote_exec_reports_unknown_status_nonzero_after_acceptance(self):
+        target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 sources={"identity": "project:remote"},
+                                 workspace_label="default", runtime_policy={})
+        accepted = {"ok": True, "status": "accepted", "job_id": "e" * 32}
+        transport = SimpleNamespace(
+            submit=lambda _submission: accepted,
+            status=lambda _remote, job_id, *, timeout: {
+                "ok": False, "status": "unknown", "job_id": job_id,
+                "lifecycle": "unknown", "error": "status unavailable",
+            },
+            read_output=lambda *_args, **_kwargs: self.fail("unknown status must not read output"),
+        )
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        output = StringIO()
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport), \
+             patch("sandbox.core._remote.deploy_exact_working_tree"), \
+             patch("sandbox.core._remote.ssh_run"), \
+             patch("sandbox.core._remote.get_remote"), \
+             patch("sandbox.core._remote.remote_sb_path"), \
+             patch("sys.stdout", output), \
+             self.assertRaises(SystemExit) as raised:
+            cmd_exec(None, self._args(remote="vps", json=True))
+        self.assertEqual(raised.exception.code, 1)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["acceptance"], "accepted")
+        self.assertEqual(result["job_id"], "e" * 32)
+
+    def test_remote_exec_rejects_malformed_acceptance_without_claiming_success(self):
+        target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 sources={"identity": "project:remote"},
+                                 workspace_label="default", runtime_policy={})
+        transport = SimpleNamespace(
+            submit=lambda _submission: {"ok": True, "status": "accepted"},
+            status=lambda *_args, **_kwargs: self.fail("malformed acceptance must not be followed"),
+            read_output=lambda *_args, **_kwargs: self.fail("malformed acceptance must not read output"),
+        )
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        output = StringIO()
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport), \
+             patch("sandbox.core._remote.deploy_exact_working_tree"), \
+             patch("sandbox.core._remote.ssh_run"), \
+             patch("sandbox.core._remote.get_remote"), \
+             patch("sandbox.core._remote.remote_sb_path"), \
+             patch("sys.stdout", output), \
+             self.assertRaises(SystemExit) as raised:
+            cmd_exec(None, self._args(remote="vps", json=True))
+        self.assertEqual(raised.exception.code, 1)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["acceptance"], "unknown")
+
+    def test_remote_exec_failed_terminal_state_uses_child_exit_code(self):
+        target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 sources={"identity": "project:remote"},
+                                 workspace_label="default", runtime_policy={})
+        accepted = {"ok": True, "status": "accepted", "job_id": "f" * 32}
+        transport = SimpleNamespace(
+            submit=lambda _submission: accepted,
+            status=lambda _remote, job_id, *, timeout: {
+                "ok": True, "job_id": job_id, "lifecycle": "failed", "exit_code": 23,
+            },
+            read_output=lambda _remote, job_id, **_kwargs: {
+                "ok": True, "job_id": job_id, "data": "child-failed\n",
+                "cursor": "opaque-cursor", "has_more": False,
+            },
+        )
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        output = StringIO()
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport), \
+             patch("sandbox.core._remote.deploy_exact_working_tree"), \
+             patch("sandbox.core._remote.ssh_run"), \
+             patch("sandbox.core._remote.get_remote"), \
+             patch("sandbox.core._remote.remote_sb_path"), \
+             patch("sys.stdout", output), \
+             self.assertRaises(SystemExit) as raised:
+            cmd_exec(None, self._args(remote="vps", json=True))
+        self.assertEqual(raised.exception.code, 23)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["result"]["lifecycle"], "failed")
+        self.assertEqual(result["output"]["data"], "child-failed\n")
+
+    def test_attached_remote_exec_streams_cursor_pages_without_duplication(self):
+        class TerminalOutput(StringIO):
+            def isatty(self):
+                return True
+
+        target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 sources={"identity": "project:remote"},
+                                 workspace_label="default", runtime_policy={})
+        accepted = {"ok": True, "status": "accepted", "job_id": "1" * 32}
+        states = iter(("running", "succeeded"))
+        pages = iter((
+            {"ok": True, "job_id": "1" * 32, "data": "first-page\n",
+             "cursor": "cursor-1", "has_more": False},
+            {"ok": True, "job_id": "1" * 32, "data": "final-page\n",
+             "cursor": "cursor-2", "has_more": False},
+        ))
+        output_calls = []
+        def read_status(_remote, job_id, *, timeout):
+            lifecycle = next(states)
+            return {"ok": True, "job_id": job_id, "lifecycle": lifecycle,
+                    "exit_code": 0 if lifecycle == "succeeded" else None}
+
+        transport = SimpleNamespace(
+            submit=lambda _submission: accepted,
+            status=read_status,
+            read_output=lambda remote, job_id, **kwargs: output_calls.append(kwargs) or next(pages),
+        )
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        output, errors = TerminalOutput(), StringIO()
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport), \
+             patch("sandbox.core._remote.deploy_exact_working_tree"), \
+             patch("sandbox.core._remote.ssh_run"), \
+             patch("sandbox.core._remote.get_remote"), \
+             patch("sandbox.core._remote.remote_sb_path"), \
+             patch("sandbox.commands.runtime.time.sleep", return_value=None), \
+             patch("sys.stdout", output), patch("sys.stderr", errors):
+            cmd_exec(None, self._args(remote="vps", json=False))
+        self.assertEqual(output.getvalue(), "first-page\nfinal-page\n")
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual([call.get("cursor") for call in output_calls], [None, "cursor-1"])
+        self.assertEqual([call["wait_seconds"] for call in output_calls], [2, 0])
+
+    def test_remote_exec_wait_deadline_fails_with_accepted_receipt(self):
+        target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 sources={"identity": "project:remote"},
+                                 workspace_label="default", runtime_policy={})
+        accepted = {"ok": True, "status": "accepted", "job_id": "2" * 32}
+        status_calls = []
+        transport = SimpleNamespace(
+            submit=lambda _submission: accepted,
+            status=lambda remote, job_id, *, timeout: status_calls.append(timeout) or {
+                "ok": True, "job_id": job_id, "lifecycle": "running",
+            },
+            read_output=lambda *_args, **_kwargs: self.fail("non-terminal JSON waits do not fetch output"),
+        )
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        output = StringIO()
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport), \
+             patch("sandbox.core._remote.deploy_exact_working_tree"), \
+             patch("sandbox.core._remote.ssh_run"), \
+             patch("sandbox.core._remote.get_remote"), \
+             patch("sandbox.core._remote.remote_sb_path"), \
+             patch("sandbox.commands.runtime.time.monotonic", side_effect=(0, 0, 0, 7)), \
+             patch("sandbox.commands.runtime.time.sleep", return_value=None), \
+             patch("sys.stdout", output), \
+             self.assertRaises(SystemExit) as raised:
+            cmd_exec(None, self._args(remote="vps", timeout=1, json=True))
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(status_calls, [5])
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["acceptance"], "accepted")
+        self.assertEqual(result["job_id"], "2" * 32)
+        self.assertIn("resolved deadline", result["error"])
+
+    def test_remote_exec_requires_zero_exit_code_for_succeeded_status(self):
+        for terminal_fields in ({}, {"exit_code": True}, {"exit_code": 23}):
+            with self.subTest(terminal_fields=terminal_fields):
+                target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                         sources={"identity": "project:remote"},
+                                         workspace_label="default", runtime_policy={})
+                accepted = {"ok": True, "status": "accepted", "job_id": "3" * 32}
+                state = {"ok": True, "job_id": accepted["job_id"],
+                         "lifecycle": "succeeded", **terminal_fields}
+                transport = SimpleNamespace(
+                    submit=lambda _submission: accepted,
+                    status=lambda _remote, _job_id, *, timeout: state,
+                    read_output=lambda *_args, **_kwargs: self.fail(
+                        "malformed successful status must not read output"),
+                )
+                dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+                output = StringIO()
+                with patch("sandbox.application.context.durable_job_dependencies",
+                           return_value=dependencies), \
+                     patch("sandbox.transports.remote_jobs.RemoteJobTransport",
+                           return_value=transport), \
+                     patch("sandbox.core._remote.deploy_exact_working_tree"), \
+                     patch("sandbox.core._remote.ssh_run"), \
+                     patch("sandbox.core._remote.get_remote"), \
+                     patch("sandbox.core._remote.remote_sb_path"), \
+                     patch("sys.stdout", output), \
+                     self.assertRaises(SystemExit) as raised:
+                    cmd_exec(None, self._args(remote="vps", json=True))
+                self.assertEqual(raised.exception.code, 1)
+                result = json.loads(output.getvalue())
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["acceptance"], "accepted")
+                self.assertIn("missing exit_code=0", result["error"])
 
     def test_in_instance_exec_bypasses_the_local_job_host_and_uses_compose_service(self):
         requests, invocations = [], []

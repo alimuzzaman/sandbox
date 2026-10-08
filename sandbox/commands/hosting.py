@@ -2520,6 +2520,9 @@ def _runtime_apply_decision(*, previous: dict, requested_revision: str,
     if source_state_clean and same_source_state and same_config and exact_runtime_proven \
             and (recorded_identity or staged_identity):
         return "edge_only"
+    if previous.get("retired_unproven_runtime"):
+        # retire-delivery voided an unproven runtime; converge from scratch.
+        return "full_recreate"
     if same_source_state and same_config and (recorded_identity or staged_identity):
         return "refuse"
     if same_config and staged_identity and previous.get("source_state_identity") is None:
@@ -2995,6 +2998,13 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
             if record.get("staged_revision") and \
                     record.get("staged_revision") != record.get("recorded_revision"):
                 record["staged_revision"] = None
+            # The same holds when staged equals recorded but nothing observed
+            # that revision running: an environment without a declared source
+            # revision can never prove it, so the same commit refused forever.
+            # Retire is the operator's consent to converge from scratch once.
+            revision = record.get("recorded_revision") or record.get("commit")
+            if revision and record.get("observed_runtime_revision") != revision:
+                record["retired_unproven_runtime"] = True
             hosting.save_host_state(state)
     except DeliveryError as exc:
         payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
@@ -3798,6 +3808,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         **previous_entry,
         "requested_revision": sha,
         "staged_revision": sha,
+        "retired_unproven_runtime": None,
         "source_state_identity": source_state_identity,
         "source_state_clean": source_state_clean,
         "source_state_identity_version": _SOURCE_STATE_IDENTITY_VERSION,

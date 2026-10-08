@@ -3689,6 +3689,59 @@ class TestHostingManifest(unittest.TestCase):
             source_state_identity="src", source_state_clean=True,
             exact_runtime_proven=False), "full_recreate")
 
+    def test_host_retire_delivery_unfences_an_unobserved_recorded_revision(self):
+        # Edge failed after the runtime was recorded but never observed (no
+        # declared source revision), so staged == recorded. Retire must still
+        # let the same commit converge instead of refusing forever.
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "a" * 40, "recorded_revision": "a" * 40,
+                         "observed_runtime_revision": None,
+                         "config_digest": "cfg", "source_state_identity": "src",
+                         "source_state_clean": True,
+                         "runtime": {"state": "unverified"}},
+        }}
+        previous = dict(state["hosts"][target_key])
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=previous, requested_revision="a" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=False), "refuse")
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        record = state["hosts"][target_key]
+        self.assertTrue(record["retired_unproven_runtime"])
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=record, requested_revision="a" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=False), "full_recreate")
+        # A freshly proven runtime still takes the cheaper edge-only path.
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=record, requested_revision="a" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=True), "edge_only")
+
+    def test_host_retire_delivery_leaves_an_observed_runtime_fenced_normally(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "a" * 40, "recorded_revision": "a" * 40,
+                         "observed_runtime_revision": "a" * 40},
+        }}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        self.assertNotIn("retired_unproven_runtime", state["hosts"][target_key])
+
     def test_host_retire_delivery_keeps_a_proven_staged_revision(self):
         with self._write(_manifest_with_derived_revision()) as directory:
             validated = hosting.validate_manifest(directory)

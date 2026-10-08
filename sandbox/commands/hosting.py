@@ -1079,6 +1079,72 @@ def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
                                log_phase=log_phase)
 
 
+_BUILD_CONTEXT_WARN_MB = 100
+
+
+def _build_context_probe_command(source_dir: str, *,
+                                 threshold_mb: int = _BUILD_CONTEXT_WARN_MB) -> str:
+    """Render a bounded, read-only warning probe for the remote build context.
+
+    The shipped source is the Git commit plus a capped overlay of untracked,
+    not-ignored files, so a local `.pnpm-store` or `node_modules` never travels.
+    The remote checkout is reset with `git clean -fd` (no `-x`), so ignored
+    directories that containers wrote there persist and Docker sends them as
+    build context. This lists top-level directories of the source checkout over
+    the threshold that `.dockerignore` does not exclude (top-level patterns
+    only). It never mutates, never fails the apply (`|| true`), and stops after
+    a 20 second walk budget.
+    """
+    program = "\n".join((
+        "import fnmatch,os,sys,time",
+        "root=sys.argv[1];limit=int(sys.argv[2])*1048576;end=time.monotonic()+20",
+        "if not os.path.isdir(root):raise SystemExit(0)",
+        "rules=[]",
+        "try:",
+        " with open(os.path.join(root,'.dockerignore'),encoding='utf-8',errors='replace') as f:",
+        "  for line in f.read(65536).splitlines():",
+        "   line=line.strip()",
+        "   if not line or line.startswith('#'):continue",
+        "   neg=line.startswith('!');line=line[1:] if neg else line",
+        "   line=line.lstrip('/')",
+        "   while line.startswith('./'):line=line[2:]",
+        "   if line.startswith('**/'):line=line[3:]",
+        "   for tail in ('/**','/*','/'):",
+        "    if line.endswith(tail):line=line[:-len(tail)];break",
+        "   if line and '/' not in line:rules.append((neg,line))",
+        "except OSError:pass",
+        "def ignored(name):",
+        " state=False",
+        " for neg,pattern in rules:",
+        "  if fnmatch.fnmatchcase(name,pattern):state=not neg",
+        " return state",
+        "def size(top):",
+        " total=0",
+        " for base,dirs,files in os.walk(top):",
+        "  for name in files:",
+        "   try:total+=os.lstat(os.path.join(base,name)).st_size",
+        "   except OSError:pass",
+        "  if time.monotonic()>end:return total,False",
+        " return total,True",
+        "found=[]",
+        "try:entries=sorted(os.listdir(root))",
+        "except OSError:raise SystemExit(0)",
+        "for name in entries:",
+        " path=os.path.join(root,name)",
+        " if name=='.git' or os.path.islink(path) or not os.path.isdir(path) or ignored(name):continue",
+        " if time.monotonic()>end:break",
+        " total,complete=size(path)",
+        " if total>=limit:found.append((total,name,complete))",
+        "for total,name,complete in sorted(found,reverse=True)[:10]:",
+        " safe=''.join(c if c.isprintable() else '?' for c in name)[:80]",
+        " size_text=('at least ' if not complete else '')+str(total//1048576)+' MB'",
+        " print('build context warning: '+safe+'/ is '+size_text+' in the remote source checkout and not excluded by .dockerignore; Docker sends it with every build')",
+    ))
+    probe = shlex.join(["timeout", "-k", "5", "30", "python3", "-c", program,
+                        source_dir, str(int(threshold_mb))])
+    return f"{{ {probe}; }} 2>/dev/null || true"
+
+
 def _no_build_image_preflight_command(prefix: str, services: list[str]) -> str:
     """Render one bounded, read-only check for explicit local service images."""
     config_command = f"{prefix} --profile '*' config --format json"
@@ -1370,7 +1436,9 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         # --with-dependencies: `up --no-build` below starts depends_on services
         # too, and on a fresh host their images do not exist yet.
         _build_checked(
-            entry, prefix, f"{prefix} build --with-dependencies {service_args}", service_args,
+            entry, prefix,
+            f"{_build_context_probe_command(source_dir)}; "
+            f"{prefix} build --with-dependencies {service_args}", service_args,
             timeout=build_timeout, progress=progress, log_path=apply_log,
             log_phase="compose_build",
         )

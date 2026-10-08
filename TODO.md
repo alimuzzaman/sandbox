@@ -329,9 +329,13 @@ and not-applicable records must not be reimplemented without fresh evidence.
   claiming OOM (8a541c2; `5978c11e4`). Remaining, all needing a reachable
   remote or a design decision: a live retry of the `7ab76b8b` hosted-dev path
   (record still `blocked`), a cold 30-35 min build under a raised timeout,
-  host/cgroup memory-pressure evidence to tell OOM from host kills, and
-  trimming large build contexts (for example `.pnpm-store`) when
-  `build=true`.
+  host/cgroup memory-pressure evidence to tell OOM from host kills, and a
+  live check of the build-context warning. Build-context trimming: the
+  shipped artifact is commit + capped not-ignored overlay, so local
+  `.pnpm-store` never ships; remote-persisted ignored dirs do, and
+  `build=true` applies now print a read-only `build context warning` for
+  top-level dirs >= 100 MB not in `.dockerignore`
+  (t3/host-build-context-trim).
 - [ ] **Hermes dashboard/public/provider/repository lifecycle:** distinguish
   config from dashboard/gateway/public readiness; repair saved-session resume,
   obsolete cloudflared cleanup, Access-policy resolution, provider inspection,

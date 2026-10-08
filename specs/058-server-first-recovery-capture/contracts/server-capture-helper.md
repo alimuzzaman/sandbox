@@ -57,6 +57,9 @@ table-set scan of the dump) → `archive` (`tarfile` with `database.sql`,
 `min(1800, remaining)`. Any failure writes `failed` with a fixed reason and
 removes work files. Container names and the database user are the reviewed
 constants already in `sandbox/transports/remote_recovery.py:516-526,766-768`.
+Note: the helper hardcodes the Amar Sonar container, database and user names
+(`WP_CONTAINER`, `DB_CONTAINER`, `DB_USER`, `DB_NAME`); capturing any other
+site needs these made configurable per profile before that profile is added.
 
 ## Memory
 

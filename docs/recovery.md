@@ -244,5 +244,7 @@ Sandbox revision, and an inventory digest, and captures a native MariaDB logical
 with the complete WordPress tree. The database credential is accepted only through the brokered
 `SANDBOX_RECOVERY_DB_PASSWORD` child environment; it is never placed in an argument or output.
 The adapter also materializes a non-secret control-plane declaration for the profile dependency.
+The server capture helper hardcodes the Amar Sonar container, database and user names; any other
+site needs those made configurable before it can be captured this way.
 It does not capture the `alimuzzaman-me` Git profile or any other hosted project, and a stale
 remote runtime is rejected until the supported remote service migration has completed.

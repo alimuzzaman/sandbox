@@ -122,7 +122,9 @@ long-running loop that `runner.py`'s bounded, retaining runner must not acquire.
 ## Decisions
 
 Decided by a Fable reviewer (delegated by user, 2026-10-08; research
-"Decisions"): `SIGTERM`/`SIGQUIT` map to `interrupted`; exit 0/130/129 for
+"Decisions"): `SIGTERM`/`SIGQUIT` and every other catchable default-terminate
+signal (`SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGVTALRM`, `SIGPROF`, `SIGXCPU`;
+`TERMINATION_SIGNALS` in `session.py`) map to `interrupted`; exit 0/130/129 for
 non-child ends; the live stream keeps complete SGR colour sequences and removes
 every other escape sequence whole. Ordinary `run` output is unchanged.
 

@@ -80,8 +80,9 @@ secrets session: ended end_reason=child_exited exit_code=0 elapsed=1_to_4h dropp
 |------------------|--------|
 | `SIGINT` (Ctrl-C) | end `interrupted` |
 | `SIGHUP` (terminal closed) | end `hangup` |
-| `SIGTERM`, `SIGQUIT` | end `interrupted` |
+| `SIGTERM`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGVTALRM`, `SIGPROF`, `SIGXCPU` (every other catchable signal whose default would end the broker) | end `interrupted` |
 | `SIGTSTP` (Ctrl-Z) | ignored |
+| `SIGPIPE`, `SIGXFSZ` | left ignored by Python; a failed terminal write surfaces as `OSError` → `hangup` |
 | `SIGKILL`, `SIGSTOP` | cannot be handled; child outlives the broker (accepted risk) |
 
 On every end the child's process group gets `SIGTERM`, then `SIGKILL` for

@@ -37,12 +37,28 @@ DRAIN_IDLE_SECONDS = 0.5
 DRAIN_CAP_SECONDS = 5.0
 _READ_BYTES = 65_536
 
-_SIGNAL_REASONS = {
-    signal.SIGINT: "interrupted",
-    signal.SIGHUP: "hangup",
-    signal.SIGTERM: "interrupted",
-    signal.SIGQUIT: "interrupted",
-}
+# Every catchable signal whose default action would terminate the broker
+# (spec 059 FR-010). SIGHUP is the terminal going away; the rest are
+# termination requests. Left out on purpose: SIGKILL/SIGSTOP (uncatchable),
+# SIGPIPE/SIGXFSZ (Python ignores them; they surface as OSError), fault
+# signals (SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT, SIGSYS, SIGTRAP) and
+# job-control stops (SIGTSTP is ignored below; SIGTTIN/SIGTTOU stay default).
+_TERMINATION_SIGNAL_NAMES = (
+    "SIGINT", "SIGHUP", "SIGTERM", "SIGQUIT", "SIGUSR1", "SIGUSR2", "SIGALRM",
+    "SIGVTALRM", "SIGPROF", "SIGXCPU",
+)
+
+
+def _termination_signals() -> dict[int, str]:
+    mapping = {}
+    for name in _TERMINATION_SIGNAL_NAMES:
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            mapping[signum] = "hangup" if name == "SIGHUP" else "interrupted"
+    return mapping
+
+
+TERMINATION_SIGNALS = _termination_signals()
 
 
 def _wall_now() -> float:
@@ -56,7 +72,10 @@ def _mono_now() -> float:
 class SessionSignals:
     """Own the broker's termination signals for the length of one session.
 
-    Handlers only record the first end reason; the session loop acts on it.
+    Every signal in ``TERMINATION_SIGNALS`` is handled, so no catchable
+    termination request can kill the broker and leave the child's group
+    running with the secret. Handlers only record the first end reason; the
+    session loop acts on it.
     ``SIGTSTP`` is ignored so Ctrl-Z cannot stop the process that enforces
     the lifetime. Handlers are installed unconditionally, so an inherited
     ignored ``SIGHUP`` (``nohup``) is overridden. Previous dispositions are
@@ -75,11 +94,11 @@ class SessionSignals:
 
     def _handle(self, signum, _frame) -> None:
         if self.reason is None:
-            self.reason = _SIGNAL_REASONS.get(signum, "interrupted")
+            self.reason = TERMINATION_SIGNALS.get(signum, "interrupted")
 
     def __enter__(self) -> "SessionSignals":
         try:
-            for signum in _SIGNAL_REASONS:
+            for signum in TERMINATION_SIGNALS:
                 self._previous[signum] = signal.signal(signum, self._handle)
             self._previous[signal.SIGTSTP] = signal.signal(signal.SIGTSTP, signal.SIG_IGN)
         except BaseException:
@@ -369,5 +388,6 @@ def run_session(
 
 
 __all__ = [
-    "SessionSignals", "end_process_group", "run_session", "validate_lifetime",
+    "SessionSignals", "TERMINATION_SIGNALS", "end_process_group", "run_session",
+    "validate_lifetime",
 ]

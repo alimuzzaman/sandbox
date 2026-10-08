@@ -99,11 +99,21 @@ class SessionSignalsTests(unittest.TestCase):
         self.SessionSignals = SessionSignals
 
     def test_each_signal_records_its_reason(self):
-        cases = {
+        from sandbox.secrets.session import TERMINATION_SIGNALS
+        # FR-010: every catchable termination request ends the session, not
+        # just the four the terminal generates.
+        expected = {
             signal.SIGINT: "interrupted", signal.SIGHUP: "hangup",
             signal.SIGTERM: "interrupted", signal.SIGQUIT: "interrupted",
+            signal.SIGUSR1: "interrupted", signal.SIGUSR2: "interrupted",
+            signal.SIGALRM: "interrupted", signal.SIGVTALRM: "interrupted",
+            signal.SIGPROF: "interrupted", signal.SIGXCPU: "interrupted",
         }
-        for signum, reason in cases.items():
+        self.assertEqual(TERMINATION_SIGNALS, expected)
+        for name in ("SIGKILL", "SIGSTOP", "SIGPIPE", "SIGXFSZ", "SIGSEGV", "SIGCHLD",
+                     "SIGTSTP", "SIGWINCH"):
+            self.assertNotIn(getattr(signal, name), TERMINATION_SIGNALS)
+        for signum, reason in TERMINATION_SIGNALS.items():
             with self.subTest(signal=signum), self.SessionSignals() as signals:
                 os.kill(os.getpid(), signum)
                 time.sleep(0.01)
@@ -138,7 +148,8 @@ class SessionSignalsTests(unittest.TestCase):
             signal.signal(signal.SIGHUP, previous)
 
     def test_dispositions_restored_including_after_exception(self):
-        handled = (signal.SIGINT, signal.SIGHUP, signal.SIGTERM, signal.SIGQUIT, signal.SIGTSTP)
+        from sandbox.secrets.session import TERMINATION_SIGNALS
+        handled = (*TERMINATION_SIGNALS, signal.SIGTSTP)
         before = {signum: signal.getsignal(signum) for signum in handled}
         with self.SessionSignals():
             pass

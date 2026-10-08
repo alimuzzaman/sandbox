@@ -286,7 +286,7 @@ The session ends on the first of these:
 |------------|-------|------------------|
 | `child_exited` | the child exited by itself | the child's status, mapped as for `run` (0 stays 0, 1 to 125 pass through, anything else is 1 with `child_failed`) |
 | `lifetime_expired` | the lifetime ran out | 0 |
-| `interrupted` | Ctrl-C, `SIGTERM` or `SIGQUIT` to `sb` | 130 |
+| `interrupted` | Ctrl-C, or any other catchable termination signal to `sb` (`SIGTERM`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGVTALRM`, `SIGPROF`, `SIGXCPU`) | 130 |
 | `hangup` | the terminal closed (`SIGHUP`) or a write to it failed | 129 |
 
 On every end, `sb` sends `SIGTERM` to the child's whole process group, then

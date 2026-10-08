@@ -66,8 +66,13 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
 - **Decision**: A `SessionSignals` context manager in
   `sandbox/secrets/session.py`, entered by the CLI immediately after the
   terminal check and before the service is called, installs handlers for
-  `SIGINT` (`interrupted`), `SIGHUP` (`hangup`), `SIGTERM` and `SIGQUIT`
-  (`interrupted`, decision 1), and sets `SIGTSTP` to ignore. Handlers only
+  `SIGINT` (`interrupted`), `SIGHUP` (`hangup`) and every other catchable
+  signal whose default action would terminate the broker: `SIGTERM`,
+  `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGVTALRM`, `SIGPROF`, `SIGXCPU`
+  (`interrupted`, decision 1; the set is `TERMINATION_SIGNALS`), and sets
+  `SIGTSTP` to ignore. `SIGPIPE` and `SIGXFSZ` stay ignored as Python leaves
+  them (they surface as `OSError`); fault signals and `SIGTTIN`/`SIGTTOU` are
+  not termination requests and keep their default. Handlers only
   record the first reason. Previous dispositions are restored on exit. The
   session loop checks the recorded reason before launching the child and on
   every iteration.
@@ -226,7 +231,10 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
 
 1. Catchable termination requests other than interrupt/hangup (`SIGTERM`,
    `SIGQUIT`) end the session as `interrupted`. Confirmed: a fifth reason buys
-   no operator action.
+   no operator action. Review fix (2026-10-09): the code handled only those
+   four while FR-010 says any catchable termination request; the handled set
+   now covers every catchable default-terminate signal (R4), so no such
+   signal can kill the broker and orphan the child's group with the secret.
 2. Broker exit status: `lifetime_expired` 0, `interrupted` 130, `hangup` 129.
    Confirmed: expiry is the planned end, and ordinary `run` exits 0 on timeout.
 3. Revised: complete SGR colour and style sequences pass through; every other

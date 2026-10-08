@@ -64,13 +64,21 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 057 | Scheduled Safe Cleanup on a Remote | Open (1 of 26) | — | Feedback 8a3e8c35 |
 | 058 | Server-First Recovery Capture and Later Drive Promotion | Open (1 of 56) | — | Feedback 9e54f17b |
 | 059 | Supervised Long-Running Secret Session | Open (1 of 30) | — | Feedback 2cfab06f |
+| 060 | Per-Target Hosting Operations | PRD not ready | Roadmap 2026-10-08 #1 | Feedback adccd6b7, 83dd053a, f72c4279 |
+| 061 | Remote Runtime Revision Coexistence | PRD not ready | Roadmap 2026-10-08 #2 | Feedback e41bef3b, be5a6353, f475f422 |
+| 062 | Hosted Delivery Evidence Reconciliation | PRD not ready | Roadmap 2026-10-08 #3; amends 054 identity scope | Feedback 48c3e007, bae5cd4e, e4333c7b, f3329d32 |
+| 063 | Remote Development Execution Readiness | PRD not ready | Roadmap 2026-10-08 #5 | Feedback cef740dd, cebec97a, 5598f2d0 |
+| 064 | Transactional Edge and DNS Changes | PRD not ready | Roadmap 2026-10-08 #4 | Feedback 6bd6bd1d, 50735fc8, 83cca354, 34af9b95, 075c6caf |
 
 Statuses are counted from each feature's `tasks.md` (reconciled 2026-10-08). `Ledger closed`
 means no unchecked task; `Open (n of m)` counts unchecked tasks, which are mostly
 live, remote, or operator gates that stay open until their evidence is recorded.
 A closed ledger is not by itself an acceptance claim: "Outside the ledger" names
 gates tracked in `TODO.md` instead. `PRD ready` / `PRD not ready` are pre-spec
-features (`prd.md` only). Two directories share number 042.
+features (`prd.md` only). Two directories share number 042. Features 060–064
+are ranked and sequenced in
+[`docs/roadmap/2026-10-08-next-features.md`](../docs/roadmap/2026-10-08-next-features.md);
+each needs an independent readiness review before `speckit-specify`.
 
 ## Background: the Novamira comparison (2026-06-22)
 

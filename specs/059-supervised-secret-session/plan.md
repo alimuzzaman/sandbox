@@ -76,7 +76,7 @@ specs/059-supervised-secret-session/
 ```text
 sandbox/secrets/
 ├── models.py        # + DEFAULT_SESSION_SECONDS, MAX_SESSION_SECONDS, END_REASONS, SessionResult
-├── runner.py        # extract shared argv/secret validation and the _CONTROL filter for reuse
+├── runner.py        # extract shared argv/secret validation for reuse (_CONTROL unchanged)
 ├── session.py       # NEW: SessionSignals, run_session loop, group termination, live redacted display
 └── service.py       # + _normalize_bindings (from run_many), run_session, success reason_code in _operate
 
@@ -109,21 +109,22 @@ long-running loop that `runner.py`'s bounded, retaining runner must not acquire.
   R4 and R9.
 - **Loop** (R5 to R8): selector wait at most 0.25 s; per iteration check signal
   reason, deadline, child exit; feed chunks through `StreamingRedactor`,
-  incremental UTF-8 decode, `_CONTROL` filter, write and flush; write failure is
+  incremental UTF-8 decode, session display filter (SGR kept, other escape
+  sequences removed whole, incomplete trailing sequence held), write and flush; write failure is
   `hangup`.
 - **End** (R6): `SIGTERM` to the group, 3 s grace, `SIGKILL`, up to 1.5 s; drain
   pipe; `redactor.finish()`; return `SessionResult`.
 - **Audit** (R9): operation `use_session`; success outcome carries
   `reason_code=<end_reason>`.
 - **Exit** (R10): `child_exited` reuses `run`'s mapping; `lifetime_expired` 0,
-  `interrupted` 130, `hangup` 129 (provisional).
+  `interrupted` 130, `hangup` 129.
 
-## Pending Decisions
+## Decisions
 
-Three provisional answers are in force (research "Pending decisions"):
-`SIGTERM`/`SIGQUIT` map to `interrupted`; exit 0/130/129 for non-child ends;
-control characters stripped from the live stream. Each is isolated to one
-constant or mapping so a different answer changes one place and its tests.
+Decided by a Fable reviewer (delegated by user, 2026-10-08; research
+"Decisions"): `SIGTERM`/`SIGQUIT` map to `interrupted`; exit 0/130/129 for
+non-child ends; the live stream keeps complete SGR colour sequences and removes
+every other escape sequence whole. Ordinary `run` output is unchanged.
 
 ## Complexity Tracking
 

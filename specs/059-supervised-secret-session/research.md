@@ -67,7 +67,7 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
   `sandbox/secrets/session.py`, entered by the CLI immediately after the
   terminal check and before the service is called, installs handlers for
   `SIGINT` (`interrupted`), `SIGHUP` (`hangup`), `SIGTERM` and `SIGQUIT`
-  (`interrupted`, provisional), and sets `SIGTSTP` to ignore. Handlers only
+  (`interrupted`, decision 1), and sets `SIGTSTP` to ignore. Handlers only
   record the first reason. Previous dispositions are restored on exit. The
   session loop checks the recorded reason before launching the child and on
   every iteration.
@@ -133,9 +133,11 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
   prefix of a selected value until whitespace disambiguates it; that is the
   fail-closed hold in clarification 4 and is why a newline-terminated line is
   shown at once (SC-006). Reusing `_CONTROL` keeps the terminal-injection
-  protection `run` has today (colour codes are removed; provisional).
+  protection `run` has today. Session display adds its own filter after redaction:
+  complete SGR sequences (`ESC [ <digits;> m`) pass, any other escape sequence
+  is removed whole (decision 3); `run`'s `_CONTROL` is unchanged.
 - **Alternatives**: a time-based flush of held text (could emit a secret prefix);
-  passing ANSI SGR sequences through (pending decision 3).
+  reusing `_CONTROL` alone (it removes only the escape byte, leaving `[31m` visible).
 
 ## R8. Terminal loss
 
@@ -176,7 +178,7 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
   exit: `child_exited` maps exactly as `run` (0 stays 0; 1 to 125 pass through;
   anything else, including death by signal, becomes 1, with the same
   `child_failed` message); `lifetime_expired` 0; `interrupted` 130; `hangup` 129
-  (provisional).
+  (decision 2).
 - **Rationale**: Keeping `RunResult` untouched avoids changing output that
   existing callers and `test_timeout_terminates_process_group` rely on (FR-019).
   The `run` exit mapping is in `cmd_secrets`; the session reuses it.
@@ -210,13 +212,13 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
   touch a WordPress instance, so the live surface is the real CLI under a real
   terminal.
 
-## Pending decisions (provisional answers in force)
+## Decisions (Fable reviewer, delegated by user, 2026-10-08)
 
 1. Catchable termination requests other than interrupt/hangup (`SIGTERM`,
-   `SIGQUIT`) end the session as `interrupted`. Alternative: add a fifth reason
-   `terminated`.
+   `SIGQUIT`) end the session as `interrupted`. Confirmed: a fifth reason buys
+   no operator action.
 2. Broker exit status: `lifetime_expired` 0, `interrupted` 130, `hangup` 129.
-   Alternative: nonzero (for example 124) for `lifetime_expired`.
-3. Terminal control characters (including ANSI colour) are stripped from the
-   live stream as `run` strips them. Alternative: pass SGR colour sequences
-   through while still stripping all other control sequences.
+   Confirmed: expiry is the planned end, and ordinary `run` exits 0 on timeout.
+3. Revised: complete SGR colour and style sequences pass through; every other
+   escape sequence, including an incomplete or malformed SGR, is removed whole.
+   `run`'s filter strips only the escape byte, which leaves visible junk.

@@ -12,17 +12,16 @@
 
 ### Session 2026-10-08
 
-Product decisions were delegated by the user to an independent reviewer who was
-not reachable in this pass. Each answer below is the conservative choice that
-keeps the PRD's broker-enforced bound intact, grounded in the current
-`secrets run` and `secrets reveal` behavior. Answers marked *provisional* are
-listed as pending decisions for confirmation; the spec follows them until then.
+Product decisions were delegated by the user to an independent reviewer. Each
+answer below keeps the PRD's broker-enforced bound intact, grounded in the
+current `secrets run` and `secrets reveal` behavior. The three answers first
+marked provisional were confirmed or revised by a Fable reviewer on 2026-10-08.
 
 - Q: What happens if the developer suspends the broker from the keyboard or starts the session as a background job? → A: Keyboard suspend is ignored for the whole session, so the broker never stops enforcing the lifetime; a start from a process that is not the terminal's foreground job is refused with `tty_required` before any secret is read.
 - Q: Does time the machine spends asleep count toward the lifetime? → A: Yes. The lifetime is wall-clock time; the session ends at the stated end time even if the machine slept, and ends on wake if that time has already passed.
-- Q: How do terminal loss without a hangup signal, and other catchable termination requests to the broker, end a session? → A: A failed write to the terminal ends the session with `hangup`. A catchable termination request other than interrupt or hangup ends it with `interrupted` (*provisional*). The four end reasons stay the complete set.
-- Q: How are partial lines and terminal control characters in the child's output shown? → A: Output is redacted fail-closed: text after the last whitespace is held until the line completes or the session ends, with no idle flush. Terminal control characters are removed before display, as ordinary use does today, so colour codes are lost (*provisional*).
-- Q: What exit status does the broker return when the session did not end by the child's own exit? → A: `lifetime_expired` exits 0 (a planned end; ordinary use also exits 0 on its timeout), `interrupted` exits 130 and `hangup` exits 129, following the shell convention for those signals (*provisional*).
+- Q: How do terminal loss without a hangup signal, and other catchable termination requests to the broker, end a session? → A: A failed write to the terminal ends the session with `hangup`. A catchable termination request other than interrupt or hangup ends it with `interrupted` (confirmed by Fable, 2026-10-08). The four end reasons stay the complete set.
+- Q: How are partial lines and terminal control characters in the child's output shown? → A: Output is redacted fail-closed: text after the last whitespace is held until the line completes or the session ends, with no idle flush. Complete SGR colour and style sequences pass through; every other control character or escape sequence is removed whole (revised by Fable, 2026-10-08: ordinary use strips only the escape byte, which would leave visible junk such as `[31m` in a long-running stream).
+- Q: What exit status does the broker return when the session did not end by the child's own exit? → A: `lifetime_expired` exits 0 (a planned end; ordinary use also exits 0 on its timeout), `interrupted` exits 130 and `hangup` exits 129, following the shell convention for those signals (confirmed by Fable, 2026-10-08).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -140,7 +139,7 @@ instruction for an agent to start a session.
 - An interrupt or hangup arrives after secrets are read but before the child has started: the session ends with that reason, and the child is ended within the same 5-second bound if it was started.
 - The child exits while a grandchild keeps running and holds the output stream open: the session ends with `child_exited` and the grandchild is ended with the rest of the process group.
 - The child prints a partial line with no trailing newline (for example a prompt) and then goes quiet: the partial text is held until the line completes or the session ends.
-- The child emits terminal control sequences such as colour codes: they are removed before display.
+- The child emits terminal control sequences: colour codes are kept; all other control sequences are removed whole.
 - The child prints the selected value split across two output chunks.
 - The child prints more than any retention bound would allow over a long session.
 - Redaction of one output chunk fails.
@@ -182,7 +181,7 @@ instruction for an agent to start a session.
 
 #### Output
 
-- **FR-014**: Redacted child output MUST be shown in the terminal as it is produced, using the same exact-value and pattern redaction as ordinary use, including values split across output chunks. Redaction MUST stay fail-closed: text that could still be part of a secret is held until it is disambiguated or the session ends, with no time-based flush. Terminal control characters MUST be removed before display, as in ordinary use.
+- **FR-014**: Redacted child output MUST be shown in the terminal as it is produced, using the same exact-value and pattern redaction as ordinary use, including values split across output chunks. Redaction MUST stay fail-closed: text that could still be part of a secret is held until it is disambiguated or the session ends, with no time-based flush. Terminal control characters and escape sequences MUST be removed before display, except complete SGR colour and style sequences (`ESC [ <parameters> m`), which MUST pass through unchanged; any other escape sequence, including an incomplete or malformed SGR, MUST be removed whole, not just its escape byte. Ordinary use is unchanged.
 - **FR-015**: Session mode MUST NOT retain child output in its result, audit, or any file written by Sandbox; spec 041 FR-037's 1 MiB display bound does not apply to the live stream, and its retention bound is met trivially because nothing is retained.
 - **FR-016**: When redaction of an output chunk fails, that chunk MUST be dropped rather than shown, and the number of dropped chunks MUST be reported when the session ends.
 - **FR-017**: The child's standard input MUST be closed, as in ordinary use.

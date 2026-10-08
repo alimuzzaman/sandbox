@@ -49,8 +49,8 @@ Start line (after the child is launched):
 secrets session: started source=ALIAS keys=KEY[,KEY] lifetime=28800s (8h) ends_at=2026-10-08T18:30:00+06:00
 ```
 
-Then the child's combined stdout and stderr, redacted, control characters
-removed, written as it arrives. Text after the last whitespace may be held until
+Then the child's combined stdout and stderr, redacted, with complete SGR colour
+sequences kept and every other control sequence removed whole, written as it arrives. Text after the last whitespace may be held until
 the line completes or the session ends.
 
 End line:

@@ -83,7 +83,7 @@ The existing `SecretAudit` intent/outcome pair, unchanged schema:
 | `child_exited`, child status 0 | 0 |
 | `child_exited`, child status 1 to 125 | same status |
 | `child_exited`, any other status or death by signal | 1 |
-| `lifetime_expired` | 0 (provisional) |
-| `interrupted` | 130 (provisional) |
-| `hangup` | 129 (provisional) |
+| `lifetime_expired` | 0 |
+| `interrupted` | 130 |
+| `hangup` | 129 |
 | refused start | 1, with `error: <code>: <message>` on stderr |

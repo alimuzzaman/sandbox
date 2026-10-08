@@ -14,6 +14,7 @@ from sandbox.core._config import _local_yaml, _write_local_yaml
 from sandbox.core._secrets import resolve_secret, write_secret
 
 API_BASE = "https://api.cloudflare.com/client/v4"
+DNS_ONLY_TTL_SECONDS = 60
 
 
 class CloudflareError(RuntimeError):
@@ -128,8 +129,10 @@ class Client:
     def upsert_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True) -> dict:
         record_type = "AAAA" if ":" in address else "A"
         existing = [r for r in self.records(zone_id, hostname) if r.get("type") == record_type]
+        # Proxied records ignore TTL (1 = automatic). DNS-only records get the
+        # 60s minimum so an origin move propagates quickly.
         body = {"type": record_type, "name": hostname, "content": address,
-                "proxied": bool(proxied), "ttl": 1,
+                "proxied": bool(proxied), "ttl": 1 if proxied else DNS_ONLY_TTL_SECONDS,
                 "comment": "managed by Sandbox hosting"}
         if existing:
             return self._request("PUT", f"/zones/{zone_id}/dns_records/{existing[0]['id']}", body)["result"]

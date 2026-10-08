@@ -575,6 +575,16 @@ index record (`indexed: false`). Sizes are `null` with a `size_reason` unless
 orphaned deployment storage; it is still not cleanup authority, and status, create,
 reset, destroy, and migration apply keep refusing a degraded index.
 
+## Remote front door (nginx servers)
+
+A server whose own nginx (a panel such as xCloud) already holds 80/443 cannot run
+Sandbox's Caddy. Register it with `sb remote add NAME USER@HOST --front-door nginx`.
+After that, `sb host plan/apply` and the HTTPS control route write only
+`/etc/nginx/conf.d/sandbox-*.conf`. Inspect them with `sb remote edge NAME [--json]`
+and remove one with `--remove-route NAME --confirm`. `deploy --expose`, aliases and
+`preview` refuse on such a remote (`front_door_capability_unavailable`). See
+docs/remote-hosting.md, "nginx front door".
+
 ## Remote CI workflows
 
 Preflight a GitHub Actions workflow before submission. A compatible workflow

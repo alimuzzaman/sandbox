@@ -1097,7 +1097,7 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--force-recreate", up_commands[0])
         self.assertIn("--renew-anon-volumes", up_commands[0])
         self.assertTrue(up_commands[-1].endswith("up -d --no-deps web"))
-        build_index = next(i for i, command in enumerate(commands) if command.endswith("build setup"))
+        build_index = next(i for i, command in enumerate(commands) if command.endswith("build --with-dependencies setup"))
         run_index = next(
             i for i, command in enumerate(commands)
             if command.endswith("run --rm --pull never setup")
@@ -1351,7 +1351,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertTrue(commands[0].endswith(" build web worker"))
+        self.assertTrue(commands[0].endswith(" build --with-dependencies web worker"))
         self.assertIn("up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[1])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
@@ -1387,7 +1387,7 @@ class TestHostingManifest(unittest.TestCase):
             "--remove-orphans web worker",
             next(command for command in commands if " up -d" in command),
         )
-        self.assertFalse(any(command.endswith(" build setup") for command in commands))
+        self.assertFalse(any(command.endswith(" build --with-dependencies setup") for command in commands))
         self.assertTrue(any(
             command.endswith("run --rm --pull never --no-build setup")
             for command in commands
@@ -1515,7 +1515,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertTrue(commands[0].endswith(" build web"))
+        self.assertTrue(commands[0].endswith(" build --with-dependencies web"))
         self.assertEqual(remote_checked.call_args_list[0].kwargs["log_phase"], "compose_build")
         self.assertIn("up -d --no-build --force-recreate", commands[1])
 
@@ -1651,7 +1651,7 @@ class TestHostingManifest(unittest.TestCase):
         ])
         build_call = next(
             call for call in remote_checked.call_args_list
-            if call.args[1].endswith(" build web")
+            if call.args[1].endswith(" build --with-dependencies web")
         )
         self.assertEqual(build_call.kwargs["log_path"], "/srv/runtime/apply.log")
 
@@ -1716,7 +1716,7 @@ class TestHostingManifest(unittest.TestCase):
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         build_calls = [call for call in remote_checked.call_args_list
                        if "--force-recreate" in call.args[1]
-                       or " build setup" in call.args[1]]
+                       or " build --with-dependencies setup" in call.args[1]]
         self.assertGreaterEqual(len(build_calls), 2)
         self.assertTrue(all(call.kwargs.get("timeout") == 2400 for call in build_calls))
 
@@ -3756,6 +3756,97 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIsNone(record["image_activation"]["active"])
         mock_save.assert_called_once_with(state)
 
+    def test_host_retire_delivery_drops_an_unproven_staged_revision(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "b" * 40, "recorded_revision": "a" * 40,
+                         "config_digest": "cfg", "source_state_identity": "src",
+                         "runtime": {"state": "unverified"}},
+        }}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        record = state["hosts"][target_key]
+        self.assertIsNone(record["staged_revision"])
+        self.assertEqual(record["recorded_revision"], "a" * 40)
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=record, requested_revision="b" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=False), "full_recreate")
+
+    def test_host_retire_delivery_unfences_an_unobserved_recorded_revision(self):
+        # Edge failed after the runtime was recorded but never observed (no
+        # declared source revision), so staged == recorded. Retire must still
+        # let the same commit converge instead of refusing forever.
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "a" * 40, "recorded_revision": "a" * 40,
+                         "observed_runtime_revision": None,
+                         "config_digest": "cfg", "source_state_identity": "src",
+                         "source_state_clean": True,
+                         "runtime": {"state": "unverified"}},
+        }}
+        previous = dict(state["hosts"][target_key])
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=previous, requested_revision="a" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=False), "refuse")
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        record = state["hosts"][target_key]
+        self.assertTrue(record["retired_unproven_runtime"])
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=record, requested_revision="a" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=False), "full_recreate")
+        # A freshly proven runtime still takes the cheaper edge-only path.
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=record, requested_revision="a" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=True), "edge_only")
+
+    def test_host_retire_delivery_leaves_an_observed_runtime_fenced_normally(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "a" * 40, "recorded_revision": "a" * 40,
+                         "observed_runtime_revision": "a" * 40},
+        }}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        self.assertNotIn("retired_unproven_runtime", state["hosts"][target_key])
+
+    def test_host_retire_delivery_keeps_a_proven_staged_revision(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "a" * 40, "recorded_revision": "a" * 40},
+        }}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        self.assertEqual(state["hosts"][target_key]["staged_revision"], "a" * 40)
+
 
 class _Response:
     def __init__(self, data):
@@ -3799,6 +3890,20 @@ class TestCloudflareClient(unittest.TestCase):
         self.assertEqual(request.get_method(), "PUT")
         self.assertIn("rec-1", request.full_url)
         self.assertNotIn("token", request.full_url)
+
+    @patch("urllib.request.urlopen")
+    def test_upsert_ttl_is_automatic_when_proxied_and_60s_when_dns_only(self, mock_open):
+        for proxied, ttl in ((True, 1), (False, 60)):
+            mock_open.reset_mock()
+            mock_open.side_effect = [
+                _Response({"success": True, "result": []}),
+                _Response({"success": True, "result": {"id": "rec-1"}}),
+            ]
+            cloudflare.Client("token").upsert_address(
+                "zone", "example.com", "203.0.113.10", proxied=proxied)
+            body = json.loads(mock_open.call_args_list[1].args[0].data)
+            self.assertEqual(body["ttl"], ttl)
+            self.assertEqual(body["proxied"], proxied)
 
     @patch("urllib.request.urlopen")
     def test_api_errors_do_not_echo_token(self, mock_open):

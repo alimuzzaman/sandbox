@@ -154,6 +154,11 @@ def _cmd_preview(cfg, args) -> None:
         die("a provisioned --remote is required")
     if not entry.get("origin_ipv4"):
         die("remote has no origin IPv4; run `./sb remote set-origin`")
+    from sandbox.hosting.front_door import FrontDoorError, require_capability
+    try:
+        require_capability(entry, "preview_routes")
+    except FrontDoorError as exc:
+        die(str(exc))
     record = None
     instance = None
     target = None

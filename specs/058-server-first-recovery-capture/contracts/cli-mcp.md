@@ -90,7 +90,9 @@ The passphrase comes only from inherited `RECOVERY_PASSPHRASE`. Order:
 | `--confirm` | `confirmation_required` |
 | passphrase present | `missing_passphrase` |
 | destination present (`--destination` or env) | `recovery_not_configured` |
-| local pending ciphertext for B → finish it (FR-029) | `passphrase_not_current`, `pending_artifact_invalid`, `drive_upload_failed`, `drive_verification_failed` |
+| local pending ciphertext for B and Drive manifest for B with the same `ciphertext_sha256` → the upload already finished; local leftovers removed, nothing uploaded | success, `status=already_published`, `data.from_pending` |
+| local pending ciphertext for B and Drive manifest for B with another `ciphertext_sha256` → refused before any transfer, pending files kept | `set_id_conflict` |
+| local pending ciphertext for B, no Drive manifest → finish it (FR-029) | `passphrase_not_current`, `pending_artifact_invalid`, `drive_upload_failed`, `drive_verification_failed` |
 | Drive manifest for B exists and traces to this capture | success, `status=already_published` |
 | Drive manifest for B from another capture | `set_id_conflict` |
 | Drive holds ciphertext for B without manifest and no local pending | `incomplete_remote_set` |

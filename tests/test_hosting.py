@@ -1720,6 +1720,109 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotIn("compose_recreate", hosting_cmd._PRE_EFFECT_PHASES)
         self.assertIn("failed to solve", str(caught.exception))
 
+    _MEMINFO = "mem MemTotal 4028000\nmem MemAvailable 81000\nmem SwapFree 0\n"
+
+    def _killed_apply(self, probe_stdout=None, probe_exc=None, *, tail="",
+                      phase="compose_build", log_path=None,
+                      command="docker compose build web"):
+        killed = subprocess.CompletedProcess("cmd", 137, stdout="", stderr=tail or "Killed\n")
+        probe = (subprocess.CompletedProcess("probe", 0, stdout=probe_stdout or "", stderr="")
+                 if probe_exc is None else probe_exc)
+        calls = []
+
+        def fake(entry, command, timeout=None, **kwargs):
+            calls.append((command, timeout))
+            if len(calls) == 1:
+                return killed
+            if len(calls) == 2:
+                if isinstance(probe, BaseException):
+                    raise probe
+                return probe
+            return subprocess.CompletedProcess("log", 0, stdout="", stderr="")
+
+        with patch("sandbox.commands.hosting.remote.ssh_run", side_effect=fake), \
+                patch("sandbox.commands.hosting.remote.ssh_stream", side_effect=fake):
+            with self.assertRaises(hosting_cmd.HostRemoteCommandFailed) as caught:
+                hosting_cmd._remote_checked({}, command,
+                                            log_phase=phase, log_path=log_path)
+        return caught.exception, calls
+
+    def test_kill_classified_as_container_oom_from_docker_state(self):
+        error, calls = self._killed_apply(
+            "oom_container web-1\nkernel_source journal\nkernel_oom 0\n" + self._MEMINFO)
+        self.assertEqual(error.exit_code, 137)
+        self.assertEqual(error.kill_evidence["classification"], "container_oom")
+        self.assertEqual(error.kill_evidence["oom_containers"], ["web-1"])
+        self.assertEqual(error.kill_evidence["memory_kb"]["MemAvailable"], 81000)
+        self.assertIn("kill_classification=container_oom", str(error))
+        self.assertIn("MemAvailable=81000kB", str(error))
+        probe_command, probe_timeout = calls[1]
+        self.assertTrue(probe_command.startswith("timeout "))
+        self.assertLessEqual(probe_timeout, 60)
+        import re
+        self.assertIsNone(re.search(
+            r"(^|[\s;|(])(rm|kill|pkill|sudo|restart|prune|stop|env)\s", probe_command))
+        self.assertNotIn(">", probe_command.replace("2>/dev/null", ""))
+
+    def test_kill_probe_inspects_only_this_compose_project(self):
+        _, calls = self._killed_apply(
+            "kernel_source unavailable\n" + self._MEMINFO,
+            command="docker compose -p sandbox-host-acme-dev build web")
+        self.assertTrue(calls[1][0].endswith(" kill-probe sandbox-host-acme-dev"))
+        self.assertIn("label=com.docker.compose.project=$1", calls[1][0])
+        _, calls = self._killed_apply("kernel_source unavailable\n" + self._MEMINFO)
+        self.assertTrue(calls[1][0].endswith(" kill-probe ''"))
+
+    def test_kill_classified_as_container_oom_from_build_output_tail(self):
+        error, _ = self._killed_apply(
+            "kernel_source journal\nkernel_oom 0\n" + self._MEMINFO,
+            tail="#12 ERROR: process did not complete: signal: killed (out of memory)\n")
+        self.assertEqual(error.kill_evidence["classification"], "container_oom")
+
+    def test_kill_classified_as_host_memory_pressure_from_kernel_log(self):
+        error, _ = self._killed_apply(
+            "kernel_source dmesg\nkernel_oom 3\n" + self._MEMINFO)
+        self.assertEqual(error.kill_evidence["classification"], "host_memory_pressure")
+        self.assertEqual(error.kill_evidence["kernel_source"], "dmesg")
+
+    def test_kill_without_oom_evidence_stays_process_killed(self):
+        error, _ = self._killed_apply("kernel_source unavailable\n" + self._MEMINFO)
+        self.assertEqual(error.kill_evidence["classification"], "process_killed")
+        self.assertEqual(error.kill_evidence["kernel_source"], "unavailable")
+
+    def test_kill_probe_failure_reports_classification_unavailable(self):
+        for failure in (subprocess.TimeoutExpired("probe", 30), OSError("boom"),
+                        subprocess.CompletedProcess("probe", 1, stdout="", stderr="x")):
+            error, _ = self._killed_apply(probe_exc=failure if isinstance(failure, BaseException) else None,
+                                          probe_stdout=None) if isinstance(failure, BaseException) \
+                else self._killed_apply_with_result(failure)
+            self.assertEqual(error.exit_code, 137)
+            self.assertEqual(error.kill_evidence["classification"], "classification_unavailable")
+            self.assertIn("kill_classification=classification_unavailable", str(error))
+
+    def _killed_apply_with_result(self, result):
+        killed = subprocess.CompletedProcess("cmd", 137, stdout="", stderr="Killed\n")
+        with patch("sandbox.commands.hosting.remote.ssh_run",
+                   side_effect=[killed, result]):
+            with self.assertRaises(hosting_cmd.HostRemoteCommandFailed) as caught:
+                hosting_cmd._remote_checked({}, "docker compose build web",
+                                            log_phase="compose_build")
+        return caught.exception, None
+
+    def test_kill_classification_is_appended_to_apply_log(self):
+        error, calls = self._killed_apply(
+            "kernel_source journal\nkernel_oom 1\n" + self._MEMINFO,
+            log_path="/srv/runtime/apply.log")
+        self.assertEqual(error.kill_evidence["classification"], "host_memory_pressure")
+        self.assertEqual(len(calls), 3)
+        self.assertIn("event=kill_classification", calls[2][0])
+        self.assertIn("/srv/runtime/apply.log", calls[2][0])
+
+    def test_untracked_phase_and_non_kill_exit_skip_the_probe(self):
+        error, calls = self._killed_apply("", phase="unclassified")
+        self.assertIsNone(error.kill_evidence)
+        self.assertEqual(len(calls), 1)
+
     @patch("sandbox.commands.hosting.remote.ssh_run")
     def test_ssh_transport_loss_is_not_a_known_failure(self, ssh_run):
         ssh_run.return_value = subprocess.CompletedProcess(

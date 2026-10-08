@@ -18,6 +18,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from tests.subprocess_support import run_test_process
+
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools" / "server-migration"
 SCRIPTS = ["prepare-host.sh", "deploy-project.sh", "retire-failed.sh", "stage-volume.sh",
@@ -618,8 +620,8 @@ class BackupTests(MigrationScriptTestCase):
         # gpg-agent's socket path must stay short, so this home lives directly in /tmp.
         gnupg = Path(tempfile.mkdtemp(prefix="smg-", dir="/tmp"))
         self.addCleanup(shutil.rmtree, gnupg, ignore_errors=True)
-        self.addCleanup(subprocess.run, ["gpgconf", "--kill", "gpg-agent"], capture_output=True,
-                        env={**os.environ, "GNUPGHOME": str(gnupg)})
+        self.addCleanup(run_test_process, ["gpgconf", "--kill", "gpg-agent"], capture_output=True,
+                        env={"GNUPGHOME": str(gnupg)})
         work = self.tmp / "work"
         result = self.run_script("backup-to-drive.sh", "repo", "--confirm", "--repo", str(repo), "--name", "r",
                                  "--secret-source", "drive-src", "--work-dir", str(work),

@@ -361,6 +361,44 @@ class TestPendingPromote(PromoteCase):
         self.assertFalse(cipher.exists())
         self.assertEqual(self.transport.marked, [])
 
+    def test_pending_leftover_for_id_published_elsewhere_is_conflict(self):
+        # Drive holds set-a from another capture; the stale local pending file
+        # must not be uploaded over it (FR-028 before FR-029).
+        cipher, sidecar = self.make_pending()
+        self.drive.objects.clear()
+        other = self.materialized / "other"
+        other.mkdir()
+        (other / "file").write_bytes(b"other")
+        self.capture().publish_files("set-a", {"control-plane/file": other / "file"},
+                                     profiles=("control-plane",))
+        published = dict(self.drive.objects)
+        self.drive.log.clear()
+        outcome = self.promote()
+        self.assertEqual(outcome["error"]["code"], "set_id_conflict")
+        self.assertEqual(self.drive.objects, published)
+        self.assertEqual([op for op, _key in self.drive.log], [])
+        self.assertTrue(cipher.exists())
+        self.assertTrue(sidecar.exists())
+
+    def test_pending_leftover_of_finished_publish_reports_existing(self):
+        cipher, sidecar = self.make_pending()
+        copies = (cipher.read_bytes(), sidecar.read_bytes())
+        self.offline()
+        self.assertTrue(self.promote()["ok"])
+        # Simulate a publish whose local cleanup was lost after the upload.
+        cipher.write_bytes(copies[0])
+        sidecar.write_bytes(copies[1])
+        published = dict(self.drive.objects)
+        self.drive.log.clear()
+        outcome = self.promote()
+        self.assertTrue(outcome["ok"], outcome)
+        self.assertEqual(outcome["status"], "already_published")
+        self.assertTrue(outcome["data"]["from_pending"])
+        self.assertEqual(self.drive.objects, published)
+        self.assertEqual([op for op, _key in self.drive.log], [])
+        self.assertFalse(cipher.exists())
+        self.assertFalse(sidecar.exists())
+
     def test_pending_files_are_owner_only(self):
         cipher, sidecar = self.make_pending()
         self.assertEqual(cipher.stat().st_mode & 0o777, 0o600)

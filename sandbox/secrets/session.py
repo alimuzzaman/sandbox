@@ -37,12 +37,28 @@ DRAIN_IDLE_SECONDS = 0.5
 DRAIN_CAP_SECONDS = 5.0
 _READ_BYTES = 65_536
 
-_SIGNAL_REASONS = {
-    signal.SIGINT: "interrupted",
-    signal.SIGHUP: "hangup",
-    signal.SIGTERM: "interrupted",
-    signal.SIGQUIT: "interrupted",
-}
+# Every catchable signal whose default action would terminate the broker
+# (spec 059 FR-010). SIGHUP is the terminal going away; the rest are
+# termination requests. Left out on purpose: SIGKILL/SIGSTOP (uncatchable),
+# SIGPIPE/SIGXFSZ (Python ignores them; they surface as OSError), fault
+# signals (SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT, SIGSYS, SIGTRAP) and
+# job-control stops (SIGTSTP is ignored below; SIGTTIN/SIGTTOU stay default).
+_TERMINATION_SIGNAL_NAMES = (
+    "SIGINT", "SIGHUP", "SIGTERM", "SIGQUIT", "SIGUSR1", "SIGUSR2", "SIGALRM",
+    "SIGVTALRM", "SIGPROF", "SIGXCPU",
+)
+
+
+def _termination_signals() -> dict[int, str]:
+    mapping = {}
+    for name in _TERMINATION_SIGNAL_NAMES:
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            mapping[signum] = "hangup" if name == "SIGHUP" else "interrupted"
+    return mapping
+
+
+TERMINATION_SIGNALS = _termination_signals()
 
 
 def _wall_now() -> float:
@@ -56,7 +72,10 @@ def _mono_now() -> float:
 class SessionSignals:
     """Own the broker's termination signals for the length of one session.
 
-    Handlers only record the first end reason; the session loop acts on it.
+    Every signal in ``TERMINATION_SIGNALS`` is handled, so no catchable
+    termination request can kill the broker and leave the child's group
+    running with the secret. Handlers only record the first end reason; the
+    session loop acts on it.
     ``SIGTSTP`` is ignored so Ctrl-Z cannot stop the process that enforces
     the lifetime. Handlers are installed unconditionally, so an inherited
     ignored ``SIGHUP`` (``nohup``) is overridden. Previous dispositions are
@@ -75,11 +94,11 @@ class SessionSignals:
 
     def _handle(self, signum, _frame) -> None:
         if self.reason is None:
-            self.reason = _SIGNAL_REASONS.get(signum, "interrupted")
+            self.reason = TERMINATION_SIGNALS.get(signum, "interrupted")
 
     def __enter__(self) -> "SessionSignals":
         try:
-            for signum in _SIGNAL_REASONS:
+            for signum in TERMINATION_SIGNALS:
                 self._previous[signum] = signal.signal(signum, self._handle)
             self._previous[signal.SIGTSTP] = signal.signal(signal.SIGTSTP, signal.SIG_IGN)
         except BaseException:
@@ -97,6 +116,28 @@ class SessionSignals:
             signal.signal(signum, previous)
 
 
+# Commands whose whole purpose is to run their argument with other
+# privileges. A privileged member of the child's group cannot be signalled by
+# the unprivileged broker, so the 5-second end bound (FR-011) could not hold.
+ESCALATION_COMMANDS = frozenset({"sudo", "sudoedit", "doas", "su", "pkexec", "run0"})
+
+
+def refuse_escalation(argv: Sequence[str]) -> None:
+    """Refuse a session whose direct command escalates privileges.
+
+    Only the executable itself is inspected: escalation deeper inside the
+    child is not detectable before launch and is a documented limit, reported
+    after the fact through ``SessionResult.group_ended``.
+    """
+    executable = argv[0] if isinstance(argv, (list, tuple)) and argv else ""
+    if isinstance(executable, str) and os.path.basename(executable) in ESCALATION_COMMANDS:
+        raise SecretBrokerError(
+            "escalation_unsupported",
+            "session mode cannot end a privileged child; run the command without "
+            "sudo, sudoedit, doas, su, pkexec or run0",
+        )
+
+
 def validate_lifetime(lifetime_seconds: object) -> int:
     if not isinstance(lifetime_seconds, int) or isinstance(lifetime_seconds, bool) \
             or not 1 <= lifetime_seconds <= MAX_SESSION_SECONDS:
@@ -106,15 +147,25 @@ def validate_lifetime(lifetime_seconds: object) -> int:
     return lifetime_seconds
 
 
-def _group_alive(pgid: int) -> bool:
+def _group_state(pgid: int) -> str:
+    """``gone``, ``alive`` or ``unreachable`` (a member we may not signal).
+
+    ``killpg`` fails with ``EPERM`` only when no member could be signalled,
+    so ``unreachable`` means every process left in the group runs with other
+    privileges than the broker: the child escalated and the broker cannot end
+    what remains.
+    """
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
-        return False
+        return "gone"
     except PermissionError:
-        # A pid we cannot signal is not one we started; treat as gone.
-        return False
-    return True
+        return "unreachable"
+    return "alive"
+
+
+def _group_alive(pgid: int) -> bool:
+    return _group_state(pgid) != "gone"
 
 
 def _signal_group(pgid: int, signum: int) -> None:
@@ -136,19 +187,26 @@ def _wait_group(process: subprocess.Popen, pgid: int, seconds: float) -> bool:
         time.sleep(0.05)
 
 
-def end_process_group(process: subprocess.Popen) -> None:
-    """Polite then forced termination of the child's whole group, under 5 s."""
+def end_process_group(process: subprocess.Popen) -> bool:
+    """Polite then forced termination of the child's whole group, under 5 s.
+
+    Returns ``True`` when the group is gone. ``False`` means a member survived
+    the bound: in practice one the broker may not signal (a privileged
+    descendant), which the caller reports instead of claiming the group ended.
+    """
     pgid = process.pid  # start_new_session=True: the child leads its group
     process.poll()
+    gone = True
     if _group_alive(pgid):
         _signal_group(pgid, signal.SIGTERM)
         if not _wait_group(process, pgid, GRACE_SECONDS):
             _signal_group(pgid, signal.SIGKILL)
-            _wait_group(process, pgid, KILL_WAIT_SECONDS)
+            gone = _wait_group(process, pgid, KILL_WAIT_SECONDS)
     try:
         process.wait(timeout=0.5)
     except subprocess.TimeoutExpired:
         pass
+    return gone
 
 
 _SGR_SPLIT = re.compile(r"(\x1b\[[0-9;]*m)")
@@ -235,6 +293,7 @@ def run_session(
     A display (or ``on_start``) ``OSError`` is terminal loss: ``hangup``.
     """
     validate_child_request(argv, secrets)
+    refuse_escalation(argv)
     lifetime = validate_lifetime(lifetime_seconds)
     if not callable(display):
         raise SecretBrokerError("command_invalid", "session display is invalid")
@@ -311,6 +370,7 @@ def run_session(
     stream_open = True
     end_reason: str | None = None
     exit_code: int | None = None
+    group_ended = True
     try:
         while True:
             if signals.reason is not None:
@@ -336,7 +396,7 @@ def run_session(
                     process.wait(timeout=POLL_SECONDS)
                 except subprocess.TimeoutExpired:
                     pass
-        end_process_group(process)
+        group_ended = end_process_group(process)
         if exit_code is None and end_reason == "child_exited":
             exit_code = process.returncode
         # Every writer in the group is gone; drain what is left. Bounded in
@@ -357,7 +417,7 @@ def run_session(
         selector.close()
         stream.close()
         if process.poll() is None:
-            end_process_group(process)
+            group_ended = end_process_group(process) and group_ended
 
     return SessionResult(
         end_reason=end_reason,
@@ -365,9 +425,11 @@ def run_session(
         elapsed_seconds=max(0.0, _mono_now() - mono_start),
         dropped_chunks=state["dropped"],
         lifetime_seconds=lifetime,
+        group_ended=group_ended,
     )
 
 
 __all__ = [
-    "SessionSignals", "end_process_group", "run_session", "validate_lifetime",
+    "ESCALATION_COMMANDS", "SessionSignals", "TERMINATION_SIGNALS", "end_process_group",
+    "refuse_escalation", "run_session", "validate_lifetime",
 ]

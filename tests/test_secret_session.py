@@ -73,7 +73,10 @@ class SessionModelTests(unittest.TestCase):
         result = SessionResult("child_exited", 0, 12.0, 0, 60)
         self.assertEqual(set(result.as_dict()), {
             "end_reason", "exit_code", "elapsed_class", "dropped_chunks", "lifetime_seconds",
+            "group_ended",
         })
+        self.assertTrue(result.as_dict()["group_ended"])
+        self.assertFalse(SessionResult("hangup", None, 1.0, 0, 60, False).as_dict()["group_ended"])
         self.assertNotIn("elapsed_seconds", result.as_dict())
         self.assertNotIn("output", result.as_dict())
 
@@ -99,11 +102,21 @@ class SessionSignalsTests(unittest.TestCase):
         self.SessionSignals = SessionSignals
 
     def test_each_signal_records_its_reason(self):
-        cases = {
+        from sandbox.secrets.session import TERMINATION_SIGNALS
+        # FR-010: every catchable termination request ends the session, not
+        # just the four the terminal generates.
+        expected = {
             signal.SIGINT: "interrupted", signal.SIGHUP: "hangup",
             signal.SIGTERM: "interrupted", signal.SIGQUIT: "interrupted",
+            signal.SIGUSR1: "interrupted", signal.SIGUSR2: "interrupted",
+            signal.SIGALRM: "interrupted", signal.SIGVTALRM: "interrupted",
+            signal.SIGPROF: "interrupted", signal.SIGXCPU: "interrupted",
         }
-        for signum, reason in cases.items():
+        self.assertEqual(TERMINATION_SIGNALS, expected)
+        for name in ("SIGKILL", "SIGSTOP", "SIGPIPE", "SIGXFSZ", "SIGSEGV", "SIGCHLD",
+                     "SIGTSTP", "SIGWINCH"):
+            self.assertNotIn(getattr(signal, name), TERMINATION_SIGNALS)
+        for signum, reason in TERMINATION_SIGNALS.items():
             with self.subTest(signal=signum), self.SessionSignals() as signals:
                 os.kill(os.getpid(), signum)
                 time.sleep(0.01)
@@ -138,7 +151,8 @@ class SessionSignalsTests(unittest.TestCase):
             signal.signal(signal.SIGHUP, previous)
 
     def test_dispositions_restored_including_after_exception(self):
-        handled = (signal.SIGINT, signal.SIGHUP, signal.SIGTERM, signal.SIGQUIT, signal.SIGTSTP)
+        from sandbox.secrets.session import TERMINATION_SIGNALS
+        handled = (*TERMINATION_SIGNALS, signal.SIGTSTP)
         before = {signum: signal.getsignal(signum) for signum in handled}
         with self.SessionSignals():
             pass
@@ -467,6 +481,42 @@ class SessionBoundTests(unittest.TestCase):
                     self.run_child("print(1)", lifetime=lifetime)
                 self.assertEqual(raised.exception.code, "lifetime_invalid")
                 popen.assert_not_called()
+
+    def test_escalating_command_refused_before_launch(self):
+        real = subprocess.Popen
+        calls = []
+        with mock.patch.object(self.session.subprocess, "Popen",
+                               side_effect=lambda *a, **k: calls.append(a) or real(*a, **k)):
+            for argv in (["sudo", "true"], ["/usr/bin/doas", "true"], ["su", "-c", "true"],
+                         ["pkexec", "true"], ["run0", "true"], ["sudoedit", "f"]):
+                with self.subTest(argv=argv):
+                    with self.assertRaises(SecretBrokerError) as raised:
+                        self.session.run_session(
+                            argv, secrets={"API_TOKEN": SECRET}, lifetime_seconds=5,
+                            display=Sink())
+                    self.assertEqual(raised.exception.code, "escalation_unsupported")
+        self.assertEqual(calls, [])
+        # Only the executable is inspected: "sudo" as an argument is fine.
+        result, _sink = self.run_child("import sys; print(sys.argv)")
+        self.assertEqual(result.end_reason, "child_exited")
+        self.assertTrue(result.group_ended)
+
+    def test_unreachable_group_member_is_reported_not_claimed_ended(self):
+        # A member the broker may not signal (privilege escalation inside the
+        # child) survives the bounded end; the result says so instead of
+        # pretending the group is gone, and the bound still holds.
+        program = "import os; print('pid=%d' % os.getpid(), flush=True); import time; time.sleep(60)"
+        real_state = self.session._group_state
+        with mock.patch.object(self.session, "_group_state",
+                               side_effect=lambda pgid: "unreachable"
+                               if real_state(pgid) == "gone" else real_state(pgid)):
+            started = time.monotonic()
+            result, sink = self.run_child(program, lifetime=1)
+        self.assertEqual(result.end_reason, "lifetime_expired")
+        self.assertFalse(result.group_ended)
+        self.assertLess(time.monotonic() - started, 7)
+        pid = int(re.search(r"pid=(\d+)", sink.text()).group(1))
+        self.assertTrue(_gone(pid, 1))
 
     def test_invalid_command_refused(self):
         with self.assertRaises(SecretBrokerError) as raised:

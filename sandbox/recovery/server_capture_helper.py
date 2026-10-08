@@ -393,6 +393,25 @@ def active_backup_id(root):
 
 # --- ops -------------------------------------------------------------------
 
+def stale_slot(directory):
+    """A slot directory with no request and no live owner is a crash leftover.
+
+    ``request.json`` is the first file a start writes after ``mkdir``, under
+    ``active.lock``; a slot without it was abandoned before the job existed.
+    It is only reclaimed by a start that holds ``active.lock`` (op_start).
+    """
+    return (os.path.isdir(directory) and not os.path.islink(directory)
+            and load_json(os.path.join(directory, "request.json"), 16 * 1024) is None
+            and lock_free(os.path.join(directory, "job.lock")))
+
+
+def reclaim_stale_slot(directory):
+    """Remove a crash leftover; caller holds ``active.lock``. Re-checks first
+    so this never deletes a slot that gained an owner or a request."""
+    if stale_slot(directory):
+        remove_path(directory)
+
+
 def existing_result(root, slot, request):
     directory = slot_dir(root, slot)
     if not os.path.lexists(directory):
@@ -404,6 +423,10 @@ def existing_result(root, slot, request):
             break
         time.sleep(0.05)
     if stored is None:
+        if stale_slot(directory):
+            return None  # reclaimed by op_start once it holds active.lock
+        # A live start for this same slot (so this same backup id) is still
+        # writing its request: it is the capture in progress.
         raise Refusal("capture_in_progress", active_backup_id=request.get("backup_id"))
     if stored.get("request_id") != request.get("request_id"):
         raise Refusal("capture_binding_conflict")
@@ -480,8 +503,11 @@ def op_start(root, slot, request_text):
                 time.sleep(0.05)
             raise Refusal("capture_in_progress", active_backup_id=active_backup_id(root))
         if os.path.lexists(directory):
-            os.close(active)
-            active = None
+            if stale_slot(directory):
+                reclaim_stale_slot(directory)
+            else:
+                os.close(active)
+                active = None
     try:
         if not detach_supported():
             raise Refusal("detach_unsupported")

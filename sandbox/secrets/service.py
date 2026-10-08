@@ -13,7 +13,7 @@ from .models import (
 from .parser import SecretParseError, parse_document
 from .policy import fixed_mask, length_bucket, metadata, validate, validate_key
 from .runner import run_with_secret, run_with_secrets
-from .session import run_session, validate_lifetime
+from .session import refuse_escalation, run_session, validate_lifetime
 from .sources import SourceRegistry
 from .organizer import organize as organize_document
 from .writer import load_revision_key, opaque_revision, rewrite_source, update_source
@@ -325,6 +325,7 @@ class SecretService:
         if surface != "cli":
             raise SecretBrokerError("command_denied", "secret sessions are local CLI only")
         validate_lifetime(lifetime_seconds)
+        refuse_escalation(argv)
 
         def perform(correlation):
             values = self._binding_values(source, normalized)

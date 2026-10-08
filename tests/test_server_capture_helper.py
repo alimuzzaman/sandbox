@@ -181,6 +181,37 @@ class TestHelperStart(HelperCase):
         self.assertFalse(self.h.slot_path(backup_id="set-b").exists())
         self.h.wait()
 
+    def test_stale_slot_from_crashed_start_is_reclaimed(self):
+        # A start that died after mkdir and before request.json leaves a slot
+        # with no request and no lock holder; the next start takes it over.
+        self.h.root.mkdir(parents=True, mode=0o700)
+        stale = self.h.slot_path()
+        stale.mkdir(mode=0o700)
+        (stale / "job.lock").touch(mode=0o600)
+        outcome = self.h.start()
+        self.assertTrue(outcome["ok"], outcome)
+        self.assertFalse(outcome["existing"])
+        self.assertEqual(outcome["state"], "queued")
+        final = self.h.wait()
+        self.assertEqual(final["state"]["state"], "complete")
+        self.assertEqual(final["request"]["backup_id"], "set-a")
+
+    def test_slot_still_initializing_reports_its_own_backup_id(self):
+        # No request.json yet but a live job.lock holder: the same slot (so
+        # the same backup id) is being started by someone else right now.
+        self.h.root.mkdir(parents=True, mode=0o700)
+        busy = self.h.slot_path()
+        busy.mkdir(mode=0o700)
+        held = helper.try_lock(str(busy / "job.lock"), True)
+        self.assertIsNotNone(held)
+        try:
+            outcome = self.h.start()
+        finally:
+            os.close(held)
+        self.assertEqual(outcome, {"ok": False, "code": "capture_in_progress",
+                                   "active_backup_id": "set-a"})
+        self.assertFalse((busy / "request.json").exists())
+
     def test_kill_user_processes_refuses_detach(self):
         outcome = self.h.start(env=self.h.env(FAKE_KILL_USER_PROCESSES="yes"))
         self.assertEqual(outcome, {"code": "detach_unsupported", "ok": False})

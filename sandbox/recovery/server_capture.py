@@ -386,6 +386,30 @@ class ServerCaptureService:
         return result(True, "retention", remote=remote, status="planned",
                       data=dict(data, requires_confirmation=True))
 
+    def _retire_candidate(self, remote: str | None, backup_id: str | None) -> tuple[str, dict]:
+        self._require_ids(remote, backup_id)
+        slot = slot_for(remote, backup_id)
+        candidate = self.transport.retire_plan(remote, slot)
+        reviewed = candidate.get("state")
+        if reviewed not in RETIRABLE:
+            raise refusal("server capture is not retirable", "not_retirable", state=reviewed)
+        return slot, candidate
+
+    def retire_plan(self, remote: str | None, backup_id: str | None) -> dict:
+        """Read-only preview of retiring one capture: the reviewed candidate a
+        confirmed retire would have to match (FR-034). Deletes nothing."""
+        action = "retention"
+        try:
+            _slot, candidate = self._retire_candidate(remote, backup_id)
+        except RecoveryError as exc:
+            return self._envelope_error(action, remote, exc)
+        except (OSError, TypeError, ValueError, KeyError):
+            return self._envelope_error(action, remote, RecoveryError(
+                "server capture retire plan failed", "server_capture_failed"))
+        return result(True, action, remote=remote, status="planned", data={
+            "backup_id": backup_id, "candidate": candidate, "retirable": True,
+            "requires_confirmation": True})
+
     def retire(self, remote: str | None, backup_id: str | None, *, confirm: bool = False) -> dict:
         """Retire one promoted, failed or incomplete capture (FR-034)."""
         action = "retention"
@@ -393,13 +417,8 @@ class ServerCaptureService:
             if not confirm or not backup_id:
                 raise RecoveryError("retire requires --confirm and --backup-id",
                                     "confirmation_required")
-            self._require_ids(remote, backup_id)
-            slot = slot_for(remote, backup_id)
-            candidate = self.transport.retire_plan(remote, slot)
+            slot, candidate = self._retire_candidate(remote, backup_id)
             reviewed = candidate.get("state")
-            if reviewed not in RETIRABLE:
-                raise refusal("server capture is not retirable", "not_retirable",
-                              state=reviewed)
             outcome = self.transport.retire(remote, slot, candidate)
         except RecoveryError as exc:
             return self._envelope_error(action, remote, exc)
@@ -438,6 +457,40 @@ class ServerCaptureService:
         except RecoveryError:
             return False
         return True
+
+    def _verified_manifest(self, backup_id: str) -> dict:
+        from .restore import verify_manifest
+        return verify_manifest(self.drive, backup_id)
+
+    def _resume_pending(self, remote: str, backup_id: str, pending: Path) -> dict:
+        """Finish a local pending ciphertext only if Drive does not already
+        hold this backup id from somewhere else (FR-028 before FR-029).
+
+        A published manifest whose ciphertext hash equals the pending file is
+        this same capture: the upload completed and only the local cleanup was
+        lost, so the leftovers are removed and nothing is uploaded. Any other
+        manifest under the id is ``set_id_conflict`` before any transfer. A
+        set with objects but no manifest is the upload this pending file was
+        in the middle of, and is resumed.
+        """
+        if f"sets/{backup_id}/manifest.json" in self._drive_paths(backup_id):
+            manifest = self._verified_manifest(backup_id)
+            if manifest.get("ciphertext_sha256") != sha256_file(pending):
+                raise RecoveryError("Drive holds a different set under this backup id",
+                                    "set_id_conflict")
+            pending.unlink(missing_ok=True)
+            (pending.parent / f"{backup_id}.manifest.json").unlink(missing_ok=True)
+            server_capture = (manifest.get("provenance") or {}).get("server_capture") or {}
+            marked = False
+            if server_capture.get("request_id"):
+                marked = self._mark(remote, slot_for(remote, backup_id),
+                                    server_capture["request_id"], backup_id, manifest)
+            return result(True, "promote", remote=remote, status="already_published", data={
+                "set_id": backup_id, "manifest": manifest, "from_pending": True,
+                "request_id": server_capture.get("request_id"),
+                "archive_sha256": server_capture.get("archive_sha256"),
+                "server_marked": marked})
+        return self._finish_pending(remote, backup_id)
 
     def _finish_pending(self, remote: str, backup_id: str) -> dict:
         manifest = self.capture.publish_pending(backup_id, bindings_for=self._bindings)
@@ -521,16 +574,16 @@ class ServerCaptureService:
             if self.drive is None or self.capture is None:
                 raise RecoveryError("recovery Drive destination is not configured",
                                     "recovery_not_configured")
-            if self._pending_ciphertext(backup_id) is not None:
-                return self._finish_pending(remote, backup_id)
+            pending = self._pending_ciphertext(backup_id)
+            if pending is not None:
+                return self._resume_pending(remote, backup_id, pending)
             slot = slot_for(remote, backup_id)
             facts = self.transport.status(remote, slot)
             request = facts.get("request") or {}
             summary = facts.get("receipt") or {}
             paths = self._drive_paths(backup_id)
             if f"sets/{backup_id}/manifest.json" in paths:
-                from .restore import verify_manifest
-                manifest = verify_manifest(self.drive, backup_id)
+                manifest = self._verified_manifest(backup_id)
                 server_capture = (manifest.get("provenance") or {}).get("server_capture") or {}
                 if (request.get("request_id") and summary.get("archive_sha256")
                         and server_capture.get("request_id") == request["request_id"]

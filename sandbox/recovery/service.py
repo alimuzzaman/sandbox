@@ -81,8 +81,10 @@ class RecoveryService:
                 "server capture is not configured", "recovery_not_configured"))
         if not remote:
             return self.retention_plan()
-        if backup_id is None and not confirm:
-            return self.server_capture.retention(remote)
+        if not confirm:
+            if backup_id is None:
+                return self.server_capture.retention(remote)
+            return self.server_capture.retire_plan(remote, backup_id)
         return self.server_capture.retire(remote, backup_id, confirm=confirm)
 
     def create_materialized(self, set_id: str, profiles: tuple[str, ...], *,

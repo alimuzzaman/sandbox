@@ -275,7 +275,10 @@ sb secrets run --session [--lifetime-seconds N]
 - Standard output must be a terminal, `/dev/tty` must open as a terminal, and
   `sb` must be that terminal's foreground job. Otherwise the start is refused
   with `tty_required`. This keeps CI, MCP, durable jobs and captured remote
-  paths out. All of these refusals happen before any secret is read.
+  paths out. A command that is itself `sudo`, `sudoedit`, `doas`, `su`,
+  `pkexec` or `run0` is refused with `escalation_unsupported`, because `sb`
+  could not end the privileged child at the end of the session. All of these
+  refusals happen before any secret is read.
 - A start line shows the source, key names, the lifetime and the local end
   time. Redacted output is shown live; an end line shows the end reason, the
   child's exit status, an elapsed-time class and the number of dropped chunks.
@@ -286,7 +289,7 @@ The session ends on the first of these:
 |------------|-------|------------------|
 | `child_exited` | the child exited by itself | the child's status, mapped as for `run` (0 stays 0, 1 to 125 pass through, anything else is 1 with `child_failed`) |
 | `lifetime_expired` | the lifetime ran out | 0 |
-| `interrupted` | Ctrl-C, `SIGTERM` or `SIGQUIT` to `sb` | 130 |
+| `interrupted` | Ctrl-C, or any other catchable termination signal to `sb` (`SIGTERM`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGALRM`, `SIGVTALRM`, `SIGPROF`, `SIGXCPU`) | 130 |
 | `hangup` | the terminal closed (`SIGHUP`) or a write to it failed | 129 |
 
 On every end, `sb` sends `SIGTERM` to the child's whole process group, then
@@ -319,6 +322,12 @@ Risks that remain:
   is defense in depth.
 - `SIGKILL` or `SIGSTOP` sent to `sb` cannot be handled. A broker killed that
   way leaves its child running with the secret until something else ends it.
+- A child that escalates privileges inside (a script that calls `sudo`, for
+  example) puts the privileged part out of `sb`'s reach: the polite request
+  is relayed by `sudo`, but nothing can force it. When that happens the end
+  line is followed by a warning and the audited result records
+  `group_ended=false`; check for the leftover process yourself. Only the
+  direct `sudo ...` form is refused up front.
 - An agent harness that allocates a pseudo-terminal passes the terminal check.
   The skill tells agents never to start a session; the check is not an
   exclusive security boundary.

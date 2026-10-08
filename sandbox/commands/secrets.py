@@ -401,6 +401,12 @@ def _run_session(service, args, bindings, argv, lifetime: int) -> None:
             f"secrets session: ended end_reason={end_reason} exit_code={result.get('exit_code')} "
             f"elapsed={result.get('elapsed_class')} dropped_chunks={result.get('dropped_chunks')}\n"
         )
+        if result.get("group_ended") is False:
+            _session_write(
+                "secrets session: warning: a process in the child's group could not be "
+                "ended within the bound (did the child escalate privileges?); it may still "
+                "hold the secret\n"
+            )
     except OSError:
         terminal_gone = True  # the audit outcome already holds the reason
     if terminal_gone:

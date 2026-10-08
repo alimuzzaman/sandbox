@@ -129,8 +129,9 @@ under the same request identity. A verified archive-versus-receipt mismatch mark
 failed with `integrity_mismatch` so it can be reviewed and retired.
 
 Server capture retention defaults to seven days and accepts a configured bound from 1 to 365
-days. `sb recovery retention --remote R --json` is a read-only plan. Only a promoted, failed, or
-derived incomplete capture can be retired with
+days. `sb recovery retention --remote R --json` is a read-only plan, and adding `--backup-id B`
+without `--confirm` previews that one retire (the reviewed candidate, nothing deleted). Only a
+promoted, failed, or derived incomplete capture can be retired with
 `sb recovery retention --remote R --backup-id B --confirm`. The remote rechecks state, archive
 receipt digest, current archive hash, and size against the reviewed candidate before removing its
 archive, residue, and receipt. Failed and incomplete captures remain eligible when their receipt
@@ -243,5 +244,7 @@ Sandbox revision, and an inventory digest, and captures a native MariaDB logical
 with the complete WordPress tree. The database credential is accepted only through the brokered
 `SANDBOX_RECOVERY_DB_PASSWORD` child environment; it is never placed in an argument or output.
 The adapter also materializes a non-secret control-plane declaration for the profile dependency.
+The server capture helper hardcodes the Amar Sonar container, database and user names; any other
+site needs those made configurable before it can be captured this way.
 It does not capture the `alimuzzaman-me` Git profile or any other hosted project, and a stale
 remote runtime is rejected until the supported remote service migration has completed.

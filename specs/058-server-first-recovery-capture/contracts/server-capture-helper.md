@@ -27,11 +27,17 @@ or raw tool diagnostics.
 1. Create root (0700, owner check, no symlink). If the slot exists, compare
    `request.json.request_id`: equal → return the current derived state with
    `existing: true` (no lock taken, works while that slot's own job is running);
-   differ → `capture_binding_conflict`.
+   differ → `capture_binding_conflict`. A slot with no `request.json` whose
+   `job.lock` is held is a start still initializing this same slot →
+   `capture_in_progress` (its `active_backup_id` is this backup id). A slot
+   with no `request.json` and a free `job.lock` is a crash leftover (a start
+   died between `mkdir` and its first write): it is stale and is removed in
+   step 2, never reported as in progress.
 2. Otherwise open `active.lock` with `LOCK_EX|LOCK_NB`; failure → read the
    active slot's request → `capture_in_progress`. After acquiring it, re-check
-   that the slot still does not exist (a racing start may have created it) and
-   fall back to step 1 if it does.
+   that the slot still does not exist (a racing start may have created it):
+   a stale slot is removed under the lock and the start proceeds; any other
+   slot falls back to step 1.
 3. Check `loginctl show-user $USER -p KillUserProcesses` when `loginctl` exists;
    `yes` → `detach_unsupported`.
 4. Write `request.json`, `declarations.json`, `state.json{queued}`; open and lock
@@ -51,6 +57,9 @@ table-set scan of the dump) → `archive` (`tarfile` with `database.sql`,
 `min(1800, remaining)`. Any failure writes `failed` with a fixed reason and
 removes work files. Container names and the database user are the reviewed
 constants already in `sandbox/transports/remote_recovery.py:516-526,766-768`.
+Note: the helper hardcodes the Amar Sonar container, database and user names
+(`WP_CONTAINER`, `DB_CONTAINER`, `DB_USER`, `DB_NAME`); capturing any other
+site needs these made configurable per profile before that profile is added.
 
 ## Memory
 

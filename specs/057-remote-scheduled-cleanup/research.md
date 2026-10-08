@@ -25,8 +25,8 @@
 
 ## R5 — Run execution
 
-- **Decision**: `run.py` loads the recorded routine, finalizes any open stale record (FR-016 backstop), pre-checks the guard, then calls `ReclaimService(None).reap(tier="safe", confirm=True, exclude_names=<effective>, trigger="scheduled_routine", budget_seconds=<bound − elapsed>)`. Incomplete inventory → refused; `budget_exhausted` → `timed_out`; a nothing-to-do run records no manifest reference. Revision comes from `sandbox.services.runtime_revision.runtime_revision(<sb-src root>)`.
-- **Rationale**: FR-006 says the selection must equal `workspace reap --tier safe`; reusing `reap` guarantees it. A cleanup without `plan_id` always plans fresh (FR-017).
+- **Decision**: `run.py` loads the recorded routine, finalizes any open stale record (FR-016 backstop), pre-checks the guard and apply locks, then, through the local `reclaim_service(None)`, plans the safe tier with exactly the `reap` selection (`plan("safe", exclude_kinds=("runtime",), exclude_names=<effective>)`), refuses with `inventory_incomplete` unless the plan's inventory status is `complete` and untruncated, records `nothing_to_do` (no manifest) when the plan is empty, and otherwise executes that plan with `cleanup(plan_id, confirm=True, trigger="scheduled_routine", budget_seconds=<bound − elapsed>, run_id=<record id>)`. `budget_exhausted` → `timed_out`; a probe `host_reclaim_busy` → `skipped_busy`. Revision comes from `sandbox.services.runtime_revision.runtime_revision(<sb-src root>)`.
+- **Rationale**: FR-006 says the selection must equal `workspace reap --tier safe`; using the same plan call as `reap` guarantees it. `reap(confirm=True)` alone cannot satisfy FR-019 (it plans and executes in one step and does not refuse on a partial inventory) and writes a `run_start` manifest line even for an empty plan, so the routine splits plan and execute. Every run plans fresh (FR-017). The record id is passed as the reclaim `run_id` so an open record already names its manifest for the backstop.
 
 ## R6 — Runtime match at enable
 
@@ -41,6 +41,7 @@
 
 - **Decision**: effective set = routine exclusions ∪ host `resources.reclaim_exclude` (read on the host via its own `load_config`). Validator: non-empty string ≤ 128 characters, no control characters or `/`, at most 32 entries, brackets balanced; otherwise `invalid_exclusion`.
 - **Rationale**: `fnmatch` never raises, so FR-014 needs an explicit validator.
+- **Finding (implementation)**: the existing reap exclusion matched only display names, so an excluded workspace's package volume (`sandbox-<workspace>_node-modules`) stayed a candidate. `ReclaimService._selection` now drops a workspace-scoped volume whose owner is excluded, reported `excluded_by_request` (FR-013, SC-002). This also applies to `workspace reap --exclude`.
 
 ## R9 — Manifest retention
 

@@ -36,7 +36,8 @@ Unknown keys â†’ `invalid_request`. All strings are length-capped; exclusions â‰
    "routine": {"enabled": true, "cadence": "daily", "timeout": "30min",
                "randomized_delay": "5min", "exclusions": ["lenzora*"],
                "effective_exclusions": ["lenzora*", "keep-*"],
-               "enabled_revision": "<rev>", "next_run": "2026-10-09T00:03:00Z"},
+               "enabled_revision": "<rev>", "next_run": "2026-10-09T00:03:00Z",
+               "enabled_at": "2026-10-08T10:00:00Z", "disabled_at": null},
    "last_run_revision": "<rev>",
    "runs": [ {RunRecord}, ... ]
  }}

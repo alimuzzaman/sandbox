@@ -117,6 +117,22 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported resource action"):
             server._resource_contract({"action": "shell", "command": "id"})
 
+    def test_resource_contract_routes_cleanup_routine_actions_before_the_probe(self):
+        """Spec 057: routine actions go to the host handler, never the probe."""
+        envelope = {"resource_schema": 1, "transport": "control",
+                    "service": {"runtime_revision": "a" * 24},
+                    "result": {"ok": True}}
+        with patch("server._live_runtime_revision", return_value="a" * 24), \
+                patch("sandbox.resources.cleanup_routine.host.handle",
+                      return_value=envelope) as handle, \
+                patch("sandbox.resources.remote.LocalProbeAdapter") as probe:
+            for action in ("cleanup_routine_enable", "cleanup_routine_disable",
+                           "cleanup_routine_status"):
+                self.assertEqual(server._resource_contract({"action": action}), envelope)
+        probe.assert_not_called()
+        self.assertEqual(handle.call_count, 3)
+        self.assertEqual(handle.call_args.kwargs["live_revision"], "a" * 24)
+
     @patch("server._run_remote_wp_process")
     @patch.dict(os.environ, {
         "SANDBOX_REMOTE_MCP_RUNTIME_REVISION": "a" * 24,

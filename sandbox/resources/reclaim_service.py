@@ -488,12 +488,27 @@ class ReclaimService:
         selection = policy.tier_candidates(
             block, tier, now=now, hosted_sites=block.get("hosted_sites") or (),
         )
+        def name_excluded(name: str) -> bool:
+            return any(fnmatch.fnmatchcase(name, pattern) for pattern in exclude_names)
+
+        # A workspace-scoped package volume belongs to its workspace: when the
+        # workspace is excluded by name, its volume is too (spec 057 FR-013).
+        excluded_workspaces = {
+            str(item.display_name or "") for item in selection.candidates
+            if item.kind == "worktree" and name_excluded(str(item.display_name or ""))
+        }
+
         def excluded(item) -> bool:
             # Name globs let an operator keep whole projects (e.g. lenzora*)
             # out of a sweep; they only ever remove candidates.
-            return item.kind in exclude_kinds or any(
-                fnmatch.fnmatchcase(str(item.display_name or ""), pattern)
-                for pattern in exclude_names)
+            if item.kind in exclude_kinds or name_excluded(str(item.display_name or "")):
+                return True
+            if item.kind == "volume" and excluded_workspaces:
+                match = policy.WORKSPACE_VOLUME_PATTERN.fullmatch(str(item.locator or ""))
+                if match is not None and policy._workspace_matches(
+                        match.group("workspace"), excluded_workspaces):
+                    return True
+            return False
 
         if exclude_kinds or exclude_names:
             kept = tuple(

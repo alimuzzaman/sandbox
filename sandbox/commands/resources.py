@@ -327,7 +327,7 @@ def _run_monitor(args) -> dict:
 def configure_parser(parser) -> None:
     parser.description = "Monitor host storage and safely clean managed resources"
     parser.add_argument(
-        "action", choices=("status", "plan", "cleanup", "monitor", "schedule",
+        "action", choices=("status", "plan", "cleanup", "monitor", "schedule", "routine",
                            "swap-status", "swap-plan", "swap-apply", "swap-history", "swap-disable")
     )
     parser.add_argument("--remote", default=None, help="configured remote name")
@@ -429,7 +429,209 @@ def configure_parser(parser) -> None:
         action="store_true",
         help="schedule only: disable and remove the rendered monitor unit (requires --confirm)",
     )
+    parser.add_argument(
+        "--status", dest="routine_status", action="store_true",
+        help="routine only: show the remote cleanup routine and its run history",
+    )
+    parser.add_argument(
+        "--enable", dest="routine_enable", action="store_true",
+        help="routine only: install or replace the remote cleanup timer (requires --confirm)",
+    )
+    parser.add_argument(
+        "--disable", dest="routine_disable", action="store_true",
+        help="routine only: remove the remote cleanup timer, keeping history (requires --confirm)",
+    )
+    # Host-only entry point invoked by the routine's systemd timer unit.
+    parser.add_argument("--routine-run", dest="routine_run", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--cadence", default=None,
+        help="routine --enable only: systemd calendar expression (default daily)",
+    )
+    parser.add_argument(
+        "--timeout", dest="routine_timeout", default=None,
+        help="routine --enable only: run time bound as a systemd time span "
+             "(default: the remote's storage-monitor schedule_timeout)",
+    )
+    parser.add_argument(
+        "--exclude", dest="routine_exclude", action="append", default=None,
+        metavar="GLOB",
+        help="routine --enable only: keep workspaces whose name matches GLOB (repeatable)",
+    )
     parser.add_argument("--json", action="store_true")
+
+
+# -- scheduled cleanup routine (spec 057) ------------------------------------
+
+_ROUTINE_FLAGS = (
+    ("--status", "routine_status"),
+    ("--enable", "routine_enable"),
+    ("--disable", "routine_disable"),
+    ("--routine-run", "routine_run"),
+    ("--cadence", "cadence"),
+    ("--timeout", "routine_timeout"),
+    ("--exclude", "routine_exclude"),
+)
+
+
+def _routine_adapter(remote: str):
+    from sandbox.resources.remote import RemoteResourceAdapter
+
+    return RemoteResourceAdapter(remote)
+
+
+def _routine_revision() -> str:
+    from sandbox.core._remote import _remote_mcp_runtime_revision
+
+    return _remote_mcp_runtime_revision()
+
+
+def _routine_envelope(remote: str | None, *, ok: bool, status: str,
+                      data: dict | None = None, code: str | None = None,
+                      message: str = "", retryable: bool = False) -> dict:
+    return {
+        "schema_version": 1,
+        "ok": bool(ok),
+        "action": "routine",
+        "status": status,
+        "target": {"kind": "remote", "name": str(remote)} if remote else None,
+        "data": data or {},
+        "error": None if code is None else {
+            "code": code,
+            "message": redact(str(message).replace("\r", " ").replace("\n", " "))[:240]
+            or code.replace("_", " "),
+            "retryable": bool(retryable),
+        },
+    }
+
+
+def _routine_refusal(remote, code: str, message: str) -> dict:
+    return _routine_envelope(remote, ok=False, status="refused", code=code, message=message)
+
+
+def _run_routine(args) -> dict:
+    """Enable, disable or inspect a remote's cleanup routine, or run it here."""
+    from sandbox.resources.cleanup_routine.contract import RoutineError, validate_request
+    from sandbox.resources.service import ResourceError
+
+    remote = getattr(args, "remote", None)
+    modes = [flag for flag, dest in _ROUTINE_FLAGS[:4] if getattr(args, dest, False)]
+    if len(modes) != 1:
+        return _routine_refusal(
+            remote, "invalid_mode",
+            "choose exactly one of --status, --enable, --disable",
+        )
+    mode = modes[0]
+    foreign = next((flag for flag, present in (
+        ("--scope", getattr(args, "scope", None) is not None),
+        ("--tier", getattr(args, "tier", None) is not None),
+        ("--plan-id", getattr(args, "plan_id", None) is not None),
+        ("--detach", bool(getattr(args, "detach", False))),
+        ("--scheduled", bool(getattr(args, "scheduled", False))),
+        ("--dry-run", bool(getattr(args, "dry_run", False))),
+        ("--activate", bool(getattr(args, "activate", False))),
+        ("--deactivate", bool(getattr(args, "deactivate", False))),
+    ) if present), None)
+    enable_only = next((flag for flag, dest in _ROUTINE_FLAGS[4:]
+                        if getattr(args, dest, None) is not None), None)
+    if foreign or (enable_only and mode != "--enable"):
+        return _routine_refusal(
+            remote, "invalid_mode",
+            f"{foreign or enable_only} is not valid for resources routine {mode}",
+        )
+
+    if mode == "--routine-run":
+        if remote:
+            return _routine_refusal(
+                remote, "invalid_mode",
+                "--routine-run runs on the host itself and takes no --remote",
+            )
+        from sandbox.resources.cleanup_routine import run as routine_run
+
+        outcome = routine_run.run_routine()
+        error = outcome.get("error") or {}
+        record = outcome.get("run") or {}
+        return _routine_envelope(
+            None, ok=bool(outcome.get("ok")),
+            status=str(record.get("outcome") or "refused"),
+            data={"run": outcome.get("run")},
+            code=error.get("code"), message=error.get("message", ""),
+        )
+
+    if not remote:
+        return _routine_refusal(None, "remote_required",
+                                "--remote is required for resources routine")
+    if mode in {"--enable", "--disable"} and not bool(getattr(args, "confirm", False)):
+        verb = "enabling" if mode == "--enable" else "disabling"
+        return _routine_refusal(
+            remote, "protected_operation",
+            f"{verb} the cleanup routine is a protected operation; re-run with --confirm",
+        )
+
+    adapter = _routine_adapter(remote)
+    try:
+        adapter._entry()
+    except ResourceError as exc:
+        return _routine_refusal(remote, "remote_unavailable", str(exc))
+
+    try:
+        if mode == "--enable":
+            policy = resolve_policy(remote)
+            request = validate_request({
+                "action": "cleanup_routine_enable",
+                "expected_runtime_revision": _routine_revision(),
+                "cadence": args.cadence if args.cadence is not None else "daily",
+                "timeout": (args.routine_timeout if args.routine_timeout is not None
+                            else policy.get("schedule_timeout")),
+                "randomized_delay": policy.get("schedule_randomized_delay"),
+                "exclusions": list(args.routine_exclude or ()),
+            })
+        elif mode == "--disable":
+            request = {"action": "cleanup_routine_disable"}
+        else:
+            request = {"action": "cleanup_routine_status", "history": 30}
+    except RoutineError as exc:
+        return _routine_refusal(remote, exc.code, str(exc))
+    except (StorageMonitorConfigError, ValueError, OSError) as exc:
+        return _routine_refusal(
+            remote, getattr(exc, "code", None) or "policy_resolution_failed", str(exc),
+        )
+
+    action = request.pop("action")
+    try:
+        result = adapter.routine(action, **request)
+    except ResourceError as exc:
+        return _routine_envelope(
+            remote, ok=False, status="failed", code=exc.code, message=str(exc),
+            retryable=exc.retryable,
+        )
+    if result.get("ok") is not True:
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        return _routine_envelope(
+            remote, ok=False, status="refused",
+            code=str(error.get("code") or "routine_failed")[:64],
+            message=str(error.get("message") or ""),
+        )
+    data = {key: value for key, value in result.items() if key != "ok"}
+    enabled = bool((data.get("routine") or {}).get("enabled"))
+    return _routine_envelope(remote, ok=True,
+                             status="enabled" if enabled else "disabled", data=data)
+
+
+def _emit_routine(payload: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    target = (payload.get("target") or {}).get("name", "this host")
+    print(f"resources routine: {payload.get('status')} ({target})")
+    error = payload.get("error") or {}
+    if error:
+        print(f"  {error.get('code')}: {error.get('message')}")
+    data = payload.get("data") or {}
+    run = data.get("run")
+    if isinstance(run, dict):
+        print(f"  run {run.get('run_id')}: {run.get('outcome')}"
+              f" reclaimed {_human_bytes(run.get('bytes_reclaimed'))}")
 
 
 def _human_bytes(value) -> str:
@@ -1384,6 +1586,21 @@ def _run_tier(args) -> dict:
 
 def cmd_resources(_cfg, args) -> None:
     action = args.action
+    if action == "routine":
+        payload = _run_routine(args)
+        _emit_routine(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
+    routine_flag = next((flag for flag, dest in _ROUTINE_FLAGS
+                         if getattr(args, dest, None) not in (None, False)), None)
+    if routine_flag:
+        from sandbox.resources.service import ResourceError, result
+        payload = result(False, action, status="refused", error=ResourceError(
+            f"{routine_flag} is valid only for resources routine", "invalid_mode",
+        ))
+        _emit(payload, bool(args.json))
+        raise SystemExit(1)
     if action == "swap-status":
         payload = _host_memory_cli(args)
         _emit_host_memory(payload, bool(args.json))

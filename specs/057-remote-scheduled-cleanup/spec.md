@@ -183,8 +183,8 @@ cadence periods, and confirm no run fired and no schedule remains on the host.
 - **FR-013**: Excluded items MUST be reported as skipped with reason
   `excluded_by_request` and MUST NOT appear as candidates or manifest intents.
 - **FR-014**: An exclusion that cannot be parsed MUST cause enable to refuse.
-- **FR-015**: Each run MUST have a time bound enforced by the host's init
-  system; the default MUST be the `schedule_timeout` of the operator's resolved
+- **FR-015**: Each run MUST have a time bound, enforced by the run itself with
+  the host's init system as a backstop (FR-016); the default MUST be the `schedule_timeout` of the operator's resolved
   storage-monitor policy for that remote (30 minutes) unless overridden at
   enable. Each run start MUST be jittered by the `schedule_randomized_delay` of
   that same resolved policy (default 5 minutes), which is not settable at

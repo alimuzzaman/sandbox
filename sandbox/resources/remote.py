@@ -3828,6 +3828,37 @@ class RemoteResourceAdapter:
         }, 25)
         return self._decode(response, "lease")
 
+    # -- scheduled cleanup routine (spec 057) -----------------------------
+
+    def routine(self, action: str, **fields) -> dict:
+        """Send one ``cleanup_routine_*`` action; return the host's result.
+
+        The remote is resolved first, so an unknown or unprovisioned name is
+        refused before any request leaves this machine.
+        """
+        from .service import ResourceError
+
+        entry = self._entry()
+        response = self._request(entry, {"action": action, **fields}, 60)
+        if response.returncode != 0:
+            raise ResourceError(
+                "remote control endpoint is unreachable", "remote_unreachable",
+                retryable=True,
+            )
+        try:
+            payload = json.loads(response.stdout or "")
+        except ValueError:
+            payload = None
+        # The control transport returns the result object; an injected
+        # transport may hand back the whole envelope.
+        if isinstance(payload, dict) and "result" in payload and "resource_schema" in payload:
+            payload = payload["result"]
+        if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
+            raise ResourceError(
+                "remote cleanup routine response is invalid", "response_invalid",
+            )
+        return payload
+
     def release_network(self, lifecycle: NetworkLifecycle | ResourceObservation | dict) -> dict:
         """Return a diagnostic release decision without opening SSH."""
         if isinstance(lifecycle, ResourceObservation):

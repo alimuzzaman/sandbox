@@ -371,6 +371,21 @@ class TestRetention(ServiceCase):
                    if item.get("reason") == "excluded_by_request"]
         self.assertTrue(any(item["display_name"] == name for item in skipped))
 
+    def test_reap_name_glob_also_keeps_the_workspace_package_volume(self):
+        provider = FakeProvider()
+        provider.block["volumes"] = [{
+            "name": "sandbox-a-workspace-1_node-modules", "size_bytes": 64,
+            "mounted_running": False,
+        }]
+        everything = self.service(provider).reap(dry_run=True)["data"]["candidates"]
+        self.assertIn("sandbox-a-workspace-1_node-modules",
+                      {item["locator"] for item in everything})
+        payload = self.service(provider).reap(dry_run=True, exclude_names=("a-work*",))
+        self.assertEqual(payload["data"]["candidates"], [])
+        skipped = {item["locator"] for item in payload["data"]["skipped"]
+                   if item.get("reason") == "excluded_by_request"}
+        self.assertIn("sandbox-a-workspace-1_node-modules", skipped)
+
     def test_reap_excludes_disposable_scratch(self):
         provider = FakeProvider()
         provider.block["scratch"] = [{

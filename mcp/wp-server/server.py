@@ -103,6 +103,12 @@ def _resource_contract(payload: dict) -> dict:
     """Execute only the fixed resource probe contract on the co-located host."""
     if payload.get("action") in {"host_memory_status", "host_memory_apply", "host_memory_history"}:
         return _host_memory_contract(payload)
+    if str(payload.get("action") or "").startswith("cleanup_routine_"):
+        # Spec 057: the scheduled cleanup routine has its own fixed contract
+        # and never reaches the probe.
+        from sandbox.resources.cleanup_routine import host as cleanup_routine
+
+        return cleanup_routine.handle(payload, live_revision=_live_runtime_revision())
     from sandbox.resources.remote import LocalProbeAdapter
 
     action = payload.get("action")

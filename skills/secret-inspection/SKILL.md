@@ -152,6 +152,28 @@ MCP may inspect or validate only explicitly authorized source modes. MCP use is
 limited to a registered reviewed use profile; it never accepts arbitrary
 commands or a candidate secret. There is no MCP reveal tool.
 
+## 5b. Operator-only session
+
+`secrets run --session` keeps one child, such as a dev server, running with its
+secrets for up to 12 hours (default 8) in the operator's own terminal. It is
+operator-run only. Agents must not run `--session`, including through a
+pseudo-terminal a harness allocates; Sandbox refuses it without a foreground
+terminal (`tty_required`), but the guidance, not that check, is the boundary.
+
+When a task needs a long-lived child with a secret, stop and ask the human to
+start it themselves in an uncaptured terminal, for example:
+
+```bash
+./sb secrets run --session --source SOURCE_ALIAS --key SECRET_KEY \
+  --project-dir PROJECT_DIR -- trusted-dev-server
+```
+
+The session ends on the first of: lifetime expiry (`lifetime_expired`), Ctrl-C
+or another termination request (`interrupted`), the terminal closing
+(`hangup`), or the child's own exit (`child_exited`). A broker killed with
+`SIGKILL` cannot end its child, so the child can outlive it. Keep using the
+bounded `secrets run` above for every agent-run check.
+
 ## 6. Update one key without reading the source
 
 Prefer the hidden controlling-TTY prompt:

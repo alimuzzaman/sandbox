@@ -208,7 +208,8 @@ selected value to one child process:
 shell, substitute the secret into argv, export into the parent, or inherit all
 registered secrets. The child starts from a reviewed minimal environment plus
 the selected destination. The default timeout is five minutes; callers may
-choose from one second to 30 minutes. Combined redacted output is bounded to
+choose from one second to 30 minutes (only operator session mode, section 5b,
+runs longer). Combined redacted output is bounded to
 1 MiB and reports truncation. A child that exits unsuccessfully makes
 `sb secrets run` exit nonzero after the bounded result is printed; the child
 exit code is preserved when it is safe for the shell to represent it.
@@ -251,6 +252,76 @@ registered reviewed profile whose source, key, direct argv, destination, output
 budget, and timeout are fixed in configuration. `secret_inspect` and
 `secret_validate` also require explicit source-mode authorization. No MCP tool
 returns plaintext or accepts a candidate secret.
+
+### 5b. Operator session for a long-running child
+
+Some children have to keep running with their secret, for example a dev server
+for a working day. Ordinary `secrets run` stops them after 30 minutes at most.
+Session mode (spec 059) is the one exception, and it is operator-only:
+
+```text
+sb secrets run --session [--lifetime-seconds N]
+               --source ALIAS (--key KEY [--destination NAME] | --secret KEY=DEST ...)
+               [--project-dir DIR] -- ARGV...
+```
+
+- The lifetime is whole seconds from 1 to 43200 (12 hours). The default is
+  28800 (8 hours). There is no unbounded value. `--timeout-seconds` is refused
+  with `--session` and `--lifetime-seconds` is refused without it
+  (`option_conflict`); a malformed or out-of-range lifetime is
+  `lifetime_invalid`.
+- Bindings, the destination deny list, direct argv with no shell, the minimal
+  child environment and closed standard input are the same as ordinary `run`.
+- Standard output must be a terminal, `/dev/tty` must open as a terminal, and
+  `sb` must be that terminal's foreground job. Otherwise the start is refused
+  with `tty_required`. This keeps CI, MCP, durable jobs and captured remote
+  paths out. All of these refusals happen before any secret is read.
+- A start line shows the source, key names, the lifetime and the local end
+  time. Redacted output is shown live; an end line shows the end reason, the
+  child's exit status, an elapsed-time class and the number of dropped chunks.
+
+The session ends on the first of these:
+
+| End reason | Cause | `sb` exit status |
+|------------|-------|------------------|
+| `child_exited` | the child exited by itself | the child's status, mapped as for `run` (0 stays 0, 1 to 125 pass through, anything else is 1 with `child_failed`) |
+| `lifetime_expired` | the lifetime ran out | 0 |
+| `interrupted` | Ctrl-C, `SIGTERM` or `SIGQUIT` to `sb` | 130 |
+| `hangup` | the terminal closed (`SIGHUP`) or a write to it failed | 129 |
+
+On every end, `sb` sends `SIGTERM` to the child's whole process group, then
+`SIGKILL` to anything left after 3 seconds; the group is gone within 5
+seconds. A crashed child is never restarted.
+
+Behavior to know:
+
+- Ctrl-Z is ignored for the whole session, so `sb` never stops enforcing the
+  lifetime. Run the session in its own terminal tab.
+- The lifetime is wall-clock time. Time the machine spends asleep counts; a
+  session whose end time passed during sleep ends with `lifetime_expired` on
+  wake.
+- Text after the last whitespace may be held until the line completes or the
+  session ends, because it could be the start of a secret. There is no
+  time-based flush.
+- Complete SGR colour and style sequences (`ESC [ ... m`) are kept. Every other
+  control character and escape sequence (cursor movement, screen clearing,
+  window titles, malformed or incomplete SGR) is removed whole. Colour is
+  dropped, and a reset added, on any span where redaction changed text, so
+  colour cannot split a value away from redaction. Ordinary `run` output is
+  unchanged.
+- Nothing from the child is retained. The live stream has no 1 MiB bound; only
+  the end line and the audit outcome remain.
+
+Risks that remain:
+
+- The child is an intentional secret recipient, exactly as in ordinary `run`.
+  It can print, transform, persist or send the value elsewhere, and redaction
+  is defense in depth.
+- `SIGKILL` or `SIGSTOP` sent to `sb` cannot be handled. A broker killed that
+  way leaves its child running with the secret until something else ends it.
+- An agent harness that allocates a pseudo-terminal passes the terminal check.
+  The skill tells agents never to start a session; the check is not an
+  exclusive security boundary.
 
 ### 6. Update one assignment without reading the source
 
@@ -390,6 +461,11 @@ source excerpts, candidate input, child output, provider bodies, or temporary
 file content. If outcome recording fails after an operation, the result reports
 that failure without embedding secret data.
 
+Session mode records operation `use_session` instead of `use`. Its intent is
+written before the source read, and its outcome is `decision=succeeded` with
+`reason_code` set to the end reason (`lifetime_expired`, `interrupted`,
+`hangup` or `child_exited`), or the refusal code. No audit field was added.
+
 ## Incident response
 
 If plaintext is displayed, logged, captured, persisted, or sent somewhere
@@ -423,6 +499,9 @@ unintended:
 - The same OS identity may retain direct filesystem access.
 - A trusted child and its descendants can disclose the delivered value.
 - Exact-match redaction cannot guarantee transformed-output removal.
+- Ordinary `secrets run` is limited to 30 minutes. Only operator session mode
+  (section 5b) runs longer, up to 12 hours, and a session child outlives a
+  broker killed with `SIGKILL`.
 - Atomic update may leave owner-only plaintext temporary remnants after a host
   crash; cleanup is best effort.
 - V1 does not promise perfect in-memory zeroization.

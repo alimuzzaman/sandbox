@@ -429,7 +429,10 @@ whether the registered file exists, whether it is empty, its type, a size
 bucket, and whether the broker can safely open it—without reading its contents
 or returning its path. It can validate or apply a fixed mask to an
 eligible scalar, run a bounded trusted child without displaying the credential,
-and update one dotenv assignment through protected input. Plaintext reveal is a
+and update one dotenv assignment through protected input. An operator can keep
+one child such as a dev server running with its secret for up to 12 hours with
+`secrets run --session` in their own foreground terminal; agents stay on the
+bounded run. Plaintext reveal is a
 human-only local TTY exception and is never available through MCP. See
 [Safe secret inspection](docs/secret-inspection.md) or load the
 `secret-inspection` skill for the least-disclosure workflow and incident steps.

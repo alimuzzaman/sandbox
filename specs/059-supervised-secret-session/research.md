@@ -138,6 +138,16 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
   is removed whole (decision 3); `run`'s `_CONTROL` is unchanged.
 - **Alternatives**: a time-based flush of held text (could emit a secret prefix);
   reusing `_CONTROL` alone (it removes only the escape byte, leaving `[31m` visible).
+- **Implementation note (2026-10-08)**: `redact_text` strips the escape byte
+  before matching, so SGR cannot survive if the display filter runs after the
+  redactor. The implemented order is: incremental UTF-8 decode,
+  `SessionDisplayFilter`, then redaction of the plain projection (SGR taken
+  out) by the shared `StreamingRedactor`, with each SGR sequence put back only
+  on a span the redactor emitted unchanged. A redacted or discarded span is
+  shown without its colour and followed by `ESC [0m`. `StreamingRedactor`
+  gained a read-only `consumed_bytes` counter to align output with input; its
+  redaction behavior is unchanged. A value split by colour or by a stray
+  control character is now redacted in session output.
 
 ## R8. Terminal loss
 

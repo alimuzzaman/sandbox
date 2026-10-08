@@ -179,6 +179,13 @@ An agent receives a detailed operational skill that orders safe inspection, vali
 - **FR-035**: Secret destinations that control loaders, interpreters, runtimes, shells, prompts, or credential helpers MUST be denied. The deny policy MUST include `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONHOME`, `PERL5OPT`, `RUBYOPT`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `PS4`, `PROMPT_COMMAND`, `GIT_ASKPASS`, and `SSH_ASKPASS`.
 - **FR-036**: Local use MUST default to a 5-minute wall-time limit, MUST allow an explicit limit from 1 second through 30 minutes, and MUST terminate the child process group when the limit expires.
 - **FR-037**: Local use MUST display or retain no more than 1 MiB of combined redacted child output and MUST report when additional output was suppressed.
+
+> **Amendment (spec 059, 2026-10-08)**: FR-036 and the display clause of FR-037
+> are amended for operator session mode only (`secrets run --session`, see
+> `specs/059-supervised-secret-session/spec.md`). A session's lifetime is 1 to
+> 43,200 seconds (default 28,800) and its redacted output is streamed live
+> without the 1 MiB display bound; nothing is retained. Ordinary local use keeps
+> FR-036 and FR-037 unchanged.
 - **FR-038**: The use result MUST report exit status or termination reason, elapsed-time class, truncation state, source alias, and key name without returning value-derived metadata.
 - **FR-039**: MCP use MUST be unavailable for arbitrary caller-supplied commands and MUST run only a registered reviewed profile that fixes command, argument shape, destination or non-environment delivery channel, source/key scope, output limit, and timeout.
 - **FR-040**: Remote transport authentication alone MUST NOT authorize inspection or use; each MCP catalog MUST explicitly grant the source and operation, otherwise the capability MUST be absent or refuse the request.

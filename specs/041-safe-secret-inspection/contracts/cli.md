@@ -42,6 +42,9 @@ sb secrets run --source ALIAS --key KEY [--destination NAME]
 - Local CLI only for arbitrary direct argv.
 - No implicit shell, secret substitution, or parent export.
 - Result reports exit/termination, elapsed class, and truncation; redacted output is bounded.
+- Operator session mode (`--session [--lifetime-seconds N]`) is specified in
+  `specs/059-supervised-secret-session/contracts/cli.md`; it amends the limits
+  above for that mode only.
 
 ## Targeted update
 

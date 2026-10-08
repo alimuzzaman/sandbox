@@ -607,6 +607,25 @@ class SessionPtyEndToEndTests(unittest.TestCase):
         self.run_case((), lambda process, master: os.killpg(process.pid, signal.SIGHUP),
                       129, "hangup")
 
+    def test_terminal_closed_exits_129(self):
+        process, master, stderr_path = self.start()
+        transcript = bytearray()
+        try:
+            self.assertTrue(self.read_until(master, transcript, b"heartbeat", 20),
+                            bytes(transcript) + stderr_path.read_bytes())
+            os.close(master)
+            process.wait(timeout=8)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        self.assertEqual(process.returncode, 129, stderr_path.read_bytes())
+        grandchild = int(re.search(rb"grandchild=(\d+)", bytes(transcript)).group(1))
+        self.assertTrue(_gone(grandchild, 5))
+        outcome = self.audit_outcome()
+        self.assertEqual((outcome["decision"], outcome["reason_code"]), ("succeeded", "hangup"))
+        self.assert_no_canary(transcript, stderr_path)
+
     def test_lifetime_expiry(self):
         self.run_case(("--lifetime-seconds", "3"), lambda process, master: None,
                       0, "lifetime_expired")

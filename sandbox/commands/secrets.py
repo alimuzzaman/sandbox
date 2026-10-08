@@ -319,6 +319,28 @@ def _session_display(data: bytes) -> None:
 _SESSION_EXIT = {"lifetime_expired": 0, "interrupted": 130, "hangup": 129}
 
 
+def _detach_lost_terminal() -> None:
+    """Point stdout and stderr at /dev/null once the terminal is gone.
+
+    Otherwise the interpreter's final flush hits EIO and Python replaces the
+    documented exit status (129 for hangup) with 120.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            descriptor = stream.fileno()
+            null = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(null, descriptor)
+            finally:
+                os.close(null)
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
 def _run_session(service, args, bindings, argv, lifetime: int) -> None:
     from datetime import datetime
     from sandbox.secrets.session import SessionSignals
@@ -350,13 +372,16 @@ def _run_session(service, args, bindings, argv, lifetime: int) -> None:
     if not isinstance(result, dict):
         raise SecretBrokerError("operation_failed", "secret operation failed")
     end_reason = result.get("end_reason")
+    terminal_gone = end_reason == "hangup"
     try:
         _session_write(
             f"secrets session: ended end_reason={end_reason} exit_code={result.get('exit_code')} "
             f"elapsed={result.get('elapsed_class')} dropped_chunks={result.get('dropped_chunks')}\n"
         )
     except OSError:
-        pass  # the terminal is gone; the audit outcome already holds the reason
+        terminal_gone = True  # the audit outcome already holds the reason
+    if terminal_gone:
+        _detach_lost_terminal()
     if end_reason == "child_exited":
         _child_failed(result.get("exit_code"))
         return

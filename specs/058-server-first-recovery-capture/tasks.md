@@ -159,14 +159,14 @@ must fail before the matching implementation task starts. Run with
 
 - [ ] T044 [P] [US5] Helper `list` tests: returns slot facts and `legacy` entries from `runtime/recovery-controller/*.tar` (name, size only), bounded to 500 slots and 256 KiB, in `tests/test_server_capture_helper.py`
 - [ ] T045 [P] [US5] Service list tests: `RecoveryService.list(remote)` adds `server_captures` and `legacy_server_archives`; Drive unconfigured with a remote → `ok` with `drive.configured: false`; without a remote the old `recovery_not_configured` result is unchanged, in `tests/test_recovery_service.py`
-- [ ] T046 [P] [US5] Retention tests: complete unpromoted past bound → `retention_exceeded` in status and list and blocks start naming backup ids; promoted, failed, incomplete residue and legacy archives never block; promote leaves `archive.tar` in place; no code path deletes server files, in `tests/test_server_capture.py`
+- [ ] T046 [P] [US5] Retention tests: complete unpromoted past bound → `retention_exceeded` in status and list and blocks start naming backup ids; promoted, failed, incomplete residue and legacy archives never block; promote leaves `archive.tar` in place; no code path other than the confirmed retire (T050) deletes server files, in `tests/test_server_capture.py`
 
 ### Implementation for User Story 5
 
 - [ ] T047 [US5] Implement helper `list` op in `sandbox/recovery/server_capture_helper.py` (depends on T044)
 - [ ] T048 [US5] Merge server captures into `RecoveryService.list` and tolerate missing Drive with a remote in `sandbox/recovery/service.py`; print the server section in `_emit` in `sandbox/commands/recovery.py` (depends on T045, T047)
 - [ ] T049 [US5] Finalize the retention view and start guard against helper `list` facts in `sandbox/recovery/server_capture.py` (depends on T046, T048)
-- [ ] T050 [US5] BLOCKED on pending decision FR-034 (server-capture retirement): once decided, add the retirement plan/apply tasks here; until then retirement stays unexposed and `recovery retention --confirm` keeps returning `protected_operation`
+- [ ] T050 [US5] Server-capture retirement per FR-034: helper `retire` op (re-read slot; refuse `retire_candidate_changed` on state/hash/size drift; remove archive, residue and receipt; keep record as `retired` with time) in `sandbox/recovery/server_capture_helper.py`; retention plan lists server captures with `retirable`, and `recovery retention --confirm --remote R --backup-id ID` (CLI and MCP) retires one capture, refusing `not_retirable` for `complete` unpromoted, `queued`/`running` and legacy archives, in `sandbox/recovery/server_capture.py`, `sandbox/recovery/service.py` and `sandbox/commands/recovery.py`; promote integrity mismatch sets the capture `failed`/`integrity_mismatch`; tests for each refusal code and the retire path in `tests/test_server_capture.py` and `tests/test_server_capture_helper.py` (depends on T049)
 
 ---
 
@@ -187,7 +187,7 @@ must fail before the matching implementation task starts. Run with
 - US1 (P1) → US2 (P1): US2's service status reuses the slot written by US1's helper, but its tests use fixture slots, so US2 can start after Foundational in parallel with US1 implementation.
 - US3 (P2) needs US1 + US2 (complete captures and status).
 - US4 (P3) needs US3's promote entry (T038).
-- US5 (P3) needs Foundational; T049 needs T022. T050 is blocked on a decision.
+- US5 (P3) needs Foundational; T049 needs T022. T050 needs T049.
 - Polish after the stories it measures.
 
 ## Parallel Examples

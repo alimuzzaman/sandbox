@@ -38,7 +38,7 @@ runtime/recovery-captures/
 
 | Field | Type | Rule |
 |-------|------|------|
-| `state` | enum | `queued`, `running`, `complete`, `failed` |
+| `state` | enum | `queued`, `running`, `complete`, `failed`, `retired` |
 | `phase` | enum | `preflight` < `inventory` < `dump` < `files` < `verify` < `archive` < `receipt` |
 | `accepted_at`, `started_at`, `ended_at` | float/null | monotonic order |
 | `reason` | str/null | typed code when `failed` |
@@ -93,7 +93,18 @@ Size bound: 1 MiB (an inventory of a few thousand tables fits).
 
 `{schema_version: 1, request_id, set_id, ciphertext_sha256, promoted_at}`.
 Written only after the Drive manifest exists and verifies. Its presence removes
-the capture from the retention guard. Nothing deletes the archive.
+the capture from the retention guard. Only a confirmed retire (FR-034) deletes
+the archive.
+
+## Retirement (FR-034)
+
+Retirable: `promoted` (marker present), `failed`, or derived `incomplete`.
+Not retirable: `complete` unpromoted, `queued`/`running` with the lock held,
+legacy one-shot archives. Retire re-reads the slot, compares state, archive
+sha256 and size with the reviewed plan, then removes `archive.tar`, residue and
+the receipt and writes `state.json` with `state: retired, retired_at`.
+A promote refused for an archive-versus-receipt mismatch sets `failed` with
+`reason: integrity_mismatch`.
 
 ## PromoteProgress (operator side)
 

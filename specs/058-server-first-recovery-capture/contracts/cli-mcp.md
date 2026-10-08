@@ -64,7 +64,7 @@ capture, and only across the bound; SC-002 tests run inside the bound.
 ## `sb recovery list` (extended)
 
 `--remote R` adds `data.server_captures`: a list of
-`{backup_id, state, age_seconds, archive_size, promoted, retention_exceeded}`
+`{backup_id, state, age_seconds, archive_size, promoted, retention_exceeded, retirable}`
 and `data.legacy_server_archives`: `[{name, size}]` from
 `runtime/recovery-controller/*.tar`. When Drive is not configured and `--remote`
 is given, the call succeeds with `data.drive = {"configured": false}` and empty
@@ -98,6 +98,29 @@ The passphrase comes only from inherited `RECOVERY_PASSPHRASE`. Order:
 
 Success: `status=published`, `data = {set_id, manifest, request_id, archive_sha256, resumed_from_bytes}`.
 After success the server slot gets `promoted.json`; the archive is kept.
+A transfer whose bytes do not match the receipt hash sets the capture `failed`
+with reason `integrity_mismatch` (then retirable, FR-034).
+
+## `sb recovery retention` (server captures, FR-034)
+
+```text
+sb recovery retention --remote R [--json]                              # plan, read-only
+sb recovery retention --remote R --backup-id B --confirm [--json]      # retire one capture
+```
+
+MCP: `recovery_retention(remote, backup_id=None, confirm=False)` with the same rules.
+The plan lists every server capture with `retirable`. Retire order:
+
+| Check | Error code |
+|-------|------------|
+| `--confirm` and `--backup-id` | `confirmation_required` |
+| capture exists | `capture_not_found` |
+| state `promoted`, `failed` or derived `incomplete` | `not_retirable` |
+| server re-read: state, archive sha256 and size equal the plan | `retire_candidate_changed` |
+
+Success: `status=retired`, `data = {backup_id, retired_at, removed_bytes}`.
+The record stays with `state: retired`. Without `--remote` the existing
+Drive-set retention review is unchanged.
 
 ## MCP group
 

@@ -875,6 +875,8 @@ unbuffered streaming, unlimited body size and 3600s timeouts match the Caddy rou
 certificates expired, or with fewer than 25 days left, which means renewal at 30 days did not happen), and `sb remote domains`
 lists nginx routes.
 
+Moving every site from one remote to another: [server-migration.md](server-migration.md).
+
 **Limitations.** The nginx front door serves `sb host` routes and the HTTPS MCP control
 route only. `sb deploy --expose`, instance aliases and `sb preview` refuse before any side
 effect with `front_door_capability_unavailable`. Use a Caddy remote for those.

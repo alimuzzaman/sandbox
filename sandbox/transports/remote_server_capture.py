@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import shlex
@@ -27,6 +28,7 @@ HELPER_PATH = Path(__file__).resolve().parents[1] / "recovery" / "server_capture
 _REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SLOT = re.compile(r"^capture-[0-9a-f]{64}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _JSON_LIMIT = 2 * 1024 * 1024
 _HEADER_LIMIT = 4096
 _MESSAGES = {
@@ -237,9 +239,52 @@ class RegisteredServerCaptureTransport:
     def check_integrity(self, remote: str, slot: str) -> dict:
         return self._json(remote, "check-integrity", self._slot(slot), timeout=1800)
 
+    @staticmethod
+    def _retire_candidate(value: Mapping) -> dict:
+        fields = {"state", "receipt_sha256", "archive_sha256", "archive_size"}
+        if set(value) != fields:
+            raise RecoveryError("server capture retire plan is invalid", "record_invalid")
+        state = value.get("state")
+        receipt_sha = value.get("receipt_sha256")
+        archive_sha = value.get("archive_sha256")
+        archive_size = value.get("archive_size")
+        if (state not in ("promoted", "failed", "incomplete")
+                or (receipt_sha is not None
+                    and (not isinstance(receipt_sha, str) or not _HEX64.fullmatch(receipt_sha)))
+                or (archive_sha is not None
+                    and (not isinstance(archive_sha, str) or not _HEX64.fullmatch(archive_sha)))
+                or (archive_size is not None
+                    and (isinstance(archive_size, bool) or not isinstance(archive_size, int)
+                         or archive_size < 0))
+                or ((archive_sha is None) != (archive_size is None))):
+            raise RecoveryError("server capture retire plan is invalid", "record_invalid")
+        return {"state": state, "receipt_sha256": receipt_sha,
+                "archive_sha256": archive_sha, "archive_size": archive_size}
+
+    def retire_plan(self, remote: str, slot: str) -> dict:
+        response = self._json(remote, "retire-plan", self._slot(slot), timeout=1800)
+        if set(response) != {"ok", "state", "receipt_sha256", "archive_sha256", "archive_size"}:
+            raise RecoveryError("server capture retire plan is invalid", "record_invalid")
+        return self._retire_candidate({key: response[key] for key in response if key != "ok"})
+
     def retire(self, remote: str, slot: str, plan: Mapping) -> dict:
-        return self._json(remote, "retire", self._slot(slot),
-                          json.dumps(plan, sort_keys=True, separators=(",", ":")), timeout=300)
+        candidate = self._retire_candidate(plan)
+        response = self._json(remote, "retire", self._slot(slot),
+                              json.dumps(candidate, sort_keys=True, separators=(",", ":")),
+                              timeout=1800)
+        retired_at = response.get("retired_at")
+        removed_bytes = response.get("removed_bytes")
+        if (set(response) != {"ok", "retired_at", "removed_bytes"}
+                or isinstance(retired_at, bool)
+                or not isinstance(retired_at, (int, float))
+                or retired_at < 0 or retired_at > 253402300799
+                or (isinstance(retired_at, float) and not math.isfinite(retired_at))
+                or isinstance(removed_bytes, bool) or not isinstance(removed_bytes, int)
+                or removed_bytes < 0):
+            raise RecoveryError(
+                "server capture retirement result is invalid; inspect status before any retry",
+                "record_invalid")
+        return {"retired_at": retired_at, "removed_bytes": removed_bytes}
 
 
 __all__ = ["HELPER_PATH", "RegisteredServerCaptureTransport", "load_sandbox_config"]

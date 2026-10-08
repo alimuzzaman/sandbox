@@ -179,7 +179,10 @@ class PostgresRecovery:
         path.unlink()
 
     def source(self, remote, profile):
-        return recovery_source(_read_owner_only_json(self._source_path(remote, profile)))
+        binding = _read_owner_only_json(self._source_path(remote, profile))
+        if binding is None:
+            raise RecoveryError('no source is registered for this profile', 'source_binding_missing')
+        return recovery_source(binding)
 
     def _request(self, source, operation, request_id, extra=None):
         if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', request_id):

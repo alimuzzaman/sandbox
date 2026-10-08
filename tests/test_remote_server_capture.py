@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import shlex
 import subprocess
@@ -15,6 +16,7 @@ from sandbox.recovery.hosted import HostedRecoveryMaterializer
 from sandbox.recovery.materialize import SourceBinding
 from sandbox.recovery.planner import build_plan
 from sandbox.recovery.server_capture import ServerCaptureService, slot_for
+from sandbox.recovery.server_capture import capture_request_id
 from sandbox.transports.remote_server_capture import HELPER_PATH, RegisteredServerCaptureTransport
 from tests.server_capture_support import (
     SECRET, HelperHarness, LocalSsh, declarations_bytes, local_transport, request_for,
@@ -133,6 +135,41 @@ class TestTransportInvocation(unittest.TestCase):
                                        16 * 1024 * 1024 + 1)
         self.assertEqual(caught.exception.code, "request_invalid")
 
+    def test_retire_plan_uses_a_closed_candidate_frame(self):
+        payload = json.dumps({"ok": True, "state": "failed", "receipt_sha256": None,
+                              "archive_sha256": "a" * 64, "archive_size": 17}).encode()
+        ssh, _calls = _canned(payload)
+        candidate = _transport(ssh).retire_plan(
+            "fixture-remote", slot_for("fixture-remote", "set-a"))
+        self.assertEqual(candidate, {
+            "state": "failed", "receipt_sha256": None,
+            "archive_sha256": "a" * 64, "archive_size": 17,
+        })
+        ssh, _calls = _canned(payload[:-1] + b', "unexpected": true}')
+        with self.assertRaises(RecoveryError) as caught:
+            _transport(ssh).retire_plan("fixture-remote", slot_for("fixture-remote", "set-a"))
+        self.assertEqual(caught.exception.code, "record_invalid")
+
+    def test_retire_requires_a_valid_mutation_ack_and_warns_to_inspect_status(self):
+        candidate = {"state": "promoted", "receipt_sha256": "b" * 64,
+                     "archive_sha256": "a" * 64, "archive_size": 17}
+        ssh, _calls = _canned(b'{"ok":true,"retired_at":123.5,"removed_bytes":17}')
+        self.assertEqual(_transport(ssh).retire(
+            "fixture-remote", slot_for("fixture-remote", "set-a"), candidate),
+            {"retired_at": 123.5, "removed_bytes": 17})
+        for response in (b'{"ok":true}',
+                         b'{"ok":true,"retired_at":123.5,"removed_bytes":true}',
+                         b'{"ok":true,"retired_at":NaN,"removed_bytes":17}',
+                         b'{"ok":true,"retired_at":123.5,"removed_bytes":17,"path":"/private"}'):
+            with self.subTest(response=response):
+                ssh, calls = _canned(response)
+                with self.assertRaises(RecoveryError) as caught:
+                    _transport(ssh).retire(
+                        "fixture-remote", slot_for("fixture-remote", "set-a"), candidate)
+                self.assertEqual(caught.exception.code, "record_invalid")
+                self.assertIn("inspect status before any retry", str(caught.exception))
+                self.assertEqual(len(calls), 1)
+
 
 class TestTransportStart(unittest.TestCase):
     """T017: brokered stdin, request identity and no archive bytes during capture."""
@@ -171,8 +208,15 @@ class TestTransportStart(unittest.TestCase):
         source = transport.observe("fixture-remote")
         binding = SourceBinding("fixture-remote", source.machine_identity, source.revision,
                                 source.source_digest)
-        expected = HostedRecoveryMaterializer._request_id(
-            "fixture-remote", plan.artifacts[-1], binding, "set-a")
+        artifact = next(item for item in plan.artifacts
+                        if item.profile_id == "amarsonar-bangla-prod")
+        control = next(item for item in plan.artifacts if item.profile_id == "control-plane")
+        declarations = (json.dumps(transport.declaration(
+            "fixture-remote", control, source, "set-a"),
+            sort_keys=True, separators=(",", ":")) + "\n").encode()
+        base_request_id = HostedRecoveryMaterializer._request_id(
+            "fixture-remote", artifact, binding, "set-a")
+        expected = capture_request_id(base_request_id, hashlib.sha256(declarations).hexdigest())
         self.assertEqual(outcome["data"]["request_id"], expected)
         stored = json.loads((self.h.slot_path() / "request.json").read_text())
         self.assertEqual(stored["request_id"], expected)

@@ -68,15 +68,17 @@ used: they are reused and do not survive a reboot meaningfully.
 
 **Decision**: Slot key = `capture-` + sha256 of `{"schema_version":1,"remote":R,"backup_id":B}`;
 directory `<remote $SANDBOX_HOME>/runtime/recovery-captures/<slot>/`. The request id
-is `HostedRecoveryMaterializer._request_id(remote, artifact, binding, backup_id)`
-(`sandbox/recovery/hosted.py:409-438`), unchanged. `request.json` stores the
-request id, backup operation id, profile, artifact id and source binding. A start
-whose request id equals the stored one returns the existing state; any other
-value is `capture_binding_conflict` (the existing script exits 8 on the same
-condition, `remote_recovery.py:736-737`).
+is a deterministic hash of `HostedRecoveryMaterializer._request_id(remote, artifact, binding, backup_id)`
+(`sandbox/recovery/hosted.py:409-438`) and the canonical control-plane declaration hash.
+`request.json` stores the resulting request id, backup operation id, profile, artifact id,
+source binding and declaration hash. A start whose request id equals the stored one returns
+the existing state; any source or declaration drift under the same backup id returns
+`capture_binding_conflict` (the existing script exits 8 on the same condition,
+`remote_recovery.py:736-737`).
 
-**Rationale**: matches clarification Q5 and keeps today's request-id derivation,
-so receipts from both paths use the same identity scheme.
+**Rationale**: matches clarification Q5 and preserves the hosted request derivation as the
+source-binding component while preventing a changed control-plane declaration from replaying
+an old capture.
 
 ## R5. Table inventory and the dump comparison
 

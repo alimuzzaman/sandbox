@@ -340,15 +340,24 @@ class TestRetention(unittest.TestCase):
         for backup_id in ("promoted", "failed", "residue"):
             with self.subTest(backup_id=backup_id):
                 transport = self.transport()
+                slot = slot_for("r", backup_id)
+                candidate = transport.retire_plan("r", slot)
                 outcome = service(transport, now=8 * DAY).retire("r", backup_id, confirm=True)
                 self.assertTrue(outcome["ok"], outcome)
                 self.assertEqual(outcome["status"], "retired")
                 self.assertEqual(outcome["data"]["removed_bytes"], 13)
-                facts = transport.slots[slot_for("r", backup_id)]
-                self.assertEqual(transport.retired, [{
-                    "state": review_state(facts),
-                    "archive_sha256": (facts["receipt"] or {}).get("archive_sha256"),
-                    "archive_size": facts["archive_size"]}])
+                self.assertEqual(transport.retired, [candidate])
+
+    def test_same_size_archive_drift_after_review_is_refused(self):
+        transport = self.transport()
+        slot = slot_for("r", "promoted")
+        original = transport.archives[slot]
+        transport.after_retire_plan = lambda planned: transport.archives.__setitem__(
+            planned, b"changed-bytes")
+        outcome = service(transport, now=8 * DAY).retire("r", "promoted", confirm=True)
+        self.assertEqual(outcome["error"]["code"], "retire_candidate_changed")
+        self.assertEqual(len(original), len(transport.archives[slot]))
+        self.assertEqual(transport.retired, [])
 
     def test_only_retire_and_job_cleanup_delete_server_files(self):
         tree = ast.parse(HELPER.read_text())

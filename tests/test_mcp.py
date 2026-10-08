@@ -389,9 +389,12 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("hermes_cron_catalog", "remote"), ("hermes_cron_reconcile", "remote"),
             ("hermes_cron_verify", "job_id,remote"), ("recovery_profiles", ""),
             ("recovery_plan", ""), ("recovery_list", ""), ("recovery_verify", "backup_id"),
-            ("recovery_create", ""), ("recovery_restore_plan", "backup_id"),
+            ("recovery_create", ""), ("recovery_capture", "backup_id,profiles,remote"),
+            ("recovery_capture_status", "backup_id,remote"),
+            ("recovery_promote", "backup_id,remote"),
+            ("recovery_restore_plan", "backup_id"),
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
-            ("recovery_retention_plan", ""),
+            ("recovery_retention_plan", ""), ("recovery_retention", ""),
             ("sync_once", "project_dir,remote,request_id,workspace_id"),
             ("sync_status", "project_dir,remote,workspace_id"),
             ("sync_start", "mode,project_dir,remote,workspace_id"),
@@ -408,7 +411,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("delivery_trace_owner_status", "parent_request_id,producer,project_dir"),
             ("delivery_trace_owner_record", "expected_sequence,input,parent_request_id,producer,project_dir,publication_id"),
         )
-        self.assertEqual(len(actual), 144)
+        self.assertEqual(len(actual), 148)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         for name, _required, response in actual:
             if name.startswith("owned_storage_"):

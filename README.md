@@ -7,6 +7,9 @@ drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 
 Recovery is profile-driven through `sb recovery`. Capture, restore apply, retention deletion,
 and schedule activation are protected; see [docs/recovery.md](docs/recovery.md).
+For server-first capture, `capture` and `status` work without Drive or a passphrase; `promote`
+publishes a retained capture through the encrypted Drive path. Remote retention is read-only until
+an eligible capture is retired with `--confirm`.
 Read-only PostgreSQL restore inspection reports a bounded phase, refusal code,
 request correlation, and local and installed runtime revisions; see
 [hosted data recovery](docs/hosted-data-recovery.md).

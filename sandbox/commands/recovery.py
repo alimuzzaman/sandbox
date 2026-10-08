@@ -14,7 +14,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def configure_recovery(parser) -> None:
     parser.description = "Plan and operate scoped encrypted recovery profiles"
-    parser.add_argument("action", choices=("profiles", "plan", "create", "list", "verify", "restore", "retention", "schedule", "postgres", "data"))
+    parser.add_argument(
+        "action", choices=("profiles", "plan", "create", "capture", "status", "promote",
+                           "list", "verify", "restore", "retention", "schedule", "postgres", "data"))
     parser.add_argument("--postgres-operation", choices=("register", "rebind", "observe", "status", "capture", "restore-plan", "restore", "inspect-restore", "verify-restore", "reopen-restore", "readiness"))
     parser.add_argument("--resume-capture", action="store_true", help="resume only an inspected incomplete local development capture under its original identity")
     parser.add_argument("--source-binding", default=None, help="owner-only non-secret PostgreSQL source descriptor")
@@ -60,6 +62,51 @@ def _emit(payload: dict, as_json: bool) -> None:
             for item in entries:
                 if isinstance(item, dict):
                     print(f"    {item.get('Path', '(unknown)')}")
+        captures = tuple(data.get("server_captures") or ())
+        print(f"  server captures: {len(captures)}")
+        for item in captures:
+            print("    {backup_id}: {state}; age={age}; archive_size={size}; promoted={promoted}; "
+                  "retention_exceeded={exceeded}; retirable={retirable}".format(
+                      backup_id=item.get("backup_id", "(unknown)"),
+                      state=item.get("state", "unknown"), age=item.get("age_seconds"),
+                      size=item.get("archive_size"), promoted=item.get("promoted", False),
+                      exceeded=item.get("retention_exceeded", False),
+                      retirable=item.get("retirable", False)))
+        legacy_captures = tuple(data.get("legacy_server_archives") or ())
+        print(f"  legacy server archives: {len(legacy_captures)}")
+        for item in legacy_captures:
+            print(f"    {item.get('name', '(unknown)')}: {item.get('size')} bytes")
+    elif payload["action"] == "capture":
+        data = payload.get("data") or {}
+        for field in ("backup_id", "request_id", "state", "phase", "accepted_at", "existing"):
+            if field in data:
+                print(f"  {field}: {data[field]}")
+    elif payload["action"] == "status":
+        data = payload.get("data") or {}
+        for field in ("backup_id", "request_id", "state", "phase", "reason",
+                      "accepted_at", "started_at", "ended_at", "archive",
+                      "members", "inventory_summary", "promoted", "promoted_set_id",
+                      "retention_days", "retention_exceeded", "residue_bytes",
+                      "local_transfer_bytes"):
+            if field in data:
+                print(f"  {field}: {data[field]}")
+        detail = data.get("detail")
+        if isinstance(detail, dict):
+            for field in ("need_bytes", "available_bytes", "shortfall_bytes"):
+                value = detail.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    print(f"  {field}: {value}")
+            for field in ("missing_from_dump", "not_in_inventory"):
+                values = detail.get(field)
+                if isinstance(values, list):
+                    safe_values = [value[:256] for value in values[:200]
+                                   if isinstance(value, str)]
+                    print(f"  {field}: {safe_values}")
+    elif payload["action"] == "promote":
+        data = payload.get("data") or {}
+        for field in ("set_id", "request_id", "archive_sha256", "resumed_from_bytes"):
+            if field in data:
+                print(f"  {field}: {data[field]}")
     elif payload["action"] == "verify":
         data = payload.get("data") or {}
         manifest = data.get("manifest") if isinstance(data.get("manifest"), dict) else {}
@@ -85,6 +132,24 @@ def _emit(payload: dict, as_json: bool) -> None:
                     print(f"    {line}")
     elif payload["action"] == "retention":
         data = payload.get("data") or {}
+        if "backup_id" in data:
+            for field in ("backup_id", "retired_at", "removed_bytes", "previous_state"):
+                if field in data:
+                    print(f"  {field}: {data[field]}")
+        server_captures = tuple(data.get("server_captures") or ())
+        if "server_captures" in data:
+            print(f"  server captures: {len(server_captures)}")
+            for item in server_captures:
+                print("    {backup_id}: {state}; age={age}; archive_size={size}; promoted={promoted}; "
+                      "retention_exceeded={exceeded}; retirable={retirable}".format(
+                          backup_id=item.get("backup_id", "(unknown)"),
+                          state=item.get("state", "unknown"), age=item.get("age_seconds"),
+                          size=item.get("archive_size"), promoted=item.get("promoted", False),
+                          exceeded=item.get("retention_exceeded", False),
+                          retirable=item.get("retirable", False)))
+            print(f"  legacy server archives: {len(data.get('legacy_server_archives') or ())}")
+            for item in data.get("legacy_server_archives") or ():
+                print(f"    {item.get('name', '(unknown)')}: {item.get('size')} bytes")
         protected = tuple(data.get("protected_sets") or ())
         candidates = tuple(data.get("candidates") or ())
         print(f"  protected: {', '.join(protected) or '(none)'}")
@@ -166,9 +231,12 @@ def _postgres(cfg, args, service):
             else: raise RecoveryError("PostgreSQL operation is required", "request_invalid")
         return result(True, "postgres", remote=args.remote, status=data.get("code", "planned"), data=data)
     except Exception as exc:
+        code = exc.code if isinstance(exc, RecoveryError) else "postgres_recovery_failed"
+        message = ("no PostgreSQL source is registered for this profile; register its source binding before retrying"
+                   if code == "source_binding_missing" else
+                   "PostgreSQL recovery requires inspection; retained requests are preserved")
         return result(False, "postgres", remote=args.remote,
-            error=RecoveryError("PostgreSQL recovery requires inspection; retained requests are preserved",
-                exc.code if isinstance(exc, RecoveryError) else "postgres_recovery_failed"))
+                      error=RecoveryError(message, code))
 
 
 def cmd_recovery(_cfg, args) -> None:
@@ -222,6 +290,14 @@ def cmd_recovery(_cfg, args) -> None:
             except ValueError as exc:
                 payload = result(False, "create", remote=args.remote,
                                  error=RecoveryError(str(exc), "invalid_artifact"))
+    elif args.action == "capture":
+        payload = service.server_capture_start(
+            args.remote, args.backup_id, tuple(args.profile), confirm=args.confirm)
+    elif args.action == "status":
+        payload = service.server_capture_status(args.remote, args.backup_id)
+    elif args.action == "promote":
+        payload = service.server_capture_promote(
+            args.remote, args.backup_id, confirm=args.confirm)
     elif args.action == "restore":
         from sandbox.recovery.errors import RecoveryError, result
         if not args.backup_id:
@@ -244,7 +320,10 @@ def cmd_recovery(_cfg, args) -> None:
             payload = result(True, "schedule", remote=args.remote, status="planned", data={"units": render_systemd_units(policy)})
     elif args.action == "retention":
         from sandbox.recovery.errors import RecoveryError, result
-        if args.confirm:
+        if args.remote:
+            payload = service.server_capture_retention(
+                args.remote, args.backup_id, confirm=args.confirm)
+        elif args.confirm:
             payload = result(False, "retention", remote=args.remote, error=RecoveryError(
                 "retention deletion requires a verified real recovery set", "protected_operation"))
         else:

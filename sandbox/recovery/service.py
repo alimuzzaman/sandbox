@@ -42,13 +42,48 @@ def _retention_timestamp_valid(value: object) -> bool:
 
 class RecoveryService:
     def __init__(self, catalog: RecoveryCatalog, *, inventory=None, drive=None, capture=None,
-                 pending_root: str | Path | None = None, materializer=None) -> None:
+                 pending_root: str | Path | None = None, materializer=None,
+                 server_capture=None) -> None:
         self.catalog = catalog
         self.inventory = inventory
         self.drive = drive
         self.capture = capture
         self.pending_root = Path(pending_root) if pending_root else None
         self.materializer = materializer
+        self.server_capture = server_capture
+
+    def server_capture_start(self, remote: str | None, backup_id: str | None, profiles,
+                             *, confirm: bool = False) -> dict:
+        if self.server_capture is None:
+            return result(False, "capture", remote=remote, error=RecoveryError(
+                "server capture is not configured", "recovery_not_configured"))
+        return self.server_capture.start(remote, backup_id, profiles, confirm=confirm)
+
+    def server_capture_status(self, remote: str | None, backup_id: str | None) -> dict:
+        if self.server_capture is None:
+            return result(False, "status", remote=remote, error=RecoveryError(
+                "server capture is not configured", "recovery_not_configured"))
+        return self.server_capture.status(remote, backup_id)
+
+    def server_capture_promote(self, remote: str | None, backup_id: str | None,
+                               *, confirm: bool = False) -> dict:
+        if self.server_capture is None:
+            return result(False, "promote", remote=remote, error=RecoveryError(
+                "server capture is not configured", "recovery_not_configured"))
+        return self.server_capture.promote(remote, backup_id, confirm=confirm)
+
+    def server_capture_retention(self, remote: str | None, backup_id: str | None = None,
+                                 *, confirm: bool = False) -> dict:
+        if self.server_capture is None:
+            if not remote:
+                return self.retention_plan()
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "server capture is not configured", "recovery_not_configured"))
+        if not remote:
+            return self.retention_plan()
+        if backup_id is None and not confirm:
+            return self.server_capture.retention(remote)
+        return self.server_capture.retire(remote, backup_id, confirm=confirm)
 
     def create_materialized(self, set_id: str, profiles: tuple[str, ...], *,
                             confirm: bool = False, remote: str | None = None) -> dict:
@@ -155,11 +190,20 @@ class RecoveryService:
         return result(True, "create", remote=remote, status="complete", data={"manifest": manifest})
 
     def list(self, remote: str | None = None) -> dict:
-        if self.drive is None:
+        server_data = {}
+        if remote and self.server_capture is not None:
+            try:
+                server_data = self.server_capture.captures(remote)
+            except RecoveryError as exc:
+                return result(False, "list", remote=remote, error=exc)
+            except (OSError, TypeError, ValueError):
+                return result(False, "list", remote=remote, error=RecoveryError(
+                    "server capture listing is invalid", "list_failed"))
+        if self.drive is None and not (remote and server_data):
             return result(False, "list", remote=remote, error=RecoveryError(
                 "recovery Drive is not configured", "recovery_not_configured"))
         try:
-            objects = self.drive.list("")
+            objects = self.drive.list("") if self.drive is not None else []
             groups: dict[str, list[dict]] = {}
             legacy: list[dict] = []
             for item in objects:
@@ -199,14 +243,18 @@ class RecoveryService:
         except (OSError, TypeError, ValueError) as exc:
             return result(False, "list", remote=remote, error=RecoveryError(
                 "recovery listing is invalid", "list_failed"))
-        return result(True, "list", remote=remote, status="listed", data={
+        data = {
             "complete_manifests": tuple(complete),
             "incomplete": tuple(incomplete),
             "legacy": tuple(legacy),
             "locally_pending": tuple(local_pending),
             "unverifiable": tuple(unverifiable),
             "pending": tuple(incomplete),
-        })
+            **server_data,
+        }
+        if remote:
+            data["drive"] = {"configured": self.drive is not None}
+        return result(True, "list", remote=remote, status="listed", data=data)
 
     def verify(self, set_id: str, remote: str | None = None) -> dict:
         if self.drive is None:

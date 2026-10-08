@@ -251,6 +251,33 @@ class FakeTransport:
 
 
 class PostgresRecoveryTests(unittest.TestCase):
+    def test_missing_source_binding_has_distinct_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport(b'')
+            recovery, _ = self._recovery(Path(directory), transport)
+            for operation in (
+                    lambda: recovery.source('scaleway-sandbox', 'lenzora-dev'),
+                    lambda: recovery.observe('scaleway-sandbox', 'lenzora-dev', 'observe-a')):
+                with self.subTest(operation=operation), self.assertRaises(RecoveryError) as raised:
+                    operation()
+                self.assertEqual(raised.exception.code, 'source_binding_missing')
+                self.assertEqual(str(raised.exception), 'no source is registered for this profile')
+            self.assertEqual(transport.calls, [])
+
+    def test_malformed_and_unsupported_source_bindings_remain_invalid(self):
+        from sandbox.hosting.images.provisioning import install_owner_only_json
+        with tempfile.TemporaryDirectory() as directory:
+            recovery, _ = self._recovery(Path(directory), FakeTransport(b''))
+            with self.assertRaises(RecoveryError) as unsupported:
+                recovery.source('scaleway-sandbox', 'unknown-profile')
+            self.assertEqual(unsupported.exception.code, 'source_binding_invalid')
+
+            path = recovery.root / 'sources' / 'scaleway-sandbox-lenzora-dev.json'
+            install_owner_only_json(path, {'profile': 'lenzora-dev'})
+            with self.assertRaises(RecoveryError) as malformed:
+                recovery.source('scaleway-sandbox', 'lenzora-dev')
+            self.assertEqual(malformed.exception.code, 'source_binding_invalid')
+
     def test_retained_verification_requires_confirmation_and_unambiguous_action(self):
         with tempfile.TemporaryDirectory() as directory:
             recovery, _ = self._recovery(Path(directory), FakeTransport(b''))

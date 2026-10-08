@@ -54,6 +54,14 @@ def slot_for(remote: str, backup_id: str) -> str:
     return "capture-" + hashlib.sha256(payload.encode()).hexdigest()
 
 
+def capture_request_id(base_request_id: str, declarations_sha256: str) -> str:
+    """Bind hosted source identity and the complete control-plane declaration."""
+    payload = json.dumps({"base_request_id": base_request_id,
+                          "declarations_sha256": declarations_sha256},
+                         sort_keys=True, separators=(",", ":"))
+    return "recovery-" + hashlib.sha256(payload.encode()).hexdigest()
+
+
 def phase_index(phase: str | None) -> int:
     """Order of a capture phase; ``-1`` before the first phase."""
     return PHASES.index(phase) if phase in PHASES else -1
@@ -241,7 +249,13 @@ class ServerCaptureService:
                                     source.source_digest)
             artifact = next(item for item in plan.artifacts if item.profile_id == CAPTURE_PROFILE)
             control = next(item for item in plan.artifacts if item.profile_id == CONTROL_PROFILE)
-            request_id = HostedRecoveryMaterializer._request_id(remote, artifact, binding, backup_id)
+            declarations = (json.dumps(
+                self.transport.declaration(remote, control, source, backup_id),
+                sort_keys=True, separators=(",", ":")) + "\n").encode()
+            declarations_sha256 = hashlib.sha256(declarations).hexdigest()
+            request_id = capture_request_id(
+                HostedRecoveryMaterializer._request_id(remote, artifact, binding, backup_id),
+                declarations_sha256)
             slot = slot_for(remote, backup_id)
             listing = self.transport.list(remote)
             existing = any(item.get("slot") == slot for item in listing.get("slots") or ())
@@ -250,9 +264,6 @@ class ServerCaptureService:
                 if blocking:
                     raise refusal("an unpromoted server capture is past its retention bound",
                                   "retention_exceeded", blocking=blocking)
-            declarations = (json.dumps(
-                self.transport.declaration(remote, control, source, backup_id),
-                sort_keys=True, separators=(",", ":")) + "\n").encode()
             request = {
                 "schema_version": 1, "slot": slot, "remote": remote, "backup_id": backup_id,
                 "backup_operation_id": backup_id, "request_id": request_id,
@@ -261,7 +272,7 @@ class ServerCaptureService:
                 "source_binding": {"machine_identity": binding.machine_identity,
                                    "revision": binding.revision,
                                    "source_digest": binding.source_digest},
-                "declarations_sha256": hashlib.sha256(declarations).hexdigest(),
+                "declarations_sha256": declarations_sha256,
             }
             outcome = self.transport.start(remote, slot, request, password, declarations)
         except RecoveryError as exc:
@@ -297,10 +308,22 @@ class ServerCaptureService:
         view = retention_view(state, bool(promoted), receipt.get("completed_at"), days,
                               self._clock())
         residue = facts.get("residue_bytes")
+        detail = raw.get("detail")
+        safe_detail = {}
+        if isinstance(detail, Mapping):
+            for name in ("need_bytes", "available_bytes", "shortfall_bytes"):
+                value = detail.get(name)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    safe_detail[name] = value
+            for name in ("missing_from_dump", "not_in_inventory"):
+                values = detail.get(name)
+                if isinstance(values, list):
+                    safe_detail[name] = [value[:256] for value in values[:200]
+                                         if isinstance(value, str)]
         return {
             "backup_id": backup_id, "request_id": request.get("request_id"),
             "state": state, "phase": raw.get("phase"),
-            "reason": raw.get("reason"), "detail": raw.get("detail"),
+            "reason": raw.get("reason"), "detail": safe_detail or None,
             "accepted_at": raw.get("accepted_at", request.get("accepted_at")),
             "started_at": raw.get("started_at"), "ended_at": raw.get("ended_at"),
             "archive": ({"sha256": receipt.get("archive_sha256"), "size": receipt.get("archive_size")}
@@ -372,15 +395,12 @@ class ServerCaptureService:
                                     "confirmation_required")
             self._require_ids(remote, backup_id)
             slot = slot_for(remote, backup_id)
-            facts = self.transport.status(remote, slot)
-            reviewed = review_state(facts)
+            candidate = self.transport.retire_plan(remote, slot)
+            reviewed = candidate.get("state")
             if reviewed not in RETIRABLE:
                 raise refusal("server capture is not retirable", "not_retirable",
                               state=reviewed)
-            receipt = facts.get("receipt") or {}
-            plan = {"state": reviewed, "archive_sha256": receipt.get("archive_sha256"),
-                    "archive_size": facts.get("archive_size")}
-            outcome = self.transport.retire(remote, slot, plan)
+            outcome = self.transport.retire(remote, slot, candidate)
         except RecoveryError as exc:
             return self._envelope_error(action, remote, exc)
         except (OSError, TypeError, ValueError, KeyError) as exc:

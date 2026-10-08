@@ -6,9 +6,9 @@ from pathlib import Path
 from app import SANDBOX_ROOT, mcp
 
 
-def _service():
+def _service(destination: str | None = None):
     from sandbox.recovery.context import recovery_service
-    return recovery_service(SANDBOX_ROOT)
+    return recovery_service(SANDBOX_ROOT, destination=destination)
 
 
 @mcp.tool()
@@ -72,6 +72,28 @@ def recovery_create(remote: str | None = None, backup_id: str | None = None,
 
 
 @mcp.tool()
+def recovery_capture(remote: str, backup_id: str, profiles: list[str],
+                     confirm: bool = False) -> dict:
+    """Start or replay a detached server-side capture after explicit confirmation."""
+    return _service().server_capture_start(
+        remote, backup_id, tuple(profiles or ()), confirm=confirm)
+
+
+@mcp.tool()
+def recovery_capture_status(remote: str, backup_id: str) -> dict:
+    """Read one server capture without requiring Drive or a passphrase."""
+    return _service().server_capture_status(remote, backup_id)
+
+
+@mcp.tool()
+def recovery_promote(remote: str, backup_id: str, destination: str | None = None,
+                     confirm: bool = False) -> dict:
+    """Promote a retained server capture through the encrypted Drive pipeline."""
+    return _service(destination).server_capture_promote(
+        remote, backup_id, confirm=confirm)
+
+
+@mcp.tool()
 def recovery_restore_plan(backup_id: str, remote: str | None = None, profiles: list[str] | None = None) -> dict:
     """Build a non-mutating restore plan; it never writes a target."""
     return _service().restore_plan(backup_id, tuple(profiles or ()), remote=remote)
@@ -105,3 +127,11 @@ def recovery_retention_plan(remote: str | None = None, keep_count: int = 1,
     return _service().retention_plan(
         remote, keep_count=keep_count, minimum_age_days=minimum_age_days,
     )
+
+
+@mcp.tool()
+def recovery_retention(remote: str | None = None, backup_id: str | None = None,
+                       confirm: bool = False) -> dict:
+    """Review server capture retention, or retire one capture after confirmation."""
+    return _service().server_capture_retention(
+        remote, backup_id, confirm=confirm)

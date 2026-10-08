@@ -115,18 +115,43 @@ class TestHostedRecoveryMaterializer(unittest.TestCase):
         self.assertNotIn("private/path", str(result))
         self.assertNotIn("password", str(result))
 
-    def test_controller_error_code_is_named_as_cause_with_hint(self):
+    def test_unhashable_controller_error_code_uses_generic_public_error(self):
         class FailingController(_Controller):
             def observe(self, remote, plan):
-                raise RecoveryError("ssh://user:password@host/private/path", "remote_unavailable")
+                raise RecoveryError("private controller diagnostic", ["remote_revision_mismatch"])
 
         service, _ = self._service(FailingController())
         result = service.create_materialized("hosted-set", ("site",), confirm=True,
                                              remote="scaleway-sandbox")
         self.assertEqual(result["error"]["code"], "materialization_observe_failed")
-        self.assertIn("cause: remote_unavailable", result["error"]["message"])
-        self.assertIn("sb remote status", result["error"]["message"])
+        self.assertEqual(result["error"]["message"], "hosted source observation failed")
+        self.assertNotIn("private controller diagnostic", str(result))
+
+    def test_reviewed_controller_error_code_is_public_with_safe_hint(self):
+        class FailingController(_Controller):
+            def observe(self, remote, plan):
+                raise RecoveryError("ssh://user:password@host/private/path", "remote_revision_mismatch")
+
+        service, _ = self._service(FailingController())
+        result = service.create_materialized("hosted-set", ("site",), confirm=True,
+                                             remote="scaleway-sandbox")
+        self.assertEqual(result["error"]["code"], "remote_revision_mismatch")
+        self.assertIn("sync the remote runtime revision, then retry", result["error"]["message"])
         self.assertNotIn("private/path", str(result))
+        self.assertNotIn("password", str(result))
+
+    def test_reviewed_capture_error_code_is_public_with_safe_hint(self):
+        class FailingController(_Controller):
+            def capture(self, remote, artifact, destination, binding, request_id,
+                        *, backup_operation_id):
+                raise RecoveryError("private capture path", "remote_unavailable")
+
+        service, _ = self._service(FailingController())
+        result = service.create_materialized("hosted-set", ("site",), confirm=True,
+                                             remote="scaleway-sandbox")
+        self.assertEqual(result["error"]["code"], "remote_unavailable")
+        self.assertIn("sb remote status", result["error"]["message"])
+        self.assertNotIn("private capture path", str(result))
 
     def test_request_identity_changes_with_capture_declaration_and_replays_stably(self):
         controller = _Controller()

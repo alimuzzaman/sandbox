@@ -248,6 +248,49 @@ def hash_file(path):
     return digest.hexdigest(), size
 
 
+def archive_fingerprint(path):
+    """Hash an existing owner-controlled regular archive without following links."""
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        raise Refusal("record_invalid")
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+            or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o077):
+        raise Refusal("record_invalid")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise Refusal("retire_candidate_changed")
+    except OSError:
+        raise Refusal("record_invalid")
+    digest, size = hashlib.sha256(), 0
+    try:
+        opened = os.fstat(fd)
+        stamp = lambda info: (info.st_dev, info.st_ino, info.st_size,
+                              info.st_mtime_ns, info.st_ctime_ns)
+        if stamp(opened) != stamp(before):
+            raise Refusal("retire_candidate_changed")
+        while True:
+            chunk = os.read(fd, READ)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+        after = os.fstat(fd)
+        try:
+            current = os.lstat(path)
+        except OSError:
+            raise Refusal("retire_candidate_changed")
+        if (stamp(after) != stamp(before) or stamp(current) != stamp(before)
+                or size != before.st_size):
+            raise Refusal("retire_candidate_changed")
+    finally:
+        os.close(fd)
+    return digest.hexdigest(), size
+
+
 # --- slot facts ------------------------------------------------------------
 
 def slot_dir(root, slot):
@@ -635,6 +678,20 @@ def op_check_integrity(root, slot):
     return {"ok": True, "mismatch": True}
 
 
+def op_retire_plan(root, slot):
+    """Read-only candidate snapshot, including bytes even without a valid receipt."""
+    item = require(root, slot)
+    state = review_state(item)
+    if state not in ("promoted", "failed", "incomplete"):
+        raise Refusal("not_retirable", state=state)
+    archive_sha256, archive_size = archive_fingerprint(
+        os.path.join(root, slot, "archive.tar"))
+    receipt = item.get("receipt") or {}
+    return {"ok": True, "state": state,
+            "receipt_sha256": receipt.get("archive_sha256"),
+            "archive_sha256": archive_sha256, "archive_size": archive_size}
+
+
 def op_retire(root, slot, plan_text):
     if len(plan_text) > 4096:
         raise Refusal("request_invalid")
@@ -642,7 +699,22 @@ def op_retire(root, slot, plan_text):
         plan = json.loads(plan_text)
     except ValueError:
         raise Refusal("request_invalid")
-    if not isinstance(plan, dict):
+    if not isinstance(plan, dict) or set(plan) != {
+            "state", "receipt_sha256", "archive_sha256", "archive_size"}:
+        raise Refusal("request_invalid")
+    if (plan.get("state") not in ("promoted", "failed", "incomplete")
+            or (plan.get("receipt_sha256") is not None
+                and (not isinstance(plan["receipt_sha256"], str)
+                     or not HEX64.match(plan["receipt_sha256"])))
+            or (plan.get("archive_sha256") is not None
+                and (not isinstance(plan["archive_sha256"], str)
+                     or not HEX64.match(plan["archive_sha256"])))
+            or (plan.get("archive_size") is not None
+                and (isinstance(plan["archive_size"], bool)
+                     or not isinstance(plan["archive_size"], int)
+                     or plan["archive_size"] < 0))
+            or ((plan.get("archive_sha256") is None)
+                != (plan.get("archive_size") is None))):
         raise Refusal("request_invalid")
     item = require(root, slot)
     current = review_state(item)
@@ -655,8 +727,11 @@ def op_retire(root, slot, plan_text):
     try:
         item = facts(root, slot)
         receipt = item["receipt"] or {}
-        observed = {"state": review_state(item), "archive_sha256": receipt.get("archive_sha256"),
-                    "archive_size": item["archive_size"]}
+        archive_sha256, archive_size = archive_fingerprint(
+            os.path.join(directory, "archive.tar"))
+        observed = {"state": review_state(item),
+                    "receipt_sha256": receipt.get("archive_sha256"),
+                    "archive_sha256": archive_sha256, "archive_size": archive_size}
         if any(plan.get(key) != value for key, value in observed.items()):
             raise Refusal("retire_candidate_changed")
         removed = 0
@@ -919,7 +994,8 @@ OPS = {
     "start": (op_start, 2), "status": (op_status, 1), "list": (op_list, 0),
     "read-receipt": (op_read_receipt, 1), "read-declaration": (op_read_declaration, 1),
     "read-chunk": (op_read_chunk, 3), "mark-promoted": (op_mark_promoted, 2),
-    "check-integrity": (op_check_integrity, 1), "retire": (op_retire, 2),
+    "check-integrity": (op_check_integrity, 1), "retire-plan": (op_retire_plan, 1),
+    "retire": (op_retire, 2),
 }
 
 

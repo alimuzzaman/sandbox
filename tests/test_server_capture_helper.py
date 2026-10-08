@@ -448,17 +448,18 @@ class TestHelperRetire(HelperCase):
     """T050 (helper side): confirmed retire and integrity mismatch."""
 
     def _plan(self, backup_id="set-a"):
-        status = self.h.status(backup_id=backup_id)
-        receipt = status["receipt"] or {}
-        return json.dumps({"state": helper.review_state(status),
-                           "archive_sha256": receipt.get("archive_sha256"),
-                           "archive_size": status["archive_size"]})
+        slot = slot_for("fixture-remote", backup_id)
+        candidate = self.h.run("retire-plan", slot)
+        if not candidate.get("ok"):
+            raise AssertionError(candidate)
+        return json.dumps({key: candidate[key] for key in (
+            "state", "receipt_sha256", "archive_sha256", "archive_size")})
 
     def test_complete_unpromoted_capture_is_not_retirable(self):
         self.h.start()
         self.h.wait()
-        refused = self.h.run("retire", slot_for("fixture-remote", "set-a"), self._plan())
-        self.assertEqual(refused, {"code": "not_retirable", "ok": False, "state": "complete"})
+        slot = slot_for("fixture-remote", "set-a")
+        self.assertEqual(self.h.run("retire-plan", slot)["code"], "not_retirable")
         self.assertTrue((self.h.slot_path() / "archive.tar").exists())
 
     def test_promoted_capture_retires_and_keeps_its_record(self):
@@ -485,16 +486,71 @@ class TestHelperRetire(HelperCase):
         self.h.start(env=self.h.env(FAKE_DUMP=str(DUMPS / "missing_table.sql")))
         self.h.wait()
         slot = slot_for("fixture-remote", "set-a")
-        stale = json.dumps({"state": "failed", "archive_sha256": None, "archive_size": 99})
+        stale = json.dumps({"state": "failed", "receipt_sha256": None,
+                            "archive_sha256": "a" * 64, "archive_size": 99})
         self.assertEqual(self.h.run("retire", slot, stale)["code"], "retire_candidate_changed")
         self.assertTrue(self.h.run("retire", slot, self._plan())["ok"])
         self.assertEqual(self.h.status()["state"]["reason"], "inventory_mismatch")
 
+    def test_failed_and_incomplete_archives_without_valid_receipts_are_retirable(self):
+        for backup_id, terminal_state in (("failed-residue", "failed"),
+                                          ("incomplete-residue", "complete")):
+            with self.subTest(state=terminal_state):
+                self.h.start(backup_id=backup_id)
+                self.h.wait(backup_id=backup_id)
+                slot = slot_for("fixture-remote", backup_id)
+                directory = self.h.slot_path(backup_id=backup_id)
+                state_path = directory / "state.json"
+                state = json.loads(state_path.read_text())
+                if terminal_state == "failed":
+                    state.update(state="failed", reason="integrity_mismatch")
+                    helper.write_private(str(directory), "state.json", helper.canonical(state))
+                (directory / "receipt.json").unlink()
+                status = self.h.status(backup_id=backup_id)
+                expected_state = "failed" if terminal_state == "failed" else "incomplete"
+                self.assertEqual(helper.review_state(status), expected_state)
+                before = {path.name: (path.stat().st_mtime_ns, path.stat().st_size)
+                          for path in directory.iterdir() if path.is_file()}
+                candidate = self.h.run("retire-plan", slot)
+                after = {path.name: (path.stat().st_mtime_ns, path.stat().st_size)
+                         for path in directory.iterdir() if path.is_file()}
+                self.assertEqual(after, before)
+                self.assertEqual(candidate["state"], expected_state)
+                self.assertIsNone(candidate["receipt_sha256"])
+                expected_sha, expected_size = helper.archive_fingerprint(
+                    str(directory / "archive.tar"))
+                self.assertEqual(candidate["archive_sha256"], expected_sha)
+                self.assertEqual(candidate["archive_size"], expected_size)
+                retired = self.h.run("retire", slot, self._plan(backup_id))
+                self.assertTrue(retired["ok"], retired)
+                self.assertFalse((directory / "archive.tar").exists())
+                self.assertEqual(self.h.status(backup_id=backup_id)["state"]["state"], "retired")
+
+    def test_same_size_archive_drift_after_review_is_refused(self):
+        self.h.start()
+        self.h.wait()
+        slot = slot_for("fixture-remote", "set-a")
+        request_id = request_for("fixture-remote", "set-a")["request_id"]
+        self.h.run("mark-promoted", slot, json.dumps({
+            "request_id": request_id, "set_id": "set-a", "ciphertext_sha256": "e" * 64,
+            "promoted_at": "2026-10-08T00:00:00+00:00"}))
+        plan = self._plan()
+        archive = self.h.slot_path() / "archive.tar"
+        before = archive.read_bytes()
+        changed = bytearray(before)
+        changed[-1] ^= 1
+        archive.write_bytes(changed)
+        self.assertEqual(len(before), archive.stat().st_size)
+        refused = self.h.run("retire", slot, plan)
+        self.assertEqual(refused["code"], "retire_candidate_changed")
+        self.assertTrue(archive.exists())
+
     def test_running_capture_is_not_retirable(self):
         self.h.start(env=self.h.env(FAKE_DUMP_DELAY="1.5"))
         slot = slot_for("fixture-remote", "set-a")
-        refused = self.h.run("retire", slot, json.dumps({"state": "running"}))
+        refused = self.h.run("retire-plan", slot)
         self.assertEqual(refused["code"], "not_retirable")
+        self.assertEqual(refused["state"], "running")
         self.h.wait()
 
     def test_integrity_check_marks_a_drifted_archive_failed(self):

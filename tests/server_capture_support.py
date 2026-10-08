@@ -279,6 +279,7 @@ class FakeTransport:
         self.marked: list[dict] = []
         self.retired: list[dict] = []
         self.chunk_hook = None
+        self.after_retire_plan = None
 
     def add(self, facts: dict, archive: bytes = b"archive-bytes",
             declarations: bytes | None = None) -> dict:
@@ -356,7 +357,49 @@ class FakeTransport:
             facts["state"] = dict(facts["state"], state="failed", reason="integrity_mismatch")
         return {"ok": True, "mismatch": mismatch}
 
+    def retire_plan(self, remote, slot):
+        self._hit("retire_plan")
+        if slot not in self.slots:
+            from sandbox.recovery.errors import RecoveryError
+            raise RecoveryError("no server capture", "capture_not_found")
+        from sandbox.recovery.server_capture import review_state
+        facts = self.slots[slot]
+        state = review_state(facts)
+        if state not in ("promoted", "failed", "incomplete"):
+            from sandbox.recovery.errors import RecoveryError
+            error = RecoveryError("server capture is not retirable", "not_retirable")
+            error.data = {"state": state}
+            raise error
+        archive = self.archives.get(slot)
+        receipt = facts.get("receipt") or {}
+        candidate = {"state": state, "receipt_sha256": receipt.get("archive_sha256"),
+                     "archive_sha256": hashlib.sha256(archive).hexdigest() if archive is not None else None,
+                     "archive_size": len(archive) if archive is not None else None}
+        if self.after_retire_plan:
+            self.after_retire_plan(slot)
+        return candidate
+
     def retire(self, remote, slot, plan):
         self._hit("retire")
+        from sandbox.recovery.errors import RecoveryError
+        from sandbox.recovery.server_capture import review_state
+        facts = self.slots.get(slot)
+        if facts is None:
+            raise RecoveryError("no server capture", "capture_not_found")
+        archive = self.archives.get(slot)
+        receipt = facts.get("receipt") or {}
+        observed = {"state": review_state(facts),
+                    "receipt_sha256": receipt.get("archive_sha256"),
+                    "archive_sha256": hashlib.sha256(archive).hexdigest() if archive is not None else None,
+                    "archive_size": len(archive) if archive is not None else None}
+        if dict(plan) != observed:
+            raise RecoveryError("server capture changed since it was reviewed",
+                                "retire_candidate_changed")
         self.retired.append(dict(plan))
+        facts["state"] = {"state": "retired", "previous_state": observed["state"],
+                           "retired_at": 2_000.0}
+        facts["receipt"] = None
+        facts["receipt_valid"] = False
+        facts["archive_size"] = None
+        self.archives.pop(slot, None)
         return {"ok": True, "retired_at": 2_000.0, "removed_bytes": 13}

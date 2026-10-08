@@ -42,13 +42,14 @@ _CAUSE_HINTS = {
 }
 
 
-def _with_cause(message: str, exc: BaseException) -> str:
-    """Append a controller's fixed error code and hint, never its raw text."""
+def _controller_error(message: str, fallback_code: str,
+                      exc: BaseException) -> RecoveryError:
+    """Expose reviewed controller codes with fixed hints, never raw diagnostics."""
     cause = getattr(exc, "code", None)
-    if not isinstance(cause, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", cause):
-        return message
-    hint = _CAUSE_HINTS.get(cause)
-    return f"{message} (cause: {cause}" + (f"; {hint})" if hint else ")")
+    hint = _CAUSE_HINTS.get(cause) if isinstance(cause, str) else None
+    if hint is None:
+        return RecoveryError(message, fallback_code)
+    return RecoveryError(f"{message} (cause: {cause}; {hint})", cause)
 
 
 @dataclass(frozen=True)
@@ -177,8 +178,8 @@ class HostedRecoveryMaterializer(MaterializationAdapter):
         except RecoveryError as exc:
             # Do not reflect controller transport/path diagnostics in the
             # public result envelope.
-            raise RecoveryError(_with_cause("hosted source observation failed", exc),
-                                "materialization_observe_failed") from exc
+            raise _controller_error("hosted source observation failed",
+                                    "materialization_observe_failed", exc) from exc
         except Exception as exc:
             raise RecoveryError("hosted source observation failed", "materialization_observe_failed") from exc
         if not isinstance(observation, HostedObservation):
@@ -197,8 +198,8 @@ class HostedRecoveryMaterializer(MaterializationAdapter):
             # Controller messages may contain transport paths or provider
             # diagnostics. Keep the public recovery envelope stable and
             # secret/path-free even when the controller returns a typed error.
-            raise RecoveryError(_with_cause("hosted capture failed", exc),
-                                "materialization_capture_failed") from exc
+            raise _controller_error("hosted capture failed",
+                                    "materialization_capture_failed", exc) from exc
         except Exception as exc:
             raise RecoveryError("hosted capture failed", "materialization_capture_failed") from exc
         if not isinstance(receipt, HostedCaptureReceipt):

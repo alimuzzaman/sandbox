@@ -11,6 +11,7 @@ from .service import RecoveryService
 from .inventory import SandboxRemoteInventory
 from .hosted import HostedRecoveryMaterializer
 from .materialize import ScopedMaterializer
+from .server_capture import ServerCaptureService
 from sandbox.services.process import BoundedProcessRunner
 
 
@@ -49,11 +50,25 @@ def recovery_service(root: str | Path, *, materializer=None,
             materialization_root,
             HostedRecoveryMaterializer(RegisteredRemoteRecoveryController()),
         )
+    catalog = load_catalog(root / "config" / "recovery-profiles.json")
+    from sandbox.transports.remote_server_capture import (
+        RegisteredServerCaptureTransport,
+        load_sandbox_config,
+    )
+    server_capture = ServerCaptureService(
+        catalog,
+        RegisteredServerCaptureTransport(),
+        config=load_sandbox_config,
+        state_root=state_root,
+        drive=drive,
+        capture=capture,
+    )
     return RecoveryService(
-        load_catalog(root / "config" / "recovery-profiles.json"),
+        catalog,
         inventory=SandboxRemoteInventory(),
         drive=drive,
         capture=capture,
         pending_root=pending_root,
         materializer=materializer,
+        server_capture=server_capture,
     )

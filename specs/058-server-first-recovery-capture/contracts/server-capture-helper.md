@@ -14,11 +14,13 @@ or raw tool diagnostics.
 |----|------|-------|--------|-------|
 | `start` | slot, request JSON (≤16 KiB, argv) | line 1: DB password; rest: declarations JSON (≤64 KiB) | `{ok, state, phase, accepted_at, existing}` | returns after fork, <5 s |
 | `status` | slot | – | `{ok, request, state, lock_free, receipt_valid, archive_size, residue_bytes}` | ≤64 KiB |
+| `retire-plan` | slot | – | `{ok, state, receipt_sha256, archive_sha256, archive_size}` | read-only; streams a present archive in 1 MiB chunks; transport timeout 1800 s |
 | `list` | – | – | `{ok, slots: [...], legacy: [{name, size}]}` | ≤256 KiB, ≤500 slots |
 | `read-receipt` | slot | – | receipt JSON | ≤1 MiB |
 | `read-declaration` | slot | – | declarations JSON | ≤64 KiB |
 | `read-chunk` | slot, offset, length (≤16 MiB) | – | header line `{offset,length,sha256}` + bytes | length + 256 B |
 | `mark-promoted` | slot, marker JSON (argv ≤4 KiB) | – | `{ok, existing}` | idempotent; refuses unless receipt valid |
+| `retire` | slot, exact candidate JSON (argv ≤4 KiB) | – | `{ok, retired_at, removed_bytes}` | locks, re-reads and re-hashes; transport timeout 1800 s |
 
 ## `start` semantics
 
@@ -54,3 +56,11 @@ constants already in `sandbox/transports/remote_recovery.py:516-526,766-768`.
 
 All file reads are 1 MiB chunks; no op loads an archive or member into memory.
 `read-chunk` reads at most 16 MiB.
+
+## Retirement candidate
+
+`retire-plan` is read-only. It returns only eligible states and fingerprints the current archive
+even when its receipt is missing or invalid. A missing archive has null hash and size. The
+confirmed `retire` operation takes the job lock, re-reads state and any valid receipt digest,
+then re-hashes the current archive and compares state, receipt digest, archive SHA-256 and size
+with the reviewed candidate. Any drift returns `retire_candidate_changed` before deletion.

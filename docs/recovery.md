@@ -104,6 +104,48 @@ classifying candidates. Sets with an unavailable current passphrase or invalid t
 reported as unclassified instead of disappearing from the plan. It remains non-destructive;
 `--keep-count` and `--minimum-age-days` control the plan, while deletion remains separately
 protected.
+
+## Server-first capture
+
+`sb recovery capture --remote R --backup-id B --profile amarsonar-bangla-prod --confirm`
+starts a detached capture on a registered remote. It also records the required control-plane
+declaration. Capture needs the brokered `SANDBOX_RECOVERY_DB_PASSWORD`, a reachable remote with a
+matching installed Sandbox revision, and explicit confirmation. It does not need Drive or
+`RECOVERY_PASSPHRASE`, and archive bytes stay on the remote until promotion. Repeating the same
+backup id reuses its request identity; a changed source binding or complete control-plane
+declaration returns `capture_binding_conflict`.
+
+Use `sb recovery status --remote R --backup-id B` to inspect progress or the terminal result. It
+does not require Drive, a passphrase, or a current remote revision. `sb recovery list --remote R`
+adds server captures and legacy one-shot archive names and sizes. With no Drive configured, that
+remote listing still succeeds and reports `drive.configured: false`; a list without `--remote`
+keeps the existing Drive requirement.
+
+After configuring a reviewed destination and the inherited `RECOVERY_PASSPHRASE`, run
+`sb recovery promote --remote R --backup-id B --confirm`. Promotion downloads in bounded chunks,
+checks each chunk and the complete archive against the server receipt, then uses the existing
+operator-side encryption and manifest-last publication path. An interrupted transfer can resume
+under the same request identity. A verified archive-versus-receipt mismatch marks the capture
+failed with `integrity_mismatch` so it can be reviewed and retired.
+
+Server capture retention defaults to seven days and accepts a configured bound from 1 to 365
+days. `sb recovery retention --remote R --json` is a read-only plan. Only a promoted, failed, or
+derived incomplete capture can be retired with
+`sb recovery retention --remote R --backup-id B --confirm`. The remote rechecks state, archive
+receipt digest, current archive hash, and size against the reviewed candidate before removing its
+archive, residue, and receipt. Failed and incomplete captures remain eligible when their receipt
+is missing or their archive fails integrity checks; the plan hashes any archive that is present,
+and retirement refuses if those reviewed bytes change. The request and retired state remain. A
+complete unpromoted archive is never retirable, even past
+its bound, and its only supported exit is promotion. No server archive is deleted automatically.
+
+The matching MCP tools are `recovery_capture`, `recovery_capture_status`, `recovery_promote`, and
+`recovery_retention`. The existing `recovery_retention_plan` remains the Drive-set plan. Both
+retention paths stay opt-in through the recovery MCP group.
+
+PostgreSQL recovery reports `source_binding_missing` with a fixed instruction to register the
+profile's source binding before retrying. It does not include controller diagnostics, paths, or
+transport text in the CLI message.
 Large ciphertext verification and retention decryption use streamed file downloads when the
 Drive adapter supports them, avoiding whole-archive memory materialization.
 
@@ -123,6 +165,10 @@ RecoveryService also converts malformed adapter responses into operation-specifi
 Plans with symbolic host-manifest roots or composite source declarations report explicit
 materialization warnings. Those warnings must be resolved by a target-bound adapter before
 capture is considered ready.
+
+A hosted recovery source revision mismatch returns `remote_revision_mismatch` with a fixed hint to
+sync the remote runtime revision and retry; controller diagnostics, paths, and transport text stay
+private.
 
 Human-readable restore planning prints the set, selected profiles, ordered actions, checkpoints,
 and rollback steps; it never applies the plan. JSON remains the structured contract.

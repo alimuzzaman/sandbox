@@ -11,10 +11,55 @@ from sandbox.recovery.capture import CaptureCoordinator
 from sandbox.recovery.crypto import FixtureCrypto
 from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError, result
+from sandbox.recovery.server_capture import ServerCaptureService
 from sandbox.recovery.service import RecoveryService
+from tests.server_capture_support import FakeTransport, fake_facts
 
 
 class TestRecoveryService(unittest.TestCase):
+    def test_remote_list_merges_server_captures_without_drive(self):
+        root = Path(__file__).resolve().parents[1]
+        catalog = __import__("sandbox.recovery.catalog", fromlist=["load_catalog"]).load_catalog(
+            root / "config" / "recovery-profiles.json")
+        transport = FakeTransport()
+        transport.add(fake_facts("server-set", remote="fixture-remote"))
+        with tempfile.TemporaryDirectory() as directory:
+            server_capture = ServerCaptureService(
+                catalog, transport, environment={}, config={}, clock=lambda: 2_000.0,
+                state_root=Path(directory),
+            )
+            service = RecoveryService(catalog, server_capture=server_capture)
+            listed = service.list("fixture-remote")
+            unchanged = service.list()
+
+        self.assertTrue(listed["ok"], listed)
+        self.assertEqual(listed["data"]["drive"], {"configured": False})
+        self.assertEqual([item["backup_id"] for item in listed["data"]["server_captures"]],
+                         ["server-set"])
+        self.assertEqual(listed["data"]["legacy_server_archives"], [])
+        self.assertFalse(unchanged["ok"])
+        self.assertEqual(unchanged["error"]["code"], "recovery_not_configured")
+
+    def test_remote_list_reports_drive_configuration_when_both_sources_are_available(self):
+        root = Path(__file__).resolve().parents[1]
+        catalog = __import__("sandbox.recovery.catalog", fromlist=["load_catalog"]).load_catalog(
+            root / "config" / "recovery-profiles.json")
+        transport = FakeTransport()
+        transport.add(fake_facts("server-set", remote="fixture-remote"))
+        drive = MemoryDrive()
+        with tempfile.TemporaryDirectory() as directory:
+            server_capture = ServerCaptureService(
+                catalog, transport, environment={}, config={}, clock=lambda: 2_000.0,
+                state_root=Path(directory), drive=drive,
+            )
+            listed = RecoveryService(catalog, drive=drive,
+                                     server_capture=server_capture).list("fixture-remote")
+
+        self.assertTrue(listed["ok"], listed)
+        self.assertEqual(listed["data"]["drive"], {"configured": True})
+        self.assertEqual([item["backup_id"] for item in listed["data"]["server_captures"]],
+                         ["server-set"])
+
     def test_result_redacts_recursive_secret_values_and_keys(self):
         payload = result(False, "create", data={"token": "visible", "nested": ["password=visible"]},
                          error=RecoveryError("passphrase=visible", "blocked"))

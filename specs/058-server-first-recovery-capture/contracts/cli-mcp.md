@@ -33,6 +33,8 @@ Preconditions, in this order (first failure wins, nothing starts on the server):
 Success: `status` = `queued` | `running` | `complete` | `failed` | `incomplete`
 (the last three only when the slot already existed), `data` =
 `{backup_id, request_id, slot, state, phase, accepted_at, existing: bool}`.
+The request id binds the hosted source request and canonical control-plane declaration hash,
+so either source or declaration drift under the same backup id returns `capture_binding_conflict`.
 Never requires `RECOVERY_PASSPHRASE` or a destination. Never transfers archive bytes.
 
 ## `sb recovery status`
@@ -60,6 +62,8 @@ revision. `ok=false, error.code=capture_not_found` for an unknown backup id.
 
 `retention_exceeded` and `age` are the only fields that change for a terminal
 capture, and only across the bound; SC-002 tests run inside the bound.
+Human status output prints only allowlisted preflight byte counts and bounded inventory mismatch
+name lists from `detail`; it never renders arbitrary helper diagnostics.
 
 ## `sb recovery list` (extended)
 
@@ -115,10 +119,10 @@ The plan lists every server capture with `retirable`. Retire order:
 |-------|------------|
 | `--confirm` and `--backup-id` | `confirmation_required` |
 | capture exists | `capture_not_found` |
-| state `promoted`, `failed` or derived `incomplete` | `not_retirable` |
-| server re-read: state, archive sha256 and size equal the plan | `retire_candidate_changed` |
+| state `complete` unpromoted, `queued` or `running` | `not_retirable` |
+| server re-read: state, valid receipt digest, current archive sha256 and size equal the reviewed candidate | `retire_candidate_changed` |
 
-Success: `status=retired`, `data = {backup_id, retired_at, removed_bytes}`.
+Success: `status=retired`, `data = {backup_id, retired_at, removed_bytes, previous_state}`.
 The record stays with `state: retired`. Without `--remote` the existing
 Drive-set retention review is unchanged.
 

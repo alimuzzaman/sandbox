@@ -3711,6 +3711,20 @@ class TestCloudflareClient(unittest.TestCase):
         self.assertNotIn("token", request.full_url)
 
     @patch("urllib.request.urlopen")
+    def test_upsert_ttl_is_automatic_when_proxied_and_60s_when_dns_only(self, mock_open):
+        for proxied, ttl in ((True, 1), (False, 60)):
+            mock_open.reset_mock()
+            mock_open.side_effect = [
+                _Response({"success": True, "result": []}),
+                _Response({"success": True, "result": {"id": "rec-1"}}),
+            ]
+            cloudflare.Client("token").upsert_address(
+                "zone", "example.com", "203.0.113.10", proxied=proxied)
+            body = json.loads(mock_open.call_args_list[1].args[0].data)
+            self.assertEqual(body["ttl"], ttl)
+            self.assertEqual(body["proxied"], proxied)
+
+    @patch("urllib.request.urlopen")
     def test_api_errors_do_not_echo_token(self, mock_open):
         mock_open.return_value = _Response({"success": False, "errors": [{"message": "denied"}]})
         with self.assertRaisesRegex(cloudflare.CloudflareError, "denied") as raised:

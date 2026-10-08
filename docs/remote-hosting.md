@@ -871,7 +871,7 @@ unbuffered streaming, unlimited body size and 3600s timeouts match the Caddy rou
 ./sb remote edge xcloud-london --remove-route host-<project>-<env> --confirm
 ```
 
-`sb remote doctor` adds front-door rows (nginx active, config valid, Sandbox routes loaded,
+`sb doctor` adds front-door rows for each registered remote (nginx active, config valid, Sandbox routes loaded,
 certificates expired, or with fewer than 25 days left, which means renewal at 30 days did not happen), and `sb remote domains`
 lists nginx routes.
 

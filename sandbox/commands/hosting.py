@@ -4004,7 +4004,19 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     state, key, classified, runtime_state="unverified",
                     save_state=durable_save,
                 )
-                raise RuntimeError(str(exc)) from exc
+                message = str(exc)
+                # host recover reconciles against this receipt, so it needs the
+                # last complete observation, not the pre-apply placeholders.
+                # source_revision is only recorded when it was observed exactly.
+                if observation.get("complete") is True:
+                    try:
+                        _refresh_hosting_operation(
+                            state, key, classified=classified,
+                            observation=observation, save_state=durable_save,
+                        )
+                    except RuntimeError as refresh_error:
+                        message += f"; receipt evidence not refreshed: {refresh_error}"
+                raise RuntimeError(message) from exc
             _persist_runtime_observation(
                 state, key, classified, runtime_state="ready",
                 save_state=durable_save)

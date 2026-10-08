@@ -767,6 +767,12 @@ of reporting a finished remote apply as failed. Keep the machine awake and on po
 during a deploy anyway: a controller frozen in an earlier phase still leaves the outcome
 uncertain.
 
+When the readiness poll still runs out, the runtime stays `unverified`, but the deploy
+receipt is refreshed from the last complete observation (images, config digests,
+topology, and the source revision only when it was observed exactly). That is the
+evidence `host recover` reconciles against, so a slow-to-healthy deploy can be
+recovered instead of refused as `partial_evidence`.
+
 For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
 manifest-declared services, profile-aware configured Compose services, running service

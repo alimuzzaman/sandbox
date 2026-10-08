@@ -3294,6 +3294,26 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotIn("recorded_revision", record)
         self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
+    def test_complete_observation_timeout_refreshes_receipt_for_recovery(self):
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        observed = _ready_observation(fixture.commit)
+        observed["images"] = [{"name": "web", "digest": "sha256:" + "1" * 64}]
+        observed["config_digests"] = [{"name": "1", "digest": "sha256:" + "2" * 64}]
+        classified = hosting_cmd._classify_host_observation(fixture.validated, observed, fixture.commit)
+        fixture.patch.object(hosting_cmd, "_poll_post_compose_host_observation",
+            side_effect=hosting_cmd._HostRuntimeObservationNotReady("health deadline reached",
+                observation=observed, classified=classified))
+        with self.assertRaisesRegex(RuntimeError, "health deadline reached"):
+            fixture.apply()
+        record = fixture.repository.load()["hosts"][fixture.key]
+        evidence = record["hosting_operation"]["evidence"]
+        self.assertEqual(record["runtime"]["state"], "unverified")
+        self.assertNotIn("commit", record)
+        self.assertEqual(evidence["images"], observed["images"])
+        self.assertEqual(evidence["config_file_digests"], observed["config_digests"])
+        self.assertEqual(evidence["topology"], ["web"])
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
+
     def test_identical_staged_unverified_retry_never_reruns_compose_or_initializer(self):
         fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
         fixture.state["hosts"][fixture.key] = {

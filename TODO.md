@@ -107,14 +107,22 @@ not close the external or human gates listed below.
   acceptance).
 
 - [ ] **Make target, transport, revision, and deployment truth actionable.**
-  Separate registered reachability from brokered SSH/MCP usability; expose a
-  bounded secret-safe host diagnostic/exec path; provide read-only hosted status
-  with applied revision, lifecycle, health, and rollback state; preserve a
-  durable deploy receipt after SSH/control loss; never exit 0 after a failed
-  apply or silent rollback; refuse wrong-target/foreign-instance inference.
-  Feedback: `b340f98a`, `834d2253`, `30a6c1d1`, `b8fcedf1`, `cc723c15`,
-  `1ef4334d`, `b41513e9`, `ac945dff`, `b4323966`, `71be9430`, `0b420c9b`,
-  `ccd9e5e2`, `7acb4245`, `e25a8491`, `4ad5d660`, `5e440951`, `f528a472`.
+  Audited 2026-10-08 against source and tests. Done locally: reachability uses
+  the same single-shot SSH probe as maintenance (`4c25877`); ensure refuses an
+  unreachable remote with a typed error (`d2af37c`); `host status`/`host
+  diagnose` report deployed revision and service health; pre-acceptance
+  timeouts fail closed with an unknown receipt (`fb89e89`, `563a62c`); failed
+  apply and incomplete rollback exit non-zero (`d2a05ab`); lifecycle never
+  infers a remote (`2a661da`); remote ensure returns the instance record
+  (`f2deed0`); apply reachability accepts HTTPS redirects (`a71a98c5`); remote
+  failures keep a bounded stderr tail (`1026dca`); reset has a remote deadline.
+  Remaining, needs a reachable remote: confirm an accepted deploy job is
+  queryable from the durable ledger (`b4323966`), and prove host rollback
+  under network-unreachable SSH (`5e440951`). Live replays of `b340f98a`,
+  `834d2253`, `71be9430` low-disk are also still unverified.
+  Closed: `30a6c1d1`, `b8fcedf1`, `cc723c15`, `1ef4334d`, `b41513e9`,
+  `ac945dff`, `0b420c9b`, `ccd9e5e2`, `7acb4245`, `e25a8491`, `4ad5d660`,
+  `f528a472`.
 
 - [ ] **Prevent unsafe target and credential disclosure.** Prove explicit local
   selectors cannot route to a configured remote or an unrelated project; ensure

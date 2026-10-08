@@ -189,9 +189,10 @@ tools/server-migration/retire-failed.sh --project-dir D --environment E \
 
 It reads the `request_id` from `sb job-status <job> --json`, refuses while the job has
 not ended, and runs `sb host retire-delivery ... --original-request-id <req> --confirm
---json`. If retire also refuses, the target can stay fenced
-(**`unproven_staged_revision`**). For a throwaway probe, use a new project name rather
-than fighting the fence.
+--json`. A successful retire also drops a staged revision the attempt never proved,
+so the next apply does a full recreate instead of refusing with
+**`unproven_staged_revision`**. If retire itself refuses, the target stays fenced; for a
+throwaway probe, use a new project name rather than fighting the fence.
 
 **Long silent phases.** During the image build and the readiness wait, `job-status`
 shows `suspected_stalled`. That is normal. Look at the remote directly before acting:
@@ -346,7 +347,7 @@ failed deploy needs no manual rollback, only `retire-failed.sh`.
 | `remote_registration_busy` | Any host apply, to any remote, holds `registry.lock` | `lsof` the lock, wait for the holder; never kill it |
 | `recovery_context_required; prepare with: ...` | apply must run inside a durable job | Run the printed `sb job-start` with a raised `--timeout` (`deploy-project.sh` does this) |
 | `required_evidence_missing`, `operation_busy` | A failed delivery is still recorded | `retire-failed.sh --job-id <job> --confirm` |
-| `unproven_staged_revision` | Retire refused; target stays fenced | Investigate with `./sb delivery inspect`; use a new project name for probes |
+| `unproven_staged_revision` | Failed attempt not retired, or retire refused | Run `retire-failed.sh`; if retire refuses, investigate with `./sb delivery inspect` (new project name for probes) |
 | "did not become fully ready before deadline", `unverified` | A compose service has no healthcheck | Add a healthcheck to every service |
 | "TLS handshake failed" during edge verification | macOS cached a new name at the old wildcard IP | Don't resolve before deploy, or pre-create the record |
 | 403 error 1010 from the control host | Control record is proxied | Make it DNS-only |

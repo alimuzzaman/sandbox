@@ -3666,6 +3666,44 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIsNone(record["image_activation"]["active"])
         mock_save.assert_called_once_with(state)
 
+    def test_host_retire_delivery_drops_an_unproven_staged_revision(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "b" * 40, "recorded_revision": "a" * 40,
+                         "config_digest": "cfg", "source_state_identity": "src",
+                         "runtime": {"state": "unverified"}},
+        }}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        record = state["hosts"][target_key]
+        self.assertIsNone(record["staged_revision"])
+        self.assertEqual(record["recorded_revision"], "a" * 40)
+        self.assertEqual(hosting_cmd._runtime_apply_decision(
+            previous=record, requested_revision="b" * 40, config_digest="cfg",
+            source_state_identity="src", source_state_clean=True,
+            exact_runtime_proven=False), "full_recreate")
+
+    def test_host_retire_delivery_keeps_a_proven_staged_revision(self):
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        target_key = hosting.state_key("myvps", validated)
+        state = {"version": 1, "hosts": {
+            target_key: {"staged_revision": "a" * 40, "recorded_revision": "a" * 40},
+        }}
+        with patch("sandbox.delivery.hosting.retire_interrupted_operation",
+                   return_value={"request_id": "orig-req"}), \
+                patch("sandbox.core._hosting.load_host_state", return_value=state), \
+                patch("sandbox.core._hosting.save_host_state"):
+            args = types.SimpleNamespace(original_request_id="orig-req", confirm=True, json=True)
+            hosting_cmd._cmd_host_retire_delivery(validated, "myvps", args)
+        self.assertEqual(state["hosts"][target_key]["staged_revision"], "a" * 40)
+
 
 class _Response:
     def __init__(self, data):

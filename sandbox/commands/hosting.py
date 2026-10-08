@@ -2989,6 +2989,12 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
             activation = record.get("image_activation")
             if isinstance(activation, dict) and activation.get("active") is not None:
                 activation["active"] = None
+            # A staged revision the retired attempt never proved would fence
+            # every retry with unproven_staged_revision; drop the claim so the
+            # next apply does a full recreate.
+            if record.get("staged_revision") and \
+                    record.get("staged_revision") != record.get("recorded_revision"):
+                record["staged_revision"] = None
             hosting.save_host_state(state)
     except DeliveryError as exc:
         payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",

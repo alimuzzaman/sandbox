@@ -575,6 +575,13 @@ class SessionServiceTests(unittest.TestCase):
             display=self.sink.append, **kwargs,
         )
 
+    def test_escalating_command_refused_before_audit(self):
+        with self.assertRaises(SecretBrokerError) as raised:
+            self.service.run_session("fixture", (("API_TOKEN", "API_TOKEN"),), ["sudo", "true"],
+                                     lifetime_seconds=10, display=self.sink.append)
+        self.assertEqual(raised.exception.code, "escalation_unsupported")
+        self.assertEqual(self.events(), [])
+
     def test_normalize_bindings_refuses_without_audit(self):
         cases = {
             "selection_invalid": [(), [("API_TOKEN",)], [("API_TOKEN", "A"), ("API_TOKEN", "B")]],
@@ -629,7 +636,9 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(payload["reason_code"], "child_exited")
         self.assertEqual(set(payload["result"]), {
             "end_reason", "exit_code", "elapsed_class", "dropped_chunks", "lifetime_seconds",
+            "group_ended",
         })
+        self.assertTrue(payload["result"]["group_ended"])
         self.assertIn("correlation_id", payload)
         events = self.events()
         self.assertEqual([(event["phase"], event["operation"]) for event in events],

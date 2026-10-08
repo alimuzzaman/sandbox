@@ -63,6 +63,7 @@ total) and drains remaining output through the redactor.
 | `elapsed_class` | str | yes | `under_1s`, `1_to_10s`, `10_to_60s`, `1_to_10m`, `10_to_60m`, `1_to_4h`, `4_to_8h`, `8_to_12h`, `12h_plus`. |
 | `dropped_chunks` | int | yes | Output chunks dropped because redaction failed. |
 | `lifetime_seconds` | int | yes | The requested lifetime. |
+| `group_ended` | bool | yes | `true` when the child's process group was gone within the 5-second bound; `false` when a member the broker may not signal (privilege escalation inside the child) survived it. |
 
 The service payload wraps it as
 `{"ok": true, "operation": "run_session", "source", "key"|"keys", "result", "correlation_id", "reason_code"}`.

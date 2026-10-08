@@ -378,6 +378,7 @@ class SessionService:
                 "exit_code": self.exit_code if self.end_reason == "child_exited" else None,
                 "elapsed_class": "1_to_10s", "dropped_chunks": 0,
                 "lifetime_seconds": kwargs["lifetime_seconds"],
+                "group_ended": getattr(self, "group_ended", True),
             },
         }
 
@@ -460,6 +461,20 @@ class SecretSessionCommandTests(unittest.TestCase):
         self.assertEqual((source, bindings, argv), ("fixture", [("API_TOKEN", "API_TOKEN")], ["child"]))
         self.assertEqual(kwargs["lifetime_seconds"], 28_800)
         self.assertIsNotNone(kwargs["signals"])
+
+    def test_session_warns_when_a_group_member_could_not_be_ended(self):
+        service = SessionService(end_reason="lifetime_expired")
+        service.group_ended = False
+        code, out, err = self.invoke(self.args(), service)
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertTrue(lines[2].startswith("secrets session: ended end_reason=lifetime_expired"))
+        self.assertEqual(lines[3], (
+            "secrets session: warning: a process in the child's group could not be ended "
+            "within the bound (did the child escalate privileges?); it may still hold the secret"))
+        quiet = SessionService()
+        _code, out, _err = self.invoke(self.args(), quiet)
+        self.assertNotIn("warning", out)
 
     def test_session_lifetime_and_multiple_keys_in_start_line(self):
         service = SessionService()

@@ -108,6 +108,18 @@ tests in `tests/test_secret_service.py`, `tests/test_secret_commands.py` and
 
 ## R6. Ending the process group within 5 seconds
 
+Review fix (2026-10-09): a privileged group member (the child used `sudo`,
+`doas`, `su`, `pkexec` or `run0`) cannot be signalled by the unprivileged
+broker, so the bound below cannot be enforced on it (CLAUDE.md gotcha 21).
+Decision: refuse the direct form before any read (`escalation_unsupported`,
+`argv[0]` by basename, in `refuse_escalation`), and for escalation deeper in
+the child stop pretending: `killpg(pgid, 0)` fails with `EPERM` only when no
+member could be signalled, so that state is `unreachable`, the wait still
+runs to its bound, `end_process_group` returns `False`, the result carries
+`group_ended=false` and the CLI prints a warning line. Previously `EPERM`
+was treated as "gone", which reported a clean end over a live privileged
+child holding the secret.
+
 - **Decision**: On any end reason, `killpg(pgid, SIGTERM)`, then poll
   `killpg(pgid, 0)` and reap the child until the group is empty or 3 s pass, then
   `killpg(pgid, SIGKILL)` and poll up to 1.5 s more. `pgid` is the child's pid

@@ -25,6 +25,7 @@ sb secrets run --session [--lifetime-seconds N]
 | `--lifetime-seconds` not decimal digits, below 1 or above 43200 | `lifetime_invalid` |
 | `--session` with `--timeout-seconds`, or `--lifetime-seconds` without `--session` | `option_conflict` |
 | stdout not a tty, `/dev/tty` cannot be opened as a tty, or broker not the terminal's foreground job | `tty_required` |
+| the command itself (`ARGV[0]`, by basename) is `sudo`, `sudoedit`, `doas`, `su`, `pkexec` or `run0` | `escalation_unsupported` |
 | binding malformed, duplicate key or destination | `selection_invalid` / `destination_denied` |
 | destination on the deny list | `destination_denied` |
 | unknown source alias | `source_unknown` |
@@ -63,6 +64,13 @@ secrets session: ended end_reason=child_exited exit_code=0 elapsed=1_to_4h dropp
 `child_exited`. `exit_code` is the child's status for `child_exited`, else
 `None`.
 
+Warning line, only when the group did not end within the bound
+(`group_ended=false` in the audited result; exit status is unchanged):
+
+```text
+secrets session: warning: a process in the child's group could not be ended within the bound (did the child escalate privileges?); it may still hold the secret
+```
+
 ## Exit status
 
 | End | Exit |
@@ -87,6 +95,15 @@ secrets session: ended end_reason=child_exited exit_code=0 elapsed=1_to_4h dropp
 
 On every end the child's process group gets `SIGTERM`, then `SIGKILL` for
 anything left after 3 s; the group is gone within 5 s.
+
+Limit: a group member running with other privileges than the broker (the
+child ran `sudo`, `doas`, `su`, `pkexec` or `run0` somewhere inside) cannot be
+signalled by the broker. `sudo` relays `SIGTERM` to its command, which usually
+ends it, but nothing can force it. The direct form is refused up front
+(`escalation_unsupported`); escalation deeper inside the child is detected
+after the bound (the broker's `killpg` is refused with `EPERM` once only
+privileged members remain) and reported as the warning line with
+`group_ended=false`, never as a clean end.
 
 ## Audit
 

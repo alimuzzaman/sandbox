@@ -145,6 +145,8 @@ instruction for an agent to start a session.
 - Redaction of one output chunk fails.
 - The child is killed by a signal rather than exiting with a status.
 - The broker is killed uncatchably; the child then outlives it (accepted risk, see Assumptions).
+- The command itself is a privilege-escalation tool (`sudo`, `sudoedit`, `doas`, `su`, `pkexec`, `run0`): refused with `escalation_unsupported` before any secret is read.
+- The child escalates privileges somewhere inside: the privileged members cannot be signalled by the broker, so the end bound cannot be enforced on them; the session still ends, the end line carries a warning and the audited result records `group_ended=false` rather than claiming the group is gone (documented limit, see Assumptions).
 - The audit intent record cannot be written, or the outcome record cannot be written after the session ends.
 - A lifetime option is given without session mode.
 
@@ -226,6 +228,7 @@ instruction for an agent to start a session.
 - The child is a trusted, intentional secret recipient (spec 041 FR-041); it can still print, transform, persist or exfiltrate the value, and redaction is defense in depth.
 - If the broker is killed uncatchably, the child outlives it, bounded only by its own exit, and the audit trail keeps the intent with no outcome. This is an accepted risk.
 - Descendants that deliberately leave the child's process group are outside the broker's reach, as with ordinary use.
+- Descendants that run with other privileges than the broker (privilege escalation inside the child) are outside the broker's reach too: the polite request still reaches them through `sudo`'s signal relay, but nothing can force them, so FR-011's bound holds only for members the broker may signal. A direct escalation command is refused; any other case is reported after the fact (`group_ended=false`) instead of being hidden.
 - Rotating or re-reading the secret during a session, interactive input to the child, and detection of what the child exposes on the network are out of scope.
 - Passing the child's own flags after `--` already works and is out of scope.
 - Exact option names, reason codes beyond those named here, and structured field names are finalized in planning, provided they preserve these behaviors and disclosure boundaries.

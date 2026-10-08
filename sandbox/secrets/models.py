@@ -119,6 +119,9 @@ class SessionResult:
     elapsed_seconds: float
     dropped_chunks: int
     lifetime_seconds: int
+    # False when a member of the child's group outlived the 5-second end
+    # bound because the broker may not signal it (privilege escalation).
+    group_ended: bool = True
 
     def elapsed_class(self) -> str:
         for bound, name in _SESSION_ELAPSED_CLASSES:
@@ -133,6 +136,7 @@ class SessionResult:
             "elapsed_class": self.elapsed_class(),
             "dropped_chunks": self.dropped_chunks,
             "lifetime_seconds": self.lifetime_seconds,
+            "group_ended": self.group_ended,
         }
 
 

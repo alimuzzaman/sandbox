@@ -171,8 +171,11 @@ start it themselves in an uncaptured terminal, for example:
 The session ends on the first of: lifetime expiry (`lifetime_expired`), Ctrl-C
 or another termination request (`interrupted`), the terminal closing
 (`hangup`), or the child's own exit (`child_exited`). A broker killed with
-`SIGKILL` cannot end its child, so the child can outlive it. Keep using the
-bounded `secrets run` above for every agent-run check.
+`SIGKILL` cannot end its child, so the child can outlive it, and a child that
+escalates privileges (`sudo` and friends) cannot be force-ended either: the
+direct form is refused (`escalation_unsupported`), anything deeper is reported
+as a warning with `group_ended=false`. Keep using the bounded `secrets run`
+above for every agent-run check.
 
 ## 6. Update one key without reading the source
 

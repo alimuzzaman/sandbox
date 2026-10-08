@@ -4,7 +4,7 @@
 
 **Created**: 2026-10-08
 
-**Last Refined**: 2026-10-08
+**Last Refined**: 2026-10-09
 
 **Input**: "Per-target hosting operations: independent locks and delivery state per remote, project and environment, bounded queueing, and selective host teardown that preserves named projects"
 
@@ -50,6 +50,13 @@ inventory (feedback `83dd053a`). A concurrent deploy refused with
 `operation_busy` also leaves no retained pre-admission refusal evidence that
 delivery inspect can show (feedback `04439999`), so the caller cannot tell
 whether anything happened before retrying.
+
+There is also no way for sessions that share one target to coordinate on
+purpose. On 2026-10-08 four agent threads took turns deploying Lenzora
+development by messaging each other, because Sandbox offers no claim or hold
+on a hosted environment; the project added a controller-local hold under its
+own home directory, which no other controller machine can see (feedback
+`f72c4279`).
 
 The cost is paid on every parallel agent session: detect busy, find the holder,
 poll, retry, retire the failed record. It will grow as more sites move to the
@@ -99,6 +106,11 @@ shared xCloud server.
   the shared infrastructure those preserved targets need.
 - Operators can list, per remote, every target with its current operation,
   holder identity, start time, and queue of waiting operations.
+- A session can claim an explicit, expiring hold on a target, visible to
+  every controller through the same listing; while a hold exists, other
+  sessions' operations on that target wait or refuse exactly as they do for a
+  running operation, naming the hold's holder and purpose. The holder, or an
+  expiry, releases it.
 
 ## Non-Goals
 
@@ -281,6 +293,7 @@ shared xCloud server.
 | Teardown shape | Plan then confirmed apply; preserve-list explicit; remove only ownership-proven items; post-apply evidence | Same protected two-step pattern as reclamation and recovery | Fable decision (delegated by user), 2026-10-08 |
 | Teardown scope | Hosted targets and their routes, certificates, containers, images, volumes only | Jobs, workspaces and registration have their own owners | Fable decision (delegated by user), 2026-10-08 |
 | Capacity admission | Out of scope; feature 047 owns it | Keeps this feature small; concurrency without governance is an accepted interim risk | Fable decision (delegated by user), 2026-10-08 |
+| Explicit holds | A target hold is the same primitive as a running operation's lease, claimed on purpose with an expiry and purpose string, visible remote-wide | Agents coordinating over chat and controller-local hold files are the symptom; one shared lease with a CLI is the fix | Fable decision (delegated by user), 2026-10-09 |
 
 ## Open Questions
 

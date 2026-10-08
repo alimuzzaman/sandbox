@@ -177,13 +177,14 @@ stop_selected() { # target list-file
   remote_bash "$1" "set -e
 mkdir -p $(shq "$WORK")
 : > $list.now
+[ -e $list ] || : > $list  # first run: cat must not fail the pipefail merge below
 for id in \$($DOCKER ps -q --filter label=com.docker.compose.project=$(shq "$PROJECT")); do
   svc=\$($DOCKER inspect -f '{{ index .Config.Labels \"com.docker.compose.service\" }}' \"\$id\")
   case $(shq "$KEEP_WORDS") in *\" \$svc \"*) continue ;; esac
   if [ -n $(shq "${ONLY_WORDS// /}") ]; then case $(shq "$ONLY_WORDS") in *\" \$svc \"*) ;; *) continue ;; esac; fi
   $DOCKER inspect -f '{{ .Name }}' \"\$id\" | sed 's#^/##' >> $list.now
 done
-cat $list.now $list 2>/dev/null | sort -u > $list.merged
+cat $list.now $list | sort -u > $list.merged
 mv $list.merged $list
 if [ -s $list.now ]; then xargs $DOCKER stop -t $STOP_TIMEOUT < $list.now >/dev/null; fi
 echo \"stopped \$(wc -l < $list.now | tr -d ' ') container(s); recorded in $2:\"

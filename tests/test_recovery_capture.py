@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -227,3 +228,63 @@ class TestRecoveryCapture(unittest.TestCase):
                 receipt = StagingCaptureCoordinator(FileCrypto(), MemoryDrive(), staging_root=root).publish_files(
                     "fixture-set", {"artifact": source}, profiles=("fixture",))
             self.assertEqual(receipt["artifacts"][0]["sha256"], "a" * 64)
+
+
+class TestPendingSidecar(unittest.TestCase):
+    """Spec 058 T040: the manifest is computed before upload and kept beside a pending ciphertext."""
+
+    class FileCrypto:
+        def encrypt_file(self, source, target): Path(target).write_bytes(b"cipher:" + Path(source).read_bytes())
+        def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+
+    @staticmethod
+    def _fail(method):
+        def broken(self, *args):
+            raise RecoveryError("offline", "drive_upload_failed")
+        return type("BrokenDrive", (MemoryDrive,), {method: broken})()
+
+    def test_failed_upload_or_verify_preserves_ciphertext_and_sidecar(self):
+        for method in ("put_file", "verify_file", "put"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+                pending = root / "pending"
+                drive = self._fail(method)
+                with self.assertRaises(RecoveryError):
+                    StagingCaptureCoordinator(self.FileCrypto(), drive, staging_root=root, pending_root=pending,
+                                              clock=lambda: "2026-10-08T00:00:00Z").publish_files(
+                        "fixture-set", {"fixture/artifact": source}, profiles=("fixture",),
+                        provenance={"catalog": "test"})
+                saved = pending / "fixture-set.archive.tar.gpg"
+                sidecar = pending / "fixture-set.manifest.json"
+                self.assertTrue(saved.is_file())
+                self.assertTrue(sidecar.is_file())
+                self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(sidecar.stat().st_mode & 0o777, 0o600)
+                manifest = json.loads(sidecar.read_text())
+                self.assertEqual(manifest["id"], "fixture-set")
+                self.assertEqual(manifest["ciphertext_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+                self.assertEqual(manifest["provenance"], {"catalog": "test"})
+                self.assertNotIn("sets/fixture-set/manifest.json", drive.objects)
+                self.assertEqual(list(root.glob("set-*")), [])
+
+    def test_success_leaves_no_pending_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            pending = root / "pending"
+            StagingCaptureCoordinator(self.FileCrypto(), MemoryDrive(), staging_root=root,
+                                      pending_root=pending).publish_files(
+                "fixture-set", {"artifact": source}, profiles=("fixture",))
+            self.assertFalse(pending.exists() and any(pending.iterdir()))
+
+    def test_existing_pending_entry_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            pending = root / "pending"; pending.mkdir()
+            (pending / "fixture-set.archive.tar.gpg").write_bytes(b"older")
+            with self.assertRaises(RecoveryError) as caught:
+                StagingCaptureCoordinator(self.FileCrypto(), self._fail("put_file"), staging_root=root,
+                                          pending_root=pending).publish_files(
+                    "fixture-set", {"artifact": source}, profiles=("fixture",))
+            self.assertEqual(caught.exception.code, "pending_artifact_exists")
+            self.assertEqual((pending / "fixture-set.archive.tar.gpg").read_bytes(), b"older")
+            self.assertFalse((pending / "fixture-set.manifest.json").exists())

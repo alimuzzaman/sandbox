@@ -115,16 +115,16 @@ must fail before the matching implementation task starts. Run with
 ### Tests for User Story 3
 
 - [x] T031 [P] [US3] Helper read-op tests: `read-receipt` ≤1 MiB, `read-declaration` ≤64 KiB, `read-chunk` header + exact bytes with per-chunk SHA-256, length > 16 MiB or offset past end refused, `mark-promoted` idempotent and refused unless receipt valid, in `tests/test_server_capture_helper.py`
-- [ ] T032 [P] [US3] Promote gate tests in contract order: `confirmation_required`, `missing_passphrase`, `recovery_not_configured`, `already_published` (no upload), `set_id_conflict`, `incomplete_remote_set`, `capture_not_complete` (for `failed`, `incomplete`, `running`), operator `insufficient_space` (3 × archive − received); none transfers a byte, in `tests/test_recovery_promote.py`
-- [ ] T033 [US3] Transfer tests: 16 MiB chunks appended to `$SANDBOX_HOME/recovery/promote/<slot>/archive.part` (0600 in 0700); interrupted promote resumes from `received` and re-reads at most one chunk; different request id or archive hash discards the partial; final hash or size mismatch → `transfer_mismatch`, partial removed, nothing published, in `tests/test_recovery_promote.py`
-- [ ] T034 [US3] Publication tests: `publish_files` called once with both artifacts under the owned `materialized` root; fake Drive records ciphertext upload and verify before the manifest write; `provenance.server_capture` matches contracts/manifest-provenance.md; artifact hash equals receipt `archive_sha256`; `mark-promoted` only after the manifest verifies; operator plaintext removed on success and reported via `local_transfer_bytes` on failure; capture past its retention bound promotes normally, in `tests/test_recovery_promote.py`
+- [x] T032 [P] [US3] Promote gate tests in contract order: `confirmation_required`, `missing_passphrase`, `recovery_not_configured`, `already_published` (no upload), `set_id_conflict`, `incomplete_remote_set`, `capture_not_complete` (for `failed`, `incomplete`, `running`), operator `insufficient_space` (3 × archive − received); none transfers a byte, in `tests/test_recovery_promote.py`
+- [x] T033 [US3] Transfer tests: 16 MiB chunks appended to `$SANDBOX_HOME/recovery/promote/<slot>/archive.part` (0600 in 0700); interrupted promote resumes from `received` and re-reads at most one chunk; different request id or archive hash discards the partial; final hash or size mismatch → `transfer_mismatch`, partial removed, nothing published, in `tests/test_recovery_promote.py`
+- [x] T034 [US3] Publication tests: `publish_files` called once with both artifacts under the owned `materialized` root; fake Drive records ciphertext upload and verify before the manifest write; `provenance.server_capture` matches contracts/manifest-provenance.md; artifact hash equals receipt `archive_sha256`; `mark-promoted` only after the manifest verifies; operator plaintext removed on success and reported via `local_transfer_bytes` on failure; capture past its retention bound promotes normally, in `tests/test_recovery_promote.py`
 - [ ] T035 [P] [US3] CLI `recovery promote` (with `--destination`) and MCP `recovery_promote` parity tests in `tests/test_recovery_cli_server_capture.py`
 
 ### Implementation for User Story 3
 
 - [x] T036 [US3] Implement helper `read-receipt`, `read-declaration`, `read-chunk`, `mark-promoted` in `sandbox/recovery/server_capture_helper.py` (depends on T031)
 - [x] T037 [US3] Implement chunked resumable reader and read ops in `sandbox/transports/remote_server_capture.py` (depends on T033, T036)
-- [ ] T038 [US3] Implement `ServerCaptureService.promote` (gates, Drive idempotency, transfer, declaration check, `publish_files` with provenance, mark promoted, cleanup) in `sandbox/recovery/server_capture.py` (depends on T032, T034, T037)
+- [x] T038 [US3] Implement `ServerCaptureService.promote` (gates, Drive idempotency, transfer, declaration check, `publish_files` with provenance, mark promoted, cleanup) in `sandbox/recovery/server_capture.py` (depends on T032, T034, T037)
 - [ ] T039 [US3] Add the `promote` action in `sandbox/commands/recovery.py` and `recovery_promote` in `mcp/wp-server/tools/recovery.py` + `mcp/wp-server/tools/manifest.py` + `tests/test_mcp.py` snapshot (depends on T035, T038)
 
 **Checkpoint**: US3 passes on its own against a fixture capture
@@ -139,13 +139,13 @@ must fail before the matching implementation task starts. Run with
 
 ### Tests for User Story 4
 
-- [ ] T040 [P] [US4] Capture coordinator tests: manifest computed before upload; a failed upload after verified ciphertext preserves both `<set>.archive.tar.gpg` and `<set>.manifest.json` (0600); existing pending behavior otherwise unchanged, in `tests/test_recovery_capture.py`
-- [ ] T041 [P] [US4] Pending promote tests: sidecar path uploads the same ciphertext bytes, verifies, writes the manifest last and removes both files; wrong passphrase → `passphrase_not_current` with files kept; ciphertext hash ≠ sidecar → `pending_artifact_invalid`; no sidecar → manifest derived from decrypted members with `"pending_recovered": true`; no server contact needed, in `tests/test_recovery_promote.py`
+- [x] T040 [P] [US4] Capture coordinator tests: manifest computed before upload; a failed upload after verified ciphertext preserves both `<set>.archive.tar.gpg` and `<set>.manifest.json` (0600); existing pending behavior otherwise unchanged, in `tests/test_recovery_capture.py`
+- [x] T041 [P] [US4] Pending promote tests: sidecar path uploads the same ciphertext bytes, verifies, writes the manifest last and removes both files; wrong passphrase → `passphrase_not_current` with files kept; ciphertext hash ≠ sidecar → `pending_artifact_invalid`; no sidecar → manifest derived from decrypted members with `"pending_recovered": true`; no server contact needed, in `tests/test_recovery_promote.py`
 
 ### Implementation for User Story 4
 
-- [ ] T042 [US4] Compute the manifest before upload, write the sidecar in `_preserve_pending`, and add `publish_pending` in `sandbox/recovery/capture.py` (depends on T040)
-- [ ] T043 [US4] Route promote through the pending path first in `sandbox/recovery/server_capture.py` (depends on T038, T041, T042)
+- [x] T042 [US4] Compute the manifest before upload, write the sidecar in `_preserve_pending`, and add `publish_pending` in `sandbox/recovery/capture.py` (depends on T040)
+- [x] T043 [US4] Route promote through the pending path first in `sandbox/recovery/server_capture.py` (depends on T038, T041, T042)
 
 ---
 

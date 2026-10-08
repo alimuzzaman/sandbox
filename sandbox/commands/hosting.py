@@ -1336,7 +1336,7 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         if progress is not None:
             progress("Initializer image build started")
         _build_checked(
-            entry, prefix, f"{prefix} build {init_args}", init_args,
+            entry, prefix, f"{prefix} build --with-dependencies {init_args}", init_args,
             timeout=build_timeout, progress=progress, log_path=apply_log,
             log_phase="initializer_build",
         )
@@ -1360,8 +1360,10 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         # Build before touching containers: a build failure is then a known,
         # effect-free failure with its own phase in apply.log, instead of an
         # uncertain one buried in interleaved `up --build` output.
+        # --with-dependencies: `up --no-build` below starts depends_on services
+        # too, and on a fresh host their images do not exist yet.
         _build_checked(
-            entry, prefix, f"{prefix} build {service_args}", service_args,
+            entry, prefix, f"{prefix} build --with-dependencies {service_args}", service_args,
             timeout=build_timeout, progress=progress, log_path=apply_log,
             log_phase="compose_build",
         )

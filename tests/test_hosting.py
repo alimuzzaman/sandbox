@@ -1097,7 +1097,7 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--force-recreate", up_commands[0])
         self.assertIn("--renew-anon-volumes", up_commands[0])
         self.assertTrue(up_commands[-1].endswith("up -d --no-deps web"))
-        build_index = next(i for i, command in enumerate(commands) if command.endswith("build setup"))
+        build_index = next(i for i, command in enumerate(commands) if command.endswith("build --with-dependencies setup"))
         run_index = next(
             i for i, command in enumerate(commands)
             if command.endswith("run --rm --pull never setup")
@@ -1351,7 +1351,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertTrue(commands[0].endswith(" build web worker"))
+        self.assertTrue(commands[0].endswith(" build --with-dependencies web worker"))
         self.assertIn("up -d --no-build --force-recreate --always-recreate-deps --renew-anon-volumes --remove-orphans web worker", commands[1])
         self.assertTrue(commands[-1].endswith("up -d --no-deps web worker"))
 
@@ -1387,7 +1387,7 @@ class TestHostingManifest(unittest.TestCase):
             "--remove-orphans web worker",
             next(command for command in commands if " up -d" in command),
         )
-        self.assertFalse(any(command.endswith(" build setup") for command in commands))
+        self.assertFalse(any(command.endswith(" build --with-dependencies setup") for command in commands))
         self.assertTrue(any(
             command.endswith("run --rm --pull never --no-build setup")
             for command in commands
@@ -1515,7 +1515,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         commands = [call.args[1] for call in remote_checked.call_args_list]
-        self.assertTrue(commands[0].endswith(" build web"))
+        self.assertTrue(commands[0].endswith(" build --with-dependencies web"))
         self.assertEqual(remote_checked.call_args_list[0].kwargs["log_phase"], "compose_build")
         self.assertIn("up -d --no-build --force-recreate", commands[1])
 
@@ -1651,7 +1651,7 @@ class TestHostingManifest(unittest.TestCase):
         ])
         build_call = next(
             call for call in remote_checked.call_args_list
-            if call.args[1].endswith(" build web")
+            if call.args[1].endswith(" build --with-dependencies web")
         )
         self.assertEqual(build_call.kwargs["log_path"], "/srv/runtime/apply.log")
 
@@ -1716,7 +1716,7 @@ class TestHostingManifest(unittest.TestCase):
         hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
         build_calls = [call for call in remote_checked.call_args_list
                        if "--force-recreate" in call.args[1]
-                       or " build setup" in call.args[1]]
+                       or " build --with-dependencies setup" in call.args[1]]
         self.assertGreaterEqual(len(build_calls), 2)
         self.assertTrue(all(call.kwargs.get("timeout") == 2400 for call in build_calls))
 

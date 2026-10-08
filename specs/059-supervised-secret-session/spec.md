@@ -8,6 +8,22 @@
 
 **Input**: `specs/059-supervised-secret-session/prd.md` (READY FOR SPECKIT; feedback 2cfab06f). Amends spec 041 FR-036 and the display clause of FR-037 for session mode only.
 
+## Clarifications
+
+### Session 2026-10-08
+
+Product decisions were delegated by the user to an independent reviewer who was
+not reachable in this pass. Each answer below is the conservative choice that
+keeps the PRD's broker-enforced bound intact, grounded in the current
+`secrets run` and `secrets reveal` behavior. Answers marked *provisional* are
+listed as pending decisions for confirmation; the spec follows them until then.
+
+- Q: What happens if the developer suspends the broker from the keyboard or starts the session as a background job? → A: Keyboard suspend is ignored for the whole session, so the broker never stops enforcing the lifetime; a start from a process that is not the terminal's foreground job is refused with `tty_required` before any secret is read.
+- Q: Does time the machine spends asleep count toward the lifetime? → A: Yes. The lifetime is wall-clock time; the session ends at the stated end time even if the machine slept, and ends on wake if that time has already passed.
+- Q: How do terminal loss without a hangup signal, and other catchable termination requests to the broker, end a session? → A: A failed write to the terminal ends the session with `hangup`. A catchable termination request other than interrupt or hangup ends it with `interrupted` (*provisional*). The four end reasons stay the complete set.
+- Q: How are partial lines and terminal control characters in the child's output shown? → A: Output is redacted fail-closed: text after the last whitespace is held until the line completes or the session ends, with no idle flush. Terminal control characters are removed before display, as ordinary use does today, so colour codes are lost (*provisional*).
+- Q: What exit status does the broker return when the session did not end by the child's own exit? → A: `lifetime_expired` exits 0 (a planned end; ordinary use also exits 0 on its timeout), `interrupted` exits 130 and `hangup` exits 129, following the shell convention for those signals (*provisional*).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Run a dev server with a brokered secret for a working session (Priority: P1)
@@ -116,13 +132,15 @@ instruction for an agent to start a session.
 
 ### Edge Cases
 
-- The developer suspends the broker from the keyboard while a session runs; the lifetime must still be enforced.
-- The developer starts the session as a background job of the shell.
-- The machine sleeps during a session; time asleep could otherwise extend the lifetime.
-- The terminal disappears and writes to it start failing before or without a hangup signal.
-- An interrupt arrives after secrets are read but before the child has started.
-- The child exits while a grandchild keeps running and holds the output stream open.
-- The child prints a partial line with no trailing newline (for example a prompt) and then goes quiet.
+- The developer suspends the broker from the keyboard while a session runs: the suspend is ignored and the session keeps running under its lifetime.
+- The developer starts the session as a background job of the shell: refused with `tty_required` before any secret is read.
+- The machine sleeps during a session: sleep counts toward the lifetime; if the end time passed during sleep, the session ends on wake with `lifetime_expired`.
+- The terminal disappears and writes to it fail before or without a hangup signal: the session ends with `hangup`.
+- The broker receives a catchable termination request other than interrupt or hangup: the session ends with `interrupted`.
+- An interrupt or hangup arrives after secrets are read but before the child has started: the session ends with that reason, and the child is ended within the same 5-second bound if it was started.
+- The child exits while a grandchild keeps running and holds the output stream open: the session ends with `child_exited` and the grandchild is ended with the rest of the process group.
+- The child prints a partial line with no trailing newline (for example a prompt) and then goes quiet: the partial text is held until the line completes or the session ends.
+- The child emits terminal control sequences such as colour codes: they are removed before display.
 - The child prints the selected value split across two output chunks.
 - The child prints more than any retention bound would allow over a long session.
 - Redaction of one output chunk fails.
@@ -147,22 +165,24 @@ instruction for an agent to start a session.
 - **FR-005**: The session lifetime MUST be given in whole seconds through one explicit option, MUST default to 28,800 seconds (8 hours), MUST accept 1 through 43,200 seconds (12 hours), and MUST have no unbounded value.
 - **FR-006**: A request MUST be refused when the lifetime is below 1, above 43,200, or not a whole number of seconds; when both a session lifetime and an ordinary use timeout are given; or when a lifetime is given without session mode.
 - **FR-007**: The broker MUST enforce the lifetime itself and MUST end the session when it expires, independent of anything the child does.
+- **FR-007a**: The lifetime MUST be measured in wall-clock time, so time the machine spends asleep counts toward it; a session whose end time passed during sleep MUST end on wake with `lifetime_expired`.
 
 #### Terminal requirement
 
-- **FR-008**: A session start MUST be refused with `tty_required` when standard output is not a terminal or when no controlling terminal can be opened.
+- **FR-008**: A session start MUST be refused with `tty_required` when standard output is not a terminal, when no controlling terminal can be opened, or when the broker is not in the terminal's foreground job.
+- **FR-008a**: Keyboard suspend of the broker MUST be ignored for the whole session so that the broker never stops enforcing the lifetime.
 - **FR-009**: Every argument check (lifetime range and form, option conflicts, destination deny list, terminal check, source registration) MUST complete before any secret value is read. An unknown key MUST be refused as ordinary use refuses it, and no refused start may deliver a value to any child.
 
 #### Session end
 
-- **FR-010**: A session MUST end on the first of: lifetime expiry, an interrupt delivered to the broker, a hangup delivered to the broker, or the child's own exit; the end reason MUST be exactly one of `lifetime_expired`, `interrupted`, `hangup`, `child_exited`.
+- **FR-010**: A session MUST end on the first of: lifetime expiry, an interrupt delivered to the broker, a hangup delivered to the broker, or the child's own exit; the end reason MUST be exactly one of `lifetime_expired`, `interrupted`, `hangup`, `child_exited`. A failed write to the terminal MUST end the session with `hangup`; any other catchable termination request to the broker MUST end it with `interrupted`.
 - **FR-011**: When a session ends for any reason, the child's entire process group MUST be gone within 5 seconds; the broker MUST first request polite termination and then force termination of anything still running inside that window.
-- **FR-012**: On `child_exited` the broker MUST exit with the child's exit status mapped exactly as ordinary local use maps it.
+- **FR-012**: On `child_exited` the broker MUST exit with the child's exit status mapped exactly as ordinary local use maps it. On `lifetime_expired` it MUST exit 0, on `interrupted` 130 and on `hangup` 129.
 - **FR-013**: A crashed or exited child MUST NOT be restarted.
 
 #### Output
 
-- **FR-014**: Redacted child output MUST be shown in the terminal as it is produced, using the same exact-value and pattern redaction as ordinary use, including values split across output chunks.
+- **FR-014**: Redacted child output MUST be shown in the terminal as it is produced, using the same exact-value and pattern redaction as ordinary use, including values split across output chunks. Redaction MUST stay fail-closed: text that could still be part of a secret is held until it is disambiguated or the session ends, with no time-based flush. Terminal control characters MUST be removed before display, as in ordinary use.
 - **FR-015**: Session mode MUST NOT retain child output in its result, audit, or any file written by Sandbox; spec 041 FR-037's 1 MiB display bound does not apply to the live stream, and its retention bound is met trivially because nothing is retained.
 - **FR-016**: When redaction of an output chunk fails, that chunk MUST be dropped rather than shown, and the number of dropped chunks MUST be reported when the session ends.
 - **FR-017**: The child's standard input MUST be closed, as in ordinary use.

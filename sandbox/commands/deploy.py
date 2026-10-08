@@ -209,6 +209,12 @@ def _cmd_deploy(cfg, args) -> None:
         _fail(remote_name, f"remote '{remote_name}' is not provisioned yet — run "
               f"`./sb remote provision {remote_name}` first", as_json,
               source_ref=source_ref)
+    if getattr(args, "expose", False):
+        from sandbox.hosting.front_door import FrontDoorError, require_capability
+        try:
+            require_capability(entry, "instance_routes")
+        except FrontDoorError as exc:
+            _fail(remote_name, str(exc), as_json, source_ref=source_ref)
 
     attempt = None
     instance = None

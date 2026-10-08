@@ -863,6 +863,184 @@ def _origin_certificate(entry: dict, validated: dict, runtime: dict, state_entry
     return cert_path, key_path, {"id": issued.get("id"), "hostnames": runtime["certificate_hostnames"]}
 
 
+class _CaddyHostEdge:
+    """Host edge on a Caddy front door: the historical path, call for call.
+
+    Every method delegates to the pre-existing helper with the same arguments in
+    the same order, so a Caddy remote receives byte-identical files and commands.
+    """
+
+    mode = "caddy"
+
+    def __init__(self, entry: dict):
+        self.entry = entry
+
+    def preflight(self, validated: dict, name: str) -> None:
+        return None
+
+    def read_previous(self, name: str) -> str | None:
+        return _read_remote_optional(self.entry, f"/etc/caddy/conf.d/{name}.caddy")
+
+    def certificate(self, proxied: bool, validated: dict, runtime: dict,
+                    state_entry: dict, client, home: str, name: str):
+        if proxied:
+            return _origin_certificate(self.entry, validated, runtime, state_entry, client, home)
+        return None, None, None
+
+    def render(self, validated: dict, port: int, cert_path, key_path,
+               secret_values: dict) -> str:
+        basic_hash = None
+        if validated.get("basic_auth"):
+            password_secret = validated["basic_auth"]["password_secret"]
+            basic_hash = _remote_basic_auth_hash(self.entry, secret_values[password_secret])
+        return hosting.caddyfile(validated, port, cert_path, key_path, basic_hash)
+
+    def configure(self, name: str, content: str, previous: str | None, *,
+                  log_path: str | None = None) -> dict:
+        return _configure_host_caddy(self.entry, name, content, previous, log_path=log_path)
+
+    def after_dns(self, validated: dict, port: int, secret_values: dict, cert_path,
+                  certificate, name: str, *, log_path: str | None = None):
+        return certificate
+
+    def restore(self, name: str, previous: str | None, *, log_path: str | None = None) -> dict:
+        return _restore_host_caddy(self.entry, name, previous, log_path=log_path)
+
+
+class _NginxHostEdge:
+    """Host edge on a host-incumbent nginx (docs/remote-hosting.md, nginx front door)."""
+
+    mode = "nginx"
+
+    def __init__(self, entry: dict):
+        from sandbox.hosting.front_door import nginx as nginx_edge
+        self.entry = entry
+        self.nginx = nginx_edge
+        self.features: dict | None = None
+
+    @staticmethod
+    def route_name(name: str) -> str:
+        return name.removeprefix("sandbox-")
+
+    def preflight(self, validated: dict, name: str) -> None:
+        facts = self.nginx.preflight(
+            self.entry, declared=[route["hostname"] for route in validated["routes"]],
+            own_file=self.nginx.route_file(self.route_name(name)))
+        self.features = self.nginx.features(facts)
+
+    def read_previous(self, name: str) -> str | None:
+        return self.nginx.read_route(self.entry, self.route_name(name))
+
+    def certificate(self, proxied: bool, validated: dict, runtime: dict,
+                    state_entry: dict, client, home: str, name: str):
+        hostnames = list(runtime["certificate_hostnames"])
+        route = self.route_name(name)
+        if proxied:
+            return self.nginx.ensure_origin_certificate(self.entry, route, hostnames, client)
+        if self.nginx.public_certificate_present(self.entry, route, hostnames):
+            cert_path, key_path = self.nginx.public_paths(route)
+            return cert_path, key_path, {"id": None, "hostnames": sorted(hostnames),
+                                         "issuer": "public"}
+        # DNS-only and not issued yet: serve the ACME challenge first, issue
+        # after the DNS step points the hostname here (after_dns).
+        return None, None, None
+
+    def render(self, validated: dict, port: int, cert_path, key_path,
+               secret_values: dict) -> str:
+        if self.features is None:
+            self.preflight(validated, f"sandbox-host-{validated['project']}-{validated['environment']}")
+        password = None
+        if validated.get("basic_auth"):
+            password = secret_values[validated["basic_auth"]["password_secret"]]
+        name = self.route_name(
+            f"sandbox-host-{validated['project']}-{validated['environment']}")
+        return self.nginx.render_host_conf(
+            validated, port, name=name, cert_path=cert_path, key_path=key_path,
+            basic_auth_password=password, ipv6=bool(self.entry.get("origin_ipv6")),
+            **(self.features or {}))
+
+    def _log(self, log_path: str | None, output: str) -> None:
+        if not log_path or not output:
+            return
+        lines = [line for line in output.splitlines() if line.startswith("[Sandbox] nginx ")]
+        if lines:
+            remote.ssh_run(self.entry, f"cat >> {shlex.quote(log_path)}", timeout=30,
+                           input_data="\n".join(lines) + "\n")
+
+    def configure(self, name: str, content: str, previous: str | None, *,
+                  log_path: str | None = None) -> dict:
+        return self.nginx.apply_route(
+            self.entry, self.route_name(name), content,
+            log=lambda output: self._log(log_path, output))
+
+    def after_dns(self, validated: dict, port: int, secret_values: dict, cert_path,
+                  certificate, name: str, *, log_path: str | None = None):
+        if cert_path is not None:
+            return certificate
+        hostnames = [route["hostname"] for route in validated["routes"]]
+        cert_path, key_path, certificate = self.nginx.ensure_public_certificate(
+            self.entry, self.route_name(name), hostnames)
+        content = self.render(validated, port, cert_path, key_path, secret_values)
+        self.configure(name, content, None, log_path=log_path)
+        return certificate
+
+    def restore(self, name: str, previous: str | None, *, log_path: str | None = None) -> dict:
+        try:
+            return self.nginx.restore_route(self.entry, self.route_name(name), previous)
+        except Exception as exc:
+            raise hosting.HostingError(f"rollback_incomplete: nginx restore failed: {exc}") from exc
+
+
+def _host_edge_preflight(validated: dict, entry: dict) -> None:
+    """Refuse an nginx-fronted apply before any remote change (Caddy: no call)."""
+    from sandbox.hosting.front_door import front_door_mode
+    if front_door_mode(entry) == "caddy":
+        return
+    name = f"sandbox-host-{validated['project']}-{validated['environment']}"
+    _host_edge(entry).preflight(validated, name)
+
+
+def _add_front_door_plan(plan: dict, validated: dict, entry: dict) -> None:
+    """Add the nginx front-door view to a read-only plan; Caddy plans are unchanged."""
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode
+    from sandbox.hosting.front_door import nginx as nginx_edge
+    try:
+        mode = front_door_mode(entry)
+    except FrontDoorError as exc:
+        plan["front_door"] = {"mode": None, "error": str(exc)}
+        return
+    if mode == "caddy":
+        return
+    name = f"host-{validated['project']}-{validated['environment']}"
+    proxied = bool(validated["cloudflare"]["proxied"])
+    runtime = plan.get("runtime") or {}
+    port = runtime.get("loopback_port") or 18000
+    view = {"mode": mode, "route_file": nginx_edge.route_file(name),
+            "certificate": "cloudflare-origin-ca" if proxied else "public-certbot",
+            "nginx_conf": nginx_edge.render_host_conf(
+                validated, port, name=name,
+                cert_path=nginx_edge.origin_paths(name)[0] if proxied else nginx_edge.public_paths(name)[0],
+                key_path=nginx_edge.origin_paths(name)[1] if proxied else nginx_edge.public_paths(name)[1],
+                redact_basic_auth=True, ipv6=bool(entry.get("origin_ipv6")))}
+    try:
+        facts = nginx_edge.preflight(
+            entry, declared=[route["hostname"] for route in validated["routes"]],
+            own_file=nginx_edge.route_file(name))
+        view["preflight"] = {"ok": True, "nginx_version": facts.get("version")}
+    except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        view["preflight"] = {"ok": False, "error": remote.redact_text(str(exc))[:800]}
+    plan["front_door"] = view
+    if isinstance(plan.get("runtime"), dict):
+        plan["runtime"].pop("caddyfile", None)
+
+
+def _host_edge(entry: dict):
+    """Select the host edge adapter from the remote's registered front door."""
+    from sandbox.hosting.front_door import HOST_ROUTES, require_capability
+    mode = require_capability(entry, HOST_ROUTES)
+    return _NginxHostEdge(entry) if mode == "nginx" else _CaddyHostEdge(entry)
+
+
 def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
                    timeout: int = 900, *, progress=None,
                    log_path: str | None = None,
@@ -2970,8 +3148,9 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
         raise RuntimeError("edge continuation intent is unavailable")
     client = cloudflare.Client()
     caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
-    previous_caddy = _read_remote_optional(
-        entry, f"/etc/caddy/conf.d/{caddy_name}.caddy")
+    edge = _host_edge(entry)
+    edge.preflight(validated, caddy_name)
+    previous_caddy = edge.read_previous(caddy_name)
     changes: list[dict] = []
 
     def rollback() -> None:
@@ -2983,9 +3162,9 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             except Exception as exc:
                 failures.append(f"DNS restore: {exc}")
         try:
-            _restore_host_caddy(entry, caddy_name, previous_caddy, log_path=apply_log)
+            edge.restore(caddy_name, previous_caddy, log_path=apply_log)
         except Exception as exc:
-            failures.append(f"Caddy restore: {exc}")
+            failures.append(f"{'Caddy' if edge.mode == 'caddy' else 'nginx'} restore: {exc}")
         if failures:
             raise hosting.HostingError("; ".join(failures))
 
@@ -2996,16 +3175,10 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
         cert_path = key_path = certificate = None
         runtime = {"loopback_port": port, "records": edge_intent["records"],
                    "certificate_hostnames": edge_intent["certificate_hostnames"]}
-        if proxied:
-            cert_path, key_path, certificate = _origin_certificate(
-                entry, validated, runtime, recorded, client, home)
-        basic_hash = None
-        if validated.get("basic_auth"):
-            password_secret = validated["basic_auth"]["password_secret"]
-            basic_hash = _remote_basic_auth_hash(entry, secret_values[password_secret])
-        content = hosting.caddyfile(validated, port, cert_path, key_path, basic_hash)
-        _configure_host_caddy(
-            entry, caddy_name, content, previous_caddy, log_path=apply_log)
+        cert_path, key_path, certificate = edge.certificate(
+            proxied, validated, runtime, recorded, client, home, caddy_name)
+        content = edge.render(validated, port, cert_path, key_path, secret_values)
+        edge.configure(caddy_name, content, previous_caddy, log_path=apply_log)
         zones: dict[str, dict] = {}
         for wanted in edge_intent["records"]:
             hostname = wanted["hostname"]
@@ -3023,6 +3196,9 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                 zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous,
                             "created_id": created.get("id")})
+        certificate = edge.after_dns(
+            validated, port, secret_values, cert_path, certificate, caddy_name,
+            log_path=apply_log)
         credentials = None
         if validated.get("basic_auth"):
             auth = validated["basic_auth"]
@@ -3036,6 +3212,8 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             "certificate": certificate, "records": changes,
             "caddy_name": caddy_name, "edge": {"state": "ready"},
         }
+        if edge.mode != "caddy":
+            result["record"]["front_door"] = edge.mode
 
     hosting.apply_with_rollback(apply, rollback)
     return result
@@ -3629,8 +3807,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     safe = safe.replace(secret, "[REDACTED]")
             progress(safe)
     caddy_name = f"sandbox-host-{validated['project']}-{validated['environment']}"
-    caddy_path = f"/etc/caddy/conf.d/{caddy_name}.caddy"
-    previous_caddy = _read_remote_optional(entry, caddy_path)
+    edge = _host_edge(entry)
+    edge.preflight(validated, caddy_name)
+    previous_caddy = edge.read_previous(caddy_name)
     changes: list[dict] = []
     ssl_previous: dict[str, str | None] = {}
     edge_cache_receipt = None
@@ -3655,11 +3834,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             except Exception as exc:
                 failures.append(f"SSL mode restore for {zone_id}: {exc}")
         try:
-            _restore_host_caddy(
-                entry, caddy_name, previous_caddy, log_path=apply_log,
-            )
+            edge.restore(caddy_name, previous_caddy, log_path=apply_log)
         except Exception as exc:
-            failures.append(f"Caddy restore: {exc}")
+            failures.append(f"{'Caddy' if edge.mode == 'caddy' else 'nginx'} restore: {exc}")
         if failures:
             raise hosting.HostingError("; ".join(failures))
 
@@ -3775,23 +3952,13 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         attempt.checkpoint('runtime', 'runtime_apply', state='observed')
         attempt.checkpoint('edge', 'edge_apply')
         proxied = validated["cloudflare"]["proxied"]
-        cert_path = key_path = None
-        certificate = None
-        if proxied:
-            cert_path, key_path, certificate = _origin_certificate(
-                entry, validated, runtime, previous_entry, client, home,
-            )
-        basic_hash = None
-        if validated.get("basic_auth"):
-            password_secret = validated["basic_auth"]["password_secret"]
-            basic_hash = _remote_basic_auth_hash(entry, secret_values[password_secret])
-        runtime["caddyfile"] = hosting.caddyfile(
-            validated, runtime["loopback_port"], cert_path, key_path, basic_hash,
-        )
-        _configure_host_caddy(
-            entry, caddy_name, runtime["caddyfile"], previous_caddy,
-            log_path=apply_log,
-        )
+        cert_path, key_path, certificate = edge.certificate(
+            proxied, validated, runtime, previous_entry, client, home, caddy_name)
+        rendered = edge.render(
+            validated, runtime["loopback_port"], cert_path, key_path, secret_values)
+        if edge.mode == "caddy":
+            runtime["caddyfile"] = rendered
+        edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
         zones: dict[str, dict] = {}
         for wanted in runtime["records"]:
             hostname = wanted["hostname"]
@@ -3825,6 +3992,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             previous = next((record for record in all_records if record.get("type") == kind), None)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
+        certificate = edge.after_dns(
+            validated, runtime["loopback_port"], secret_values, cert_path, certificate,
+            caddy_name, log_path=apply_log)
         basic_credentials = None
         if validated.get("basic_auth"):
             auth = validated["basic_auth"]
@@ -3900,6 +4070,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "caddy_name": caddy_name,
             "edge": {"state": "ready"},
         })
+        if edge.mode != "caddy":
+            state["hosts"][key]["front_door"] = edge.mode
         if edge_cache_receipt is not None:
             state["hosts"][key]["edge_cache_purge"] = edge_cache_receipt
         durable_save(state)
@@ -6384,6 +6556,7 @@ def cmd_host(cfg, args) -> None:
         }
         plan["cloudflare"] = _cloudflare_drift(plan)
         plan["edge_cache_purge"] = (validated.get("cloudflare") or {}).get("cache_purge")
+        _add_front_door_plan(plan, validated, entry)
         _emit({"ok": True, **plan}, args.json)
         return
     progress = (lambda _message: None) if args.json else (
@@ -6408,6 +6581,7 @@ def cmd_host(cfg, args) -> None:
                     validated, current_entry, args.remote,
                     allow_zone_ssl_change=bool(getattr(
                         args, "allow_zone_ssl_change", False)))
+                _host_edge_preflight(validated, current_entry)
                 # Apply and recovery share one owner. Reload after acquisition so
                 # the generation/receipt view cannot be stale at the first effect.
                 state = hosting.load_host_state()

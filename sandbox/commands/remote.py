@@ -258,6 +258,7 @@ def cmd_remote(cfg, args) -> None:
         "service": _cmd_service,
         "plugins": _cmd_plugins,
         "ssh": _cmd_ssh,
+        "edge": _cmd_edge,
     }
     dispatch[action](args, as_json)
 
@@ -355,6 +356,8 @@ def _cmd_domains(args, as_json: bool) -> None:
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
         data = {"ok": False, "code": "remote_domain_inventory_failed",
                 "message": sr.redact_ssh_connection(str(exc), entry)}
+    if data.get("ok"):
+        _add_front_door_domains(data, entry)
     if as_json:
         print(json.dumps(data, sort_keys=True))
         if not data.get("ok"): raise SystemExit(1)
@@ -364,6 +367,36 @@ def _cmd_domains(args, as_json: bool) -> None:
     for item in data["domains"]:
         owners = ", ".join(item["owners"]) or "unattributed"
         print(f"{item['domain']}  ({owners})")
+
+
+def _add_front_door_domains(data: dict, entry: dict) -> None:
+    """Add Sandbox nginx routes to the inventory; Caddy remotes are unchanged."""
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode
+    from sandbox.hosting.front_door import nginx as nginx_edge
+    try:
+        if front_door_mode(entry) == "caddy":
+            return
+        report = nginx_edge.status(entry)
+    except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        data["front_door"] = {"mode": entry.get("front_door"), "error":
+                              sr.redact_ssh_connection(str(exc), entry)[:300]}
+        return
+    rows = {item["domain"]: item for item in data["domains"]}
+    for route in report["routes"]:
+        owner = route["file"].rsplit("/", 1)[-1].removesuffix(".conf")
+        status = {True: "loaded", False: "not_loaded"}.get(route.get("loaded"), "unknown")
+        for host in route.get("hostnames") or []:
+            host = host.removeprefix("*.")
+            item = rows.setdefault(host, {"domain": host, "owners": [], "sources": [], "statuses": []})
+            for field, value in (("owners", owner), ("sources", "nginx_route"), ("statuses", status)):
+                if value not in item[field]:
+                    item[field] = sorted([*item[field], value])
+    data["domains"] = [rows[key] for key in sorted(rows)]
+    data["count"] = len(data["domains"])
+    data["front_door"] = {"mode": "nginx", "config_valid": report["config_valid"],
+                          "unloaded_routes": report["unloaded_routes"],
+                          "conflicts": report["conflicts"],
+                          "certificate_problems": report["certificate_problems"]}
 
 
 def _cmd_docker_pool(args, as_json: bool) -> None:
@@ -605,13 +638,80 @@ def _cmd_add(args, as_json: bool) -> None:
         die(str(e))
     if port:
         ssh_target = f"{ssh_target}:{port}"
-    entry = sr.put_remote(name, ssh=ssh_target, provisioned=False)
+    requested = _arg_str(args, "front_door")
+    existing = sr.get_remote(name)
+    front_door = _checked_front_door(name, existing, requested, ssh_target=ssh_target)
+    fields = {"ssh": ssh_target, "provisioned": False}
+    if front_door is not None:
+        fields["front_door"] = front_door
+    entry = sr.put_remote(name, **fields)
     result = {"ok": True, "name": name, "ssh_configured": bool(entry.get("ssh")), "error": None}
+    if entry.get("front_door"):
+        result["front_door"] = entry["front_door"]
     if as_json:
         print(json.dumps(result))
     else:
         ok(f"registered remote '{name}'")
         print("  next: ./sb remote provision " + name)
+
+
+def _checked_front_door(name: str, entry: dict | None, requested: str | None, *,
+                        ssh_target: str | None = None) -> str | None:
+    """Validate a requested front-door mode; refuse switching a remote that hosts.
+
+    Returns the mode to record, or None when nothing should be written (no
+    request, or the request equals the recorded mode). Caddy stays implicit.
+    """
+    from sandbox.hosting.front_door import (
+        DEFAULT_FRONT_DOOR, FrontDoorError, front_door_mode, validate_mode)
+    if requested is None:
+        return None
+    try:
+        mode = validate_mode(requested)
+        current = front_door_mode(entry) if entry else None
+    except FrontDoorError as exc:
+        die(str(exc))
+    if current == mode:
+        return None
+    if entry is None and mode == DEFAULT_FRONT_DOOR:
+        return None
+    if entry is not None:
+        hosted = sorted(key for key in (hosting_state_keys() or [])
+                        if key.startswith(name + "/"))
+        if hosted:
+            die("front_door_switch_refused: remote '" + name + "' already hosts "
+                + ", ".join(hosted[:5]) + "; choose the front door on a remote that hosts nothing")
+        if entry.get("provisioned") and entry.get("control_transport") == "https":
+            die("front_door_switch_refused: remote '" + name + "' already serves its HTTPS "
+                "control route through " + str(current) + "; choose the front door before provisioning")
+    target = (entry or {}).get("ssh") or ssh_target
+    if target:
+        from sandbox.hosting.front_door import nginx as nginx_edge
+        try:
+            facts = nginx_edge.probe({**(entry or {}), "ssh": target})
+        except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            if entry is None:
+                # A first registration may be offline; provision re-checks
+                # before it changes anything.
+                return mode
+            die("front_door_probe_failed: could not inspect the remote before recording its "
+                f"front door: {sr.redact_ssh_connection(str(exc), entry)}")
+        caddy = facts.get("sandbox_caddy") or {}
+        caddy_listening = any("caddy" in (row.get("processes") or [])
+                              for row in facts.get("listeners") or [])
+        if mode == "nginx" and (caddy.get("active") or caddy_listening or facts.get("caddy_routes")):
+            die("front_door_caddy_present: Sandbox's Caddy is installed or listening on '"
+                + name + "'; remove Sandbox's Caddy routes and service first (Sandbox never "
+                "removes it implicitly)")
+        if mode == "caddy" and facts.get("nginx_routes"):
+            die("front_door_switch_refused: '" + name + "' still has Sandbox nginx routes; "
+                "remove them with `./sb remote edge " + name + " --remove-route <route> --confirm`")
+    return mode
+
+
+def hosting_state_keys() -> list[str]:
+    import sandbox.core._hosting as hosting
+    return list((hosting.load_host_state().get("hosts") or {}).keys())
 
 
 def _provider_label(entry: dict) -> str:
@@ -947,6 +1047,94 @@ def _control_host(args, entry: dict, ssh_target: str, as_json: bool) -> str:
     return entered or default
 
 
+def _front_door_provision_preflight(name: str, entry: dict, control_transport: str,
+                                    public_host: str | None) -> None:
+    """Refuse before any change when the front door cannot take this provision."""
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode
+    from sandbox.hosting.front_door import nginx as nginx_edge
+    try:
+        mode = front_door_mode(entry)
+    except FrontDoorError as exc:
+        die(str(exc))
+    if mode == "nginx":
+        declared = [public_host] if control_transport == "https" and public_host else []
+        own = nginx_edge.route_file(f"mcp-{public_host}") if declared else None
+        try:
+            nginx_edge.preflight(entry, declared=declared, own_file=own)
+        except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            die(f"provisioning '{name}' refused before any change: "
+                f"{sr.redact_ssh_connection(str(exc), entry)}")
+        return
+    if control_transport != "https":
+        return
+    # Caddy is about to be installed: a foreign web server on 80/443 must
+    # block that before anything changes. Sandbox's own Caddy is never foreign.
+    try:
+        facts = nginx_edge.probe(entry)
+    except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError):
+        return
+    foreign = nginx_edge.foreign_listeners(facts)
+    if foreign:
+        owners = sorted({proc for row in foreign for proc in row.get("processes") or []})
+        ports = sorted({row.get("port") for row in foreign})
+        die(f"front_door_foreign_listener: {', '.join(owners)} already listens on port(s) "
+            f"{', '.join(ports)} of '{name}'; Sandbox will not install Caddy beside it. "
+            f"If that web server should stay the front door, re-run with `--front-door nginx`.")
+
+
+def _cmd_edge(args, as_json: bool) -> None:
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode, manifest_summary
+    from sandbox.hosting.front_door import nginx as nginx_edge
+    name = _require_name(args)
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    try:
+        mode = front_door_mode(entry)
+    except FrontDoorError as exc:
+        die(str(exc))
+    route = _arg_str(args, "remove_route")
+    if mode != "nginx":
+        if route:
+            die(f"remote '{name}' uses the {mode} front door; --remove-route applies to nginx remotes")
+        data = {"ok": True, "name": name, "mode": mode, "front_doors": manifest_summary()}
+        print(json.dumps(data, sort_keys=True) if as_json else f"{name}: front door {mode}")
+        return
+    if route:
+        if not _arg_true(args, "confirm"):
+            die("removing a Sandbox nginx route is protected; re-run with --confirm")
+        try:
+            data = {"ok": True, "name": name, "mode": mode,
+                    **nginx_edge.remove_route_and_certificates(entry, route)}
+        except (FrontDoorError, ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            die(sr.redact_ssh_connection(str(exc), entry))
+        print(json.dumps(data, sort_keys=True) if as_json else
+              f"removed {data['file']} from '{name}'")
+        return
+    try:
+        report = nginx_edge.status(entry)
+    except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        die(sr.redact_ssh_connection(str(exc), entry))
+    healthy = (report["nginx_active"] and report["config_valid"] and not report["unloaded_routes"]
+               and not report["conflicts"] and not report["certificate_problems"])
+    data = {"ok": True, "name": name, "healthy": healthy, **report}
+    if as_json:
+        print(json.dumps(data, sort_keys=True))
+        return
+    print(f"{name}: front door nginx {report['nginx_version'] or '?'} "
+          f"({'active' if report['nginx_active'] else 'INACTIVE'}, "
+          f"config {'valid' if report['config_valid'] else 'INVALID'})")
+    for row in report["routes"]:
+        loaded = {True: "loaded", False: "NOT LOADED", None: "unknown"}[row.get("loaded")]
+        print(f"  {row['file']}: {loaded}; hosts {', '.join(row.get('hostnames') or [])}")
+        for cert in row.get("certificates") or []:
+            print(f"    cert {cert.get('issuer', '?')}: expires {cert.get('not_after') or 'missing'}")
+    for item in report["conflicts"]:
+        print(f"  conflict: {item['hostname']} also served by {item['file']} ({item['owner']})")
+    for problem in report["certificate_problems"]:
+        print(f"  problem: {problem}")
+
+
 def _cmd_provision(args, as_json: bool) -> None:
     name = _require_name(args)
     entry = sr.get_remote(name)
@@ -960,6 +1148,12 @@ def _cmd_provision(args, as_json: bool) -> None:
     public_host = None
     if control_transport == "https":
         public_host = _control_host(args, entry, ssh_target, as_json)
+    if not _arg_true(args, "confirm") and _arg_str(args, "front_door"):
+        from sandbox.hosting.front_door import FrontDoorError, validate_mode
+        try:
+            validate_mode(_arg_str(args, "front_door"))
+        except FrontDoorError as exc:
+            die(str(exc))
     if not _arg_true(args, "confirm"):
         prior = _provision_log_summary(_latest_provision_log(name))
         result = {
@@ -974,6 +1168,11 @@ def _cmd_provision(args, as_json: bool) -> None:
         else:
             print(f"'{name}' provisioning is planned; re-run with --confirm to install and start its MCP service")
         return
+    # Front-door selection and preflight refuse before any remote change.
+    front_door = _checked_front_door(name, entry, _arg_str(args, "front_door"))
+    if front_door is not None:
+        entry = sr.put_remote(name, front_door=front_door)
+    _front_door_provision_preflight(name, entry, control_transport, public_host)
     try:
         upload_timeout = _runtime_source_upload_timeout_arg(args)
     except ValueError as exc:

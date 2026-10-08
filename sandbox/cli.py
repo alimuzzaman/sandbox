@@ -815,7 +815,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
             "  ./sb remote service stop NAME --confirm [--json]"
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
@@ -824,7 +824,8 @@ Per-project (each plugin carries its own sandbox.config.json):
              "the fixed /24 daemon address pools; domains: list configured "
              "instance and hosted-route domains; remove: forget a remote "
              "locally (never touches the VPS itself); ssh: explicit operator-only "
-             "direct SSH escape hatch")
+             "direct SSH escape hatch; edge: report the nginx front door (routes "
+             "loaded, conflicts, certificates) or remove one Sandbox route")
     remote_p.add_argument("name", nargs="?", default=None,
         help="remote name (required for every action except 'list')")
     remote_p.add_argument("ssh_url", nargs="?", default=None,
@@ -834,6 +835,14 @@ Per-project (each plugin carries its own sandbox.config.json):
              "interactive use, HTTPS in --json/non-interactive mode)")
     remote_p.add_argument("--control-host", default=None,
         help="public hostname for HTTPS control, e.g. sandbox-control.example.com")
+    remote_p.add_argument("--front-door", dest="front_door", choices=["caddy", "nginx"], default=None,
+        help="for add/provision: which web server owns public 80/443. caddy (default): "
+             "Sandbox installs Caddy; nginx: a host-incumbent nginx stays the front door "
+             "and Sandbox manages only /etc/nginx/conf.d/sandbox-*.conf. Refused on a "
+             "remote that already hosts routes")
+    remote_p.add_argument("--remove-route", dest="remove_route", default=None,
+        help="for `remote edge`: remove one Sandbox nginx route (e.g. host-myproj-production) "
+             "and its certificates; requires --confirm")
     remote_p.add_argument("--ipv4", default=None, help="public IPv4 address for hosted DNS records")
     remote_p.add_argument("--ipv6", default=None, help="public IPv6 address for hosted DNS records")
     remote_p.add_argument("--yes", action="store_true",

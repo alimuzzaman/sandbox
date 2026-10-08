@@ -807,6 +807,78 @@ basic_auth:
       methods: [GET, POST]
 ```
 
+## nginx front door
+
+By default Sandbox installs Caddy on a remote and Caddy owns public 80/443. A server
+that already runs nginx for something else (a control panel such as xCloud, or other
+sites) cannot also run that Caddy. For such a server, select the opt-in `nginx` front
+door when you register it:
+
+```sh
+./sb remote add xcloud-london alim@203.0.113.10 --front-door nginx
+./sb remote provision xcloud-london --control https --control-host mcp.example.com --confirm
+```
+
+The mode is recorded once in the remote registration (`front_door: nginx`).
+Unrecorded means `caddy`, so existing remotes are unchanged. `sb remote add --front-door`
+refuses to switch a remote that already holds `sb host` entries or a provisioned HTTPS
+control route (`front_door_switch_refused`). It also refuses `nginx` where Sandbox's own
+Caddy is active or has routes (`front_door_caddy_present`). Provisioning a `caddy` remote
+with HTTPS control now names a foreign listener on 80/443 and suggests `--front-door nginx`
+(`front_door_foreign_listener`) instead of failing later.
+
+**Ownership.** Sandbox writes only `/etc/nginx/conf.d/sandbox-<name>.conf` (root, mode
+0600) plus its certificates under `/etc/sandbox-edge/certs/<name>/` and certbot lineages
+named `sandbox-<name>`. It never edits `nginx.conf`, never touches a panel's files and
+never declares `default_server`. Every Sandbox server block carries a `$host` guard that
+returns 444 for undeclared hosts, so a Sandbox file can never become the implicit default
+site. Each change takes the host-wide lock `/run/lock/sandbox-edge-nginx.lock`, installs
+the file, runs `nginx -t`, reloads, and curls the route marker
+`/.well-known/sandbox-edge-route` through 127.0.0.1. Any failure restores the previous
+file (or removes the new one) and reloads again.
+
+**Preflight.** Before anything changes, `sb host plan/apply` and provision probe the
+remote and refuse with `front_door_nginx_missing`, `front_door_nginx_inactive`,
+`front_door_include_missing` (nginx.conf does not include `conf.d/*.conf`),
+`front_door_nginx_invalid` (the existing config already fails `nginx -t`),
+`front_door_caddy_present`, or `front_door_hostname_conflict`. A conflict is any
+`server_name` in another file (exact, wildcard either way, `.example.com`, or regex) that
+covers a declared hostname. The refusal names the file and whether a panel or another
+Sandbox route owns it.
+
+**TLS.** The same manifest rules apply. `proxied: true` with `tls: origin-ca` issues a
+Cloudflare Origin CA certificate. `proxied: false` with `tls: acme` first installs a
+port-80-only route serving `/var/lib/sandbox-edge/acme`, then issues a certificate with
+`certbot --webroot` (certbot is installed if missing). A deploy hook
+(`/etc/letsencrypt/renewal-hooks/deploy/sandbox-edge-nginx.sh`) runs `nginx -t` and
+reloads on renewal, and `certbot.timer` is enabled. Wildcards still require `proxied`.
+
+**Basic Auth.** The incumbent nginx workers often run as a panel user. An htpasswd file
+would have to be readable by that user, so Sandbox does not write one. The credential
+check is instead a `map $http_authorization` inside the root-only 0600 route file, which
+nginx's root master reads at load time. Bypass IPs use the TCP peer (`$realip_remote_addr`
+when the realip module is present) and accept `CF-Connecting-IP` only from Cloudflare
+ranges. Bypass paths and routes match `METHOD:path` exactly like the Caddy renderer.
+`Authorization` is stripped before the app only on requests that were authenticated.
+Robots deny, redirect aliases (308 preserving the path), HTTP to HTTPS, WebSocket upgrade,
+unbuffered streaming, unlimited body size and 3600s timeouts match the Caddy route.
+
+**Inspect and remove.**
+
+```sh
+./sb remote edge xcloud-london            # routes, loaded state, certificates, conflicts
+./sb remote edge xcloud-london --json
+./sb remote edge xcloud-london --remove-route host-<project>-<env> --confirm
+```
+
+`sb remote doctor` adds front-door rows (nginx active, config valid, Sandbox routes loaded,
+certificates expired, or with fewer than 25 days left, which means renewal at 30 days did not happen), and `sb remote domains`
+lists nginx routes.
+
+**Limitations.** The nginx front door serves `sb host` routes and the HTTPS MCP control
+route only. `sb deploy --expose`, instance aliases and `sb preview` refuse before any side
+effect with `front_door_capability_unavailable`. Use a Caddy remote for those.
+
 ## Keeping a public route out of search results
 
 An environment may declare `robots: deny` beside `cloudflare:`:

@@ -1052,6 +1052,7 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
             "hint": f"{probe_error}; retry `./sb remote service status <name>` after SSH/systemd responds",
         })
         return checks
+    checks.extend(front_door_doctor_checks(remote))
     checks.extend([
         {"label": "MCP service ownership", "ok": service.get("ownership") == "proven",
          "hint": "review remote service status and run its confirmed migration if ownership is ambiguous"},
@@ -1063,6 +1064,34 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
          "hint": "inspect the selected service credential file and authenticated /mcp route"},
     ])
     return checks
+
+
+def front_door_doctor_checks(remote: dict) -> list[dict]:
+    """nginx front-door readiness; a Caddy remote contributes no rows."""
+    from sandbox.hosting.front_door import FrontDoorError, front_door_mode
+    try:
+        if front_door_mode(remote) == "caddy":
+            return []
+    except FrontDoorError as exc:
+        return [{"label": "front door mode", "ok": False, "hint": str(exc)}]
+    from sandbox.hosting.front_door import nginx as nginx_edge
+    try:
+        report = nginx_edge.status(remote)
+    except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return [{"label": "nginx front door", "ok": False,
+                 "hint": f"probe failed: {redact_ssh_connection(str(exc), remote)[:300]}"}]
+    return [
+        {"label": "nginx front door active", "ok": bool(report["nginx_active"]),
+         "hint": "the host nginx is not active; start it with the panel or systemctl"},
+        {"label": "nginx configuration valid", "ok": bool(report["config_valid"]),
+         "hint": "`nginx -t` fails; run `./sb remote edge <name>` to see invalid Sandbox routes"},
+        {"label": "Sandbox nginx routes loaded", "ok": not report["unloaded_routes"],
+         "hint": "re-apply the owning host: " + ", ".join(report["unloaded_routes"][:5])},
+        {"label": "no panel hostname conflicts", "ok": not report["conflicts"],
+         "hint": "a panel site now claims a Sandbox hostname; see `./sb remote edge <name>`"},
+        {"label": "Sandbox certificates healthy", "ok": not report["certificate_problems"],
+         "hint": "; ".join(report["certificate_problems"][:3])},
+    ]
 
 
 def deploy_target_slug(project_root) -> str:
@@ -1555,8 +1584,14 @@ def _caddy_proxy_command(
     )
 
 
+def _require_front_door(remote: dict, capability: str) -> str:
+    from sandbox.hosting.front_door import require_capability
+    return require_capability(remote, capability)
+
+
 def configure_instance_https_route(remote: dict, domain: str, port: int) -> None:
     """Route a preview hostname through Caddy unless permanent hosting owns it."""
+    _require_front_door(remote, "instance_routes")
     domain = _validate_hostname(domain, "remote instance domain")
     cmd = _caddy_proxy_command(
         domain,
@@ -1574,6 +1609,7 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
 
 def remove_instance_https_route(remote: dict, domain: str) -> None:
     """Remove only Sandbox's Caddy fragment for one public instance route."""
+    _require_front_door(remote, "instance_routes")
     domain = _validate_hostname(domain, "remote instance domain")
     path = f"/etc/caddy/conf.d/sandbox-instance-{domain}.caddy"
     cmd = (
@@ -1603,6 +1639,7 @@ def instance_route_hosts(remote: dict, port: int) -> list[str]:
     permanent `sb host` routes are never in scope."""
     if not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError("invalid remote instance port")
+    _require_front_door(remote, "instance_routes")
     cmd = (
         "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
         f"$SUDO grep -l -F {shlex.quote(f'reverse_proxy 127.0.0.1:{int(port)}')} "
@@ -4583,6 +4620,10 @@ def configure_https_proxy(remote: dict, public_host: str, port: int) -> None:
     virtual host rather than raw public ports so the VPS can also host Next.js
     or other apps through their own Caddy site blocks."""
     public_host = _validate_hostname(public_host, "public HTTPS control host")
+    if _require_front_door(remote, "control_route") == "nginx":
+        from sandbox.hosting.front_door import nginx as nginx_edge
+        nginx_edge.configure_control_route(remote, public_host, int(port))
+        return
     cmd = _caddy_proxy_command(public_host, port, "sandbox-mcp")
     res = ssh_run(remote, cmd, timeout=180)
     if res.returncode != 0:

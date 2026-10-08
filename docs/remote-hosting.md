@@ -766,6 +766,21 @@ entries label each logged phase and record UTC start/finish times plus the remot
 code. Older unlabelled entries are not upgraded into historical phase evidence. If the
 protected log is absent or unreadable, the command reports that condition directly.
 
+The apply controller runs where `sb` runs, often a laptop. On macOS, `host apply`
+holds a `caffeinate -i -s` assertion for the whole apply so idle sleep cannot freeze it
+between the remote phases and the deploy record. Lid-close sleep on battery cannot be
+prevented. For that case, the read-only post-Compose readiness poll notices a wall-clock
+jump the monotonic clock did not see and renews its budget, at most three times, instead
+of reporting a finished remote apply as failed. Keep the machine awake and on power
+during a deploy anyway: a controller frozen in an earlier phase still leaves the outcome
+uncertain.
+
+When the readiness poll still runs out, the runtime stays `unverified`, but the deploy
+receipt is refreshed from the last complete observation (images, config digests,
+topology, and the source revision only when it was observed exactly). That is the
+evidence `host recover` reconciles against, so a slow-to-healthy deploy can be
+recovered instead of refused as `partial_evidence`.
+
 For a one-command, read-only failure explanation use
 `./sb host diagnose --remote NAME --json`. It combines the recorded deployed revision,
 manifest-declared services, profile-aware configured Compose services, running service

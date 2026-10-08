@@ -2473,6 +2473,96 @@ class TestHostingManifest(unittest.TestCase):
         initializer.assert_not_called()
         edge.assert_not_called()
 
+    def test_post_compose_observation_renews_budget_after_controller_suspend(self):
+        # A laptop controller that sleeps after Compose wakes with a dead
+        # network. The poll must not spend its whole budget on transport
+        # errors and report the finished apply as failed.
+        revision = "e" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        ready = _ready_observation(revision)
+        mono = [0.0]
+        wall = [1_000.0]
+        calls = [0]
+
+        def observe(*_args, **_kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                # Suspended for 40 minutes; monotonic time barely moves.
+                wall[0] += 2400
+                mono[0] += 1
+                raise RuntimeError("network unreachable")
+            if calls[0] < 4:
+                mono[0] += 2
+                wall[0] += 2
+                raise RuntimeError("network unreachable")
+            return ready
+
+        def sleep(seconds):
+            mono[0] += seconds
+            wall[0] += seconds
+
+        with patch.object(hosting_cmd, "_observe_host_runtime", side_effect=observe), \
+             patch.object(hosting_cmd.time, "monotonic", side_effect=lambda: mono[0]), \
+             patch.object(hosting_cmd.time, "time", side_effect=lambda: wall[0]), \
+             patch.object(hosting_cmd.time, "sleep", side_effect=sleep):
+            observation, _ = hosting_cmd._poll_post_compose_host_observation(
+                validated, {}, "/source", "/runtime", revision,
+                deadline_seconds=10, initial_backoff_seconds=1,
+                max_backoff_seconds=2,
+            )
+
+        self.assertIs(observation, ready)
+        self.assertEqual(calls[0], 4)
+
+    def test_post_compose_observation_suspend_renewals_are_bounded(self):
+        revision = "e" * 40
+        with self._write(_manifest_with_derived_revision()) as directory:
+            validated = hosting.validate_manifest(directory)
+        mono = [0.0]
+        wall = [1_000.0]
+
+        def observe(*_args, **_kwargs):
+            wall[0] += 600
+            mono[0] += 1
+            raise RuntimeError("network unreachable")
+
+        def sleep(seconds):
+            mono[0] += seconds
+            wall[0] += seconds
+
+        with patch.object(hosting_cmd, "_observe_host_runtime", side_effect=observe) as observed, \
+             patch.object(hosting_cmd.time, "monotonic", side_effect=lambda: mono[0]), \
+             patch.object(hosting_cmd.time, "time", side_effect=lambda: wall[0]), \
+             patch.object(hosting_cmd.time, "sleep", side_effect=sleep):
+            with self.assertRaises(hosting_cmd._HostRuntimeObservationNotReady):
+                hosting_cmd._poll_post_compose_host_observation(
+                    validated, {}, "/source", "/runtime", revision,
+                    deadline_seconds=3, initial_backoff_seconds=1,
+                    max_backoff_seconds=2,
+                )
+        self.assertLess(observed.call_count, 20)
+
+    def test_hold_controller_awake_stops_caffeinate_on_exit(self):
+        holder = MagicMock()
+        with patch.object(hosting_cmd.os, "uname",
+                          return_value=types.SimpleNamespace(sysname="Darwin")), \
+             patch.object(hosting_cmd.subprocess, "Popen", return_value=holder) as popen:
+            with self.assertRaises(RuntimeError):
+                with hosting_cmd._hold_controller_awake():
+                    raise RuntimeError("apply failed")
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[:4], ["caffeinate", "-i", "-s", "-w"])
+        holder.terminate.assert_called_once()
+
+    def test_hold_controller_awake_is_noop_off_macos(self):
+        with patch.object(hosting_cmd.os, "uname",
+                          return_value=types.SimpleNamespace(sysname="Linux")), \
+             patch.object(hosting_cmd.subprocess, "Popen") as popen:
+            with hosting_cmd._hold_controller_awake():
+                pass
+        popen.assert_not_called()
+
     def test_post_compose_observation_exception_can_recover_to_ready(self):
         revision = "e" * 40
         with self._write(_manifest_with_derived_revision()) as directory:
@@ -3202,6 +3292,26 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(record["runtime"]["state"], "unverified")
         self.assertEqual(record["runtime"]["observation"], partial["phases"])
         self.assertNotIn("recorded_revision", record)
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
+
+    def test_complete_observation_timeout_refreshes_receipt_for_recovery(self):
+        fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
+        observed = _ready_observation(fixture.commit)
+        observed["images"] = [{"name": "web", "digest": "sha256:" + "1" * 64}]
+        observed["config_digests"] = [{"name": "1", "digest": "sha256:" + "2" * 64}]
+        classified = hosting_cmd._classify_host_observation(fixture.validated, observed, fixture.commit)
+        fixture.patch.object(hosting_cmd, "_poll_post_compose_host_observation",
+            side_effect=hosting_cmd._HostRuntimeObservationNotReady("health deadline reached",
+                observation=observed, classified=classified))
+        with self.assertRaisesRegex(RuntimeError, "health deadline reached"):
+            fixture.apply()
+        record = fixture.repository.load()["hosts"][fixture.key]
+        evidence = record["hosting_operation"]["evidence"]
+        self.assertEqual(record["runtime"]["state"], "unverified")
+        self.assertNotIn("commit", record)
+        self.assertEqual(evidence["images"], observed["images"])
+        self.assertEqual(evidence["config_file_digests"], observed["config_digests"])
+        self.assertEqual(evidence["topology"], ["web"])
         self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
     def test_identical_staged_unverified_retry_never_reruns_compose_or_initializer(self):

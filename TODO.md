@@ -107,14 +107,22 @@ not close the external or human gates listed below.
   acceptance).
 
 - [ ] **Make target, transport, revision, and deployment truth actionable.**
-  Separate registered reachability from brokered SSH/MCP usability; expose a
-  bounded secret-safe host diagnostic/exec path; provide read-only hosted status
-  with applied revision, lifecycle, health, and rollback state; preserve a
-  durable deploy receipt after SSH/control loss; never exit 0 after a failed
-  apply or silent rollback; refuse wrong-target/foreign-instance inference.
-  Feedback: `b340f98a`, `834d2253`, `30a6c1d1`, `b8fcedf1`, `cc723c15`,
-  `1ef4334d`, `b41513e9`, `ac945dff`, `b4323966`, `71be9430`, `0b420c9b`,
-  `ccd9e5e2`, `7acb4245`, `e25a8491`, `4ad5d660`, `5e440951`, `f528a472`.
+  Audited 2026-10-08 against source and tests. Done locally: reachability uses
+  the same single-shot SSH probe as maintenance (`4c25877`); ensure refuses an
+  unreachable remote with a typed error (`d2af37c`); `host status`/`host
+  diagnose` report deployed revision and service health; pre-acceptance
+  timeouts fail closed with an unknown receipt (`fb89e89`, `563a62c`); failed
+  apply and incomplete rollback exit non-zero (`d2a05ab`); lifecycle never
+  infers a remote (`2a661da`); remote ensure returns the instance record
+  (`f2deed0`); apply reachability accepts HTTPS redirects (`a71a98c5`); remote
+  failures keep a bounded stderr tail (`1026dca`); reset has a remote deadline.
+  Remaining, needs a reachable remote: confirm an accepted deploy job is
+  queryable from the durable ledger (`b4323966`), and prove host rollback
+  under network-unreachable SSH (`5e440951`). Live replays of `b340f98a`,
+  `834d2253`, `71be9430` low-disk are also still unverified.
+  Closed: `30a6c1d1`, `b8fcedf1`, `cc723c15`, `1ef4334d`, `b41513e9`,
+  `ac945dff`, `0b420c9b`, `ccd9e5e2`, `7acb4245`, `e25a8491`, `4ad5d660`,
+  `f528a472`.
 
 - [ ] **Prevent unsafe target and credential disclosure.** Prove explicit local
   selectors cannot route to a configured remote or an unrelated project; ensure
@@ -309,11 +317,21 @@ and not-applicable records must not be reimplemented without fresh evidence.
   closed (shared 0-20 s wait bound in `sandbox/commands/jobs_runtime.py`,
   profile help, remote service help 788f542, `host logs --tail`). Bounding
   large job-list output was never a filed defect; reopen with a record.
-- [ ] **Host apply observability/build behavior:** add incremental progress,
-  bounded build/OOM/host-pressure classification, avoid stale-image or
-  multi-GB-context rebuilds when `build=false`, and make the timeout policy fit
-  real builds. IDs: `37d95e66`, `c158edba`, `6728d6f3`, `d354307a`, `a6223e14`,
-  `7ab76b8b`, `5978c11e4`.
+- [ ] **Host apply observability/build behavior:** code side done, live
+  acceptance remaining. Done: streamed phase-labelled progress, protected
+  `apply.log`, and output tails on timeout (00281d5; `37d95e66`, `a6223e14`);
+  source-revision check after recreate (9435a33; `c158edba`); per-manifest
+  `build_timeout_seconds` from 60 to 7200 s, used for builds and runtime start
+  (e44f3ca; `6728d6f3`, `d354307a`); `build=false` is a hard no-build mode
+  with a read-only image preflight that fails closed instead of building
+  missing images, and init runs use `--no-build --pull never` (f30bbb5;
+  `7ab76b8b`); durable jobs classify SIGKILL/137 as `process_killed` without
+  claiming OOM (8a541c2; `5978c11e4`). Remaining, all needing a reachable
+  remote or a design decision: a live retry of the `7ab76b8b` hosted-dev path
+  (record still `blocked`), a cold 30-35 min build under a raised timeout,
+  host/cgroup memory-pressure evidence to tell OOM from host kills, and
+  trimming large build contexts (for example `.pnpm-store`) when
+  `build=true`.
 - [ ] **Hermes dashboard/public/provider/repository lifecycle:** distinguish
   config from dashboard/gateway/public readiness; repair saved-session resume,
   obsolete cloudflared cleanup, Access-policy resolution, provider inspection,

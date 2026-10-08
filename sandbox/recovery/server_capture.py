@@ -386,6 +386,30 @@ class ServerCaptureService:
         return result(True, "retention", remote=remote, status="planned",
                       data=dict(data, requires_confirmation=True))
 
+    def _retire_candidate(self, remote: str | None, backup_id: str | None) -> tuple[str, dict]:
+        self._require_ids(remote, backup_id)
+        slot = slot_for(remote, backup_id)
+        candidate = self.transport.retire_plan(remote, slot)
+        reviewed = candidate.get("state")
+        if reviewed not in RETIRABLE:
+            raise refusal("server capture is not retirable", "not_retirable", state=reviewed)
+        return slot, candidate
+
+    def retire_plan(self, remote: str | None, backup_id: str | None) -> dict:
+        """Read-only preview of retiring one capture: the reviewed candidate a
+        confirmed retire would have to match (FR-034). Deletes nothing."""
+        action = "retention"
+        try:
+            _slot, candidate = self._retire_candidate(remote, backup_id)
+        except RecoveryError as exc:
+            return self._envelope_error(action, remote, exc)
+        except (OSError, TypeError, ValueError, KeyError):
+            return self._envelope_error(action, remote, RecoveryError(
+                "server capture retire plan failed", "server_capture_failed"))
+        return result(True, action, remote=remote, status="planned", data={
+            "backup_id": backup_id, "candidate": candidate, "retirable": True,
+            "requires_confirmation": True})
+
     def retire(self, remote: str | None, backup_id: str | None, *, confirm: bool = False) -> dict:
         """Retire one promoted, failed or incomplete capture (FR-034)."""
         action = "retention"
@@ -393,13 +417,8 @@ class ServerCaptureService:
             if not confirm or not backup_id:
                 raise RecoveryError("retire requires --confirm and --backup-id",
                                     "confirmation_required")
-            self._require_ids(remote, backup_id)
-            slot = slot_for(remote, backup_id)
-            candidate = self.transport.retire_plan(remote, slot)
+            slot, candidate = self._retire_candidate(remote, backup_id)
             reviewed = candidate.get("state")
-            if reviewed not in RETIRABLE:
-                raise refusal("server capture is not retirable", "not_retirable",
-                              state=reviewed)
             outcome = self.transport.retire(remote, slot, candidate)
         except RecoveryError as exc:
             return self._envelope_error(action, remote, exc)

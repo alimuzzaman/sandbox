@@ -111,11 +111,17 @@ with reason `integrity_mismatch` (then retirable, FR-034).
 
 ```text
 sb recovery retention --remote R [--json]                              # plan, read-only
+sb recovery retention --remote R --backup-id B [--json]                # preview one retire, read-only
 sb recovery retention --remote R --backup-id B --confirm [--json]      # retire one capture
 ```
 
 MCP: `recovery_retention(remote, backup_id=None, confirm=False)` with the same rules.
-The plan lists every server capture with `retirable`. Retire order:
+The plan lists every server capture with `retirable`. With `--backup-id` and
+no `--confirm` the call returns `status=planned`, `data = {backup_id, candidate,
+retirable: true, requires_confirmation: true}` where `candidate` is the reviewed
+state, receipt digest, archive hash and size the confirmed retire must still
+match; it deletes nothing and refuses a non-retirable capture with the same
+`not_retirable` the confirm would. Retire order:
 
 | Check | Error code |
 |-------|------------|

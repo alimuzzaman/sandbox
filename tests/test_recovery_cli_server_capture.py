@@ -179,6 +179,17 @@ class TestRecoveryCliServerCapture(unittest.TestCase):
         self.assertTrue(cli_plan["data"]["requires_confirmation"])
         self.assertNotIn("retire", self.transport.calls)
 
+        # --backup-id without --confirm is the read-only preview of that retire.
+        cli_one, _ = self._cli(["retention", "--remote", REMOTE, "--backup-id", "failed-a",
+                                "--json"])
+        mcp_one = _wire(self.mcp_recovery.recovery_retention(REMOTE, "failed-a", False))
+        self.assertEqual(cli_one, mcp_one)
+        self.assertEqual(cli_one["status"], "planned")
+        self.assertTrue(cli_one["data"]["requires_confirmation"])
+        self.assertEqual(cli_one["data"]["backup_id"], "failed-a")
+        self.assertEqual(cli_one["data"]["candidate"]["state"], "failed")
+        self.assertNotIn("retire", self.transport.calls)
+
         cli_retire, _ = self._cli(
             ["retention", "--remote", REMOTE, "--backup-id", "failed-a",
              "--confirm", "--json"])

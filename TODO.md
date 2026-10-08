@@ -303,10 +303,12 @@ and not-applicable records must not be reimplemented without fresh evidence.
   the feedback blocked until the branch is integrated and the installed remote
   revision reproduces and passes the live failure path; no live proof exists.
 
-- [ ] **Remote job UX/contract:** expose valid execution profiles and nested
-  help; make `job-output` wait bounds consistent and documented; make large
-  job-list/error output bounded and diagnosable. Representative IDs:
-  `d02cc0ff`, `a55cec51`, `763fbc6e`, `793c3d1b`, `c73e13c1`, `7ea39dad`.
+- [x] **Remote job UX/contract:** expose valid execution profiles and nested
+  help; make `job-output` wait bounds consistent and documented. IDs:
+  `d02cc0ff`, `a55cec51`, `763fbc6e`, `793c3d1b`, `c73e13c1`, `7ea39dad`, all
+  closed (shared 0-20 s wait bound in `sandbox/commands/jobs_runtime.py`,
+  profile help, remote service help 788f542, `host logs --tail`). Bounding
+  large job-list output was never a filed defect; reopen with a record.
 - [ ] **Host apply observability/build behavior:** add incremental progress,
   bounded build/OOM/host-pressure classification, avoid stale-image or
   multi-GB-context rebuilds when `build=false`, and make the timeout policy fit
@@ -324,20 +326,25 @@ and not-applicable records must not be reimplemented without fresh evidence.
   direct child-argv passthrough without printing values. IDs: `3c184f3c`,
   `910bc8c9`, `54c1c9ae`, `d89c5644`, `c335f32e`, `2cfab06f`, `18c1ac3d`,
   `6ae07ae7`, `72d7e416`.
-- [ ] **CLI contract/discoverability:** document/enforce feedback limits and
+- [x] **CLI contract/discoverability:** document/enforce feedback limits and
   prefix lookup, focused test selection/interpreter routing, status/instance
   listing, local-vs-remote selectors, `--request-id`, `--project-dir`, WP
   separators, and mount-drift recovery. IDs: `35ed6086`, `a0022cea`,
   `b2eb916f`, `c7148951`, `aff7c116`, `f200d37d`, `757a756d`, `e0a9c659`,
-  `93bdc880`, `4a9d1847`.
+  `93bdc880`, `4a9d1847`. All closed; `aff7c116` and `35ed6086` were
+  not_applicable, and the mount-drift doc fix is 431deda. The `--project-dir`
+  clause has no record of its own (related `bf6fc123` is resolved).
 - [ ] **Local/WordPress runtime isolation:** prevent broad setup from starting
   unrelated instances, preserve explicit project association, fix stale mounts
   after config changes, provide a supported remote-preview WP-CLI path, and
   classify core/install/inspection hangs. IDs: `9f0122e7`, `20a25084`,
   `103ae36f`, `fda8e3c5`, `ef047579`, `92966e70`, `d43d5bc4`, `f13ce98a`.
-- [ ] **Clean URL/proxy and host repair:** make ingress-down states fail fast,
+- [x] **Clean URL/proxy and host repair:** make ingress-down states fail fast,
   make dead proxy diagnostics actionable, and avoid false-negative HTTPS
-  reachability/rollback. IDs: `550d07ec`, `98989848`, `441022bf`, `7acb4245`.
+  reachability/rollback. IDs: `550d07ec`, `98989848`, `441022bf`, `7acb4245`,
+  all closed (833c03f, a4840a5/4c25877, a71a98c, doctor's `domains up` hint).
+  `sb domains status` diagnoses dead ingress; a raw client request to a dead
+  ingress still hangs until the client's own timeout (`curl -m`).
 - [x] **Feedback service robustness:** fixed and retained as regression coverage.
   Paginated/since responses preserve valid JSON, malformed records return typed
   errors, and persisted reads are bounded. Evidence: `6e3095a` + `3f7f658`.

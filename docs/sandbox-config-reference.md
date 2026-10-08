@@ -673,6 +673,9 @@ pinning it costs nothing, so pin it whenever the target PHP matters.
 A pin that is no longer wanted is not a request to mutate an existing site:
 delete it and `./sb apply --project-dir <DIR>` preserves the live core. Set an
 explicit new `wpVersion`, or recreate the instance, when a core move is wanted.
+`sb init` and `sb ensure` never re-version an existing instance: they install
+WordPress when the site is not installed, and warn on version drift. Run
+`./sb apply --project-dir <DIR>` to move core to the pin.
 
 `phpVersion` maps to the right image **per server**; `wpVersion` never enters an
 image tag at all:

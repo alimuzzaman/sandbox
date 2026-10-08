@@ -38,6 +38,7 @@ FAKE_CURL_BODY = textwrap.dedent("""\
     """)
 
 FAKE_SB_BODY = textwrap.dedent("""\
+    jobs="$FAKE_LOG.jobs"
     case "$1 $2" in
       "host plan") echo "plan ok" ;;
       "host apply")
@@ -50,15 +51,33 @@ FAKE_SB_BODY = textwrap.dedent("""\
             exit 1 ;;
         esac ;;
       "host retire-delivery") echo '{"ok": true}' ;;
+      "host status")
+        if [ -n "${FAKE_STAGED:-}" ]; then echo '{"ok": true, "staged_revision": "abc"}'
+        else echo '{"ok": true, "staged_revision": null}'; fi ;;
+      "remote service") echo "{\\"ok\\": true, \\"data\\": {\\"runtime_revision_state\\": \\"${FAKE_RUNTIME:-match}\\"}}" ;;
+      "remote up") echo "remote up ok" ;;
       "job-status "*)
-        echo "{\\"lifecycle\\": \\"${FAKE_LIFECYCLE:-succeeded}\\", \\"request_id\\": \\"deploy-dev-abc123\\", \\"job_id\\": \\"$2\\"}" ;;
-      "job-output "*) echo "fake job output" ;;
+        lifecycle=${FAKE_LIFECYCLE:-succeeded}
+        if [ -n "${FAKE_FENCE:-}" ] && [ "$2" = job-1 ]; then lifecycle=failed; fi
+        case $lifecycle in
+          succeeded) code=${FAKE_EXIT:-0} ;;
+          running | queued) code=null ;;
+          *) code=${FAKE_EXIT:-1} ;;
+        esac
+        started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        echo "{\\"lifecycle\\": \\"$lifecycle\\", \\"exit_code\\": $code, \\"request_id\\": \\"req-for-$2\\", \\"job_id\\": \\"$2\\", \\"health\\": \\"${FAKE_HEALTH:-active}\\", \\"deadline_seconds\\": ${FAKE_DEADLINE:-900}, \\"started_at\\": \\"$started\\"}" ;;
+      "job-output "*)
+        if [ -n "${FAKE_FENCE:-}" ] && [ "$2" = job-1 ]; then echo "error: unproven_staged_revision"
+        else echo "fake job output"; fi ;;
       "secrets run")
         shift 2
         while [ "$1" != "--" ]; do shift; done; shift
         RECOVERY_PASSPHRASE=fake-test-passphrase-not-a-secret exec "$@" ;;
       *)
-        if [ "$1" = job-start ]; then echo '{"job_id": "job-42", "ok": true}'; exit 0; fi
+        if [ "$1" = job-start ]; then
+          n=$(( $(cat "$jobs" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$jobs"
+          echo "{\\"job_id\\": \\"job-$n\\", \\"ok\\": true}"; exit 0
+        fi
         echo "fake sb: unhandled $*" >&2; exit 9 ;;
     esac
     """)
@@ -302,13 +321,34 @@ class WaitAndCutoverTests(MigrationScriptTestCase):
 
     def test_runs_cutover_only_after_success(self):
         result = self.wait("--confirm", env={"FAKE_LIFECYCLE": "succeeded"})
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("starting the data cutover", result.stderr)
         self.assertTrue(any("pg_dump" in c[-1] for c in self.calls("ssh")))
 
-    def test_failed_job_never_touches_data(self):
-        result = self.wait("--confirm", env={"FAKE_LIFECYCLE": "failed"})
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no cutover", result.stderr)
+    def test_unsuccessful_endings_never_touch_data(self):
+        for env in ({"FAKE_LIFECYCLE": "failed"}, {"FAKE_LIFECYCLE": "cancelled"},
+                    {"FAKE_LIFECYCLE": "timed_out"}, {"FAKE_LIFECYCLE": "interrupted"},
+                    {"FAKE_LIFECYCLE": "succeeded", "FAKE_EXIT": "1"}):
+            with self.subTest(env=env):
+                self.log.write_text("")
+                result = self.wait("--confirm", env=env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("no cutover", result.stderr)
+                self.assertEqual(self.calls("ssh"), [])
+
+    def test_polls_lifecycle_and_exit_code_every_5s_by_default(self):
+        result = self.run_script("wait-and-cutover.sh", "--job-id", "job-7", "--dry-run", "--", *self.CUT)
+        self.assertIn("polled every 5s", result.stdout)
+        self.assertIn("job deadline", result.stdout)
+        self.assertIn("exit_code 0", result.stdout)
+
+    def test_wait_is_bounded_by_job_deadline(self):
+        result = self.run_script("wait-and-cutover.sh", "--job-id", "job-7", "--poll-interval", "1",
+                                 "--no-caffeinate", "--confirm", "--", *self.CUT,
+                                 env={"FAKE_LIFECYCLE": "running", "FAKE_DEADLINE": "1",
+                                      "JOB_GRACE_SECONDS": "1"})
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("bounding the wait to its deadline", result.stderr)
         self.assertEqual(self.calls("ssh"), [])
 
     def test_running_job_is_bounded_and_never_touches_data(self):
@@ -375,38 +415,110 @@ class DeployProjectTests(MigrationScriptTestCase):
                                "--remote", "new-remote", "--no-caffeinate", "--poll-interval", "1",
                                "--poll-timeout", "5", *extra, env=env)
 
+    def sb_calls(self):
+        return [c[1:] for c in self.calls("sb")]
+
     def test_runs_printed_job_start_with_raised_timeout(self):
         result = self.deploy("--confirm", "--job-timeout", "5400")
         self.assertEqual(result.returncode, 0, result.stderr)
-        sb = [c[1:] for c in self.calls("sb")]
-        self.assertEqual(sb[0][:2], ["host", "plan"])
-        self.assertEqual(sb[1][:2], ["host", "apply"])
+        sb = self.sb_calls()
+        self.assertEqual(sb[0][:4], ["remote", "service", "status", "new-remote"])
+        self.assertEqual(sb[1][:2], ["host", "plan"])
+        self.assertEqual(sb[2][:2], ["host", "apply"])
         job = next(c for c in sb if c[0] == "job-start")
         self.assertEqual(job[1], "--json")
         self.assertEqual(job[job.index("--timeout") + 1], "5400")
         self.assertEqual(job[job.index("--request-id") + 1], "deploy-dev-abc123")
         self.assertEqual(job[job.index("--") + 1:job.index("--") + 3], [str(self.bin / "sb"), "host"])
-        self.assertIn(["job-status", "job-42", "--json"], sb)
+        self.assertIn(["job-status", "job-1", "--json"], sb)
+        self.assertIn("Compose version not checked", result.stderr)
 
     def test_failed_job_prints_retire_command(self):
         result = self.deploy("--confirm", env={"FAKE_LIFECYCLE": "failed"})
         self.assertEqual(result.returncode, 1)
         self.assertIn("retire-failed.sh", result.stderr)
-        self.assertIn("--original-request-id deploy-dev-abc123", result.stderr)
-        self.assertNotIn("retire-delivery", [c[2] for c in self.calls("sb") if len(c) > 2])
+        self.assertIn("--original-request-id req-for-job-1", result.stderr)
+        self.assertNotIn(["host", "retire-delivery"], [c[:2] for c in self.sb_calls()])
+
+    def test_succeeded_with_nonzero_exit_code_is_a_failure(self):
+        result = self.deploy("--confirm", env={"FAKE_EXIT": "1"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exit_code 1", result.stderr)
 
     def test_poll_budget_is_bounded(self):
         result = self.deploy("--confirm", env={"FAKE_LIFECYCLE": "running"})
         self.assertEqual(result.returncode, 3)
         self.assertIn("still running", result.stderr)
 
+    def test_suspected_stalled_points_at_apply_log(self):
+        result = self.deploy("--confirm", env={"FAKE_LIFECYCLE": "running", "FAKE_HEALTH": "suspected_stalled"})
+        self.assertIn("apply phase=", result.stderr)
+        self.assertEqual(result.stderr.count("apply phase="), 1)
+
     def test_without_confirm_only_plans(self):
         result = self.deploy()
         self.assertEqual(result.returncode, 1)
-        self.assertEqual([c[1:3] for c in self.calls("sb")], [["host", "plan"]])
+        self.assertEqual([c[:2] for c in self.sb_calls()], [["remote", "service"], ["host", "plan"]])
+
+    def test_preflight_runtime_mismatch_stops_before_plan(self):
+        result = self.deploy("--confirm", env={"FAKE_RUNTIME": "mismatch"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("remote up new-remote --confirm", result.stderr)
+        self.assertEqual([c[:2] for c in self.sb_calls()], [["remote", "service"]])
+
+    def test_preflight_fix_runtime_runs_remote_up(self):
+        result = self.deploy("--confirm", "--fix-runtime", env={"FAKE_RUNTIME": "mismatch"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sb = [c[:2] for c in self.sb_calls()]
+        self.assertLess(sb.index(["remote", "up"]), sb.index(["host", "plan"]))
+
+    def test_preflight_compose_with_dependencies(self):
+        result = self.deploy("--confirm", "--ssh", NEW)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (call,) = self.calls("ssh")
+        self.assertIn("compose build --help | grep -q -- --with-dependencies", call[-1])
+        failing = self.bin / "ssh"
+        failing.write_text(RECORDER.format(name="ssh", body="exit 1"))
+        result = self.deploy("--confirm", "--ssh", NEW)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Compose 2.24", result.stderr)
+
+    def test_skip_preflight(self):
+        result = self.deploy("--confirm", "--skip-preflight", env={"FAKE_RUNTIME": "mismatch"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(["remote", "service"], [c[:2] for c in self.sb_calls()])
+
+    def test_fence_is_explained_without_clear_fence(self):
+        result = self.deploy("--confirm", env={"FAKE_FENCE": "1"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unproven staged revision", result.stderr)
+        self.assertIn("--original-request-id req-for-job-1", result.stderr)
+        self.assertIn('"staged_revision": null', result.stderr)
+        self.assertEqual(sum(1 for c in self.sb_calls() if c[0] == "job-start"), 1)
+
+    def test_clear_fence_retires_refused_request_and_reapplies(self):
+        result = self.deploy("--confirm", "--clear-fence", env={"FAKE_FENCE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sb = self.sb_calls()
+        retire = next(c for c in sb if c[:2] == ["host", "retire-delivery"])
+        self.assertEqual(retire[retire.index("--original-request-id") + 1], "req-for-job-1")
+        order = [c[0] if c[0] != "host" else " ".join(c[:2]) for c in sb]
+        self.assertLess(order.index("host retire-delivery"), order.index("host status"))
+        self.assertEqual(order.count("job-start"), 2)
+        self.assertLess(order.index("host status"), len(order) - 1 - order[::-1].index("job-start"))
+
+    def test_clear_fence_stops_if_staged_revision_survives(self):
+        env = {"FAKE_FENCE": "1", "FAKE_STAGED": "1"}
+        result = self.run_script("deploy-project.sh", "--project-dir", str(self.project), "--environment", "dev",
+                                 "--remote", "new-remote", "--no-caffeinate", "--poll-interval", "1",
+                                 "--poll-timeout", "5", "--confirm", "--clear-fence", "--fence-timeout", "1",
+                                 env=env)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("staged_revision", result.stderr)
+        self.assertEqual(sum(1 for c in self.sb_calls() if c[0] == "job-start"), 1)
 
     def test_revision_mismatch_names_remote_up(self):
-        result = self.deploy("--confirm", env={"FAKE_APPLY": "mismatch"})
+        result = self.deploy("--confirm", "--skip-preflight", env={"FAKE_APPLY": "mismatch"})
         self.assertEqual(result.returncode, 1)
         self.assertIn("remote up new-remote --confirm", result.stderr)
 
@@ -421,6 +533,13 @@ class DeployProjectTests(MigrationScriptTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("uncommitted", result.stderr)
         self.assertEqual(self.calls("sb"), [])
+
+    def test_dry_run_shows_preflight(self):
+        result = self.deploy("--dry-run", "--ssh", NEW)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("remote service status new-remote --json", result.stdout)
+        self.assertIn("--with-dependencies", result.stdout)
+        self.assertEqual(self.calls(), [])
 
 
 class RetireTests(MigrationScriptTestCase):
@@ -444,7 +563,7 @@ class RetireTests(MigrationScriptTestCase):
                                  env={"FAKE_LIFECYCLE": "failed"})
         self.assertEqual(result.returncode, 0, result.stderr)
         retire = next(c for c in self.calls("sb") if c[1:3] == ["host", "retire-delivery"])
-        self.assertEqual(retire[retire.index("--original-request-id") + 1], "deploy-dev-abc123")
+        self.assertEqual(retire[retire.index("--original-request-id") + 1], "req-for-job-1")
 
 
 class PrepareHostTests(MigrationScriptTestCase):

@@ -121,8 +121,11 @@ When the record is proxied, Cloudflare blocks the control client with **403, err
 ## Phase 3: runtime revision
 
 `sb host apply` refuses with **`remote_runtime_revision_mismatch`** whenever the local
-Sandbox checkout's commit differs from the remote runtime, which happens after every
-local commit. Fix:
+Sandbox checkout's runtime differs from the one installed on the remote. The runtime
+revision is a hash of the Sandbox CLI sources, so in practice every local Sandbox commit
+needs this before the next apply. Check it with
+`./sb remote service status xcloud-london --json` (`data.runtime_revision_state` is
+`match` or `mismatch`; `deploy-project.sh` does this as a preflight). Fix:
 
 ```sh
 ./sb remote up xcloud-london --confirm     # positional name; --remote is rejected
@@ -134,6 +137,18 @@ apply to a different remote holds it too. Find the holder with `lsof` on that fi
 and wait for it. Never kill another team's deploy. `deploy-project.sh --fix-runtime` runs
 `remote up` and retries every 60 s for up to `--busy-timeout` (default 1800 s).
 
+**One runtime per remote, and pinned deploy tooling.** `remote up` replaces the runtime
+for every checkout that deploys to that remote. A project whose own deploy script pins
+an exact Sandbox checkout breaks the moment someone runs `remote up` from a different
+commit. Lenzora's `scripts/deploy-sandbox.sh` pins both the clean Sandbox checkout
+revision (`LENZORA_REQUIRED_SANDBOX_CLI_REVISION`) and the remote name. So:
+
+- Moving such a project to a new server means repointing its deploy tooling (remote
+  name and pin) in the same change that moves the site.
+- Do not commit in, or move the HEAD of, the Sandbox checkout such a pin names. Make
+  Sandbox changes in a separate worktree (`git worktree add <dir> -b <topic> <base>`,
+  then `git branch --unset-upstream`) and update the pin deliberately.
+
 ## Phase 4: deploy each project to the new remote
 
 1. Use a clean worktree on a branch the environment allows. If the branch is checked
@@ -141,15 +156,24 @@ and wait for it. Never kill another team's deploy. `deploy-project.sh --fix-runt
 2. Make sure every compose service has a Docker healthcheck. Readiness checks the health
    of every service; a service without one is `unverified`, and apply fails with
    "remote runtime source/topology/health did not become fully ready before deadline".
-3. Deploy:
+3. Make sure the remote runs Docker Compose 2.24 or later. Sandbox builds with
+   `docker compose build --with-dependencies`; without it, a fresh host never builds the
+   images of `depends_on` services and `compose_recreate` fails with
+   "No such image: <project>-<service>:latest".
+4. Deploy:
 
 ```sh
 tools/server-migration/deploy-project.sh --project-dir ~/Sites/git/lenzora-xcloud-dev \
-  --environment development --remote xcloud-london --job-timeout 5400 --confirm
+  --environment development --remote xcloud-london --ssh alim@NEW_IP \
+  --job-timeout 5400 --confirm
 ```
 
 What happens:
 
+- Preflight: `sb remote service status <remote> --json` must report
+  `runtime_revision_state: match` (with `--fix-runtime` the script runs `sb remote up`
+  instead of stopping), and with `--ssh` the remote's `docker compose build --help` must
+  list `--with-dependencies`. `--skip-preflight` skips both.
 - `sb host plan`, then `sb host apply --confirm`.
 - Apply refuses with **`recovery_context_required`** and prints
   `recovery_context_required; prepare with: sb job-start --local ... --request-id ...
@@ -158,10 +182,12 @@ What happens:
   to `--job-timeout`, and runs it. Lenzora needed 5400 s, mostly for the image build.
 - `caffeinate -i -t <poll budget>` keeps the Mac awake. A sleeping controller strands
   the delivery record.
-- `sb job-status <id> --json` is polled every `--poll-interval` seconds for at most
-  `--poll-timeout` seconds. Exit 0 means the job succeeded, 1 means it failed (the script
-  prints the last 200 lines of output and the retire command), and 3 means the budget
-  ran out while the job keeps running.
+- `sb job-status <id> --json` is polled every `--poll-interval` seconds (default 5) for
+  at most `--poll-timeout` seconds (default job timeout + 300). Each poll reads
+  `lifecycle` and `exit_code`; success is `succeeded` with exit code 0, nothing less.
+  Exit 0 means the job succeeded, 1 means it failed (the script prints the last 200
+  lines of output and the retire or fence-clearing command), and 3 means the budget ran
+  out while the job keeps running.
 
 Inside the job, apply builds, runs initializers, checks Docker health of every service,
 writes the nginx include `/etc/nginx/conf.d/sandbox-host-<project>-<env>.conf`, upserts
@@ -194,10 +220,40 @@ so the next apply does a full recreate instead of refusing with
 **`unproven_staged_revision`**. If retire itself refuses, the target stays fenced; for a
 throwaway probe, use a new project name rather than fighting the fence.
 
+**Clearing the fence when the request was already retired.** Retiring a request a
+second time returns **`delivery_terminal_conflict`**, and the staged revision it left
+behind survives. The loop that worked on Lenzora production:
+
+1. Run the apply again. It refuses fast (about 2 minutes) with
+   `unproven_staged_revision`.
+2. Retire THAT new request id. This retire clears `staged_revision`.
+3. Confirm `sb host status --project-dir D --environment E --remote R --json` shows
+   `"staged_revision": null`.
+4. Apply for real.
+
+`deploy-project.sh` detects step 1. Without `--clear-fence` it prints steps 2-4 with the
+request id filled in. With `--clear-fence --confirm` it runs them once: retire,
+wait for `staged_revision: null` (bounded by `--fence-timeout`, default 120 s), and
+apply again. It never loops more than once.
+
+**A failed apply removes the runtime secrets.** Its rollback deletes the files under
+`/run/secrets/`, so the database container crash-loops with
+`/run/secrets/postgres_password: No such file` until the next apply writes them again.
+Between a failed attempt and the next apply you cannot start the database, so you
+cannot pre-seed data either. Load data only after an apply has succeeded (the phase 5
+cutover). Never seed while `compose_recreate` or the migrate initializer of a running
+apply could race you; the scripts deliberately have no pre-seed step.
+
 **Long silent phases.** During the image build and the readiness wait, `job-status`
-shows `suspected_stalled`. That is normal. Look at the remote directly before acting:
-`tail ~/sandbox/runtime/hosts/<project>/<env>/apply.log` and `docker ps`. Do not cancel
-by reflex: `sb job-cancel` can land after `compose_recreate`, which leaves the runtime
+shows `suspected_stalled`. That is normal. Look at the remote directly before acting.
+The best view is the phase log:
+
+```sh
+grep "apply phase=" ~/sandbox/runtime/hosts/<project>/<env>/apply.log
+```
+
+It lists each phase's start and finish with its exit code, which tells you far more
+than `job-status` does. `docker ps` shows the containers. Do not cancel by reflex: `sb job-cancel` can land after `compose_recreate`, which leaves the runtime
 at the new revision while the ledger says cancelled.
 
 **Wildcard DNS and a new hostname.** Under a `*.zone` wildcard record, macOS
@@ -233,7 +289,7 @@ the new server, which is serving a fresh, near-empty database, so a few minutes 
 errors is the better failure. Lenzora production took about 2 minutes this way.
 
 ```sh
-tools/server-migration/wait-and-cutover.sh --job-id <job> --poll-timeout 7200 --confirm -- \
+tools/server-migration/wait-and-cutover.sh --job-id <job> --confirm -- \
   --old alim@OLD_IP --new alim@NEW_IP \
   --compose-project sandbox-host-lenzora-production --db-service lenzora-db \
   --volume lenzora-storage --volume lenzora-production-job-queue-data \
@@ -243,20 +299,26 @@ tools/server-migration/wait-and-cutover.sh --job-id <job> --poll-timeout 7200 --
   --check-table users --check-table projects
 ```
 
-The script checks `--confirm` first, polls `sb job-status` with a bound, and runs
-`cutover-compose-data.sh` only on `lifecycle=succeeded`. If the job fails or the budget
-runs out, no data is touched. To run the cutover directly, use the same arguments with
+The script checks `--confirm` first, then polls `sb job-status <id> --json` every 5 s,
+reading `lifecycle` and `exit_code`. While the job is running, queued, accepted or
+cancelling, it keeps waiting. The whole wait is bounded by the job's own deadline
+(`deadline_seconds` counted from `started_at`) plus 120 s, unless `--poll-timeout` says
+otherwise. It runs `cutover-compose-data.sh` only on `lifecycle=succeeded` with
+`exit_code` 0. `failed`, `cancelled`, `timed_out`, `interrupted`, a non-zero exit code,
+or an exhausted bound exits without touching data. To run the cutover directly, use the same arguments with
 `cutover-compose-data.sh`.
 
 The cutover, in order:
 
 1. Preflight: the Postgres container runs on both servers.
-2. Old server: stop every running container of the compose project except the database
-   and any `--keep-service`. Names are recorded in `~/migration/<compose>/stopped-old.txt`
-   (on the old server) for rollback. Use `--service` instead to stop only named services.
-3. New server: stop the same selection and record the names in
-   `~/migration/<compose>/stopped.txt`. Step 7 restarts exactly that list. A re-run merges
-   the lists and never truncates them, so re-running after a partial failure is safe.
+2. New server first: stop every running container of the compose project except the
+   database and any `--keep-service`, and record the names in
+   `~/migration/<compose>/stopped.txt`. Step 7 restarts exactly that list. Use
+   `--service` instead to stop only named services.
+3. Old server: stop the same selection. Names are recorded in
+   `~/migration/<compose>/stopped-old.txt` (on the old server) for rollback. A re-run
+   merges the lists and never truncates them, so re-running after a partial failure is
+   safe.
 4. Final dump: `docker exec <db> sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -Z 6'`
    is piped through `ssh new` into `db.dump.partial`, which is renamed only after the
    whole stream has arrived.
@@ -276,11 +338,34 @@ The cutover, in order:
    header, and `SELECT count(*)` matches for each `--check-table` on both servers.
 
 The old server's stopped containers and data stay in place for the rollback window.
-If any step after step 2 fails, the script prints the rollback commands.
+If any step after step 3 fails, the script prints the rollback commands.
 
 For Lenzora dev the result was 307 tables with matching spot counts, `/api/health` 200
 with `x-lenzora-revision`, basic auth 401 from a non-bypass IP, the bypass path 200, and
 all 18 containers healthy.
+
+### Worked example: Lenzora production (lenzora.app)
+
+The first deploy attempt failed on the fresh host (the missing `depends_on` image, fixed
+by `build --with-dependencies`). Its rollback removed the runtime secrets, so the
+database could not be started early. The fence-clearing loop above made the next
+apply possible.
+
+| Time (UTC) | Event |
+|---|---|
+| ~02:34 | Retry deploy job started; the old server kept serving |
+| | Build 13 s (cached from the failed attempt), `compose_recreate` 37 s |
+| ~02:37 | Readiness and edge verification passed; the job `succeeded` with exit code 0 |
+| ~02:37-02:39 | Cutover, about 2 minutes in total: |
+| | stop 17 containers on NEW, then everything except the database on OLD |
+| | `pg_dump -Fc` of 193 MB, old to new directly |
+| | 3 file volumes: storage 26 MB, Redis job queue 8 MB, readiness 10 KB |
+| | restore, then start the 18 recorded containers |
+
+Verification: 307 tables and 153 migrations equal on both sides, `/api/health` 200 with
+`{database: ok, storage: ok}`, and all 18 containers healthy with 0 restarts. The old
+production keeps its database running for the rollback window, with app and workers
+stopped.
 
 The pieces also run on their own: `pg-transfer.sh --dump-only | --restore-only |
 --check-only` and `copy-volume.sh --fetch-only | --extract-only`.
@@ -318,10 +403,13 @@ example templately-astro) must have a Drive backup from phase 1 first.
 - [ ] Every compose service has a healthcheck
 - [ ] Clean worktree on an allowed branch; local Sandbox commit equals the remote runtime
       (`sb remote up` if not)
+- [ ] Remote runs Docker Compose 2.24+ (`deploy-project.sh --ssh` checks it)
+- [ ] The project's own deploy tooling (pinned Sandbox revision, remote name) is
+      repointed in the same change
 - [ ] Manifest proxy/TLS pair is valid (`bypass_ips` means `proxied: true` + `origin-ca`)
 - [ ] New hostname not resolved locally before the deploy (wildcard zones)
 - [ ] Optional: volumes pre-staged with `stage-volume.sh`
-- [ ] `deploy-project.sh` succeeded; `sb job-status <id>` says `succeeded`
+- [ ] `deploy-project.sh` succeeded; `sb job-status <id> --json` says `succeeded`, exit code 0
 - [ ] Stateful: `wait-and-cutover.sh` (or the cutover) finished, row counts match, every
       durable volume (storage, job queue) copied
 - [ ] `verify-site.sh` passes: status, revision header, basic auth where used
@@ -362,6 +450,9 @@ failed deploy needs no manual rollback, only `retire-failed.sh`.
 | `refusing: running containers use <volume>` | Final copy of a live volume | Stop its service (do not `--keep-service` it) |
 | ssh `Host key verification failed` on the nested hop | Old server never saw the new host key | Run `ssh -A old ssh new true` once and accept it |
 | `ps` fails from an agent shell | Broken shim in the agent sandbox | Use `/bin/ps` |
+| `unproven_staged_revision` right after a `delivery_terminal_conflict` | The refused request's staged revision survived the earlier retire | Retire the NEW refused request, confirm `staged_revision: null` in `sb host status --json`, apply again (`deploy-project.sh --clear-fence`) |
+| preflight: Compose lacks `build --with-dependencies` | Docker Compose older than 2.24 on the remote | Upgrade the docker-compose-plugin package before deploying |
+| A project's deploy script fails its Sandbox revision check after `sb remote up` | The script pins an exact Sandbox checkout and remote name | Repoint the pin and the remote name in the same change; never move the pinned checkout's HEAD |
 | `No such image: <project>-<service>:latest` at `compose_recreate` | A `depends_on` service had no image on a fresh host (Sandbox before 88af8cf built only the declared services) | Use a Sandbox at or after 88af8cf (`build --with-dependencies`) |
 | `delivery_terminal_conflict` from retire | That request was already retired; the stale staged revision survived it (Sandbox before 66d35ee) | Let the next apply refuse, then retire that apply's request id |
 | Database container restarting: `/run/secrets/<name>: No such file` | A failed apply's rollback removed the runtime secrets | Nothing to fix by hand; the next apply writes them again. Do not pre-seed data until then |

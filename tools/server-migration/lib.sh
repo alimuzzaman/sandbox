@@ -187,3 +187,90 @@ if [ -n \"\$running\" ]; then echo \"refusing: running containers use $volume: \
   inner="mkdir -p $(shq "$dir") && cat > $(shq "$dest.partial") && mv $(shq "$dest.partial") $(shq "$dest") && ls -l $(shq "$dest")"
   remote_bash "$old" "$guard""sudo -n tar --numeric-owner -C $(volume_dir_expr "$volume") -cf - . | $(hop_ssh "$hop" "$inner")"
 }
+
+# ---------------------------------------------------------------------------
+# Durable job watching (the pattern that worked live): poll `sb job-status ID --json`
+# every few seconds, read lifecycle AND exit_code, keep waiting while the job is not
+# terminal, and bound the whole wait to the job's own deadline plus a grace period.
+# Success means lifecycle=succeeded with exit_code 0 and nothing else.
+
+JOB_GRACE_SECONDS=${JOB_GRACE_SECONDS:-120}
+JOB_FALLBACK_SECONDS=${JOB_FALLBACK_SECONDS:-7200}
+
+# job-status JSON on stdin -> "lifecycle|exit_code|request_id|health|remaining_seconds".
+# remaining_seconds = deadline_seconds - time since started_at (or accepted_at); empty
+# when the snapshot does not say.
+job_fields() {
+  "$PYTHON" -c '
+import json, sys
+from datetime import datetime, timezone
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+except ValueError:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+def s(v):
+    return "" if v is None else str(v).replace("|", "")
+deadline = d.get("deadline_seconds")
+if deadline is None and isinstance(d.get("deadline"), dict):
+    deadline = d["deadline"].get("seconds")
+remaining = ""
+start = d.get("started_at") or d.get("accepted_at")
+try:
+    if deadline is not None and start:
+        t = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - t).total_seconds()
+        remaining = str(max(0, int(int(deadline) - elapsed)))
+    elif deadline is not None:
+        remaining = str(int(deadline))
+except (TypeError, ValueError):
+    remaining = ""
+print("|".join([s(d.get("lifecycle")), s(d.get("exit_code")), s(d.get("request_id")),
+                s(d.get("health")), remaining]))
+'
+}
+
+# poll_job JOB INTERVAL BUDGET
+# BUDGET 0 derives the bound from the job's deadline (+ JOB_GRACE_SECONDS); when the job
+# does not report one, JOB_FALLBACK_SECONDS applies. Sets JOB_LIFECYCLE, JOB_EXIT,
+# JOB_REQUEST, JOB_HEALTH. Returns 0 once the job is terminal, 3 when the bound ran out.
+poll_job() {
+  local job=$1 interval=$2 budget=$3 deadline="" json fields remaining stall_hint=""
+  JOB_LIFECYCLE="" JOB_EXIT="" JOB_REQUEST="" JOB_HEALTH=""
+  if [ "$budget" -gt 0 ]; then deadline=$((SECONDS + budget)); fi
+  while :; do
+    json=$("$SB" job-status "$job" --json 2>/dev/null || true)
+    fields=$(printf '%s' "$json" | job_fields)
+    # shellcheck disable=SC2034 # JOB_* are read by the calling scripts
+    IFS='|' read -r JOB_LIFECYCLE JOB_EXIT JOB_REQUEST JOB_HEALTH remaining <<EOF_FIELDS
+$fields
+EOF_FIELDS
+    if [ -z "$deadline" ]; then
+      if [ -n "$remaining" ]; then
+        deadline=$((SECONDS + remaining + JOB_GRACE_SECONDS))
+        log "job $job: bounding the wait to its deadline (${remaining}s left) + ${JOB_GRACE_SECONDS}s"
+      else
+        deadline=$((SECONDS + JOB_FALLBACK_SECONDS))
+        log "job $job: no deadline reported; bounding the wait to ${JOB_FALLBACK_SECONDS}s"
+      fi
+    fi
+    log "job $job: ${JOB_LIFECYCLE:-unknown} exit=${JOB_EXIT:--} health=${JOB_HEALTH:-?}"
+    if [ "$JOB_HEALTH" = suspected_stalled ] && [ -z "$stall_hint" ]; then
+      stall_hint=1
+      log "suspected_stalled is normal during a long silent build or readiness wait. On the remote," \
+        "grep 'apply phase=' ~/sandbox/runtime/hosts/<project>/<env>/apply.log shows each phase" \
+        "with its exit code; docker ps shows the containers. Do not cancel: a cancel can land after compose_recreate."
+    fi
+    case $JOB_LIFECYCLE in
+      succeeded | failed | timed_out | cancelled | interrupted) return 0 ;;
+    esac
+    # running, queued, accepted, cancelling, or an unreadable snapshot: keep waiting.
+    [ $((SECONDS + interval)) -le "$deadline" ] || return 3
+    sleep "$interval"
+  done
+}
+
+job_succeeded() { [ "$JOB_LIFECYCLE" = succeeded ] && [ "$JOB_EXIT" = 0 ]; }

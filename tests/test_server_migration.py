@@ -292,6 +292,34 @@ class CutoverTests(MigrationScriptTestCase):
         self.assertFalse(any("pg_restore" in c[-1] for c in self.calls("ssh")))
 
 
+    def test_first_run_records_and_stops_without_a_prior_list(self):
+        # Run the real stop step under bash -o pipefail against a fake docker, on a
+        # server where the record files do not exist yet (the 2026-10-08 dev round trip).
+        remote = self.tmp / "remote"
+        remote.mkdir()
+        docker = self.bin / "fakedocker"
+        docker.write_text(RECORDER.format(name="docker", body=textwrap.dedent("""\
+            case "$1" in
+              ps) echo c1 ;;
+              inspect) case "$3" in *service*) echo web ;; *) echo /proj-web-1 ;; esac ;;
+            esac
+            exit 0""")))
+        docker.chmod(0o755)
+        ssh = self.bin / "ssh"
+        ssh.write_text(RECORDER.format(name="ssh", body=textwrap.dedent(f"""\
+            case "${{@: -1}}" in
+              *stopped*.txt.now*) cd {shlex.quote(str(remote))} && eval "${{@: -1}}" ;;
+              *pg_dump*) exit 1 ;;  # end the run here; the stop steps are what is under test
+            esac""")))
+        result = self.run_script("cutover-compose-data.sh", "--confirm", "--yes", *self.ARGS,
+                                 env={"MIGRATION_DOCKER": str(docker)})
+        listed = remote / "migration" / "sandbox-host-lenzora-dev"
+        self.assertEqual((listed / "stopped.txt").read_text(), "proj-web-1\n", result.stderr)
+        self.assertEqual((listed / "stopped-old.txt").read_text(), "proj-web-1\n", result.stderr)
+        self.assertEqual(len([c for c in self.calls("docker") if c[1] == "stop"]), 2)
+        self.assertTrue(any("pg_dump" in c[-1] for c in self.calls("ssh")), result.stderr)
+
+
     MAINT = ("--maintenance-service", "lenzora-monitor-worker")
 
     def test_maintenance_mode_wraps_the_cutover(self):

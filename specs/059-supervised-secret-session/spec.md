@@ -217,7 +217,7 @@ instruction for an agent to start a session.
 - **SC-002**: In 100% of tested interrupt and hangup endings, the child's process group is gone within 5 seconds and the reported reason is `interrupted` or `hangup` respectively.
 - **SC-003**: Across a full session with a fixture that prints the selected value whole and split across chunks, the value appears in 0 places among argv, terminal output, the result, audit, errors and files written by Sandbox.
 - **SC-004**: 100% of start attempts without a terminal on standard output or without an openable controlling terminal are refused with `tty_required`, and the source is never read.
-- **SC-005**: 100% of refused starts (argument, terminal, destination, source and key errors) deliver no value to any child, and every refusal other than an unknown key happens before the source is read.
+- **SC-005**: 100% of refused starts deliver no value to any child. Every argument, terminal, destination and unknown-source refusal happens before the source is read; only refusals that depend on source content (unknown key, unsafe or unparsable source) happen after it.
 - **SC-006**: Live output from the child appears in the terminal within 1 second of a newline-terminated line being written, for the duration of the session.
 - **SC-007**: An operator following the shipped documentation can start a dev server in session mode and stop it with Ctrl-C in under two minutes, without reading or exporting the value.
 

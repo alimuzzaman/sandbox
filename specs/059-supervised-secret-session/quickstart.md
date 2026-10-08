@@ -54,9 +54,11 @@ source was not read).
 
 ## 5. Past 30 minutes (evidence run, once)
 
-Run step 2 with the default lifetime and leave it 31 minutes. Confirm the server
-still answers, then press Ctrl-C. Record the start and end lines (they contain no
-value) under `specs/059-supervised-secret-session/evidence/`.
+Run step 2 with `--lifetime-seconds 1900` (31 min 40 s). At minute 31 confirm
+the server still answers. Leave it: the end line shows
+`end_reason=lifetime_expired`, exit 0, and the port is free within 5 s of the
+end time. Record the start and end lines (they contain no value) under
+`specs/059-supervised-secret-session/evidence/`.
 
 ## 6. Ordinary run unchanged
 

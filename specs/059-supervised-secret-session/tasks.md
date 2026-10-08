@@ -70,9 +70,9 @@ None. The feature lives in the existing `sandbox/secrets/` package and test layo
 
 ## Phase 7: Polish and Cross-Cutting
 
-- [ ] T027 Run `python3 -m unittest tests.test_secret_session tests.test_secret_commands tests.test_secret_service tests.test_secret_mcp tests.test_secret_config tests.test_secret_policy tests.test_architecture_boundaries` and fix regressions
+- [x] T027 Run `python3 -m unittest tests.test_secret_session tests.test_secret_commands tests.test_secret_service tests.test_secret_mcp tests.test_secret_config tests.test_secret_policy tests.test_architecture_boundaries` and fix regressions
 - [x] T028 [P] Sweep `docs/`, `README.md`, `skills/` and `CLAUDE.md` for statements that `secrets run` can never exceed 30 minutes and qualify them with the session exception
-- [ ] T029 Run quickstart.md steps 1 to 4 and 6 in an interactive terminal with a synthetic fixture source; record start/end lines and exit codes (no values) under `specs/059-supervised-secret-session/evidence/`
+- [x] T029 Run quickstart.md steps 1 to 4 and 6 in an interactive terminal with a synthetic fixture source; record start/end lines and exit codes (no values) under `specs/059-supervised-secret-session/evidence/`
 - [ ] T030 Run quickstart.md step 5 once (lifetime 1,900 s: still serving at minute 31, then `lifetime_expired` with the port free within 5 s, SC-001); record the evidence in the same folder and mark feedback 2cfab06f addressed
 
 ## Dependencies

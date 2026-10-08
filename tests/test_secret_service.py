@@ -534,3 +534,184 @@ class RunWithSecretsArgvTests(unittest.TestCase):
             with self.assertRaises(SecretBrokerError):
                 run_with_secrets(argv, secrets={"PROBE_VALUE": "fixture-value"},
                                  timeout_seconds=30)
+
+
+class SessionServiceTests(unittest.TestCase):
+    """Spec 059: SecretService.run_session and the shared binding checks."""
+
+    SESSION_VALUE = "TestOnly_" + "Session123456789AbCd"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.source = self.root / ".env.fixture"
+        self.source.write_bytes(
+            b"API_TOKEN=" + self.SESSION_VALUE.encode() + b"\nOTHER=plain-label\n"
+        )
+        self.source.chmod(0o600)
+        self.registry = SourceRegistry(
+            self.root, {"fixture": {"path": ".env.fixture"}},
+            personal_path=self.root / ".personal",
+        )
+        self.audit_path = self.root / "runtime/audit.jsonl"
+        self.service = SecretService(
+            self.registry, SecretAudit(self.audit_path),
+            revision_key_path=self.root / "runtime/revision.key",
+        )
+        self.sink = []
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def events(self):
+        if not self.audit_path.exists():
+            return []
+        return [json.loads(line) for line in self.audit_path.read_text().splitlines()]
+
+    def session(self, program="print('ok')", bindings=(("API_TOKEN", "API_TOKEN"),), **kwargs):
+        kwargs.setdefault("lifetime_seconds", 10)
+        return self.service.run_session(
+            "fixture", bindings, [sys.executable, "-c", program],
+            display=self.sink.append, **kwargs,
+        )
+
+    def test_normalize_bindings_refuses_without_audit(self):
+        cases = {
+            "selection_invalid": [(), [("API_TOKEN",)], [("API_TOKEN", "A"), ("API_TOKEN", "B")]],
+            "selection_too_large": [[(f"K{i}", f"D{i}") for i in range(101)]],
+            "destination_denied": [[("API_TOKEN", "LD_PRELOAD")], [("API_TOKEN", 5)],
+                                   [("API_TOKEN", "A"), ("OTHER", "A")]],
+            "key_invalid": [[("bad key", "A")]],
+        }
+        for code, variants in cases.items():
+            for bindings in variants:
+                with self.subTest(code=code, bindings=bindings):
+                    with self.assertRaises(SecretBrokerError) as raised:
+                        self.service._normalize_bindings("fixture", bindings)
+                    self.assertEqual(raised.exception.code, code)
+        with self.assertRaises(SecretBrokerError) as raised:
+            self.service._normalize_bindings("missing", [("API_TOKEN", "A")])
+        self.assertEqual(raised.exception.code, "source_unknown")
+        self.assertEqual(self.events(), [])
+        normalized, keys = self.service._normalize_bindings(
+            "fixture", [("API_TOKEN", "A"), ("OTHER", "B")])
+        self.assertEqual((normalized, keys), ([("API_TOKEN", "A"), ("OTHER", "B")],
+                                              ("API_TOKEN", "OTHER")))
+
+    def test_operate_records_success_reason_code_only_when_given(self):
+        self.service._operate("keys", "fixture", (), "cli",
+                              lambda correlation: {"ok": True, "reason_code": "child_exited"})
+        self.service._operate("keys", "fixture", (), "cli", lambda correlation: {"ok": True})
+        outcomes = [event for event in self.events() if event["phase"] == "outcome"]
+        self.assertEqual([event["reason_code"] for event in outcomes], ["child_exited", None])
+        self.assertEqual({event["decision"] for event in outcomes}, {"succeeded"})
+
+    def test_intent_written_before_read_and_outcome_carries_end_reason(self):
+        order = []
+        real_read = self.registry.read
+        real_intent = self.service.audit.intent
+
+        def intent(*args, **kwargs):
+            order.append("intent")
+            return real_intent(*args, **kwargs)
+
+        def read(*args, **kwargs):
+            order.append("read")
+            return real_read(*args, **kwargs)
+
+        with mock.patch.object(self.service.audit, "intent", side_effect=intent), \
+             mock.patch.object(self.registry, "read", side_effect=read):
+            payload = self.session("import os; print(os.environ['API_TOKEN'])")
+        self.assertEqual(order, ["intent", "read"])
+        self.assertEqual(payload["operation"], "run_session")
+        self.assertEqual(payload["source"], "fixture")
+        self.assertEqual(payload["key"], "API_TOKEN")
+        self.assertEqual(payload["reason_code"], "child_exited")
+        self.assertEqual(set(payload["result"]), {
+            "end_reason", "exit_code", "elapsed_class", "dropped_chunks", "lifetime_seconds",
+        })
+        self.assertIn("correlation_id", payload)
+        events = self.events()
+        self.assertEqual([(event["phase"], event["operation"]) for event in events],
+                         [("intent", "use_session"), ("outcome", "use_session")])
+        self.assertEqual((events[1]["decision"], events[1]["reason_code"]),
+                         ("succeeded", "child_exited"))
+        rendered = json.dumps(events) + repr(payload)
+        self.assertNotIn(self.SESSION_VALUE, rendered)
+        self.assertIn(b"[REDACTED]", b"".join(self.sink))
+        self.assertNotIn(self.SESSION_VALUE.encode(), b"".join(self.sink))
+
+    def test_multiple_keys_payload(self):
+        payload = self.session(bindings=(("API_TOKEN", "A"), ("OTHER", "B")))
+        self.assertEqual(payload["keys"], ["API_TOKEN", "OTHER"])
+        self.assertNotIn("key", payload)
+
+    def test_key_missing_refused_after_intent_without_child(self):
+        with mock.patch("sandbox.secrets.session.subprocess.Popen") as popen, \
+             self.assertRaises(SecretBrokerError) as raised:
+            self.session(bindings=(("MISSING", "MISSING"),))
+        self.assertEqual(raised.exception.code, "key_missing")
+        popen.assert_not_called()
+        events = self.events()
+        self.assertEqual([event["phase"] for event in events], ["intent", "outcome"])
+        self.assertEqual((events[1]["decision"], events[1]["reason_code"]),
+                         ("refused", "key_missing"))
+
+    def test_unrecordable_intent_refuses_before_read_and_child(self):
+        self.audit_path.parent.mkdir(parents=True, mode=0o700)
+        self.audit_path.write_text("")
+        self.audit_path.chmod(0o644)
+        with mock.patch.object(self.registry, "read") as read, \
+             mock.patch("sandbox.secrets.session.subprocess.Popen") as popen, \
+             self.assertRaises(SecretBrokerError) as raised:
+            self.session()
+        self.assertEqual(raised.exception.code, "audit_unavailable")
+        read.assert_not_called()
+        popen.assert_not_called()
+
+    def test_refusals_before_audit_read_and_child(self):
+        cases = [
+            ("destination_denied", "fixture", (("API_TOKEN", "LD_PRELOAD"),), "cli"),
+            ("destination_denied", "fixture", (("API_TOKEN", "NODE_OPTIONS"),), "cli"),
+            ("source_unknown", "missing", (("API_TOKEN", "API_TOKEN"),), "cli"),
+            ("selection_invalid", "fixture", (), "cli"),
+            ("command_denied", "fixture", (("API_TOKEN", "API_TOKEN"),), "mcp"),
+        ]
+        for code, source, bindings, surface in cases:
+            with self.subTest(code=code, bindings=bindings, surface=surface), \
+                 mock.patch.object(self.registry, "read") as read, \
+                 mock.patch("sandbox.secrets.session.subprocess.Popen") as popen, \
+                 self.assertRaises(SecretBrokerError) as raised:
+                self.service.run_session(
+                    source, bindings, [sys.executable, "-c", "print(1)"],
+                    lifetime_seconds=10, display=self.sink.append, surface=surface,
+                )
+            self.assertEqual(raised.exception.code, code)
+            read.assert_not_called()
+            popen.assert_not_called()
+        self.assertEqual(self.events(), [])
+
+    def test_invalid_lifetime_refused_before_audit(self):
+        with self.assertRaises(SecretBrokerError) as raised:
+            self.session(lifetime_seconds=43_201)
+        self.assertEqual(raised.exception.code, "lifetime_invalid")
+        self.assertEqual(self.events(), [])
+
+    def test_outcome_reason_code_matches_each_end_reason(self):
+        from sandbox.secrets.session import SessionSignals
+        for reason in ("interrupted", "hangup"):
+            with self.subTest(reason=reason):
+                signals = SessionSignals()
+                signals.request_end(reason)
+                payload = self.session(signals=signals)
+                self.assertEqual(payload["result"]["end_reason"], reason)
+                self.assertEqual(self.events()[-1]["reason_code"], reason)
+        payload = self.session("import time; time.sleep(30)", lifetime_seconds=1)
+        self.assertEqual(payload["result"]["end_reason"], "lifetime_expired")
+        self.assertEqual(self.events()[-1]["reason_code"], "lifetime_expired")
+        payload = self.session("raise SystemExit(4)")
+        self.assertEqual((payload["result"]["end_reason"], payload["result"]["exit_code"]),
+                         ("child_exited", 4))
+        self.assertEqual(self.events()[-1]["reason_code"], "child_exited")
+        self.assertEqual({event["decision"] for event in self.events()
+                          if event["phase"] == "outcome"}, {"succeeded"})

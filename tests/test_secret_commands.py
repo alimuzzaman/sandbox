@@ -306,5 +306,224 @@ class SecretCommandTests(unittest.TestCase):
             self.assertFalse((home / "runtime/compose").exists())
 
 
+class FakeStdout:
+    """Terminal-like stdout with a byte buffer, for session-mode tests."""
+
+    def __init__(self, tty=True):
+        self.tty = tty
+        self.buffer = io.BytesIO()
+
+    def isatty(self):
+        return self.tty
+
+    def write(self, text):
+        self.buffer.write(text.encode())
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def text(self):
+        return self.buffer.getvalue().decode()
+
+
+class SessionService:
+    def __init__(self, end_reason="child_exited", exit_code=0):
+        self.end_reason = end_reason
+        self.exit_code = exit_code
+        self.calls = []
+        self.run_many_calls = []
+
+    def run_session(self, source, bindings, argv, **kwargs):
+        self.calls.append((source, bindings, argv, kwargs))
+        kwargs["on_start"](1_700_000_000.0)
+        kwargs["display"](b"child line\n")
+        return {
+            "ok": True, "operation": "run_session", "source": source, "key": "API_TOKEN",
+            "reason_code": self.end_reason, "correlation_id": "c0ffee",
+            "result": {
+                "end_reason": self.end_reason,
+                "exit_code": self.exit_code if self.end_reason == "child_exited" else None,
+                "elapsed_class": "1_to_10s", "dropped_chunks": 0,
+                "lifetime_seconds": kwargs["lifetime_seconds"],
+            },
+        }
+
+    def run_many(self, *args, **kwargs):
+        self.run_many_calls.append((args, kwargs))
+        return {"ok": True, "operation": "run",
+                "result": {"termination": "exited", "exit_code": 0, "output": ""}}
+
+
+class SecretSessionCommandTests(unittest.TestCase):
+    def parser(self):
+        parser = argparse.ArgumentParser()
+        command.configure_parser(parser)
+        return parser
+
+    def args(self, **overrides):
+        values = dict(
+            action="run", source="fixture", key="API_TOKEN", secrets=None, project_dir=".",
+            destination=None, timeout_seconds=None, session=True, lifetime_seconds=None,
+            command=["--", "child"],
+        )
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def invoke(self, args, service, *, terminal_ok=True):
+        stdout = FakeStdout()
+        stderr = io.StringIO()
+        exit_code = 0
+        patches = [patch.object(command, "_service", return_value=service),
+                   patch.object(command.sys, "stdout", stdout)]
+        if terminal_ok:
+            patches.append(patch.object(command, "_require_foreground_terminal"))
+        with redirect_stderr(stderr):
+            for item in patches:
+                item.start()
+            try:
+                command.cmd_secrets({}, args)
+            except SystemExit as raised:
+                exit_code = raised.code
+            finally:
+                for item in reversed(patches):
+                    item.stop()
+        return exit_code, stdout.text(), stderr.getvalue()
+
+    def test_parser_accepts_session_flags_and_timeout_defaults_to_none(self):
+        args = self.parser().parse_args([
+            "run", "--session", "--lifetime-seconds", "60", "--source", "fixture",
+            "--key", "API_TOKEN", "--", "child",
+        ])
+        self.assertTrue(args.session)
+        self.assertEqual(args.lifetime_seconds, "60")
+        self.assertIsNone(args.timeout_seconds)
+        plain = self.parser().parse_args(["run", "--source", "fixture", "--key", "K", "--", "c"])
+        self.assertFalse(plain.session)
+        self.assertIsNone(plain.lifetime_seconds)
+        self.assertIsNone(plain.timeout_seconds)
+
+    def test_ordinary_run_still_uses_300_second_default(self):
+        service = SessionService()
+        args = self.args(session=False)
+        with patch.object(command, "_service", return_value=service), \
+             redirect_stdout(io.StringIO()):
+            command.cmd_secrets({}, args)
+        self.assertEqual(service.run_many_calls[0][1]["timeout_seconds"], 300)
+        self.assertEqual(service.calls, [])
+
+    def test_session_prints_start_and_end_lines(self):
+        service = SessionService()
+        code, out, err = self.invoke(self.args(), service)
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertRegex(lines[0], (
+            r"^secrets session: started source=fixture keys=API_TOKEN "
+            r"lifetime=28800s \(8h\) ends_at=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$"))
+        self.assertEqual(lines[1], "child line")
+        self.assertEqual(lines[2], (
+            "secrets session: ended end_reason=child_exited exit_code=0 "
+            "elapsed=1_to_10s dropped_chunks=0"))
+        source, bindings, argv, kwargs = service.calls[0]
+        self.assertEqual((source, bindings, argv), ("fixture", [("API_TOKEN", "API_TOKEN")], ["child"]))
+        self.assertEqual(kwargs["lifetime_seconds"], 28_800)
+        self.assertIsNotNone(kwargs["signals"])
+
+    def test_session_lifetime_and_multiple_keys_in_start_line(self):
+        service = SessionService()
+        args = self.args(key=None, secrets=["A=X", "B=Y"], lifetime_seconds="1900")
+        code, out, _err = self.invoke(args, service)
+        self.assertEqual(code, 0)
+        self.assertIn("keys=A,B lifetime=1900s (31m40s)", out)
+        self.assertEqual(service.calls[0][3]["lifetime_seconds"], 1_900)
+
+    def test_child_exit_mapping_matches_run(self):
+        for child, expected in ((0, 0), (11, 11), (-9, 1), (137, 1)):
+            with self.subTest(child=child):
+                code, out, err = self.invoke(self.args(), SessionService("child_exited", child))
+                self.assertEqual(code, expected)
+                if expected:
+                    self.assertIn("error: child_failed: secret use command failed", err)
+                self.assertIn(f"exit_code={child}", out)
+
+    def test_non_child_end_exit_codes(self):
+        for reason, expected in (("lifetime_expired", 0), ("interrupted", 130), ("hangup", 129)):
+            with self.subTest(reason=reason):
+                code, out, err = self.invoke(self.args(), SessionService(reason))
+                self.assertEqual(code, expected)
+                self.assertIn(f"end_reason={reason} exit_code=None", out)
+                self.assertNotIn("child_failed", err)
+
+    def test_lifetime_invalid_refused_before_service(self):
+        for raw in ("0", "43201", "1.5", "+5", " 5", "5s", "abc", "", "\u0665"):
+            with self.subTest(raw=raw):
+                service = SessionService()
+                code, _out, err = self.invoke(self.args(lifetime_seconds=raw), service,
+                                              terminal_ok=False)
+                self.assertEqual(code, 1)
+                self.assertTrue(err.startswith("error: lifetime_invalid: "), err)
+                self.assertEqual(service.calls, [])
+
+    def test_option_conflicts_refused_before_service(self):
+        for overrides in ({"timeout_seconds": 60},
+                          {"session": False, "lifetime_seconds": "60"}):
+            with self.subTest(overrides=overrides):
+                service = SessionService()
+                code, _out, err = self.invoke(self.args(**overrides), service,
+                                              terminal_ok=False)
+                self.assertEqual(code, 1)
+                self.assertTrue(err.startswith("error: option_conflict: "), err)
+                self.assertEqual(service.calls, [])
+                self.assertEqual(service.run_many_calls, [])
+
+    def run_terminal_case(self, *, stdout_tty=True, open_error=False, fd_tty=True,
+                          foreground=True):
+        service = SessionService()
+        stdout = FakeStdout(tty=stdout_tty)
+        stderr = io.StringIO()
+        opener = patch.object(command.os, "open", side_effect=OSError("no tty")) if open_error \
+            else patch.object(command.os, "open", return_value=9)
+        with patch.object(command, "_service", return_value=service), \
+             patch.object(command.sys, "stdout", stdout), opener, \
+             patch.object(command.os, "close"), \
+             patch.object(command.os, "isatty", return_value=fd_tty), \
+             patch.object(command.os, "tcgetpgrp", return_value=100), \
+             patch.object(command.os, "getpgrp", return_value=100 if foreground else 200), \
+             redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            command.cmd_secrets({}, self.args())
+        return raised.exception.code, stderr.getvalue(), service
+
+    def test_terminal_and_foreground_required(self):
+        for case in ({"stdout_tty": False}, {"open_error": True}, {"fd_tty": False},
+                     {"foreground": False}):
+            with self.subTest(case=case):
+                code, err, service = self.run_terminal_case(**case)
+                self.assertEqual(code, 1)
+                self.assertTrue(err.startswith("error: tty_required: "), err)
+                self.assertEqual(service.calls, [])
+
+    def test_foreground_terminal_passes_probe_and_closes_descriptor(self):
+        with patch.object(command.sys, "stdout", FakeStdout()), \
+             patch.object(command.os, "open", return_value=9) as opened, \
+             patch.object(command.os, "close") as closed, \
+             patch.object(command.os, "isatty", return_value=True), \
+             patch.object(command.os, "tcgetpgrp", return_value=100), \
+             patch.object(command.os, "getpgrp", return_value=100):
+            command._require_foreground_terminal()
+        self.assertEqual(opened.call_args[0][0], "/dev/tty")
+        closed.assert_called_once_with(9)
+
+    def test_run_help_marks_session_operator_only(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit):
+            self.parser().parse_args(["run", "--help"])
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn("--session", help_text)
+        self.assertIn("operator-only", help_text)
+        self.assertIn("foreground terminal", help_text)
+        self.assertIn("1-43200", help_text)
+        self.assertIn("agents", help_text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -52,6 +52,17 @@ class SecretMcpTests(unittest.TestCase):
         self.assertNotIn("reveal", source.lower())
         self.assertNotIn("candidate", source.lower())
 
+    def test_session_mode_is_not_exposed_over_mcp(self):
+        """Spec 059 FR-002: session mode is local CLI only (regression guard)."""
+        import inspect
+        module = importlib.import_module("tools.secrets")
+        parameters = set(inspect.signature(module.secret_use_profile).parameters)
+        self.assertFalse({name for name in parameters
+                          if "session" in name or "lifetime" in name})
+        source = (MCP_ROOT / "tools/secrets.py").read_text()
+        self.assertNotIn("run_session", source)
+        self.assertNotIn("lifetime", source.lower())
+
     def test_source_info_adapter_never_accepts_exact_size(self):
         module = importlib.import_module("tools.secrets")
         class Service:

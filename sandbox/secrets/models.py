@@ -14,6 +14,11 @@ MAX_SELECTED_KEYS = 100
 MAX_OUTPUT_BYTES = 1_048_576
 DEFAULT_TIMEOUT_SECONDS = 300
 MAX_TIMEOUT_SECONDS = 1_800
+# Operator-only session mode (spec 059): one foreground child, bounded by a
+# lifetime the broker enforces itself. Ordinary run limits above are unchanged.
+DEFAULT_SESSION_SECONDS = 28_800
+MAX_SESSION_SECONDS = 43_200
+END_REASONS = ("lifetime_expired", "interrupted", "hangup", "child_exited")
 
 
 class SecretBrokerError(RuntimeError):
@@ -90,6 +95,44 @@ class RunResult:
             "output": self.output,
             "truncated": self.truncated,
             "elapsed_class": elapsed_class,
+        }
+
+
+_SESSION_ELAPSED_CLASSES = (
+    (1, "under_1s"),
+    (10, "1_to_10s"),
+    (60, "10_to_60s"),
+    (600, "1_to_10m"),
+    (3_600, "10_to_60m"),
+    (14_400, "1_to_4h"),
+    (28_800, "4_to_8h"),
+    (43_200, "8_to_12h"),
+)
+
+
+@dataclass(frozen=True)
+class SessionResult:
+    """Metadata-only outcome of one supervised session; never holds output."""
+
+    end_reason: str
+    exit_code: int | None
+    elapsed_seconds: float
+    dropped_chunks: int
+    lifetime_seconds: int
+
+    def elapsed_class(self) -> str:
+        for bound, name in _SESSION_ELAPSED_CLASSES:
+            if self.elapsed_seconds < bound:
+                return name
+        return "12h_plus"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "end_reason": self.end_reason,
+            "exit_code": self.exit_code,
+            "elapsed_class": self.elapsed_class(),
+            "dropped_chunks": self.dropped_chunks,
+            "lifetime_seconds": self.lifetime_seconds,
         }
 
 

@@ -7,10 +7,13 @@ from collections.abc import Callable, Sequence
 
 from .audit import SecretAudit
 from .formats import SecretFormatError, parse_secret_document, validate_selector
-from .models import MAX_SELECTED_KEYS, SecretBrokerError, UseProfile, success
+from .models import (
+    DEFAULT_SESSION_SECONDS, MAX_SELECTED_KEYS, SecretBrokerError, UseProfile, success,
+)
 from .parser import SecretParseError, parse_document
 from .policy import fixed_mask, length_bucket, metadata, validate, validate_key
 from .runner import run_with_secret, run_with_secrets
+from .session import run_session, validate_lifetime
 from .sources import SourceRegistry
 from .organizer import organize as organize_document
 from .writer import load_revision_key, opaque_revision, rewrite_source, update_source
@@ -162,10 +165,13 @@ class SecretService:
             raise failure
         revision = result.get("revision") if isinstance(result, dict) else None
         count = result.get("count") if isinstance(result, dict) else None
+        # A session ends successfully for one of several bounded reasons; the
+        # outcome carries it in the existing reason_code field.
+        success_reason = result.get("reason_code") if isinstance(result, dict) else None
         _, failure = _bounded_call(lambda: self.audit.outcome(
             correlation, operation, source, list(keys), surface=surface,
-            decision="succeeded", profile=profile, revision=revision, count=count,
-            input_channel=input_channel,
+            decision="succeeded", reason_code=success_reason, profile=profile,
+            revision=revision, count=count, input_channel=input_channel,
         ))
         if failure is not None:
             raise failure
@@ -247,9 +253,9 @@ class SecretService:
             surface=surface,
         )
 
-    def run_many(self, source: str, bindings: Sequence[tuple[str, str]],
-                 argv: Sequence[str], *, timeout_seconds: int = 300,
-                 max_output_bytes: int = 1_048_576, surface: str = "cli") -> dict:
+    def _normalize_bindings(self, source: str, bindings: Sequence[tuple[str, str]]
+                            ) -> tuple[list[tuple[str, str]], tuple[str, ...]]:
+        """Validate key/destination pairs before any audit intent or read."""
         if not isinstance(bindings, (list, tuple)) or not bindings:
             raise SecretBrokerError("selection_invalid", "at least one secret binding is required")
         if len(bindings) > MAX_SELECTED_KEYS:
@@ -272,28 +278,64 @@ class SecretService:
         keys = tuple(key for key, _destination in normalized)
         if len(set(keys)) != len(keys):
             raise SecretBrokerError("selection_invalid", "secret keys must be unique")
+        return normalized, keys
+
+    def _binding_values(self, source: str, normalized) -> dict[str, str]:
+        _, document = self._document(source)
+        values = {}
+        for key, destination in normalized:
+            record = document.entries.get(key)
+            if record is None:
+                raise SecretBrokerError("key_missing", "secret key does not exist")
+            values[destination] = self._entry_value(record)
+        return values
+
+    @staticmethod
+    def _key_fields(keys: tuple[str, ...]) -> dict:
+        return {"key": keys[0]} if len(keys) == 1 else {"keys": list(keys)}
+
+    def run_many(self, source: str, bindings: Sequence[tuple[str, str]],
+                 argv: Sequence[str], *, timeout_seconds: int = 300,
+                 max_output_bytes: int = 1_048_576, surface: str = "cli") -> dict:
+        normalized, keys = self._normalize_bindings(source, bindings)
         if surface != "cli":
             raise SecretBrokerError("command_denied", "arbitrary secret commands are local CLI only")
         def perform(correlation):
-            _, document = self._document(source)
-            values = {}
-            for key, destination in normalized:
-                record = document.entries.get(key)
-                if record is None:
-                    raise SecretBrokerError("key_missing", "secret key does not exist")
-                values[destination] = self._entry_value(record)
+            values = self._binding_values(source, normalized)
             result = run_with_secrets(
                 argv, secrets=values, timeout_seconds=timeout_seconds,
                 max_output_bytes=max_output_bytes,
             )
-            payload = {"source": source, "result": result.as_dict(),
-                       "correlation_id": correlation}
-            if len(keys) == 1:
-                payload["key"] = keys[0]
-            else:
-                payload["keys"] = list(keys)
-            return success("run", **payload)
+            return success("run", source=source, result=result.as_dict(),
+                           correlation_id=correlation, **self._key_fields(keys))
         return self._operate("use", source, keys, surface, perform)
+
+    def run_session(self, source: str, bindings: Sequence[tuple[str, str]],
+                    argv: Sequence[str], *, lifetime_seconds: int = DEFAULT_SESSION_SECONDS,
+                    signals=None, display: Callable[[bytes], None],
+                    on_start: Callable[[float], None] | None = None,
+                    surface: str = "cli") -> dict:
+        """Operator-only supervised session (spec 059); local CLI only.
+
+        Every argument refusal happens before audit intent and before any
+        read. The outcome is ``succeeded`` with the end reason as its
+        ``reason_code``; output is displayed live and never returned.
+        """
+        normalized, keys = self._normalize_bindings(source, bindings)
+        if surface != "cli":
+            raise SecretBrokerError("command_denied", "secret sessions are local CLI only")
+        validate_lifetime(lifetime_seconds)
+
+        def perform(correlation):
+            values = self._binding_values(source, normalized)
+            result = run_session(
+                argv, secrets=values, lifetime_seconds=lifetime_seconds,
+                signals=signals, display=display, on_start=on_start,
+            )
+            return success("run_session", source=source, result=result.as_dict(),
+                           correlation_id=correlation, reason_code=result.end_reason,
+                           **self._key_fields(keys))
+        return self._operate("use_session", source, keys, surface, perform)
 
     def use_profile(self, profile_name: str, *, surface: str = "mcp") -> dict:
         profile = self.use_profiles.get(profile_name)

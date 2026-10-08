@@ -11,7 +11,12 @@ from sandbox.registry import CommandSpec, register_specs
 from sandbox.services.redaction import redact_structure
 from sandbox.secrets import SecretBrokerError
 from sandbox.secrets.context import build_secret_service
-from sandbox.secrets.models import MAX_VALUE_BYTES
+from sandbox.secrets.models import (
+    DEFAULT_SESSION_SECONDS,
+    DEFAULT_TIMEOUT_SECONDS,
+    MAX_SESSION_SECONDS,
+    MAX_VALUE_BYTES,
+)
 
 
 ACTIONS = ("source-info", "inspect", "validate", "run", "set", "organize", "reveal", "migrate-zshrc")
@@ -51,15 +56,33 @@ def configure_parser(parser) -> None:
     validate.add_argument("--json", action="store_true")
     validate.add_argument("--project-dir", default=".")
 
-    run = actions.add_parser("run", help="inject one or more secrets into one direct-argv child")
+    run = actions.add_parser(
+        "run", help="inject one or more secrets into one direct-argv child",
+        description=(
+            "Inject one or more secrets into one direct-argv child. Default: a bounded run "
+            "(1-1800 seconds) whose redacted output is shown when it ends. --session is "
+            "operator-only: a long-running child in your own foreground terminal, never "
+            "for agents."
+        ),
+    )
     run.add_argument("--source", required=True)
     run.add_argument("--key", help="one secret key (use --secret for paired bindings)")
     run.add_argument("--secret", action="append", dest="secrets", metavar="KEY=DEST",
                      help="bind one key to one child environment name; repeatable")
     run.add_argument("--destination", default=None,
                      help="destination environment variable name (defaults to KEY)")
-    run.add_argument("--timeout-seconds", type=int, default=300,
-                     help="maximum child lifetime (1-1800 seconds; default 300)")
+    run.add_argument("--timeout-seconds", type=int, default=None,
+                     help="maximum child lifetime (1-1800 seconds; default 300); "
+                          "not accepted with --session")
+    run.add_argument("--session", action="store_true",
+                     help="operator-only session: keep one child running in this foreground "
+                          "terminal with live redacted output until the lifetime ends, "
+                          "Ctrl-C, the terminal closes, or the child exits. Requires an "
+                          "interactive foreground terminal; agents must use a bounded run "
+                          "instead")
+    run.add_argument("--lifetime-seconds", default=None, metavar="N",
+                     help="session lifetime in whole seconds, 1-43200 (default 28800 = 8h); "
+                          "only with --session")
     run.add_argument("--project-dir", default=".")
     run.add_argument("command", nargs="+")
 
@@ -184,6 +207,164 @@ def _tty_secret(prompt: str) -> str:
     return value
 
 
+def _session_lifetime(raw) -> int:
+    if raw is None:
+        return DEFAULT_SESSION_SECONDS
+    lifetime = None
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        lifetime = int(raw)
+    if lifetime is None or not 1 <= lifetime <= MAX_SESSION_SECONDS:
+        raise SecretBrokerError(
+            "lifetime_invalid", "session lifetime must be a whole number from 1 to 43200 seconds",
+        )
+    return lifetime
+
+
+def _require_foreground_terminal() -> None:
+    """Session mode only runs as the foreground job of a live terminal.
+
+    This keeps CI, MCP, durable jobs and captured remote paths out, and makes
+    Ctrl-C and terminal hangup real bounds on the session.
+    """
+    ready = False
+    try:
+        if sys.stdout.isatty():
+            # A raw descriptor: text-mode "r+" on /dev/tty is refused as
+            # unseekable by current Python versions.
+            descriptor = os.open("/dev/tty", os.O_RDWR | getattr(os, "O_NOCTTY", 0))
+            try:
+                ready = os.isatty(descriptor) and os.tcgetpgrp(descriptor) == os.getpgrp()
+            finally:
+                os.close(descriptor)
+    except (OSError, ValueError, AttributeError):
+        ready = False
+    if not ready:
+        raise SecretBrokerError(
+            "tty_required",
+            "session mode needs an interactive terminal with sb as its foreground job",
+        )
+
+
+def _session_preflight(args):
+    """Return the session lifetime, or None for an ordinary run.
+
+    Runs before the service is built so every refusal precedes any read.
+    """
+    session = bool(getattr(args, "session", False))
+    raw = getattr(args, "lifetime_seconds", None)
+    if not session and raw is None:
+        return None
+    lifetime = _session_lifetime(raw)
+    if not session:
+        raise SecretBrokerError("option_conflict", "--lifetime-seconds requires --session")
+    if getattr(args, "timeout_seconds", None) is not None:
+        raise SecretBrokerError(
+            "option_conflict", "--timeout-seconds cannot be combined with --session",
+        )
+    _require_foreground_terminal()
+    return lifetime
+
+
+def _run_bindings(args) -> list[tuple[str, str]]:
+    if args.secrets:
+        if args.key or (args.destination is not None and args.destination != "SANDBOX_SECRET"):
+            raise SecretBrokerError(
+                "selection_invalid",
+                "use either --key/--destination or repeat --secret KEY=DEST",
+            )
+        bindings = []
+        for raw in args.secrets:
+            if not isinstance(raw, str) or raw.count("=") != 1:
+                raise SecretBrokerError(
+                    "selection_invalid", "each --secret must be KEY=DEST",
+                )
+            key, destination = raw.split("=", 1)
+            bindings.append((key, destination))
+        return bindings
+    if not args.key:
+        raise SecretBrokerError(
+            "selection_invalid", "--key is required unless --secret is provided",
+        )
+    destination = args.destination if args.destination is not None else args.key
+    return [(args.key, destination)]
+
+
+def _child_failed(exit_code) -> None:
+    """Shared child-exit mapping for ordinary run and session mode."""
+    if isinstance(exit_code, int) and exit_code != 0:
+        from sandbox.core import die
+        # Preserve the trusted child's failure without rendering its
+        # command, environment, or raw output in the error message.
+        die("child_failed: secret use command failed", code=exit_code if 1 <= exit_code <= 125 else 1)
+
+
+def _duration(seconds: int) -> str:
+    hours, remainder = divmod(int(seconds), 3_600)
+    minutes, rest = divmod(remainder, 60)
+    parts = [f"{value}{unit}" for value, unit in ((hours, "h"), (minutes, "m"), (rest, "s")) if value]
+    return "".join(parts) or "0s"
+
+
+def _session_write(text: str) -> None:
+    sys.stdout.flush()
+    sys.stdout.buffer.write(text.encode())
+    sys.stdout.buffer.flush()
+
+
+def _session_display(data: bytes) -> None:
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+
+_SESSION_EXIT = {"lifetime_expired": 0, "interrupted": 130, "hangup": 129}
+
+
+def _run_session(service, args, bindings, argv, lifetime: int) -> None:
+    from datetime import datetime
+    from sandbox.secrets.session import SessionSignals
+
+    def started(wall_deadline: float) -> None:
+        fields = redact_structure({
+            "source": args.source,
+            "keys": ",".join(key for key, _destination in bindings),
+            "lifetime": f"{lifetime}s ({_duration(lifetime)})",
+            "ends_at": datetime.fromtimestamp(wall_deadline).astimezone().isoformat(
+                timespec="seconds"),
+        })
+        if not isinstance(fields, dict):
+            fields = {}
+        _session_write(
+            f"secrets session: started source={fields.get('source')} keys={fields.get('keys')} "
+            f"lifetime={fields.get('lifetime')} ends_at={fields.get('ends_at')}\n"
+        )
+
+    # Own interrupt and hangup before the service runs, so a Ctrl-C during the
+    # source read still ends as an audited ``interrupted`` session.
+    with SessionSignals() as signals:
+        payload = service.run_session(
+            args.source, bindings, argv, lifetime_seconds=lifetime, signals=signals,
+            display=_session_display, on_start=started,
+        )
+    payload = redact_structure(payload)
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        raise SecretBrokerError("operation_failed", "secret operation failed")
+    end_reason = result.get("end_reason")
+    try:
+        _session_write(
+            f"secrets session: ended end_reason={end_reason} exit_code={result.get('exit_code')} "
+            f"elapsed={result.get('elapsed_class')} dropped_chunks={result.get('dropped_chunks')}\n"
+        )
+    except OSError:
+        pass  # the terminal is gone; the audit outcome already holds the reason
+    if end_reason == "child_exited":
+        _child_failed(result.get("exit_code"))
+        return
+    code = _SESSION_EXIT.get(end_reason, 1)
+    if code:
+        sys.exit(code)
+
+
 def _migrate(args) -> None:
     from sandbox.core import _cloudflare, _secrets
     from sandbox.core import die, ok
@@ -208,6 +389,7 @@ def cmd_secrets(cfg, args) -> None:
         _migrate(args)
         return
     try:
+        session_lifetime = _session_preflight(args) if args.action == "run" else None
         service = _service(args.project_dir)
         if args.action == "source-info":
             _emit(service.source_info(args.source, exact_size=args.exact_size), args.json)
@@ -221,40 +403,19 @@ def cmd_secrets(cfg, args) -> None:
             command = list(args.command)
             if command and command[0] == "--":
                 command.pop(0)
-            if args.secrets:
-                if args.key or (args.destination is not None and args.destination != "SANDBOX_SECRET"):
-                    raise SecretBrokerError(
-                        "selection_invalid",
-                        "use either --key/--destination or repeat --secret KEY=DEST",
-                    )
-                bindings = []
-                for raw in args.secrets:
-                    if not isinstance(raw, str) or raw.count("=") != 1:
-                        raise SecretBrokerError(
-                            "selection_invalid", "each --secret must be KEY=DEST",
-                        )
-                    key, destination = raw.split("=", 1)
-                    bindings.append((key, destination))
-            else:
-                if not args.key:
-                    raise SecretBrokerError(
-                        "selection_invalid", "--key is required unless --secret is provided",
-                    )
-                destination = args.destination if args.destination is not None else args.key
-                bindings = [(args.key, destination)]
+            bindings = _run_bindings(args)
+            if session_lifetime is not None:
+                _run_session(service, args, bindings, command, session_lifetime)
+                return
+            timeout = args.timeout_seconds
             payload = service.run_many(
                 args.source, bindings, command,
-                timeout_seconds=args.timeout_seconds,
+                timeout_seconds=DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout,
             )
             _emit(payload, False)
             result = payload.get("result") or {}
-            exit_code = result.get("exit_code")
-            termination = result.get("termination")
-            if termination == "exited" and isinstance(exit_code, int) and exit_code != 0:
-                from sandbox.core import die
-                # Preserve the trusted child's failure without rendering its
-                # command, environment, or raw output in the error message.
-                die("child_failed: secret use command failed", code=exit_code if 1 <= exit_code <= 125 else 1)
+            if result.get("termination") == "exited":
+                _child_failed(result.get("exit_code"))
         elif args.action == "set":
             intent = "create" if args.create_only else "replace" if args.replace_only else "either"
             kwargs = dict(intent=intent, expected_revision=args.if_revision,

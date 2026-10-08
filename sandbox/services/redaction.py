@@ -269,10 +269,12 @@ class StreamingRedactor:
         self._exact_values = tuple(normalized)
         self._pending = bytearray()
         self._discarding = False
+        self._fed = 0
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
         if not isinstance(chunk, bytes):
             raise RedactionError("output chunk must be bytes")
+        self._fed += len(chunk)
         if self._discarding:
             if final:
                 self._discarding = False
@@ -319,6 +321,16 @@ class StreamingRedactor:
 
     def finish(self) -> bytes:
         return self.feed(b"", final=True)
+
+    @property
+    def consumed_bytes(self) -> int:
+        """Input bytes already emitted (redacted) or discarded.
+
+        Everything fed before this offset has been accounted for and will
+        never be emitted later; only the withheld tail is still pending. The
+        session display uses it to align redacted output with its input.
+        """
+        return self._fed - len(self._pending)
 
 
 __all__ = [

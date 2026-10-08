@@ -1,7 +1,9 @@
 """CLI adapters for least-disclosure secret operations."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import getpass
+import io
 import json
 import os
 import sys
@@ -194,11 +196,32 @@ def _stdin_secret() -> str:
     return value
 
 
+@contextmanager
+def _controlling_tty():
+    """Open /dev/tty without requiring the terminal to support seeking."""
+    descriptor = os.open("/dev/tty", os.O_RDWR | getattr(os, "O_NOCTTY", 0))
+    raw = None
+    stream = None
+    try:
+        if not os.isatty(descriptor):
+            raise OSError("controlling device is not a terminal")
+        raw = io.FileIO(descriptor, "w+")
+        descriptor = -1
+        stream = io.TextIOWrapper(raw, encoding="utf-8")
+        raw = None
+        yield stream
+    finally:
+        if stream is not None:
+            stream.close()
+        elif raw is not None:
+            raw.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _tty_secret(prompt: str) -> str:
     try:
-        with open("/dev/tty", "r+") as tty:
-            if not os.isatty(tty.fileno()):
-                raise OSError
+        with _controlling_tty() as tty:
             value = getpass.getpass(prompt, stream=tty)
     except OSError as exc:
         raise SecretBrokerError("tty_required", "a controlling TTY is required") from exc
@@ -462,9 +485,7 @@ def cmd_secrets(cfg, args) -> None:
                                    expected_revision=args.if_revision), args.json)
         elif args.action == "reveal":
             try:
-                with open("/dev/tty", "r+") as tty:
-                    if not os.isatty(tty.fileno()):
-                        raise OSError
+                with _controlling_tty() as tty:
                     tty.write("WARNING: this reveals one secret to your terminal. Never paste it into chat or logs.\n")
                     tty.write(f"Retype {args.key} to continue: ")
                     tty.flush()

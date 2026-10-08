@@ -9,7 +9,7 @@ from tests.subprocess_support import synthetic_environment
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -70,6 +70,39 @@ class SecretCommandTests(unittest.TestCase):
         self.assertIsNone(raised.exception.__cause__)
         self.assertIsNone(raised.exception.__context__)
 
+    def test_controlling_tty_supports_nonseekable_duplex_io_and_closes_fd(self):
+        master, slave = os.openpty()
+        try:
+            with patch.object(command.os, "open", return_value=slave) as opened, \
+                 patch.object(command.os, "isatty", return_value=True):
+                with command._controlling_tty() as tty:
+                    self.assertFalse(tty.seekable())
+                    tty.write("prompt")
+                    tty.flush()
+                    self.assertEqual(os.read(master, 6), b"prompt")
+                    os.write(master, b"confirm\n")
+                    self.assertEqual(tty.readline(), "confirm\n")
+            opened.assert_called_once_with(
+                "/dev/tty", os.O_RDWR | getattr(os, "O_NOCTTY", 0),
+            )
+            with self.assertRaises(OSError):
+                os.fstat(slave)
+        finally:
+            os.close(master)
+
+    def test_controlling_tty_rejects_nonterminal_and_closes_fd(self):
+        master, slave = os.openpty()
+        try:
+            with patch.object(command.os, "open", return_value=slave), \
+                 patch.object(command.os, "isatty", return_value=False), \
+                 self.assertRaises(OSError):
+                with command._controlling_tty():
+                    self.fail("nonterminal descriptor was accepted")
+            with self.assertRaises(OSError):
+                os.fstat(slave)
+        finally:
+            os.close(master)
+
     def test_feature_skill_is_discoverable_and_forbids_pasted_secrets(self):
         body = (Path(__file__).parent.parent / "skills/secret-inspection/SKILL.md").read_text()
         self.assertIn("secrets inspect", body)
@@ -114,8 +147,7 @@ class SecretCommandTests(unittest.TestCase):
         )
         stdout = io.StringIO()
         with patch.object(command, "_service", return_value=service), \
-             patch("builtins.open", return_value=tty), \
-             patch.object(command.os, "isatty", return_value=True), \
+             patch.object(command, "_controlling_tty", return_value=nullcontext(tty)), \
              redirect_stdout(stdout):
             command.cmd_secrets({}, args)
         self.assertEqual(stdout.getvalue(), "")

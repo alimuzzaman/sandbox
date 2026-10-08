@@ -332,6 +332,10 @@ The safest local input is a hidden controlling-TTY prompt:
   --profile PROFILE_NAME --project-dir PROJECT_DIR
 ```
 
+The prompt opens the controlling terminal through a descriptor-backed stream,
+so it works with nonseekable terminals while `getpass` suppresses input echo.
+The terminal must still be available to the command.
+
 Use `--create-only` when absence is required, or omit both create/replace flags
 only when either intent is acceptable. When an inspection supplied an opaque
 revision, add `--if-revision OPAQUE_REVISION` to refuse a concurrent change.

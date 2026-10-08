@@ -1,0 +1,47 @@
+# Research: Scheduled Safe Cleanup on a Remote
+
+## R1 — Transport for enable, disable and status
+
+- **Decision**: new `cleanup_routine_enable|disable|status` actions on the existing `/resources` control route, dispatched in `mcp/wp-server/server.py` `_resource_contract` ahead of the probe allowlist; the client sends them with the public `sandbox.core._remote.remote_resource_request`.
+- **Rationale**: this is how the host-memory contract was added (`sandbox/resources/host_memory/remote.py`). It is authenticated, bounded (64 KB body), and needs no change to `_remote.py`.
+- **Alternatives**: remote durable job (heavier, no typed result); SSH (forbidden by FR-025).
+
+## R2 — Host unit rendering
+
+- **Decision**: `cleanup_routine/units.py` renders one `sandbox-cleanup-routine.service` + `.timer` pair per host into `~/.config/systemd/user`: `Type=oneshot`, `UMask=0077`, `TimeoutStartSec=<bound+60s>`, `OnCalendar=<cadence>`, `RandomizedDelaySec=<jitter>`, `Persistent=true`. `ExecStart` is the fixed argv `<sb-src>/sb resources routine --routine-run --json`. Write, snapshot/restore and bounded reads reuse helpers from `sandbox/resources/schedule.py`, promoted to public names.
+- **Rationale**: `schedule.py` already solves atomic install, rollback and receipt hardening for the local monitor timer.
+- **Alternatives**: extending `schedule.py` itself (would mix local-monitor and remote-routine policy; FR-005 forbids reading `schedule_calendar`).
+
+## R3 — Cadence validation
+
+- **Decision**: `systemd-analyze calendar <expr>` on the host, bounded; failure → `invalid_cadence`; its "Next elapse" output gives the next run time shown at enable.
+- **Rationale**: FR-005; systemd is the only valid oracle on the host.
+
+## R4 — Shared host reclaim guard
+
+- **Decision**: `sandbox/resources/host_guard.py` defines `RUNTIME/resources/reclaim-host.lock`. The probe's `reclaim_action` (`sandbox/resources/remote.py`) takes `flock(LOCK_EX|LOCK_NB)` on it after `run_id` validation and before the first manifest write, and before that probes, read-only with `LOCK_SH|LOCK_NB`, the host-side apply transaction locks `/run/lock/sandbox-hosting-caddy.lock`, `/run/lock/sandbox-edge-nginx.lock` and `/run/lock/sandbox-docker-pool.lock` (a missing file means not held). Busy → `{"ok": false, "reason": "host_reclaim_busy"}`. `ReclaimService.cleanup` maps that to `status="skipped"`, code `host_reclaim_busy`. The routine also pre-checks the guard before inventory (acquire and release) so a busy host costs no probe.
+- **Rationale**: every reclaim path (local cleanup, remote cleanup, monitor `scheduled_auto`, the routine) ends in the probe's `reclaim_action` on the host, so one guard there covers them all (FR-018). The lock paths are duplicated as literals; a parity test imports the originals read-only.
+- **Alternatives**: a host apply run marker (needs restricted-file edits; rejected by the D1 decision).
+
+## R5 — Run execution
+
+- **Decision**: `run.py` loads the recorded routine, finalizes any open stale record (FR-016 backstop), pre-checks the guard, then calls `ReclaimService(None).reap(tier="safe", confirm=True, exclude_names=<effective>, trigger="scheduled_routine", budget_seconds=<bound − elapsed>)`. Incomplete inventory → refused; `budget_exhausted` → `timed_out`; a nothing-to-do run records no manifest reference. Revision comes from `sandbox.services.runtime_revision.runtime_revision(<sb-src root>)`.
+- **Rationale**: FR-006 says the selection must equal `workspace reap --tier safe`; reusing `reap` guarantees it. A cleanup without `plan_id` always plans fresh (FR-017).
+
+## R6 — Runtime match at enable
+
+- **Decision**: the enable request carries `expected_runtime_revision` (the local `runtime_revision(repo root)`); the host compares it with its live revision and refuses `runtime_revision_mismatch` before any write.
+- **Rationale**: same pattern as the `/wp-cli` route; avoids the SSH-based service status probe.
+
+## R7 — Policy source
+
+- **Decision**: the operator resolves `schedule_timeout` and `schedule_randomized_delay` via `monitor.resolve_policy(remote)`, sends them at enable; the host re-validates with `config/storage_monitor.py` rules and records them (decision D2).
+
+## R8 — Exclusions
+
+- **Decision**: effective set = routine exclusions ∪ host `resources.reclaim_exclude` (read on the host via its own `load_config`). Validator: non-empty string ≤ 128 characters, no control characters or `/`, at most 32 entries, brackets balanced; otherwise `invalid_exclusion`.
+- **Rationale**: `fnmatch` never raises, so FR-014 needs an explicit validator.
+
+## R9 — Manifest retention
+
+- **Finding**: no code prunes deletion manifests today; "existing manifest retention rules" means manifests are kept. The routine prunes only its own run records (keep 30).

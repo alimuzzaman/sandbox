@@ -18,7 +18,8 @@ Decisions delegated by the user to an independent Fable reviewer (yolo mode).
 - Q: What happens to an enabled routine after the remote runtime is migrated? → A: It keeps running under the new runtime and records the revision per run.
 - Q: Is a run missed while the host was down caught up? → A: Yes, once at next boot, as an ordinary run.
 - Q: Is the run start jittered? → A: Yes, by the existing `schedule_randomized_delay` policy (default 5 minutes).
-- Q: How is overlap with other reclaiming work detected on the host? → A: One shared host reclaim guard taken by the routine, `resources cleanup` and the pressure-triggered cleanup; host apply is detected through its existing host-apply lock without changing host apply.
+- Q: How is overlap with other reclaiming work detected on the host? → A: One shared host reclaim guard taken by the routine, `resources cleanup` and the pressure-triggered cleanup; host apply is detected by probing its existing host-side transaction locks (Caddy hosting, nginx edge, Docker pool) without changing host apply. Apply work outside those transactions is not detected; cleanup only touches reclaim-eligible classes that apply does not create mid-transaction.
+- Q: Where do the time bound and jitter come from? → A: The operator's resolved storage-monitor policy for the remote, sent at enable, validated on the host and recorded with the routine.
 - Q: Who records `timed_out` when the bound is hit? → A: The run enforces the bound itself and writes the record; the init-system timeout is the bound plus 60 seconds as a backstop, and an unfinished record is finalized as `timed_out` at the next run or status read.
 
 ## User Scenarios & Testing *(mandatory)*
@@ -183,10 +184,13 @@ cadence periods, and confirm no run fired and no schedule remains on the host.
   `excluded_by_request` and MUST NOT appear as candidates or manifest intents.
 - **FR-014**: An exclusion that cannot be parsed MUST cause enable to refuse.
 - **FR-015**: Each run MUST have a time bound enforced by the host's init
-  system; the default MUST be the existing scheduled-run timeout policy
-  (30 minutes) unless overridden at enable. Each run start MUST be jittered by
-  the existing `schedule_randomized_delay` policy (default 5 minutes), which is
-  not settable at enable.
+  system; the default MUST be the `schedule_timeout` of the operator's resolved
+  storage-monitor policy for that remote (30 minutes) unless overridden at
+  enable. Each run start MUST be jittered by the `schedule_randomized_delay` of
+  that same resolved policy (default 5 minutes), which is not settable at
+  enable. Both values MUST be sent in the enable request, validated on the host
+  with the storage-monitor schedule-field rules, and recorded with the routine;
+  a run MUST use the recorded values, not the host's config at run time.
 - **FR-016**: A run that reaches its time bound MUST stop, record `timed_out`,
   remove nothing after the bound, and list removals made before it. The run
   MUST enforce the bound itself and write that record; the init-system timeout
@@ -198,8 +202,10 @@ cadence periods, and confirm no run fired and no schedule remains on the host.
 - **FR-018**: The routine, `resources cleanup`, and the pressure-triggered
   automatic cleanup MUST take one shared non-blocking host reclaim guard on the
   host before any removal, whichever machine initiated them. A run MUST record
-  `skipped: busy` and do nothing when that guard is held or when the host's
-  existing host-apply lock is held; host apply itself is not changed.
+  `skipped: busy` and do nothing when that guard is held or when any existing
+  host-side apply transaction lock (Caddy hosting, nginx edge, or Docker pool)
+  is held; those locks are only probed, never taken, and host apply itself is
+  not changed.
 - **FR-019**: A run MUST remove nothing and record a refusal when the
   inventory is incomplete.
 - **FR-020**: Enable MUST refuse, without changing any schedule, when the

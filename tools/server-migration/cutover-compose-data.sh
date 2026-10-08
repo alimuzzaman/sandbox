@@ -70,7 +70,8 @@ Options:
   --new-from-old TARGET      how the OLD server reaches the new one (default: --new)
   --db-container NAME        override the DB container name (default P-S-1, both sides)
   --restore-mode MODE        recreate (default, as used live) or clean; see pg-transfer.sh
-  --check-table TABLE        row-count spot check old vs new; repeatable
+  --check-table TABLE        row-count spot check old vs new; repeatable. Quote
+                             mixed-case names: --check-table '"Snapshot"'
   --expect-status CODE       health status (default 200)
   --revision-header NAME     header that carries the revision (e.g. x-lenzora-revision)
   --expect-revision VALUE    expected revision (prefix match)
@@ -149,6 +150,8 @@ if [ -n "$MAINT_SERVICE" ]; then
   is_positive_int "$MAINT_TIMEOUT" && [ "$MAINT_TIMEOUT" -ge 6 ] ||
     usage_error "--maintenance-timeout must be at least 6 (a drain lasts at least 5.5 minutes)"
 fi
+# Validate now: pg-transfer.sh checks again, but only after the data has moved.
+for t in ${TABLES[@]+"${TABLES[@]}"}; do check_table_name "$t"; done
 [ -n "$HOP" ] || HOP=$NEW
 [ -n "$DB_CONTAINER" ] || DB_CONTAINER="$PROJECT-$DB_SERVICE-1"
 [ -n "$WORK" ] || WORK="migration/$PROJECT"

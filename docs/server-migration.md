@@ -243,7 +243,7 @@ tools/server-migration/wait-and-cutover.sh --job-id <job> --poll-timeout 7200 --
   --volume lenzora-job-runtime-readiness \
   --health-url https://lenzora.example.com/api/health \
   --revision-header x-lenzora-revision --expect-revision <sha> \
-  --check-table users --check-table projects
+  --check-table '"User"' --check-table '"Project"' --check-table '"Snapshot"'
 ```
 
 The script checks `--confirm` first, polls `sb job-status` with a bound, and runs
@@ -281,6 +281,29 @@ The cutover, in order:
 
 The old server's stopped containers and data stay in place for the rollback window.
 If any step after step 2 fails, the script prints the rollback commands.
+
+`--check-table` names go into SQL as written. A plain name is folded to lower case by
+Postgres, so mixed-case tables (Prisma's `"User"`, `"Snapshot"`) must be passed with
+their double quotes: `--check-table '"Snapshot"'`. Names are checked before anything
+stops; anything other than `name`, `schema.name` or `"Name"` exits 2.
+
+Row counts do not prove that a volume's files arrived. For an app that records stored
+files in the database, follow the cutover with an app-level check that every live row's
+file exists in the volume at the recorded size. The Lenzora dev round trip on
+2026-10-08 did this for its snapshot, comparison and resource storage.
+
+**Redeploying to a server that was the old side.** After a cutover, the server that
+was OLD still holds the ledger of its last deploy, and that runtime was stopped by the
+cutover, not by Sandbox. The next `sb host apply` there refuses with
+`unproven_staged_revision`. Retire that last delivery first, then deploy:
+
+```sh
+./sb host retire-delivery --project-dir <dir> --environment <env> --remote <old> \
+  --original-request-id <request id of the last deploy there> --confirm
+```
+
+The request id is in `sb job-status <job> --json` for that deploy. This came up on the
+second leg of the 2026-10-08 Lenzora dev round trip (scaleway, then back to xcloud).
 
 For Lenzora dev the result was 307 tables with matching spot counts, `/api/health` 200
 with `x-lenzora-revision`, basic auth 401 from a non-bypass IP, the bypass path 200, and

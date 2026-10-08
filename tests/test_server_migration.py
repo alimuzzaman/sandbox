@@ -292,6 +292,61 @@ class CutoverTests(MigrationScriptTestCase):
         self.assertFalse(any("pg_restore" in c[-1] for c in self.calls("ssh")))
 
 
+    MAINT = ("--maintenance-service", "lenzora-monitor-worker")
+
+    def test_maintenance_mode_wraps_the_cutover(self):
+        result = self.run_script("cutover-compose-data.sh", "--dry-run", *self.ARGS, *self.MAINT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        steps = [
+            out.index("maintenance:status\n"),                               # CLI present
+            out.index("maintenance:enable --reason 'server migration'"),      # NEW read_only
+            out.index("maintenance:drain --reason 'server migration' --wait --timeout 15"),
+            out.index("grep -q '\"mode\":\"read_only\"'"),                   # OLD confirmed
+            out.index("/stopped.txt.now"),                                    # then stop NEW
+            out.index("stopped-old.txt.now"),
+            out.index("pg_dump"),
+            out.index("+ curl"),
+            out.index("grep -q '\"mode\":\"read_write\"'"),                  # NEW writable
+        ]
+        self.assertEqual(steps, sorted(steps))
+        enable = [l for l in out.splitlines() if "maintenance:enable" in l]
+        self.assertEqual(len(enable), 1)
+        before_enable = out[:out.index("maintenance:enable")]
+        self.assertIn(f"{NEW} -- set -e", before_enable[before_enable.rindex("+ ssh"):])
+        drain_ssh = out[:out.index("maintenance:drain")]
+        self.assertIn(f"{OLD} -- set -e", drain_ssh[drain_ssh.rindex("+ ssh"):])
+        self.assertIn("com.docker.compose.service=lenzora-monitor-worker", out)
+        self.assertIn("maintenance:disable", out[out.index("Rollback"):])
+        self.assertNoRemoteCalls()
+
+    def test_maintenance_old_only_leaves_new_alone(self):
+        result = self.run_script("cutover-compose-data.sh", "--dry-run", *self.ARGS, *self.MAINT,
+                                 "--maintenance-old-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("maintenance:enable", result.stdout)
+        self.assertIn("maintenance:drain", result.stdout)
+
+    def test_maintenance_timeout_must_cover_a_drain(self):
+        result = self.run_script("cutover-compose-data.sh", "--dry-run", *self.ARGS, *self.MAINT,
+                                 "--maintenance-timeout", "5")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("at least 6", result.stderr)
+
+    def test_drain_failure_stops_nothing_and_prints_disable(self):
+        failing_ssh = self.bin / "ssh"
+        failing_ssh.write_text(RECORDER.format(
+            name="ssh", body='case "${@: -1}" in *maintenance:drain*) exit 4 ;; esac; exit 0'))
+        result = self.run_script("cutover-compose-data.sh", "--confirm", *self.ARGS, *self.MAINT)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any("stopped" in c[-1] for c in self.calls("ssh")))
+        self.assertIn("To leave maintenance mode", result.stderr)
+        tail = result.stderr[result.stderr.index("To leave maintenance mode"):]
+        self.assertIn(f"ssh {OLD} ", tail)
+        self.assertIn(f"ssh {NEW} ", tail)
+        self.assertIn("maintenance:disable", tail)
+
+
 class WaitAndCutoverTests(MigrationScriptTestCase):
     CUT = ("--old", OLD, "--new", NEW, "--compose-project", "sandbox-host-p-dev", "--db-service", "db",
            "--health-url", "https://p.example.invalid/api/health")

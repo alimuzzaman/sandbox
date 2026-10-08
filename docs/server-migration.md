@@ -254,12 +254,13 @@ runs out, no data is touched. To run the cutover directly, use the same argument
 The cutover, in order:
 
 1. Preflight: the Postgres container runs on both servers.
-2. Old server: stop every running container of the compose project except the database
-   and any `--keep-service`. Names are recorded in `~/migration/<compose>/stopped-old.txt`
-   (on the old server) for rollback. Use `--service` instead to stop only named services.
-3. New server: stop the same selection and record the names in
-   `~/migration/<compose>/stopped.txt`. Step 7 restarts exactly that list. A re-run merges
-   the lists and never truncates them, so re-running after a partial failure is safe.
+2. New server: stop every running container of the compose project except the database
+   and any `--keep-service`, and record the names in `~/migration/<compose>/stopped.txt`.
+   Step 7 restarts exactly that list. Use `--service` instead to stop only named services.
+3. Old server: stop the same selection. Names are recorded in
+   `~/migration/<compose>/stopped-old.txt` (on the old server) for rollback. A re-run
+   merges the lists and never truncates them, so re-running after a partial failure is
+   safe.
 4. Final dump: `docker exec <db> sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -Z 6'`
    is piped through `ssh new` into `db.dump.partial`, which is renamed only after the
    whole stream has arrived.
@@ -287,6 +288,40 @@ all 18 containers healthy.
 
 The pieces also run on their own: `pg-transfer.sh --dump-only | --restore-only |
 --check-only` and `copy-volume.sh --fetch-only | --extract-only`.
+
+### Read-only maintenance mode (`--maintenance-service`)
+
+An app that ships a read-only maintenance CLI can stay readable during the cutover
+instead of losing writes. Lenzora has one (spec 056, `pnpm maintenance:status|enable|
+drain|disable`, documented in its `docs/runbooks/hosted-production-images.md`). Pass the
+service whose container runs it:
+
+```sh
+... --maintenance-service lenzora-monitor-worker [--maintenance-timeout 15] \
+    [--maintenance-reason "server migration"] [--maintenance-old-only]
+```
+
+The script runs the CLI with `docker exec` in the first running container of that
+service (`--maintenance-command`, default `pnpm --silent maintenance:`, is the prefix the
+verb is appended to). Before step 2 it:
+
+1. runs `status` on both servers, so a missing CLI stops the cutover before any change;
+2. puts NEW into `read_only` with `enable`. DNS already points at NEW, and NEW still has
+   its pre-seed; read-only means it serves those reads and refuses writes with 503 and
+   `Retry-After`, instead of accepting writes the restore would silently discard.
+   `--maintenance-old-only` skips this;
+3. runs `drain --wait --timeout <min>` on OLD: writes are refused at once, queued work
+   finishes, then the mode becomes `read_only`. A drain lasts at least 5.5 minutes, so
+   the timeout must be at least 6. Then `status --json` must report `read_only`.
+
+Steps 2 to 8 then run as above. The flag is stored in Postgres and bound to the
+cluster's system identifier, so the restored copy of OLD's flag reads as `read_write` on
+NEW's cluster; step 8 checks `status --json` on NEW for `read_write`. If the drain times
+out (exit 4, OLD stays `draining`) or anything else fails before a container stops, the
+script prints the `disable` commands for both servers. OLD keeps `read_only` for the
+rollback window, and the rollback commands include `disable`. Run `disable` before any
+migration on OLD: `prisma migrate deploy` refuses while the mode is not `read_write`.
+GitHub webhook deliveries refused during the window need a manual redelivery afterwards.
 
 ## Phase 6: stateless sites
 

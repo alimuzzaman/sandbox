@@ -756,6 +756,20 @@ explicit `init_services` build operations; the final no-build restart and health
 retain their own shorter limits. This keeps long builds observable and bounded instead
 of silently using a fixed 15-minute cutoff.
 
+Build context size. `host apply` ships the Git commit plus a capped overlay of
+untracked, not-ignored files (4096 files / 64 MiB; over the cap the apply refuses), so
+gitignored local directories such as `.pnpm-store`, `node_modules`, or `.next/cache`
+never travel from the controller. The remote checkout is reset with `git clean -fd`
+(no `-x`), so ignored directories written there by containers survive between applies
+and Docker sends them as build context. Before the `build=true` image build, apply runs
+a read-only probe over the remote source checkout and prints one
+`build context warning: <dir>/ is N MB ...` line, in progress output and `apply.log`
+(phase `compose_build`), for each top-level directory of 100 MB or more that the
+project's `.dockerignore` does not exclude. Only top-level `.dockerignore` patterns are
+evaluated, `.git` and symlinks are skipped, and the walk stops after 20 seconds
+(sizes then read "at least"). The probe never deletes anything and never fails the
+apply; fix a warning by adding the directory to `.dockerignore`.
+
 Text-mode `host apply` reports source, Compose, initializer, and healthcheck progress as
 the remote command runs. Compose output is streamed without changing the machine-readable
 JSON contract and is appended to a mode-0600 remote log at the path returned as

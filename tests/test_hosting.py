@@ -1507,6 +1507,59 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(results["large-valid"].returncode, 0)
         self.assertNotEqual(results["oversized"].returncode, 0)
 
+    def test_build_context_probe_warns_only_for_large_unignored_top_level_dirs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (".pnpm-store", "node_modules", "src", ".next"):
+                (root / name).mkdir()
+            (root / ".pnpm-store" / "blob").write_bytes(b"x" * 3 * 1024 * 1024)
+            (root / "node_modules" / "blob").write_bytes(b"x" * 3 * 1024 * 1024)
+            (root / ".next" / "blob").write_bytes(b"x" * 3 * 1024 * 1024)
+            (root / "src" / "app.py").write_text("print(1)\n")
+            (root / ".dockerignore").write_text("# deps\n/node_modules/\n**/.next\n!keep\n")
+            before = sorted(p.name for p in root.iterdir())
+            command = hosting_cmd._build_context_probe_command(directory, threshold_mb=1)
+            self.assertTrue(command.endswith("|| true"))
+            with tempfile.TemporaryDirectory() as shims:
+                shim = Path(shims) / "timeout"
+                shim.write_text("#!/bin/sh\nshift 3\nexec \"$@\"\n")
+                shim.chmod(0o700)
+                (Path(shims) / "python3").symlink_to(sys.executable)
+                result = run_test_process(
+                    ["sh", "-c", command], capture_output=True, text=True, check=False,
+                    timeout=30, env={"PATH": shims + os.pathsep + os.defpath})
+            after = sorted(p.name for p in root.iterdir())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(before, after)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn("build context warning", lines[0])
+        self.assertIn(".pnpm-store/", lines[0])
+        self.assertIn(".dockerignore", lines[0])
+
+    def test_build_context_probe_is_silent_for_missing_or_small_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "src").mkdir()
+            for target in (directory, str(Path(directory) / "absent")):
+                result = run_test_process(
+                    ["sh", "-c", hosting_cmd._build_context_probe_command(target)],
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout.strip(), "")
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_build_apply_runs_context_probe_before_build_and_no_build_skips_it(
+            self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+        build_command = remote_checked.call_args_list[0].args[1]
+        probe = hosting_cmd._build_context_probe_command("/srv/example")
+        self.assertTrue(build_command.startswith(probe + "; "))
+        self.assertTrue(build_command.endswith(" build --with-dependencies web"))
+
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_default_compose_apply_requests_a_fresh_build(self, remote_checked, _write):

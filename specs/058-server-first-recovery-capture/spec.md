@@ -168,7 +168,7 @@ unpromoted capture is older than the bound.
 - Archives left by the earlier one-shot `recovery create --remote` path are listed as legacy server archives: visible, not promotable, and not counted against the retention bound.
 - Drive already holds a set with the same backup id that does not trace to this capture: promote refuses with `set_id_conflict` and uploads nothing.
 - Promote finds a partial local transfer from a different capture identity under the same backup id: it discards it and starts over.
-- Operator-side free space is below the archive size plus its ciphertext: promote refuses with `insufficient_space` before transfer.
+- Operator-side free space is below what promote needs (the transferred archive, the set archive that wraps it, and its ciphertext): promote refuses with `insufficient_space` before transfer.
 - Interruption between upload and manifest write leaves the ciphertext `locally_pending`; the next promote finishes it.
 
 ## Requirements *(mandatory)*
@@ -247,7 +247,7 @@ unpromoted capture is older than the bound.
 - **SC-003**: Status and server-side listing succeed with `RECOVERY_PASSPHRASE` and `RECOVERY_RCLONE_DESTINATION` both unset.
 - **SC-004**: A complete capture's receipt lists 100% of the base tables and views the source reported at dump start, each with a row-count estimate; the dump's table set equals that list; the archive and every member carry a hash.
 - **SC-005**: Every capture start performs the free-space check before any dump, and a start below the estimate is refused with the shortfall stated.
-- **SC-006**: Promote of a complete capture publishes a set whose plaintext hash equals the receipt's archive hash, with zero recaptures.
+- **SC-006**: Promote of a complete capture publishes a set whose recorded hash for the captured archive equals the receipt's archive hash, checkable from the manifest without decryption, with zero recaptures.
 - **SC-007**: For a 2 GB archive, peak memory of the server capture job and of the operator-side promote each stays under 256 MB.
 - **SC-008**: An interrupted promote resumes and transfers no more than one chunk of already-received data again.
 - **SC-009**: The database credential and recovery passphrase appear in none of the arguments, command text, retained records, logs or outputs produced by capture, status or promote.

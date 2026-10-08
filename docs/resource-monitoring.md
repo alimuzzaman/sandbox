@@ -564,6 +564,19 @@ the whole run is refused with `manifest_unavailable` rather than deleting
 unrecorded. Each intent names the path, bytes, class, tier, reason, trigger and
 time, which is what makes "what happened to X" answerable afterwards.
 
+The trigger says which path started the run: `manual` (`resources cleanup`),
+`reap` (`workspace reap --confirm`), `scheduled_auto` (automatic safe-tier
+reclamation from the storage monitor) or `scheduled_routine` (the remote
+cleanup routine below). Manifests are kept; nothing prunes them.
+
+Every one of those paths ends in the host probe's `reclaim` step, which takes
+the host-wide reclaim guard `$SANDBOX_HOME/runtime/resources/reclaim-host.lock`
+before its first manifest line. It refuses with `host_reclaim_busy`, writing
+nothing, when another reclaim holds the guard or a hosting apply holds one of
+`/run/lock/sandbox-hosting-caddy.lock`, `/run/lock/sandbox-edge-nginx.lock` or
+`/run/lock/sandbox-docker-pool.lock`. `resources cleanup` reports that as
+`status: "skipped"` and the reviewed plan stays retryable.
+
 After removal the host reconciles: registry records whose root is gone are
 dropped through the typed repository, feature-owned lease files are removed, and
 workspace index records are dropped through `sb workspace destroy
@@ -605,7 +618,78 @@ Exclusions only remove candidates; PROTECTED and LIVE entries stay protected.
 `status` classifies free-space pressure: `warning` below 15% free, `critical`
 below 5%. Automatic reclamation is **off by default** and, when enabled, may
 only ever run the `safe` tier; every automatic run is recorded in the manifest
-with `trigger: "threshold"`.
+with `trigger: "scheduled_auto"`.
+
+### Scheduled safe cleanup on a remote
+
+A remote can clean its own safe-tier waste on a timer, without an operator
+session and without the operator machine being on:
+
+```sh
+./sb resources routine --remote R --enable --confirm \
+    [--cadence EXPR] [--timeout SPAN] [--exclude GLOB ...]
+./sb resources routine --remote R --status [--json]
+./sb resources routine --remote R --disable --confirm
+```
+
+`--enable` and `--disable` are protected (`protected_operation` without
+`--confirm`, nothing sent). All three go through the authenticated control
+service (`POST /resources`); no SSH is opened.
+
+- **What a run removes**: exactly what `workspace reap --tier safe --confirm`
+  would, planned fresh each run: the `safe` tier (ORPHAN entries, released
+  entries, expired registry-only entries and their workspace package volumes).
+  Disposable runtime scratch and STOPPED workspaces are never touched, and
+  PROTECTED, LIVE and hosted entries stay protected. The run first plans, refuses with `inventory_incomplete` (removing
+  nothing) unless the inventory is complete, records `nothing_to_do` without a
+  manifest when the plan is empty, and otherwise executes that plan with
+  `trigger: "scheduled_routine"`, writing each intent before its removal.
+- **Cadence**: a systemd `OnCalendar` expression (default `daily`; for example
+  `weekly`, `*-*-* 03:00:00`, `*:0/30`), at most 128 characters, validated on
+  the host with `systemd-analyze calendar` before anything is written
+  (`invalid_cadence`). The monitor's `schedule_calendar` is not used.
+- **Bound and jitter**: `--timeout` defaults to the remote's resolved storage
+  monitor `schedule_timeout` (30 minutes) and must be 60 seconds to 6 hours;
+  the jitter is the monitor's `schedule_randomized_delay` (5 minutes, at most a
+  day). Both are resolved on the operator side by `monitor.resolve_policy(R)`
+  and validated again on the host (`invalid_timeout`). The run stops at its own
+  bound and records `timed_out` with what it removed before stopping; the unit's
+  `TimeoutStartSec` (bound + 60 seconds) is the init-system backstop, and a
+  record left open past it is finalized `timed_out` (`run_bound_exceeded`) by
+  the next run or status read.
+- **Exclusions**: the effective set is the routine's `--exclude` globs (at most
+  32, each at most 128 characters, no `/` or control characters, brackets
+  balanced; else `invalid_exclusion`) plus the host's own
+  `resources.reclaim_exclude`. An excluded workspace's package volume is kept
+  too. Skipped items carry `excluded_by_request`.
+- **Busy host**: the run checks the reclaim guard and the hosting apply locks
+  first. If either is held it records `skipped_busy` and tries again at the
+  next period; a run never waits.
+- **Host requirements**: a systemd user manager (`systemd_unavailable`) with
+  lingering on for the service user (`linger_disabled`), and a host runtime
+  matching the operator's: enable sends the local runtime revision and the host
+  refuses `runtime_revision_mismatch` before any write. Run
+  `sb remote service migrate R --confirm` first.
+- **Installation**: one `sandbox-cleanup-routine.service` (oneshot, `UMask=0077`)
+  and `.timer` (`Persistent=true`) under `~/.config/systemd/user/` of the
+  service user. The service runs the fixed argv
+  `<sb-src>/sb resources routine --routine-run --json`; `--routine-run` is the
+  hidden host-side entry and refuses `--remote`. Re-enabling replaces the
+  settings and leaves exactly one timer; a failed install restores the prior
+  units and config (`routine_install_failed`). Disable runs
+  `systemctl --user disable --now`, deletes both unit files and keeps the run
+  history; disabling an absent routine is an idempotent success, and a failed
+  disable keeps the units (`routine_remove_failed`).
+- **Status and retention**: status reports the routine settings, effective
+  exclusions, `enabled_revision`, `last_run_revision`, the timer's `next_run`
+  and up to 30 runs newest first. Each run has its outcome (`reclaimed`,
+  `nothing_to_do`, `skipped_busy`, `timed_out`, `refused`), bytes reclaimed,
+  removed and skipped counts with skip reasons, its runtime revision, and a
+  manifest reference only if it attempted removal. Records live in
+  `$SANDBOX_HOME/runtime/resources/cleanup-routine/` (files `0600`, directories
+  `0700`); the 31st record prunes the oldest. Status never returns SSH targets,
+  tokens or file contents. A run that ends `skipped_busy`, `timed_out` or
+  `refused` exits non-zero, so systemd shows the service as failed.
 
 ### What needs a host runtime sync
 
@@ -615,6 +699,10 @@ an older Sandbox runtime. Only the host-executed control commands — `workspace
 list|status|create|reset|destroy --remote` — run `sb` on the host and therefore
 depend on its `sb-src` copy. Index reconciliation after a cleanup uses that same
 command, which is why it degrades to `index_pending` rather than failing.
+The cleanup routine is host-executed too: its enable, status and disable
+handlers run in the control service and its timer runs the host's `sb-src`, so
+it needs `sb remote service migrate <remote> --confirm` before first use and
+after any routine fix.
 
 ## MCP parity
 

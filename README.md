@@ -492,12 +492,22 @@ deletion manifest before each removal so "what happened to X" stays answerable:
 ./sb workspace release <name> --remote scaleway-sandbox    # done with it
 ./sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox
 ./sb workspace reap --remote scaleway-sandbox --dry-run
+# let the remote reap its own safe tier on a systemd timer (spec 057)
+./sb resources routine --remote scaleway-sandbox --enable --confirm --exclude 'lenzora*'
+./sb resources routine --remote scaleway-sandbox --status
+./sb resources routine --remote scaleway-sandbox --disable --confirm
 ```
 
 Only workspace-scoped `node_modules`-style volumes are ever eligible — every
 other volume is protected at every tier, including ones the engine reports as
 unused — hosted sites are untouchable, a partial delete is reported as a
 failure rather than success, and the default retention window is 7 days.
+`resources routine` installs one `systemd --user` timer on the remote that plans
+and executes the same safe-tier selection as `workspace reap` on a cadence
+(default `daily`), within the storage monitor's timeout, with
+`trigger: "scheduled_routine"` in the manifest. It skips a run while another
+reclaim or a hosting apply holds the host, keeps 30 run records for `--status`,
+and needs the remote's runtime to match (`sb remote service migrate`).
 See [Resource Monitoring and Safe Cleanup](docs/resource-monitoring.md).
 
 ### Host swap and memory management

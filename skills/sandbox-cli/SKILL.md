@@ -49,6 +49,10 @@ sb resources cleanup --remote scaleway-sandbox --tier safe --confirm --json
 sb workspace release <name> --remote scaleway-sandbox --json
 sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox --json
 sb workspace reap --remote scaleway-sandbox --dry-run --json
+# remote-side scheduled safe cleanup (systemd --user timer on the remote)
+sb resources routine --remote scaleway-sandbox --enable --confirm --exclude 'lenzora*' --json
+sb resources routine --remote scaleway-sandbox --status --json
+sb resources routine --remote scaleway-sandbox --disable --confirm --json
 ```
 
 For authenticated host health evidence through the remote Sandbox service, use:
@@ -165,6 +169,16 @@ or removing a receipt-bound installation is protected: use `--activate --confirm
 `--deactivate --confirm` only after reviewing the target policy and live
 read-only evidence. The target remote is reached by the monitor command, not by
 installing a timer on that host.
+
+`sb resources routine --remote R` is the opposite: it installs a timer ON the
+remote (`--enable --confirm`, `--disable --confirm`, `--status`) over the
+control service. Each run plans the `workspace reap --tier safe` selection,
+refuses an incomplete inventory, and executes it with trigger
+`scheduled_routine`. It records `skipped_busy` while another reclaim or a
+hosting apply holds the host, and keeps 30 run records. Cadence is a systemd
+calendar expression (default `daily`); the timeout and jitter come from the
+remote's storage-monitor policy. It needs systemd with lingering and a matching
+runtime revision (`sb remote service migrate R --confirm`).
 
 Deep status is diagnostic only. `existing_cache_scope` and
 `existing_stale_scope` may reference only eligibility independently established

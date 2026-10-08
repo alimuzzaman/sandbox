@@ -627,6 +627,12 @@ Applies to one host share a host state lock, so an apply for another project
 can be holding it. `apply` waits up to `--lock-wait` seconds (default 600, max
 3600) for that lock before it fails with `operation_busy`. Give the wrapping
 `job-start --timeout` room for the wait plus the apply itself.
+Storage reclamation on the same host yields to an apply: while the Caddy
+fragment, nginx edge or Docker pool lock is held, every reclaim (`resources
+cleanup`, `workspace reap`, the storage monitor's automatic run and the
+scheduled cleanup routine) refuses with `host_reclaim_busy` before deleting
+anything. An apply does not wait for a reclaim that is already running. See
+[Scheduled safe cleanup on a remote](resource-monitoring.md#scheduled-safe-cleanup-on-a-remote).
 Sandbox records the requested source, staged source receipt, recorded revision, and
 observed runtime revision separately. The staged receipt is saved before runtime
 observation, and exact runtime/topology evidence is saved before edge verification.

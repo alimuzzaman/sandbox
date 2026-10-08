@@ -54,9 +54,9 @@
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T023 [P] Docs: new "Scheduled safe cleanup on a remote" section in `docs/resource-monitoring.md` (enable/status/disable, cadence grammar, policy source, guard and busy semantics, trigger `scheduled_routine`, retention, migrate needed); update "Deletion manifest" trigger list
-- [ ] T024 [P] Docs: CLAUDE.md gotcha 23, `README.md` resources section, `skills/sandbox-cli/SKILL.md` and `.agents/skills/sandbox-cli/SKILL.md`, `docs/remote-hosting.md` remote resource note
-- [ ] T025 Run `python3 -m unittest` for every test module in quickstart.md plus `tests.test_architecture_boundaries`; fix regressions
+- [x] T023 [P] Docs: new "Scheduled safe cleanup on a remote" section in `docs/resource-monitoring.md` (enable/status/disable, cadence grammar, policy source, guard and busy semantics, trigger `scheduled_routine`, retention, migrate needed); update "Deletion manifest" trigger list
+- [x] T024 [P] Docs: CLAUDE.md gotcha 23, `README.md` resources section, `skills/sandbox-cli/SKILL.md` and `.agents/skills/sandbox-cli/SKILL.md`, `docs/remote-hosting.md` remote resource note
+- [x] T025 Run `python3 -m unittest` for every test module in quickstart.md plus `tests.test_architecture_boundaries`; fix regressions
 - [ ] T026 Live proof per quickstart.md on a disposable remote after `sb remote service migrate` with no active deploy and pinned consumers repinned; record evidence in this file and resolve feedback 8a3e8c35
 
 ## Dependencies

@@ -188,8 +188,19 @@ class PgTransferTests(MigrationScriptTestCase):
         self.assertNotIn("--clean", result.stdout)
 
     def test_bad_table_name_rejected(self):
-        result = self.run_script("pg-transfer.sh", "--dry-run", *self.ARGS, "--check-table", "x;drop")
-        self.assertEqual(result.returncode, 2)
+        for bad in ("x;drop", '"x;drop"', '"Snapshot', 'Snapshot"', '"a" or 1', "1abc", '""', "a..b", "a."):
+            with self.subTest(table=bad):
+                result = self.run_script("pg-transfer.sh", "--dry-run", *self.ARGS, "--check-table", bad)
+                self.assertEqual(result.returncode, 2, result.stdout)
+
+    def test_quoted_table_names_keep_their_case(self):
+        result = self.run_script("pg-transfer.sh", "--dry-run", *self.ARGS, "--check-only",
+                                 "--check-table", '"Snapshot"', "--check-table", 'public."User"',
+                                 "--check-table", "users")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('select count(*) from "Snapshot"', result.stdout)
+        self.assertIn('select count(*) from public."User"', result.stdout)
+        self.assertIn("select count(*) from users", result.stdout)
 
 
 class VolumeTests(MigrationScriptTestCase):
@@ -274,6 +285,14 @@ class CutoverTests(MigrationScriptTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("refusing", result.stderr)
         self.assertEqual(self.calls(), [])
+
+    def test_bad_check_table_refused_before_anything_moves(self):
+        result = self.run_script("cutover-compose-data.sh", "--confirm", *self.ARGS, "--check-table", "x;drop")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.calls(), [])
+        ok = self.run_script("cutover-compose-data.sh", "--dry-run", *self.ARGS, "--check-table", '"Snapshot"')
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn('from "Snapshot"', ok.stdout)
 
     def test_db_service_cannot_be_stopped(self):
         for flag in ("--service", "--keep-service"):

@@ -149,6 +149,24 @@ if value is not None:
 ' "$1"
 }
 
+# A --check-table name goes into SQL verbatim, so allow only identifiers: [schema.]table,
+# each part plain (folded to lower case by Postgres) or double-quoted to keep its case
+# (Prisma tables are "User", "Snapshot"; pass --check-table '"Snapshot"').
+check_table_name() { # value
+  local rest=$1 part
+  while :; do
+    part=${rest%%.*}
+    case $part in
+      \"[A-Za-z_]*\") part=${part#\"}; part=${part%\"} ;;
+      [A-Za-z_]*) ;;
+      *) usage_error "bad --check-table: $1 (use name, schema.name or \"Name\")" ;;
+    esac
+    case $part in *[!A-Za-z0-9_]*) usage_error "bad --check-table: $1 (use name, schema.name or \"Name\")" ;; esac
+    [ "$rest" != "${rest#*.}" ] || break
+    rest=${rest#*.}
+  done
+}
+
 is_positive_int() { case ${1:-} in '' | *[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] ;; esac; }
 
 # Names that end up inside remote shell scripts. Quoting already protects them; this

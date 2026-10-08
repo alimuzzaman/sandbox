@@ -76,10 +76,7 @@ check_name --new-container "$NEW_CONTAINER"
 [ -n "$HOP" ] || HOP=$NEW
 [ -n "$DUMP" ] || DUMP="migration/$CONTAINER.dump"
 case $MODE in clean | recreate) ;; *) usage_error "--restore-mode must be clean or recreate" ;; esac
-for t in ${TABLES[@]+"${TABLES[@]}"}; do
-  case $t in [A-Za-z_]*) ;; *) usage_error "bad --check-table: $t" ;; esac
-  case $t in *[!A-Za-z0-9_.]*) usage_error "bad --check-table: $t" ;; esac
-done
+for t in ${TABLES[@]+"${TABLES[@]}"}; do check_table_name "$t"; done
 
 # Expanded inside the container, never on this machine.
 # shellcheck disable=SC2016

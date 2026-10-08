@@ -309,11 +309,21 @@ and not-applicable records must not be reimplemented without fresh evidence.
   closed (shared 0-20 s wait bound in `sandbox/commands/jobs_runtime.py`,
   profile help, remote service help 788f542, `host logs --tail`). Bounding
   large job-list output was never a filed defect; reopen with a record.
-- [ ] **Host apply observability/build behavior:** add incremental progress,
-  bounded build/OOM/host-pressure classification, avoid stale-image or
-  multi-GB-context rebuilds when `build=false`, and make the timeout policy fit
-  real builds. IDs: `37d95e66`, `c158edba`, `6728d6f3`, `d354307a`, `a6223e14`,
-  `7ab76b8b`, `5978c11e4`.
+- [ ] **Host apply observability/build behavior:** code side done, live
+  acceptance remaining. Done: streamed phase-labelled progress, protected
+  `apply.log`, and output tails on timeout (00281d5; `37d95e66`, `a6223e14`);
+  source-revision check after recreate (9435a33; `c158edba`); per-manifest
+  `build_timeout_seconds` from 60 to 7200 s, used for builds and runtime start
+  (e44f3ca; `6728d6f3`, `d354307a`); `build=false` is a hard no-build mode
+  with a read-only image preflight that fails closed instead of building
+  missing images, and init runs use `--no-build --pull never` (f30bbb5;
+  `7ab76b8b`); durable jobs classify SIGKILL/137 as `process_killed` without
+  claiming OOM (8a541c2; `5978c11e4`). Remaining, all needing a reachable
+  remote or a design decision: a live retry of the `7ab76b8b` hosted-dev path
+  (record still `blocked`), a cold 30-35 min build under a raised timeout,
+  host/cgroup memory-pressure evidence to tell OOM from host kills, and
+  trimming large build contexts (for example `.pnpm-store`) when
+  `build=true`.
 - [ ] **Hermes dashboard/public/provider/repository lifecycle:** distinguish
   config from dashboard/gateway/public readiness; repair saved-session resume,
   obsolete cloudflared cleanup, Access-policy resolution, provider inspection,

@@ -238,8 +238,8 @@ class CutoverTests(MigrationScriptTestCase):
         out = result.stdout
         steps = [
             out.index(f"{OLD} -- [ \"$(sudo -n docker inspect"),          # preflight
-            out.index("stopped-old.txt.now"),                                 # stop old
-            out.index("/stopped.txt.now"),                                    # stop new
+            out.index("/stopped.txt.now"),                                    # stop new first
+            out.index("stopped-old.txt.now"),                                 # then old
             out.index("pg_dump"),                                             # final dump
             out.index("sandbox-host-lenzora-dev_lenzora-storage)\" -cf -"),   # final tar
             out.index("dropdb"),                                              # restore

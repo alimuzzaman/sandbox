@@ -16,10 +16,12 @@ stopping the web then fails verification and apply rolls DNS back.
 
 Order (phase 5 of docs/server-migration.md; generalized from the Lenzora dev cutover):
   1. preflight: the Postgres container runs on both servers
-  2. OLD: stop the project's containers except the database and --keep-service ones;
-     the names go to WORK/stopped-old.txt on OLD (for rollback)
-  3. NEW: stop the same selection; the names go to WORK/stopped.txt on NEW, and step 7
-     restarts exactly that list
+  2. NEW: stop the project's containers except the database and --keep-service ones;
+     the names go to WORK/stopped.txt on NEW, and step 7 restarts exactly that list.
+     NEW goes first because DNS already points at it: until the data lands it would
+     serve a fresh, near-empty database, and an error page is better than that.
+  3. OLD: stop the same selection; the names go to WORK/stopped-old.txt on OLD
+     (for rollback)
   4. final pg_dump on OLD, streamed straight to NEW            (pg-transfer.sh)
   5. final tar of every --volume on OLD, streamed to NEW       (copy-volume.sh)
      A volume copy refuses while any running container uses the volume, on either side.
@@ -27,7 +29,7 @@ Order (phase 5 of docs/server-migration.md; generalized from the Lenzora dev cut
   7. NEW: start the recorded containers
   8. verify the health URL (and revision header), compare --check-table row counts
 OLD's stopped containers and data stay in place for the rollback window. If a step fails
-after step 2, the script prints the rollback commands.
+after step 3, the script prints the rollback commands.
 
 Containers are selected by the label com.docker.compose.project=P, so scaled replicas and
 one-off workers are included. Re-running after a partial failure is safe: the recorded
@@ -192,12 +194,12 @@ log "1/8 preflight"
 require_running "$OLD" "$DB_CONTAINER"
 require_running "$NEW" "$DB_CONTAINER"
 
-log "2/8 stop $SELECTION on OLD (database keeps running)"
+log "2/8 stop $SELECTION on NEW (database keeps running)"
+stop_selected "$NEW" "$WORK/stopped.txt"
+
+log "3/8 stop the same on OLD"
 OLD_STOPPED=1
 stop_selected "$OLD" "$WORK/stopped-old.txt"
-
-log "3/8 stop the same on NEW"
-stop_selected "$NEW" "$WORK/stopped.txt"
 
 log "4/8 final database dump OLD -> NEW"
 "$HERE/pg-transfer.sh" "${PASS[@]}" --dump-only --old "$OLD" --new "$NEW" \

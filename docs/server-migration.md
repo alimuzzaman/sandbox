@@ -228,6 +228,10 @@ tools/server-migration/stage-volume.sh --old alim@OLD_IP --new alim@NEW_IP \
 during that check, verification fails and apply rolls DNS back. So start the deploy job,
 then let `wait-and-cutover.sh` wait for it:
 
+The cutover stops the NEW containers before the OLD ones. By then DNS already points at
+the new server, which is serving a fresh, near-empty database, so a few minutes of
+errors is the better failure. Lenzora production took about 2 minutes this way.
+
 ```sh
 tools/server-migration/wait-and-cutover.sh --job-id <job> --poll-timeout 7200 --confirm -- \
   --old alim@OLD_IP --new alim@NEW_IP \
@@ -358,3 +362,6 @@ failed deploy needs no manual rollback, only `retire-failed.sh`.
 | `refusing: running containers use <volume>` | Final copy of a live volume | Stop its service (do not `--keep-service` it) |
 | ssh `Host key verification failed` on the nested hop | Old server never saw the new host key | Run `ssh -A old ssh new true` once and accept it |
 | `ps` fails from an agent shell | Broken shim in the agent sandbox | Use `/bin/ps` |
+| `No such image: <project>-<service>:latest` at `compose_recreate` | A `depends_on` service had no image on a fresh host (Sandbox before 88af8cf built only the declared services) | Use a Sandbox at or after 88af8cf (`build --with-dependencies`) |
+| `delivery_terminal_conflict` from retire | That request was already retired; the stale staged revision survived it (Sandbox before 66d35ee) | Let the next apply refuse, then retire that apply's request id |
+| Database container restarting: `/run/secrets/<name>: No such file` | A failed apply's rollback removed the runtime secrets | Nothing to fix by hand; the next apply writes them again. Do not pre-seed data until then |

@@ -60,5 +60,21 @@ if [ -z "$REQUEST_ID" ]; then
 fi
 
 confirm_or_die "retire delivery $REQUEST_ID for $ENVIRONMENT on $REMOTE"
-run "$SB" host retire-delivery --project-dir "$PROJECT_DIR" --environment "$ENVIRONMENT" \
-  --remote "$REMOTE" --original-request-id "$REQUEST_ID" --confirm --json
+if [ "$DRY_RUN" = 1 ]; then
+  run "$SB" host retire-delivery --project-dir "$PROJECT_DIR" --environment "$ENVIRONMENT" \
+    --remote "$REMOTE" --original-request-id "$REQUEST_ID" --confirm --json
+  exit 0
+fi
+set +e
+out=$("$SB" host retire-delivery --project-dir "$PROJECT_DIR" --environment "$ENVIRONMENT" \
+  --remote "$REMOTE" --original-request-id "$REQUEST_ID" --confirm --json 2>&1)
+rc=$?
+set -e
+printf '%s\n' "$out"
+case $out in
+  *delivery_terminal_conflict*)
+    # Retired once already. The retire that clears a stale staged revision only runs on
+    # a fresh record, so let the next apply refuse, then retire that request instead.
+    die "delivery $REQUEST_ID was already retired; if the next apply refuses with unproven_staged_revision, retire that apply's request id" ;;
+esac
+exit $rc

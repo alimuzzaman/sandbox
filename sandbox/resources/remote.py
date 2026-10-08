@@ -21,6 +21,8 @@ from .models import (
 
 
 _REMOTE_PROGRAM = r"""
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -31,6 +33,7 @@ import re
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -2004,6 +2007,14 @@ def docker_storage_resources(thorough):
 
 LEASE_DIR = RUNTIME / "resources" / "leases"
 DELETION_DIR = RUNTIME / "resources" / "deletions"
+# Kept in lockstep with sandbox/resources/host_guard.py (parity-tested).  The
+# probe is self-contained, so the guard and the apply-lock probe are inlined.
+RECLAIM_GUARD = RUNTIME / "resources" / "reclaim-host.lock"
+APPLY_TRANSACTION_LOCKS = (
+    "/run/lock/sandbox-hosting-caddy.lock",
+    "/run/lock/sandbox-edge-nginx.lock",
+    "/run/lock/sandbox-docker-pool.lock",
+)
 LEASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 # Kept in lockstep with sandbox/resources/reclaim.WORKSPACE_VOLUME_PATTERN.
 # The probe re-asserts it independently so a malformed or hostile request can
@@ -2378,7 +2389,69 @@ def remove_path(path):
     return absent, elevated, failure
 
 
+def apply_transaction_active():
+    # Probe, never take, the host-apply transaction locks.  A missing or
+    # unopenable file cannot be held by a transaction this user can observe.
+    for path in APPLY_TRANSACTION_LOCKS:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return True
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+    return False
+
+
+def take_reclaim_guard():
+    # Return a descriptor holding the shared host reclaim guard, or None when
+    # another reclaim holds it or the file is not a safe owner-only file.
+    descriptor = -1
+    try:
+        RECLAIM_GUARD.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(
+            str(RECLAIM_GUARD), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600,
+        )
+        state = os.fstat(descriptor)
+        if (not stat.S_ISREG(state.st_mode) or state.st_uid != os.getuid()
+                or stat.S_IMODE(state.st_mode) & 0o077):
+            raise OSError("unsafe reclaim guard")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return descriptor
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        return None
+
+
 def reclaim_action():
+    # Every reclaiming path on this host (manual and remote cleanup, the
+    # pressure-triggered monitor, the scheduled routine) ends here, so one
+    # non-blocking guard serializes them all.  Busy is reported before any
+    # manifest line exists.
+    run_id = str(REQUEST.get("run_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+        return {"stage": "final", "ok": False, "reason": "invalid_run_id"}
+    if apply_transaction_active():
+        return {"stage": "final", "ok": False, "reason": "host_reclaim_busy",
+                "detail": "apply_transaction"}
+    guard = take_reclaim_guard()
+    if guard is None:
+        return {"stage": "final", "ok": False, "reason": "host_reclaim_busy",
+                "detail": "guard"}
+    try:
+        return reclaim_run()
+    finally:
+        os.close(guard)
+
+
+def reclaim_run():
     run_id = str(REQUEST.get("run_id") or "")
     if not re.fullmatch(r"[a-f0-9]{32}", run_id):
         return {"stage": "final", "ok": False, "reason": "invalid_run_id"}

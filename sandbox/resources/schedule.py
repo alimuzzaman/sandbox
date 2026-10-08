@@ -412,7 +412,7 @@ def _existing_file_state(path: Path, expected_mode: int) -> os.stat_result | Non
     return state
 
 
-def _bounded_file_bytes(path: Path, expected_mode: int) -> bytes | None:
+def bounded_file_bytes(path: Path, expected_mode: int) -> bytes | None:
     """Read one scheduler file without an unbounded allocation or decode leak."""
     state = _existing_file_state(path, expected_mode)
     if state is None:
@@ -467,7 +467,7 @@ def _load_receipt(target: Mapping[str, str], platform: str) -> tuple[dict[str, A
     return canonical, path
 
 
-def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+def atomic_write(path: Path, content: bytes, mode: int) -> None:
     platform = "systemd" if path.parent == Path.home() / ".config" / "systemd" / "user" else "launchd"
     root = _scheduler_root(platform, create=True)
     if path.parent != root or path.name in {"", ".", ".."}:
@@ -501,11 +501,11 @@ def _atomic_write(path: Path, content: bytes, mode: int) -> None:
                 pass
 
 
-def _write_unit(path: Path, content: str, mode: int) -> None:
+def write_unit(path: Path, content: str, mode: int) -> None:
     _atomic_write(path, content.encode("utf-8"), mode)
 
 
-def _snapshot_installation(
+def snapshot_installation(
     paths: Mapping[Path, int],
 ) -> dict[Path, tuple[bytes, int] | None]:
     """Capture the complete pre-write state for transactional restoration."""
@@ -528,7 +528,7 @@ def _snapshot_installation(
     return snapshot
 
 
-def _restore_installation(snapshot: Mapping[Path, tuple[bytes, int] | None]) -> None:
+def restore_installation(snapshot: Mapping[Path, tuple[bytes, int] | None]) -> None:
     """Restore all paths after a failed pre-transition write."""
     try:
         for path, prior in snapshot.items():
@@ -553,7 +553,7 @@ def _restore_installation(snapshot: Mapping[Path, tuple[bytes, int] | None]) -> 
         ) from exc
 
 
-def _run_bounded(command: Sequence[str]) -> None:
+def run_bounded(command: Sequence[str]) -> None:
     try:
         completed = subprocess.run(
             list(command),
@@ -728,11 +728,29 @@ def deactivate_installed(
         return _result(display, ok=False, status="failed", error=exc)
 
 
+
+# Public names for the helpers the remote cleanup routine (spec 057) reuses.
+# The private spellings stay as module globals so existing internal calls and
+# tests that patch ``_run_bounded`` keep working unchanged.
+_atomic_write = atomic_write
+_write_unit = write_unit
+_snapshot_installation = snapshot_installation
+_restore_installation = restore_installation
+_bounded_file_bytes = bounded_file_bytes
+_run_bounded = run_bounded
+
+
 __all__ = [
     "ScheduleError",
     "activate",
+    "atomic_write",
+    "bounded_file_bytes",
     "build_schedule_plan",
     "deactivate",
     "deactivate_installed",
     "normalize_platform",
+    "restore_installation",
+    "run_bounded",
+    "snapshot_installation",
+    "write_unit",
 ]

@@ -555,5 +555,128 @@ class ProbeCase(unittest.TestCase):
         self.assertEqual(timeout, 17)
 
 
+class TestHostReclaimGuard(ProbeCase):
+    """Spec 057: one host guard serializes every reclaiming path."""
+
+    def candidate(self, path):
+        return {
+            "seq": 1, "kind": "worktree", "locator": str(path), "bytes": 32,
+            "class": "ORPHAN", "tier": "safe", "reason": "orphan_workspace",
+        }
+
+    def test_probe_reclaim_while_the_guard_is_held_is_busy_and_writes_nothing(self):
+        from sandbox.resources.host_guard import try_reclaim_guard
+
+        path = self.workspace("held-workspace-1")
+        run_id = "a1" * 16
+        with try_reclaim_guard(runtime=self.home / "runtime") as acquired:
+            self.assertTrue(acquired)
+            response = self.probe.reclaim(
+                [self.candidate(path)], run_id=run_id, budget_seconds=30,
+            )
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "host_reclaim_busy")
+        self.assertEqual(response["detail"], "guard")
+        self.assertTrue(path.exists())
+        manifest = (self.home / "runtime" / "resources" / "deletions"
+                    / f"{run_id}.jsonl")
+        self.assertFalse(manifest.exists())
+
+    def test_guard_is_released_after_a_probe_reclaim(self):
+        from sandbox.resources.host_guard import try_reclaim_guard
+
+        path = self.workspace("free-workspace-1")
+        response = self.probe.reclaim(
+            [self.candidate(path)], run_id="a2" * 16, budget_seconds=30,
+        )
+        self.assertTrue(response["ok"], response)
+        with try_reclaim_guard(runtime=self.home / "runtime") as acquired:
+            self.assertTrue(acquired)
+
+    def test_reap_trigger_reaches_manifest_run_start_and_intents(self):
+        path = self.workspace("orphan-workspace-9")
+        old = time.time() - 11 * DAY
+        for item in (path / "node_modules" / "a.txt", path / "node_modules", path):
+            os.utime(item, (old, old))
+        probe = self.probe
+
+        class Hybrid(FakeProvider):
+            def reclaim(self, candidates, **kwargs):
+                return probe.reclaim(candidates, **kwargs)
+
+        provider = Hybrid()
+        provider.block["entries"] = [entry(
+            "orphan-workspace-9", path=str(path), size_bytes=32,
+            mtime=path.stat().st_mtime,
+        )]
+        provider.block["volumes"] = []
+        store = PlanStore(self.home / "plans")
+        payload = ReclaimService(provider, store, target=TARGET).reap(
+            dry_run=False, confirm=True, tier="safe",
+            trigger="scheduled_routine",
+        )
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["data"]["trigger"], "scheduled_routine")
+        records = self.manifest_records(payload["data"]["run_id"])
+        self.assertEqual(records[0]["phase"], "run_start")
+        self.assertEqual(records[0]["trigger"], "scheduled_routine")
+        intents = [item for item in records if item["phase"] == "intent"]
+        self.assertTrue(intents)
+        self.assertTrue(all(item["trigger"] == "scheduled_routine"
+                            for item in intents))
+
+
+class TestBusyMapping(ServiceCase):
+    def test_host_reclaim_busy_is_a_skipped_cleanup(self):
+        class Busy(FakeProvider):
+            def reclaim(self, candidates, **kwargs):
+                self.calls.append(("reclaim",))
+                return {"stage": "final", "ok": False,
+                        "reason": "host_reclaim_busy", "detail": "guard"}
+
+        provider = Busy()
+        payload = self.service(provider).cleanup(tier="safe", confirm=True)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "skipped")
+        self.assertEqual(payload["error"]["code"], "host_reclaim_busy")
+        self.assertEqual(payload["data"]["detail"], "guard")
+
+    def test_busy_plan_is_left_retryable(self):
+        state = {"busy": True}
+
+        class SometimesBusy(FakeProvider):
+            def reclaim(self, candidates, **kwargs):
+                if state["busy"]:
+                    return {"ok": False, "reason": "host_reclaim_busy",
+                            "detail": "apply_transaction"}
+                return FakeProvider.reclaim(self, candidates, **kwargs)
+
+        service = self.service(SometimesBusy())
+        plan_id = service.plan("safe")["data"]["plan_id"]
+        busy = service.cleanup(plan_id=plan_id, confirm=True)
+        self.assertEqual(busy["status"], "skipped")
+        state["busy"] = False
+        again = service.cleanup(plan_id=plan_id, confirm=True)
+        self.assertTrue(again["ok"], again)
+
+    def test_reap_default_trigger_is_unchanged(self):
+        provider = FakeProvider()
+        self.service(provider).reap(dry_run=False, confirm=True, tier="safe")
+        call = next(item for item in provider.calls if item[0] == "reclaim")
+        self.assertEqual(call[2], "reap")
+
+    def test_cleanup_accepts_a_caller_run_id(self):
+        provider = FakeProvider()
+        payload = self.service(provider).cleanup(
+            tier="safe", confirm=True, run_id="ab" * 16,
+        )
+        self.assertEqual(payload["data"]["run_id"], "ab" * 16)
+        bad = self.service(FakeProvider()).cleanup(
+            tier="safe", confirm=True, run_id="../x",
+        )
+        self.assertFalse(bad["ok"])
+        self.assertEqual(bad["error"]["code"], "invalid_run_id")
+
+
 if __name__ == "__main__":
     unittest.main()

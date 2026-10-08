@@ -30,12 +30,15 @@ Transitions: absent → enabled (enable) → enabled (re-enable replaces atomica
 | `reason` | str or null | typed code when `refused`/`skipped_busy` (e.g. `inventory_incomplete`, `host_reclaim_busy`, `apply_transaction_active`) |
 | `bytes_reclaimed` | int | ≥ 0 |
 | `removed` / `skipped` | int | counts; the skipped count includes `excluded_by_request` |
+| `skipped_reasons` | object | skipped count per reason (for example `excluded_by_request`, `candidate_modified_since_plan`); the spec's "skipped items with reasons" |
 | `runtime_revision` | str | host revision at run start |
 | `manifest` | str or null | `deletions/<run_id>.jsonl` when any removal was attempted |
 
 Transitions: `running` → one terminal outcome. An open `running` record older than
-`timeout + 60s` is finalized to `timed_out` from the manifest's completed outcomes at
-the next run or status read. Retention: newest 30 records by `started_at`.
+`timeout + 60s` is finalized to `timed_out` (reason `run_bound_exceeded`) from the
+manifest's completed outcomes at the next run or status read. The stored record also
+keeps `timeout_seconds` (the bound it ran under) for that check; it is not part of the
+public status projection. Retention: newest 30 records by `started_at`.
 
 ## Deletion manifest (existing)
 

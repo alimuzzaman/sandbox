@@ -590,7 +590,8 @@ class ReclaimService:
                 confirm: bool = False, trigger: str = "manual",
                 budget_seconds: float = 900,
                 directory_cache: str | None = None,
-                exclude_kinds=(), exclude_names=()) -> dict:
+                exclude_kinds=(), exclude_names=(),
+                run_id: str | None = None) -> dict:
         if not confirm:
             return result(
                 False, "cleanup", status="refused",
@@ -604,6 +605,16 @@ class ReclaimService:
                 False, "cleanup", status="refused",
                 error=ResourceError("--tier or --plan-id is required",
                                     "invalid_tier"),
+            )
+        if run_id is not None and (
+            not isinstance(run_id, str)
+            or len(run_id) != 32
+            or any(char not in "0123456789abcdef" for char in run_id)
+        ):
+            return result(
+                False, "cleanup", status="refused",
+                error=ResourceError("run id must be 32 lowercase hex characters",
+                                    "invalid_run_id"),
             )
         started = self.clock().astimezone(timezone.utc)
         try:
@@ -627,7 +638,9 @@ class ReclaimService:
 
         candidates = list((stored.metadata or {}).get("candidates") or ())
         workspace_ids = dict((stored.metadata or {}).get("workspace_ids") or {})
-        run_id = secrets.token_hex(16)
+        # A caller-supplied id lets the scheduled routine name its manifest
+        # before the host run starts (spec 057).
+        run_id = run_id or secrets.token_hex(16)
         try:
             response = self.provider.reclaim(
                 [
@@ -654,6 +667,25 @@ class ReclaimService:
                 error=ResourceError(
                     "cleanup outcome is indeterminate; rescan before any retry",
                     "plan_indeterminate",
+                ),
+            )
+        if (isinstance(response, Mapping) and response.get("ok") is not True
+                and response.get("reason") == "host_reclaim_busy"):
+            # Another reclaim or a host apply transaction holds the host.  The
+            # probe refused before writing any manifest line, so nothing ran;
+            # the plan stays begun and the same plan id can be retried.
+            detail = response.get("detail")
+            return result(
+                False, "cleanup", status="skipped", target=stored.target,
+                data={
+                    "plan_id": stored.plan_id, "run_id": run_id,
+                    "trigger": trigger,
+                    "detail": detail if detail in {"guard", "apply_transaction"}
+                    else "guard",
+                },
+                error=ResourceError(
+                    "another reclaim or host apply is in progress on the host",
+                    "host_reclaim_busy", retryable=True,
                 ),
             )
         if not isinstance(response, Mapping) or response.get("ok") is not True:
@@ -788,8 +820,12 @@ class ReclaimService:
     def reap(self, *, dry_run: bool = True, ttl: str | None = None,
              confirm: bool = False, budget_seconds: float = 900,
              directory_cache: str | None = None, tier: str = "all",
-             exclude_names=()) -> dict:
-        """Reclaim expired, not-in-use workspaces and one-shot base targets."""
+             exclude_names=(), trigger: str = "reap") -> dict:
+        """Reclaim expired, not-in-use workspaces and one-shot base targets.
+
+        ``trigger`` names the caller in the deletion manifest; the scheduled
+        routine passes ``scheduled_routine`` (spec 057).
+        """
         if ttl is not None:
             try:
                 policy.parse_duration(ttl)
@@ -810,7 +846,7 @@ class ReclaimService:
                 error=ResourceError("workspace reap requires --confirm",
                                     "confirmation_required"),
             )
-        outcome = self.cleanup(tier=tier, confirm=True, trigger="reap",
+        outcome = self.cleanup(tier=tier, confirm=True, trigger=trigger,
                                budget_seconds=budget_seconds,
                                directory_cache=directory_cache,
                                exclude_kinds=("runtime",), exclude_names=exclude_names)

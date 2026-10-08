@@ -186,6 +186,28 @@ class TestServerConfigCLI(unittest.TestCase):
         self.assertTrue(data.get("ok"))
 
     @patch('sandbox.commands.server.sys.stdout')
+    def test_policy_refusal_sets_error_code_and_hint(self, mock_stdout):
+        """Feedback c59007aa: a refused apply carries error_code and a bounded hint."""
+        from types import SimpleNamespace
+        mock_service = MagicMock()
+        mock_service.apply.return_value = SimpleNamespace(
+            outcome=SimpleNamespace(value="refused"), code="authority_path_forbidden",
+            mutated=False, fragment_set_id=None,
+        )
+        args = MagicMock(
+            config_action="apply", json=True, unattached_mount=False,
+            instance="inst-test", instance_service=mock_service, server_type="nginx",
+            stdin=False, file="/nonexistent", name="img", authority="wordpress-cache-v1",
+        )
+        with patch("sandbox.server_config.input.read_fragment_file", return_value=b"x"):
+            execute_server_config(args, cfg={"instances": {"inst-test": {
+                "instance_incarnation_id": "inc_" + "a" * 32, "server": "nginx"}}})
+        data = json.loads(mock_stdout.write.call_args[0][0])
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error_code"], "authority_path_forbidden")
+        self.assertIn("wp-content/cache", data["hint"])
+
+    @patch('sandbox.commands.server.sys.stdout')
     def test_refusal_omits_raw_content_and_secret(self, mock_stdout):
         """T048: CLI refusal output omits raw content, caller paths, and secrets."""
         secret = "super_secret_payload_12345"

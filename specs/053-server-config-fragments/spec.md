@@ -304,3 +304,7 @@ recognizable non-secret markers.
   is sufficient evidence that PHP did not serve that request.
 - Apache is optional for the initial release. Herd and host-global server
   configuration remain outside this feature.
+- Image-format negotiation (WebP/AVIF `Accept` rewrites to `wp-content/uploads`
+  siblings) is outside `wordpress-cache-v1` and stays refused with
+  `authority_path_forbidden`; it would need its own authority and spec
+  (decided 2026-10-08, feedback c59007aa).

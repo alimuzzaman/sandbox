@@ -22,6 +22,15 @@ from sandbox.registry import CommandSpec, register_specs
 
 _LEGACY_SERVER_TYPES = ("apache", "nginx", "litespeed", "herd")
 
+_REFUSAL_HINTS = {
+    "authority_path_forbidden": (
+        "wordpress-cache-v1 only allows file tests and rewrite targets under "
+        "wp-content/cache; image negotiation (webp/avif in wp-content/uploads) is "
+        "outside this authority and is not supported by `sb server config`. Handle "
+        "it in the plugin, or file an idea for a separate authority."
+    ),
+}
+
 # ---------------------------------------------------------------------------
 # Pre-dispatch policy
 # ---------------------------------------------------------------------------
@@ -321,8 +330,10 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
 
         outcome_val = getattr(res.outcome, "value", str(res.outcome))
         is_ok = outcome_val in ("active", "no_op")
+        res_code = getattr(res, "code", "ok")
+        hint = None if is_ok else _REFUSAL_HINTS.get(res_code)
         if use_json:
-            _render_json({
+            payload = {
                 "ok": is_ok,
                 "mutated": bool(res.mutated),
                 "operation": "apply",
@@ -332,11 +343,18 @@ def _config_apply(cfg: Any, args: argparse.Namespace, use_json: bool) -> None:
                 "fragment_set": res.fragment_set_id or "",
                 "phases": ["validate", "activate", "reload", "ready"],
                 "transaction_id": getattr(res, "transaction_id", "tx_0000"),
-                "code": getattr(res, "code", "ok"),
-            })
+                "code": res_code,
+            }
+            if not is_ok:
+                payload["error_code"] = res_code
+                if hint:
+                    payload["hint"] = hint
+            _render_json(payload)
             return
         if not is_ok:
-            print(f"error: apply outcome {outcome_val} ({getattr(res, 'code', 'failed')})", file=sys.stderr)
+            print(f"error: apply outcome {outcome_val} ({res_code})", file=sys.stderr)
+            if hint:
+                print(f"hint: {hint}", file=sys.stderr)
             raise SystemExit(1)
         print(f"Applied fragment '{name}' ({outcome_val})")
         return

@@ -54,6 +54,19 @@ class TestServerConfigService(unittest.TestCase):
         self.assertTrue(result.mutated)
         self.assertEqual(result.fragment_name, "happy-cache")
 
+    def test_policy_refusal_passes_through_bounded_codes(self):
+        """Feedback c59007aa: header and server refusals keep their own code."""
+        for code in ("authority_header_forbidden", "server_unsupported", "authority_path_forbidden"):
+            def _refuse(*_a, _code=code, **_k):
+                raise ValueError(_code)
+            self.adapter.policy = _refuse
+            result = self.service.apply(fragment(name="refused-cache"))
+            self.assertEqual(result.outcome, TerminalOutcome.REFUSED)
+            self.assertEqual(result.code, code)
+            self.assertFalse(result.mutated)
+        self.adapter.policy = lambda *_a, **_k: (_ for _ in ()).throw(ValueError("raw detail"))
+        self.assertEqual(self.service.apply(fragment(name="refused-cache")).code, "policy_rejected")
+
     def test_list_after_applying_returns_sorted_metadata(self):
         self.service.apply(fragment(name="z-cache"))
         self.service.apply(fragment(name="a-cache"))

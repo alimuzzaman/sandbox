@@ -1423,7 +1423,8 @@ mounts, or shared host infrastructure.
 - **Size bounds**: 1 to 262,144 bytes (256 KB). Empty input and oversized files are refused.
 - **Naming**: 1 to 64 lowercase alphanumeric characters, dashes, and underscores (`^[a-z0-9-_]{1,64}$`).
 - **Forbidden directives**: Refuses global listener, SSL, upstream, resolver, module, and admin directives.
-- **Refusal codes**: An authority refusal names its reason (`authority_forbidden`, `authority_scope_forbidden`, `authority_path_forbidden`, `authority_directive_unknown`, `authority_syntax_invalid`). `policy_rejected` is left for adapter checks such as duplicate locations or non-UTF-8 input.
+- **Refusal codes**: An authority refusal names its reason (`authority_forbidden`, `authority_scope_forbidden`, `authority_path_forbidden`, `authority_directive_unknown`, `authority_syntax_invalid`, `authority_header_forbidden`, `server_unsupported`). `policy_rejected` is left for adapter checks such as duplicate locations or non-UTF-8 input. A refused `sb server config apply --json` sets `error_code` to that reason, plus a `hint` where one exists.
+- **Image negotiation is out of scope**: `wordpress-cache-v1` allows file tests and rewrite targets only under `wp-content/cache`. A WebP/AVIF `Accept` rewrite to `wp-content/uploads` siblings is refused with `authority_path_forbidden`. Serve those formats from the plugin, or propose a separate authority; the cache authority is not widened for it.
 - **Secret detection**: Refuses payloads matching high-confidence credential or secret token patterns.
 - **Safe source checks**: Refuses device files (`/dev/null`, `/dev/zero`), FIFOs, symlinks, directories, and mid-read mutated files.
 

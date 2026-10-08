@@ -523,6 +523,7 @@ class ServerConfigService:
                 if err_code not in (
                     "authority_forbidden", "authority_scope_forbidden", "authority_path_forbidden",
                     "authority_directive_unknown", "authority_syntax_invalid", "policy_rejected",
+                    "authority_header_forbidden", "server_unsupported",
                 ):
                     err_code = "policy_rejected"
                 return OperationResult(

@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Fake ``loginctl show -p KillUserProcesses``.
+
+FAKE_KILL_USER_PROCESSES  value to report (default ``no``)
+FAKE_LOGINCTL_EXIT        exit status (default 0; non-zero means logind is absent)
+"""
+import os
+import sys
+
+code = int(os.environ.get("FAKE_LOGINCTL_EXIT", "0"))
+if code:
+    sys.exit(code)
+print("KillUserProcesses=" + os.environ.get("FAKE_KILL_USER_PROCESSES", "no"))

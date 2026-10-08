@@ -1,0 +1,3 @@
+wp_options	BASE TABLE	2
+wp_posts	BASE TABLE	0
+wp_recent_posts	VIEW	NULL

@@ -67,6 +67,94 @@ class _RemoteState:
     revision: str
     machine_identity: str
     source_digest: str
+    revision_state: str = ""
+
+
+RemoteSourceState = _RemoteState
+
+
+def check_inventory(inventory: dict) -> None:
+    """Require the reviewed production containers and mounts in an inventory."""
+    containers = set(inventory.get("managed_containers") or ())
+    if not _WP_CONTAINER in containers or not _DB_CONTAINER in containers:
+        raise RecoveryError("amarsonar production containers are unavailable", "remote_source_unavailable")
+    mounts = inventory.get("mounts")
+    if not isinstance(mounts, dict):
+        raise RecoveryError("remote mount inventory is invalid", "remote_source_unavailable")
+    for container, expected in _EXPECTED_MOUNTS.items():
+        records = mounts.get(container)
+        actual = {(item.get("type"), item.get("name"), item.get("destination"))
+                  for item in records or () if isinstance(item, dict)}
+        if not expected.issubset(actual):
+            raise RecoveryError("amarsonar production mounts are unavailable", "remote_source_unavailable")
+
+
+def probe_remote_state(remote: str, *, lookup: Callable, inventory: Callable,
+                       service_status: Callable, resolve_home: Callable,
+                       ssh_run: Callable) -> _RemoteState:
+    """Observe one registered remote's hosted recovery source binding.
+
+    Shared by the one-shot controller and the server-first capture transport.
+    Accepts a ``match`` or ``unknown`` runtime revision state, as the one-shot
+    path always has; callers needing a strict ``match`` check ``revision_state``.
+    """
+    if not isinstance(remote, str) or not _REMOTE.fullmatch(remote):
+        raise RecoveryError("remote name is invalid", "remote_unavailable")
+    entry = lookup(remote)
+    if not isinstance(entry, dict) or entry.get("provisioned") is not True:
+        raise RecoveryError("remote is not provisioned", "remote_unavailable")
+    try:
+        observed = inventory(remote)
+        status = service_status(entry)
+        home = resolve_home(entry)
+        hostname_result = ssh_run(entry, "hostname -s", timeout=15)
+    except RecoveryError:
+        raise
+    except Exception as exc:
+        raise RecoveryError("remote recovery preflight failed", "remote_unavailable") from exc
+    if not isinstance(observed, dict) or not isinstance(home, str) or not home.startswith("/"):
+        raise RecoveryError("remote recovery preflight is invalid", "remote_unavailable")
+    check_inventory(observed)
+    revision = status.get("installed_runtime_revision") if isinstance(status, dict) else None
+    if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
+        raise RecoveryError("remote runtime revision is unavailable", "remote_unavailable")
+    revision_state = status.get("runtime_revision_state") if isinstance(status, dict) else None
+    if revision_state not in {"match", "unknown"}:
+        raise RecoveryError("remote runtime revision is stale", "remote_revision_mismatch")
+    hostname, code = _completed_ok(hostname_result)
+    hostname_text = hostname.decode("utf-8", errors="replace").strip()
+    if code != 0 or not _HOST.fullmatch(hostname_text):
+        raise RecoveryError("remote machine identity is unavailable", "remote_unavailable")
+    machine_identity = f"{remote}:{hostname_text}"
+    digest_input = {
+        "remote": remote, "home": home, "machine_identity": machine_identity,
+        "revision": revision,
+        "containers": sorted(item for item in observed.get("managed_containers", ())
+                              if item in _EXPECTED_MOUNTS),
+        "mounts": {name: sorted([{
+            "type": item.get("type"), "name": item.get("name"),
+            "destination": item.get("destination"), "rw": item.get("rw"),
+        } for item in observed.get("mounts", {}).get(name, ()) if isinstance(item, dict)],
+                    key=lambda item: (str(item["destination"]), str(item["name"])))
+                  for name in sorted(_EXPECTED_MOUNTS)},
+        "repository": observed.get("repositories", {}).get("amarsonar-bangla", {}),
+    }
+    return _RemoteState(entry, observed, revision, machine_identity,
+                        _safe_json_digest(digest_input), revision_state)
+
+
+def control_plane_declaration(remote: str, artifact: ArtifactPlan, state: _RemoteState,
+                              backup_operation_id: str) -> dict:
+    """Build the non-secret control-plane declaration for one capture."""
+    return {
+        "schema_version": 1, "sources": list(artifact.sources),
+        "capture_contract_version": 2, "backup_operation_id": backup_operation_id,
+        "remote": remote, "machine_identity": state.machine_identity,
+        "runtime_revision": state.revision,
+        "source_digest": state.source_digest,
+        "host_projects": sorted(state.inventory.get("host_projects", ())),
+        "runtime_environments": state.inventory.get("runtime_environments", {}),
+    }
 
 
 class RegisteredRemoteRecoveryController:
@@ -98,62 +186,13 @@ class RegisteredRemoteRecoveryController:
 
     @staticmethod
     def _check_inventory(inventory: dict) -> None:
-        containers = set(inventory.get("managed_containers") or ())
-        if not _WP_CONTAINER in containers or not _DB_CONTAINER in containers:
-            raise RecoveryError("amarsonar production containers are unavailable", "remote_source_unavailable")
-        mounts = inventory.get("mounts")
-        if not isinstance(mounts, dict):
-            raise RecoveryError("remote mount inventory is invalid", "remote_source_unavailable")
-        for container, expected in _EXPECTED_MOUNTS.items():
-            records = mounts.get(container)
-            actual = {(item.get("type"), item.get("name"), item.get("destination"))
-                      for item in records or () if isinstance(item, dict)}
-            if not expected.issubset(actual):
-                raise RecoveryError("amarsonar production mounts are unavailable", "remote_source_unavailable")
+        check_inventory(inventory)
 
     def _state(self, remote: str) -> _RemoteState:
-        if not isinstance(remote, str) or not _REMOTE.fullmatch(remote):
-            raise RecoveryError("remote name is invalid", "remote_unavailable")
-        entry = self._lookup(remote)
-        if not isinstance(entry, dict) or entry.get("provisioned") is not True:
-            raise RecoveryError("remote is not provisioned", "remote_unavailable")
-        try:
-            inventory = self._inventory(remote)
-            status = self._service_status(entry)
-            home = self._resolve_home(entry)
-            hostname_result = self._ssh_run(entry, "hostname -s", timeout=15)
-        except RecoveryError:
-            raise
-        except Exception as exc:
-            raise RecoveryError("remote recovery preflight failed", "remote_unavailable") from exc
-        if not isinstance(inventory, dict) or not isinstance(home, str) or not home.startswith("/"):
-            raise RecoveryError("remote recovery preflight is invalid", "remote_unavailable")
-        self._check_inventory(inventory)
-        revision = status.get("installed_runtime_revision") if isinstance(status, dict) else None
-        if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
-            raise RecoveryError("remote runtime revision is unavailable", "remote_unavailable")
-        if isinstance(status, dict) and status.get("runtime_revision_state") not in {"match", "unknown"}:
-            raise RecoveryError("remote runtime revision is stale", "remote_revision_mismatch")
-        hostname, code = _completed_ok(hostname_result)
-        hostname_text = hostname.decode("utf-8", errors="replace").strip()
-        if code != 0 or not _HOST.fullmatch(hostname_text):
-            raise RecoveryError("remote machine identity is unavailable", "remote_unavailable")
-        machine_identity = f"{remote}:{hostname_text}"
-        digest_input = {
-            "remote": remote, "home": home, "machine_identity": machine_identity,
-            "revision": revision,
-            "containers": sorted(item for item in inventory.get("managed_containers", ())
-                                  if item in _EXPECTED_MOUNTS),
-            "mounts": {name: sorted([{
-                "type": item.get("type"), "name": item.get("name"),
-                "destination": item.get("destination"), "rw": item.get("rw"),
-            } for item in inventory.get("mounts", {}).get(name, ()) if isinstance(item, dict)],
-                        key=lambda item: (str(item["destination"]), str(item["name"])))
-                      for name in sorted(_EXPECTED_MOUNTS)},
-            "repository": inventory.get("repositories", {}).get("amarsonar-bangla", {}),
-        }
-        return _RemoteState(entry, inventory, revision, machine_identity,
-                            _safe_json_digest(digest_input))
+        return probe_remote_state(
+            remote, lookup=self._lookup, inventory=self._inventory,
+            service_status=self._service_status, resolve_home=self._resolve_home,
+            ssh_run=self._ssh_run)
 
     def observe(self, remote: str, plan: RecoveryPlan) -> HostedObservation:
         state = self._state(remote)
@@ -363,15 +402,7 @@ sys.stdout.buffer.write(output.read_bytes())'''
             raise RecoveryError("remote recovery source changed", "source_changed")
         if artifact.profile_id == "control-plane":
             started_at = time.time()
-            safe = {
-                "schema_version": 1, "sources": list(artifact.sources),
-                "capture_contract_version": 2, "backup_operation_id": backup_operation_id,
-                "remote": remote, "machine_identity": state.machine_identity,
-                "runtime_revision": state.revision,
-                "source_digest": state.source_digest,
-                "host_projects": sorted(state.inventory.get("host_projects", ())),
-                "runtime_environments": state.inventory.get("runtime_environments", {}),
-            }
+            safe = control_plane_declaration(remote, artifact, state, backup_operation_id)
             path = self._write_private(destination / "control-plane-declarations.json",
                                        (json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n").encode())
             return HostedCaptureReceipt(artifact.profile_id, artifact.artifact_id, request_id,
@@ -395,4 +426,7 @@ sys.stdout.buffer.write(output.read_bytes())'''
             started_at=receipt.get("started_at"), completed_at=receipt.get("completed_at"))
 
 
-__all__ = ["RegisteredRemoteRecoveryController"]
+__all__ = [
+    "RegisteredRemoteRecoveryController", "RemoteSourceState", "check_inventory",
+    "control_plane_declaration", "probe_remote_state",
+]

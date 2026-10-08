@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Fake ``tar -cf - -C <dir> ...`` that streams a deterministic archive.
+
+FAKE_TAR_EXIT          exit status (default 0)
+FAKE_TAR_DELAY         seconds to sleep before streaming (default 0)
+FAKE_TAR_CHANGE_FILE   counter file; each call adds a member named after the
+                       counter so a second stream differs from the first
+FAKE_TAR_SPARSE_BYTES  stream one member of this many zero bytes (memory tests)
+
+The stream is written to stdout in bounded pieces; it never holds a member in
+memory, so it is usable for the 2 GB memory test.
+"""
+import io
+import os
+import pathlib
+import sys
+import tarfile
+import time
+
+time.sleep(float(os.environ.get("FAKE_TAR_DELAY", "0")))
+code = int(os.environ.get("FAKE_TAR_EXIT", "0"))
+if code:
+    sys.exit(code)
+
+
+class ZeroReader(io.RawIOBase):
+    def __init__(self, size):
+        self.left = size
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        count = min(len(buffer), self.left)
+        buffer[:count] = bytes(count)
+        self.left -= count
+        return count
+
+
+def add(archive, name, payload):
+    member = tarfile.TarInfo(name)
+    member.size = len(payload)
+    member.mtime = 1700000000
+    archive.addfile(member, io.BytesIO(payload))
+
+
+with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+    root = tarfile.TarInfo("./")
+    root.type = tarfile.DIRTYPE
+    root.mtime = 1700000000
+    archive.addfile(root)
+    add(archive, "./index.php", b"<?php echo 'ok';\n")
+    add(archive, "./wp-config.php", b"<?php define('DB_NAME', 'amarsonar');\n")
+    counter = os.environ.get("FAKE_TAR_CHANGE_FILE")
+    if counter:
+        path = pathlib.Path(counter)
+        value = int(path.read_text() or "0") + 1 if path.exists() else 1
+        path.write_text(str(value))
+        add(archive, "./generation-%d.txt" % value, b"generation\n")
+    sparse = int(os.environ.get("FAKE_TAR_SPARSE_BYTES", "0"))
+    if sparse:
+        member = tarfile.TarInfo("./wp-content/uploads/large.bin")
+        member.size = sparse
+        member.mtime = 1700000000
+        archive.addfile(member, ZeroReader(sparse))

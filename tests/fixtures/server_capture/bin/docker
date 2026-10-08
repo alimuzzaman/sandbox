@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Fake ``docker`` for server capture helper tests.
+
+Only ``docker exec [-e NAME] <container> <command...>`` is supported.  The
+behavior is driven by environment variables so a test can shape one run:
+
+FAKE_LOG              append one JSON line per call: argv and whether MYSQL_PWD is set
+FAKE_DB_BYTES         database size reported by the size query (default 1000)
+FAKE_FILES_BYTES      WordPress tree size reported by ``du -sb`` (default 1000)
+FAKE_INVENTORY        path of the inventory TSV returned by the inventory query
+FAKE_MARIADB_EXIT     exit status of ``mariadb`` queries (default 0)
+FAKE_DUMP             path of the dump fixture written by ``mariadb-dump``
+FAKE_DUMP_EXIT        exit status of ``mariadb-dump`` (default 0)
+FAKE_DUMP_DELAY       seconds to sleep before dumping (default 0)
+FAKE_DU_EXIT          exit status of ``du`` (default 0)
+
+``tar`` inside the container is delegated to the ``tar`` found next to this
+script, so tests can drive the file stream with the FAKE_TAR_* variables.
+"""
+import json
+import os
+import pathlib
+import sys
+import time
+
+argv = sys.argv[1:]
+log = os.environ.get("FAKE_LOG")
+if log:
+    with open(log, "a") as stream:
+        stream.write(json.dumps({"argv": argv, "mysql_pwd_set": bool(os.environ.get("MYSQL_PWD"))}) + "\n")
+if not argv or argv[0] != "exec":
+    sys.exit(2)
+argv = argv[1:]
+while argv and argv[0] == "-e":
+    argv = argv[2:]
+if len(argv) < 2:
+    sys.exit(2)
+command = argv[1:]
+tool = command[0]
+out = sys.stdout.buffer
+
+
+def query_text(args):
+    for index, value in enumerate(args):
+        if value == "-e" and index + 1 < len(args):
+            return args[index + 1]
+    return ""
+
+
+if tool == "mariadb":
+    code = int(os.environ.get("FAKE_MARIADB_EXIT", "0"))
+    if code:
+        sys.exit(code)
+    query = query_text(command)
+    if "DATA_LENGTH" in query:
+        out.write((os.environ.get("FAKE_DB_BYTES", "1000") + "\n").encode())
+    elif "TABLE_TYPE" in query:
+        out.write(pathlib.Path(os.environ["FAKE_INVENTORY"]).read_bytes())
+    sys.exit(0)
+if tool == "mariadb-dump":
+    time.sleep(float(os.environ.get("FAKE_DUMP_DELAY", "0")))
+    code = int(os.environ.get("FAKE_DUMP_EXIT", "0"))
+    if code:
+        sys.exit(code)
+    out.write(pathlib.Path(os.environ["FAKE_DUMP"]).read_bytes())
+    sys.exit(0)
+if tool == "du":
+    code = int(os.environ.get("FAKE_DU_EXIT", "0"))
+    if code:
+        sys.exit(code)
+    out.write((os.environ.get("FAKE_FILES_BYTES", "1000") + "\t/var/www/html\n").encode())
+    sys.exit(0)
+if tool == "tar":
+    fake_tar = pathlib.Path(__file__).resolve().parent / "tar"
+    os.execv(sys.executable, [sys.executable, str(fake_tar)] + command[1:])
+sys.exit(127)

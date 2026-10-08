@@ -220,5 +220,75 @@ class TestRegisteredRemoteRecoveryController(unittest.TestCase):
             self.assertEqual(counter.read_text(), "2")
 
 
+class TestExtractedRemoteProbe(unittest.TestCase):
+    """T003: the shared probe and declaration builder keep today's behavior."""
+
+    def _fakes(self, revision_state="match"):
+        def lookup(name):
+            return {"provisioned": True, "name": name}
+
+        def ssh_run(_entry, command, **_kwargs):
+            return subprocess.CompletedProcess([], 0, "recovery-host\n", "")
+
+        return dict(
+            lookup=lookup, ssh_run=ssh_run,
+            resolve_home=lambda _entry: "/home/recovery/sandbox",
+            service_status=lambda _entry: {"installed_runtime_revision": "b" * 40,
+                                           "runtime_revision_state": revision_state},
+            inventory=lambda _remote: _inventory(),
+        )
+
+    def _controller(self, fakes):
+        return RegisteredRemoteRecoveryController(
+            remote_lookup=fakes["lookup"], ssh_run=fakes["ssh_run"],
+            ssh_process=lambda *_a, **_k: None, resolve_home=fakes["resolve_home"],
+            service_status=fakes["service_status"], inventory=fakes["inventory"],
+            environment={})
+
+    def test_probe_returns_exactly_the_controller_state(self):
+        from sandbox.transports.remote_recovery import probe_remote_state
+        for revision_state in ("match", "unknown"):
+            fakes = self._fakes(revision_state)
+            expected = self._controller(fakes)._state("scaleway-sandbox")
+            actual = probe_remote_state("scaleway-sandbox", **fakes)
+            self.assertEqual(actual, expected)
+            self.assertEqual(actual.revision_state, revision_state)
+            self.assertTrue(actual.source_digest.startswith("sha256:"))
+
+    def test_probe_keeps_existing_refusal_codes(self):
+        from sandbox.recovery.errors import RecoveryError
+        from sandbox.transports.remote_recovery import probe_remote_state
+        with self.assertRaises(RecoveryError) as caught:
+            probe_remote_state("scaleway-sandbox", **self._fakes("mismatch"))
+        self.assertEqual(caught.exception.code, "remote_revision_mismatch")
+        with self.assertRaises(RecoveryError) as caught:
+            probe_remote_state("bad name!", **self._fakes())
+        self.assertEqual(caught.exception.code, "remote_unavailable")
+        fakes = self._fakes()
+        fakes["inventory"] = lambda _remote: dict(_inventory(), managed_containers=[])
+        with self.assertRaises(RecoveryError) as caught:
+            probe_remote_state("scaleway-sandbox", **fakes)
+        self.assertEqual(caught.exception.code, "remote_source_unavailable")
+
+    def test_declaration_builder_matches_controller_control_plane_capture(self):
+        from sandbox.transports.remote_recovery import control_plane_declaration, probe_remote_state
+        fakes = self._fakes()
+        controller = self._controller(fakes)
+        plan = build_plan(load_catalog(Path(__file__).parents[1] / "config" / "recovery-profiles.json"),
+                          ("amarsonar-bangla-prod",))
+        observation = controller.observe("scaleway-sandbox", plan)
+        artifact = plan.artifacts[0]
+        self.assertEqual(artifact.profile_id, "control-plane")
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = controller.capture(
+                "scaleway-sandbox", artifact, Path(directory), observation.binding,
+                HostedRecoveryMaterializer._request_id("scaleway-sandbox", artifact,
+                                                       observation.binding, "set-a"),
+                backup_operation_id="set-a")
+            written = json.loads(receipt.files[0].read_text())
+        state = probe_remote_state("scaleway-sandbox", **fakes)
+        self.assertEqual(control_plane_declaration("scaleway-sandbox", artifact, state, "set-a"), written)
+
+
 if __name__ == "__main__":
     unittest.main()

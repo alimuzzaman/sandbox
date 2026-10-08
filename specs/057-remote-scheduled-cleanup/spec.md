@@ -8,6 +8,19 @@
 
 **Input**: `specs/057-remote-scheduled-cleanup/prd.md` (READY FOR SPECKIT; feedback 8a3e8c35)
 
+## Clarifications
+
+### Session 2026-10-08
+
+Decisions delegated by the user to an independent Fable reviewer (yolo mode).
+
+- Q: What cadence grammar does enable accept? → A: Any systemd calendar expression, validated on the host; default `daily`; not read from `schedule_calendar`.
+- Q: What happens to an enabled routine after the remote runtime is migrated? → A: It keeps running under the new runtime and records the revision per run.
+- Q: Is a run missed while the host was down caught up? → A: Yes, once at next boot, as an ordinary run.
+- Q: Is the run start jittered? → A: Yes, by the existing `schedule_randomized_delay` policy (default 5 minutes).
+- Q: How is overlap with other reclaiming work detected on the host? → A: One shared host reclaim guard taken by the routine, `resources cleanup` and the pressure-triggered cleanup; host apply is detected through its existing host-apply lock without changing host apply.
+- Q: Who records `timed_out` when the bound is hit? → A: The run enforces the bound itself and writes the record; the init-system timeout is the bound plus 60 seconds as a backstop, and an unfinished record is finalized as `timed_out` at the next run or status read.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Recurring safe cleanup runs on the remote (Priority: P1)
@@ -103,8 +116,8 @@ cadence periods, and confirm no run fired and no schedule remains on the host.
 - **Runtime mismatch**: the remote's installed runtime differs from the
   operator's revision; enable refuses, names the mismatch, and changes no
   schedule.
-- **Run exceeds its time bound**: the run is stopped within the bound plus at
-  most 60 seconds, records `timed_out`, and removes nothing after the bound.
+- **Run exceeds its time bound**: the run stops at the bound (the init system
+  stops it at most 60 seconds later as a backstop), records `timed_out`, and removes nothing after the bound.
   Removals made before the bound are listed. The next run starts a fresh plan;
   items already gone are reported `already_absent`.
 - **Overlap**: a run fires while another scheduled run, an operator-initiated
@@ -122,6 +135,10 @@ cadence periods, and confirm no run fired and no schedule remains on the host.
   the host.
 - **Re-enable with new settings**: enabling an already enabled routine
   replaces its settings in one step; no duplicate schedules exist.
+- **Host down at the scheduled time**: the run happens once at next boot; if
+  the inventory is not yet complete it removes nothing and records a refusal.
+- **Runtime migrated while enabled**: the routine keeps running; status shows
+  the enable-time and last-run revisions.
 - **Remote removed locally while enabled**: the routine keeps running on the
   host; registering the remote again lets the operator see and disable it.
 
@@ -138,8 +155,13 @@ cadence periods, and confirm no run fired and no schedule remains on the host.
 - **FR-003**: The routine MUST be off by default for every remote.
 - **FR-004**: The routine MUST run on the remote host under its own init
   system, independently of the operator's machine and of free-space pressure.
-- **FR-005**: The default cadence MUST be daily; operators MAY set another
-  cadence at enable time.
+  A scheduled time missed because the host was down MUST run once when the
+  host next boots; a catch-up run is an ordinary run, subject to FR-019.
+- **FR-005**: The default cadence MUST be `daily`. Operators MAY pass any
+  systemd calendar expression at enable; enable MUST validate it on the host
+  before writing any schedule and refuse with `invalid_cadence` otherwise. The
+  cadence is recorded with the routine and MUST NOT be read from the
+  `schedule_calendar` policy key.
 - **FR-006**: Each run MUST be a single safe-tier reclamation pass with the
   same candidate selection as an operator-run safe-tier workspace reap,
   including workspaces past their time-to-live.
@@ -162,21 +184,32 @@ cadence periods, and confirm no run fired and no schedule remains on the host.
 - **FR-014**: An exclusion that cannot be parsed MUST cause enable to refuse.
 - **FR-015**: Each run MUST have a time bound enforced by the host's init
   system; the default MUST be the existing scheduled-run timeout policy
-  (30 minutes) unless overridden at enable.
+  (30 minutes) unless overridden at enable. Each run start MUST be jittered by
+  the existing `schedule_randomized_delay` policy (default 5 minutes), which is
+  not settable at enable.
 - **FR-016**: A run that reaches its time bound MUST stop, record `timed_out`,
-  remove nothing after the bound, and list removals made before it.
+  remove nothing after the bound, and list removals made before it. The run
+  MUST enforce the bound itself and write that record; the init-system timeout
+  MUST be the bound plus 60 seconds as a backstop. If the backstop fires, the
+  next run or status read MUST finalize the open record as `timed_out` from the
+  manifest's completed entries.
 - **FR-017**: A run MUST NOT resume an interrupted earlier run; it MUST start a
   fresh plan and report already-removed items as `already_absent`.
-- **FR-018**: A run MUST skip and record `skipped: busy` when another
-  scheduled run, an operator-initiated cleanup, a pressure-triggered automatic
-  cleanup, or a host apply is in progress on the same host; this exclusion
-  MUST be enforced on the host, not only on the operator's machine.
+- **FR-018**: The routine, `resources cleanup`, and the pressure-triggered
+  automatic cleanup MUST take one shared non-blocking host reclaim guard on the
+  host before any removal, whichever machine initiated them. A run MUST record
+  `skipped: busy` and do nothing when that guard is held or when the host's
+  existing host-apply lock is held; host apply itself is not changed.
 - **FR-019**: A run MUST remove nothing and record a refusal when the
   inventory is incomplete.
 - **FR-020**: Enable MUST refuse, without changing any schedule, when the
   remote's installed runtime revision differs from the operator's revision,
   when the host lacks the required init system or user lingering, or when the
   remote is unregistered or unprovisioned.
+- **FR-020a**: A remote service migrate MUST leave an enabled routine in
+  place; later runs execute the installed runtime and record its revision, and
+  status MUST show both the revision recorded at enable and the revision of the
+  last run.
 - **FR-021**: Enabling an already enabled routine MUST replace its settings
   atomically; at most one schedule for the routine exists per host.
 - **FR-022**: Each run MUST produce a run record with start time, end time,

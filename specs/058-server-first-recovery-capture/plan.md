@@ -127,8 +127,9 @@ edited; no design step requires changing them.
    (`_state` logic from `RegisteredRemoteRecoveryController`) and require
    `runtime_revision_state == "match"` → else `remote_runtime_stale` (R13).
 3. Derive the request id with `HostedRecoveryMaterializer._request_id` and the slot (R4).
-4. Read `list` from the helper; refuse `retention_exceeded` if a complete unpromoted
-   slot is past its bound (R12).
+4. Read `list` from the helper. If the slot for this backup id exists, skip to the
+   replay path (FR-004). Otherwise refuse `retention_exceeded` if a complete
+   unpromoted slot is past its bound (R12).
 5. Build the control-plane declaration (R10); call helper `start` with the password
    then the declaration on stdin (R2). Map helper codes to the envelope.
 

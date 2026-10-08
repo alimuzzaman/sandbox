@@ -162,6 +162,7 @@ unpromoted capture is older than the bound.
 - A capture is already active on the same remote under another backup id: the new start refuses with `capture_in_progress` naming the active backup id.
 - The remote is unreachable: capture start, status and promote fail with `remote_unavailable`; no local state claims a capture exists that the server cannot confirm.
 - Status during the queued window (accepted but not yet started) reports `queued` with the acceptance time.
+- The server would end the capture when the operator's session closes (the host kills a user's processes at logout): capture start refuses with `detach_unsupported` instead of starting a job that would die.
 - The database credential is missing from the brokered channel: capture start refuses with `missing_database_credential` before anything starts on the server.
 - The capture exceeds its runtime bound: it ends `failed` with reason `capture_timeout`; partial plaintext is removed.
 - A failed capture removes its partial plaintext; an interrupted capture may leave residue, which status and list report with its size.
@@ -183,7 +184,7 @@ unpromoted capture is older than the bound.
 - **FR-004**: A repeated start for a backup id with an existing capture MUST return the existing identity and state when the source binding matches and MUST refuse with `capture_binding_conflict` when it differs; it MUST never overwrite or recapture.
 - **FR-005**: Capture start MUST refuse with `remote_runtime_stale` when the remote's installed runtime revision does not match, before any server work.
 - **FR-006**: Before dumping, the capture's first phase (`preflight`) MUST compare an estimate of the capture's on-server size (database plus files, including temporary space the capture needs) with free space at the capture location and end the capture `failed` with `insufficient_space`, naming need, available and shortfall, when the estimate exceeds it.
-- **FR-007**: At most one capture MUST be active per remote; a second start refuses with `capture_in_progress`.
+- **FR-007**: At most one capture MUST be active per remote; a start that would create a second capture refuses with `capture_in_progress`. A repeated start for the backup id of the active capture follows FR-004 instead.
 - **FR-008**: The capture MUST take a table inventory at dump start listing every base table and view the source database reports, with a row-count estimate per table.
 - **FR-009**: The capture MUST compare the table set present in the finished dump with the inventory and end `failed` with `inventory_mismatch` and the differing names when they disagree.
 - **FR-010**: A complete capture's receipt MUST record the archive hash and size, a hash and size for each archive member, the table inventory, the request id, the backup operation id, the source binding and start and end times.
@@ -195,7 +196,7 @@ unpromoted capture is older than the bound.
 **Status and listing**
 
 - **FR-015**: The system MUST provide a status command for a backup id on a remote that returns `queued`, `running` (with phase), `complete`, `failed` (with a typed reason) or `incomplete`, with acceptance, start and end times as applicable.
-- **FR-016**: Status for a terminal state MUST return identical data on repeat; for a running capture, the reported phase MUST never regress.
+- **FR-016**: Status for a terminal state MUST return identical data on repeat, the only exception being the retention flag when the capture crosses its retention bound between calls; for a running capture, the reported phase MUST never regress.
 - **FR-017**: A capture whose job is no longer alive without having recorded a terminal state MUST report `incomplete`, and MUST never be reported complete or be promotable.
 - **FR-018**: Status for an unknown backup id MUST return `capture_not_found`, distinct from errors.
 - **FR-019**: Status and the server capture listing MUST work with neither `RECOVERY_PASSPHRASE` nor `RECOVERY_RCLONE_DESTINATION` set, and status MUST answer when the remote runtime revision mismatches.
@@ -218,7 +219,7 @@ unpromoted capture is older than the bound.
 **Retention bound**
 
 - **FR-032**: Each complete unpromoted server capture made by this feature MUST carry a retention bound, 7 days by default and overridable per remote; past it, status and listing MUST report `retention_exceeded`. Interrupted residue and legacy one-shot archives are listed with their size but carry no bound.
-- **FR-033**: Capture start MUST refuse with `retention_exceeded`, naming the blocking backup ids, while the remote holds a complete unpromoted capture made by this feature past its bound; no other server file blocks a capture.
+- **FR-033**: A start that would create a new capture MUST refuse with `retention_exceeded`, naming the blocking backup ids, while the remote holds a complete unpromoted capture made by this feature past its bound; no other server file blocks a capture.
 - **FR-034**: Removing a server capture MUST go only through the reviewed-and-confirmed retention path; nothing is deleted automatically. [NEEDS CLARIFICATION: Does this feature enable confirmed retirement of a server capture, or does server-capture retirement stay review-only so that only promotion clears a `retention_exceeded` block?]
 
 **Surfaces and safety**

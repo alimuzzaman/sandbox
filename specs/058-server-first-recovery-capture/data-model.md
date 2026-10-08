@@ -69,7 +69,8 @@ Phase only moves forward. `failed` removes the slot's work files except
 | Field | Type | Rule |
 |-------|------|------|
 | `schema_version` | int | `1` |
-| `request_id`, `backup_operation_id`, `source_digest` | str | equal `request.json` |
+| `request_id`, `backup_operation_id` | str | equal `request.json` |
+| `source_binding` | object | equals `request.json.source_binding` |
 | `archive_sha256` | str | hex64 of `archive.tar` |
 | `archive_size` | int | bytes |
 | `members` | list | `[{name, sha256, size}]` for `database.sql`, `wordpress.tar` |

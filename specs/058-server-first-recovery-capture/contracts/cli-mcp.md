@@ -24,9 +24,10 @@ Preconditions, in this order (first failure wins, nothing starts on the server):
 | brokered `SANDBOX_RECOVERY_DB_PASSWORD` present | `missing_database_credential` |
 | remote reachable and provisioned | `remote_unavailable` |
 | runtime revision state is `match` | `remote_runtime_stale` |
-| no complete unpromoted capture past its bound | `retention_exceeded` (`data.blocking`: backup ids) |
-| helper `start`: no other active capture | `capture_in_progress` (`data.active_backup_id`) |
-| helper `start`: existing slot binding equal | `capture_binding_conflict` |
+| helper `list`: slot for B exists → replay path, skip the next two rows | – |
+| new capture only: no complete unpromoted capture past its bound | `retention_exceeded` (`data.blocking`: backup ids) |
+| new capture only, helper `start`: no other active capture | `capture_in_progress` (`data.active_backup_id`) |
+| replay, helper `start`: existing slot binding equal, else | `capture_binding_conflict` |
 | helper `start`: session can detach | `detach_unsupported` |
 
 Success: `status` = `queued` | `running` | `complete` | `failed` | `incomplete`
@@ -85,7 +86,7 @@ The passphrase comes only from inherited `RECOVERY_PASSPHRASE`. Order:
 | `--confirm` | `confirmation_required` |
 | passphrase present | `missing_passphrase` |
 | destination present (`--destination` or env) | `recovery_not_configured` |
-| local pending ciphertext for B → finish it (FR-029) | `passphrase_not_current`, `drive_upload_failed`, `drive_verification_failed` |
+| local pending ciphertext for B → finish it (FR-029) | `passphrase_not_current`, `pending_artifact_invalid`, `drive_upload_failed`, `drive_verification_failed` |
 | Drive manifest for B exists and traces to this capture | success, `status=already_published` |
 | Drive manifest for B from another capture | `set_id_conflict` |
 | Drive holds ciphertext for B without manifest and no local pending | `incomplete_remote_set` |

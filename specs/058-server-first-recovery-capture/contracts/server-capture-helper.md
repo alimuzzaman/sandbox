@@ -22,11 +22,14 @@ or raw tool diagnostics.
 
 ## `start` semantics
 
-1. Create root (0700, owner check, no symlink). Open `active.lock`; `LOCK_EX|LOCK_NB`
-   failure → read the active slot's request → `capture_in_progress`.
-2. If slot exists: compare `request.json.request_id`; equal → release
-   `active.lock`, return current derived state with `existing: true`; differ →
-   `capture_binding_conflict`.
+1. Create root (0700, owner check, no symlink). If the slot exists, compare
+   `request.json.request_id`: equal → return the current derived state with
+   `existing: true` (no lock taken, works while that slot's own job is running);
+   differ → `capture_binding_conflict`.
+2. Otherwise open `active.lock` with `LOCK_EX|LOCK_NB`; failure → read the
+   active slot's request → `capture_in_progress`. After acquiring it, re-check
+   that the slot still does not exist (a racing start may have created it) and
+   fall back to step 1 if it does.
 3. Check `loginctl show-user $USER -p KillUserProcesses` when `loginctl` exists;
    `yes` → `detach_unsupported`.
 4. Write `request.json`, `declarations.json`, `state.json{queued}`; open and lock

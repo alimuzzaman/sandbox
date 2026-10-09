@@ -34,8 +34,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   dropped connection releases nothing); strict calls re-check the installed
   revision after registering; pins are capped at 64 per remote; and the shape
   guard fingerprints embedded remote programs and counted per-payload
-  signatures named by function, binding site and nested key path (manifest
-  format 4). Strict refusals are honored by recovery, server capture and
+  signatures named by function, binding site and nested key path, plus
+  per-payload subscript writes (manifest format 5). Strict refusals are honored by recovery, server capture and
   Postgres recovery even when the revisions match.
 - `sb ensure`, `sb apply`, and `sb test`, plus their MCP counterparts, accept
   an explicit project-local `--config-file` selector when paired with

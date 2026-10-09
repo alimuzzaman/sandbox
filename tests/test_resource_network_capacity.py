@@ -629,3 +629,18 @@ class RangeCapacityHardeningTests(unittest.TestCase):
         self.assertTrue(evaluate_network_capacity(
             NO_POOLS, required_subnets=2,
             range_evidence=range_evidence(capacity=4, allocated=2, granted=[GRANT, other]))["ok"])
+
+
+class RangeCapacityRound5Tests(unittest.TestCase):
+    def test_partial_missing_pool_reason_preserves_refusal(self):
+        """Sol R5-1: a partial probe that merely names the reason is not absence."""
+        ranged = range_evidence(capacity=4, granted=[GRANT])
+        for candidate in (
+            {"ok": True, "status": "partial", "reason": "missing_pool_evidence"},
+            {"ok": True, "status": "unavailable", "reason": "missing_pool_evidence"},
+            {"status": "complete", "reason": "missing_pool_evidence"},
+        ):
+            with self.subTest(candidate=candidate):
+                result = evaluate_network_capacity(candidate, range_evidence=ranged)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "docker_network_capacity_unavailable")

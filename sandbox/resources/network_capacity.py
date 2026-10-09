@@ -215,12 +215,12 @@ def evaluate_network_capacity(
             evidence={"status": "partial", "reason": "invalid_range_evidence"},
         )
     pools = _evaluate_pools(evidence, required_subnets=required_subnets,
-                            remote_name=remote_name)
-    # Only a probe that passed every other check and found no configured
-    # pool counts as "no pools"; every other refusal stands (FR-009).
-    if pools["evidence"].get("reason") == "missing_pool_evidence":
+                            remote_name=remote_name, absent=_ABSENT)
+    # Only a probe that passed every other check and proved no configured
+    # pool returns the sentinel; every other refusal stands (FR-009).
+    if pools is _ABSENT:
         if ranged["capacity"] == 0:
-            return pools
+            return _missing_pool_evidence(remote_name, required_subnets)
         pools = None
     elif pools["code"] not in (None, "docker_network_subnet_exhausted"):
         return pools
@@ -255,12 +255,16 @@ def evaluate_network_capacity(
     )
 
 
+_ABSENT = object()
+
+
 def _evaluate_pools(
     evidence: Any,
     *,
     required_subnets: int = 1,
     remote_name: str | None = None,
-) -> dict:
+    absent: Any = None,
+) -> Any:
     """Validate a bounded probe result and decide whether admission is safe.
 
     ``evidence`` is treated as untrusted remote data.  The evaluator only
@@ -279,7 +283,8 @@ def _evaluate_pools(
         )
 
     if evidence.get("ok") is False and evidence.get("code") == "docker_address_pools_unavailable":
-        return _missing_pool_evidence(remote_name, required_subnets)
+        return absent if absent is not None else _missing_pool_evidence(
+            remote_name, required_subnets)
     if "ok" in evidence and evidence.get("ok") is not True:
         return _blocked(
             code="docker_network_capacity_unavailable",
@@ -387,7 +392,8 @@ def _evaluate_pools(
                           "required_subnets": required_subnets},
                 evidence={"status": "partial", "reason": "inconsistent_pool_totals"},
             )
-        return _missing_pool_evidence(remote_name, required_subnets)
+        return absent if absent is not None else _missing_pool_evidence(
+            remote_name, required_subnets)
 
     normalized_pools: list[dict] = []
     pool_ids: set[str] = set()

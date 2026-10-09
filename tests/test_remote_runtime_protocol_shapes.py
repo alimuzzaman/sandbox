@@ -39,7 +39,7 @@ class ShapeGuardTests(unittest.TestCase):
     def test_keys_cover_literals_subscripts_and_lookups(self):
         source = ("p = {'a': 1, **x}\nq = r['b']\ns = r.get('c')\nt = r.pop('d', 0)\n"
                   "u = r.setdefault('e', [])\nv = r[0]\nw = f('ignored')\n")
-        self.assertEqual(shapes.payload_keys(source), [":p={a}", "a", "b", "c", "d", "e"])
+        self.assertEqual(shapes.payload_keys(source), [":p={a}", ":r[e]=", "a", "b", "c", "d", "e"])
 
     def test_keys_inside_an_embedded_program_count(self):
         """A program sent over SSH as a string is part of the payload contract."""
@@ -112,6 +112,26 @@ class ShapeGuardTests(unittest.TestCase):
         self.assertEqual(self._diff(before, after), {"m.py": {
             "added": ["f:return#2={a,b}", "f:return={a}"],
             "removed": ["f:return#2={a}", "f:return={a,b}"]}})
+
+    def test_subscript_field_move_requires_protocol_bump(self):
+        """Sol R5-3: a subscript store moved into another payload counts."""
+        before = ("def f(request, other):\n    request = {'a': 1}\n    other = {'b': 2}\n"
+                  "    request['resume_capture'] = True\n")
+        after = before.replace("request['resume_capture']", "other['resume_capture']")
+        self.assertEqual(self._diff(before, after), {"m.py": {
+            "added": ["f:other[resume_capture]="], "removed": ["f:request[resume_capture]="]}})
+        moved = before.replace("request['resume_capture'] = True",
+                               "request.setdefault('resume_capture', True)")
+        self.assertEqual(self._diff(before, moved), {})
+        twice = before + "    request['resume_capture'] = False\n"
+        self.assertEqual(self._diff(before, twice)["m.py"]["added"],
+                         ["f:request[resume_capture]=*2"])
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "shapes.json"
+            shapes.write_manifest(manifest, spoken=3, shapes={"m.py": shapes.payload_keys(before)})
+            with self.assertRaisesRegex(ValueError, "bump CONTROL_PROTOCOL_SPOKEN"):
+                shapes.write_manifest(manifest, spoken=3,
+                                      shapes={"m.py": shapes.payload_keys(after)})
 
     def test_writer_refuses_changed_keys_under_the_same_version(self):
         with tempfile.TemporaryDirectory() as tmp:

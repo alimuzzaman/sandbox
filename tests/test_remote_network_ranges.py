@@ -259,6 +259,32 @@ class NetworkRangeCommandTests(unittest.TestCase):
             _code, payload = self._run(operation, **extra)
             self.assertNotIn("10.200.0.0/26", json.dumps(payload))
 
+    def test_invalid_cidr_refusal_omits_sensitive_input(self):
+        """Sol R5-2: a malformed --cidr is never echoed back."""
+        import io
+        import json
+        import types
+        from sandbox.commands import remote as remote_cmd
+        canaries = ("ghp_" + "A" * 36, "/home/operator/.ssh/id_ed25519")
+        parsing = self.patch.object(_Store, "assign", lambda self, cidr, subnet_prefix,
+                                    confirm=False: ranges.parse_range(cidr, subnet_prefix))
+        parsing.start()
+        self.addCleanup(parsing.stop)
+        for canary in canaries:
+            with self.subTest(canary=canary[:6]):
+                with self.assertRaises(RangeError) as ctx:
+                    ranges.parse_range(canary)
+                self.assertNotIn(canary, str(ctx.exception))
+                code, payload = self._run("assign", cidr=canary, confirm=True)
+                self.assertEqual((code, payload["error"]["code"]), (1, "range_invalid"))
+                self.assertNotIn(canary, json.dumps(payload))
+                err = io.StringIO()
+                with self.patch("sys.stderr", err), self.assertRaises(SystemExit):
+                    remote_cmd._cmd_network_range(types.SimpleNamespace(
+                        name="assign", ssh_url="vps", cidr=canary, subnet_prefix=None,
+                        confirm=False), as_json=False)
+                self.assertNotIn(canary, err.getvalue())
+
     def test_unknown_operation_or_remote_dies(self):
         code, _payload = None, None
         with self.patch("sandbox.core._remote.get_remote", return_value=None), \

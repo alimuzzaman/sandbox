@@ -82,8 +82,10 @@ def parse_range(cidr, subnet_prefix=DEFAULT_SUBNET_PREFIX) -> DevRange:
         raise RangeError("range_invalid", "range must be an IPv4 CIDR string")
     try:
         network = ipaddress.IPv4Network(cidr.strip(), strict=True)
-    except (ValueError, TypeError) as exc:
-        raise RangeError("range_invalid", f"not an IPv4 network address: {exc}") from None
+    except (ValueError, TypeError):
+        # Fixed text: the rejected input may be a path or a secret (SC-009).
+        raise RangeError("range_invalid", "range is not an IPv4 network address with "
+                         "host bits clear, e.g. 10.200.0.0/20") from None
     if "/" not in cidr:
         raise RangeError("range_invalid", "range must carry an explicit prefix")
     if not CIDR_PREFIX_MIN <= network.prefixlen <= CIDR_PREFIX_MAX:

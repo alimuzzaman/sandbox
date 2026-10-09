@@ -56,7 +56,7 @@ SHAPE_SOURCES = (
 
 # Bumped when the fingerprint method changes (not the payloads): a manifest
 # recorded with an older format may be re-recorded under the same protocol.
-FORMAT = 3
+FORMAT = 4
 _EMBEDDED_DEPTH = 2
 
 _KEY_METHODS = frozenset({"get", "pop", "setdefault"})
@@ -97,42 +97,83 @@ def _target(node) -> str:
         return type(node).__name__
 
 
-def _owner(node, parents) -> str:
-    """``scope:binding`` for a dict literal or string constant."""
-    binding, scope, current = None, [], node
+def _site(node, parents):
+    """``(scope, label, site node, key path)`` naming where a payload is bound.
+
+    The key path holds every enclosing dict key up to the binding, so a
+    nested ``source`` in a request and one in a response stay apart. The
+    binding is an assignment target, ``callee(arg=)``, ``callee(index)``,
+    ``return`` or, failing those, the enclosing statement (``_``).
+    """
+    label = site = None
+    path, scope, current = [], [], node
     while current in parents:
         parent = parents[current]
-        if binding is None:
-            if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
-                binding = ",".join(_target(t) for t in targets)
-            elif isinstance(parent, ast.keyword):
-                binding = f"{parent.arg}="
-            elif isinstance(parent, ast.Return):
-                binding = "return"
-            elif isinstance(parent, ast.Dict) and current in parent.values:
+        if label is None:
+            if isinstance(parent, ast.Dict) and current in parent.values:
                 key = _text(parent.keys[parent.values.index(current)])
-                binding = f"[{key}]" if key is not None else None
+                path.append(key if key is not None else "?")
+            elif isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+                label, site = ",".join(_target(t) for t in targets), parent
+            elif isinstance(parent, ast.keyword):
+                call = parents.get(parent)
+                callee = _target(call.func) if isinstance(call, ast.Call) else ""
+                label, site = f"{callee}({parent.arg}=)", parent
+            elif isinstance(parent, ast.Call) and current in parent.args:
+                label = f"{_target(parent.func)}({parent.args.index(current)})"
+                site = parent
+            elif isinstance(parent, ast.Return):
+                label, site = "return", parent
+            elif isinstance(parent, ast.stmt):
+                label, site = "_", parent
         if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             scope.append(parent.name)
         current = parent
-    return ".".join(reversed(scope)) + ":" + (binding or "_")
+    return ".".join(reversed(scope)), label or "_", site, "".join(f"[{k}]" for k in reversed(path))
+
+
+def _namer(tree, parents):
+    """Owner names for one tree; repeated sites in a scope are numbered.
+
+    Numbering follows source order, so two calls with the same keyword or
+    two return branches never share a name (Sol R3-1).
+    """
+    sites: dict[tuple[str, str], list] = {}
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict) or (isinstance(node, ast.Constant)
+                                          and isinstance(node.value, str)):
+            scope, label, site, path = _site(node, parents)
+            found.append((node, scope, label, site, path))
+            if site is not None:
+                bucket = sites.setdefault((scope, label), [])
+                if site not in bucket:
+                    bucket.append(site)
+    for bucket in sites.values():
+        bucket.sort(key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
+    names = {}
+    for node, scope, label, site, path in found:
+        ordinal = sites[(scope, label)].index(site) + 1 if site is not None else 1
+        names[node] = f"{scope}:{label}" + (f"#{ordinal}" if ordinal > 1 else "") + path
+    return names
 
 
 def _collect(tree, keys: set[str], signatures: list[str], depth: int, prefix: str = "") -> None:
     parents = _parents(tree)
+    names = _namer(tree, parents)
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             literal = [key for key in map(_text, node.keys) if key is not None]
             keys.update(literal)
             if literal:
-                signatures.append(prefix + _owner(node, parents)
+                signatures.append(prefix + names[node]
                                   + "={" + ",".join(sorted(set(literal))) + "}")
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and depth:
             embedded = _embedded_program(node.value)
             if embedded is not None:
                 _collect(embedded, keys, signatures, depth - 1,
-                         prefix + "<" + _owner(node, parents) + ">")
+                         prefix + "<" + names[node] + ">")
         elif isinstance(node, ast.Subscript):
             key = _text(node.slice)
             if key is not None:

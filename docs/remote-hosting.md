@@ -1206,10 +1206,13 @@ their remote programs exchange must bump the spoken version:
 `python -m sandbox.remote_runtime.shapes --write` records them (it refuses
 changed keys under an unchanged version). The fingerprint covers keys inside
 Python programs embedded as strings (single-line or not) and one counted
-signature per dict literal naming the payload it builds (enclosing function
-plus the name, keyword or key it is bound to), so moving a key between
-payloads, exchanging keys, or dropping a field from one of several identical
-payloads also counts. The pin program is
+signature per dict literal naming the payload it builds: the enclosing
+function, the binding (assignment target, `callee(arg=)`, `callee(index)` or
+`return`, numbered `#2`, `#3` in source order when a function has several such
+sites) and the full path of dict keys down to the literal. Moving a key between
+payloads, including between a request's and a response's nested `source`,
+exchanging keys, or dropping a field from one of several identical payloads
+also counts. The pin program is
 not part of it: the installed runtime never runs it, and pin records are
 versioned by `pins.SCHEMA` instead.
 

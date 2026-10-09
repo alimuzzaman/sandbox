@@ -48,7 +48,7 @@ class ShapeGuardTests(unittest.TestCase):
         self.assertIn("ok", shapes.payload_keys(before))
         diff = shapes.shape_diff({"m.py": shapes.payload_keys(before)},
                                  {"m.py": shapes.payload_keys(after)})
-        self.assertEqual(diff["m.py"]["added"], ["<:PROGRAM>:_={extra,ok}", "extra"])
+        self.assertEqual(diff["m.py"]["added"], ["<:PROGRAM>:json.dumps(0)={extra,ok}", "extra"])
         prose = 'DOC = """Spec text\nthat is not a program."""\n'
         self.assertEqual(shapes.payload_keys(prose), [])
 
@@ -75,13 +75,43 @@ class ShapeGuardTests(unittest.TestCase):
     def test_single_line_embedded_programs_count(self):
         before = "P = \"import json; print(json.dumps({'k': 1}))\"\n"
         after = before.replace("{'k': 1}", "{'k': 1, 'z': 2}")
-        self.assertEqual(self._diff(before, after)["m.py"]["added"], ["<:P>:_={k,z}", "z"])
+        self.assertEqual(self._diff(before, after)["m.py"]["added"], ["<:P>:json.dumps(0)={k,z}", "z"])
         self.assertEqual(shapes.payload_keys("S = 'ok'\nT = 'set -eu; echo hi'\n"), [])
 
     def test_keyword_return_and_nested_bindings_are_named(self):
-        source = ("def f():\n    g(body={'a': 1})\n    return {'b': {'c': 1}}\n")
+        source = ("def f(jobs):\n    g(body={'a': 1})\n    return {'b': {'c': 1}}\n"
+                  "def h(jobs):\n    jobs.append({'s': {'d': 1}})\n")
         self.assertEqual(shapes.payload_keys(source),
-                         ["a", "b", "c", "f:[b]={c}", "f:body=={a}", "f:return={b}"])
+                         ["a", "b", "c", "d", "f:g(body=)={a}", "f:return={b}", "f:return[b]={c}",
+                          "h:jobs.append(0)={s}", "h:jobs.append(0)[s]={d}", "s"])
+
+    def test_nested_payload_field_exchange_counts(self):
+        """Sol R3-1: a request and a response both carry a nested ``source``."""
+        before = ("def submit(jobs):\n"
+                  "    jobs.append({'source': {'identity': 1, 'commit': 2}})\n"
+                  "    return {'source': {'identity': 1, 'commit': 2, 'dirty': 3}}\n")
+        after = ("def submit(jobs):\n"
+                 "    jobs.append({'source': {'identity': 1, 'commit': 2, 'dirty': 3}})\n"
+                 "    return {'source': {'identity': 1, 'commit': 2}}\n")
+        self.assertEqual(self._diff(before, after), {"m.py": {
+            "added": ["submit:jobs.append(0)[source]={commit,dirty,identity}",
+                      "submit:return[source]={commit,identity}"],
+            "removed": ["submit:jobs.append(0)[source]={commit,identity}",
+                        "submit:return[source]={commit,dirty,identity}"]}})
+
+    def test_separate_calls_with_the_same_keyword_are_distinct_sites(self):
+        before = "def f():\n    g(body={'a': 1, 'b': 2})\n    g(body={'a': 1})\n"
+        after = "def f():\n    g(body={'a': 1})\n    g(body={'a': 1, 'b': 2})\n"
+        self.assertEqual(self._diff(before, after), {"m.py": {
+            "added": ["f:g(body=)#2={a,b}", "f:g(body=)={a}"],
+            "removed": ["f:g(body=)#2={a}", "f:g(body=)={a,b}"]}})
+
+    def test_separate_return_branches_are_distinct_sites(self):
+        before = "def f(c):\n    if c:\n        return {'a': 1, 'b': 2}\n    return {'a': 1}\n"
+        after = "def f(c):\n    if c:\n        return {'a': 1}\n    return {'a': 1, 'b': 2}\n"
+        self.assertEqual(self._diff(before, after), {"m.py": {
+            "added": ["f:return#2={a,b}", "f:return={a}"],
+            "removed": ["f:return#2={a}", "f:return={a,b}"]}})
 
     def test_writer_refuses_changed_keys_under_the_same_version(self):
         with tempfile.TemporaryDirectory() as tmp:

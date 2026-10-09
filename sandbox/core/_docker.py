@@ -660,10 +660,16 @@ def compose(*args: str, instance: str,
         run_kwargs["stdin"] = stdin
     if stdout is not None:
         run_kwargs["stdout"] = stdout
-    return run(
-        ["docker", "compose",
-         "-p", project_name(instance),
-         "-f", str(compose_file(instance)),
+    # Spec 063: on a host with development ranges, allocate the stack's
+    # networks before `up` and pass the subnet override last; a
+    # volume-removing `down` frees them. Inert when the host has no ranges.
+    from sandbox.remote_network import runtime as range_runtime
+    ranges = range_runtime.default_runtime(compose_config=_compose_config)
+    if ranges is not None and args[:1] == ("up",):
+        ranges.prepare(instance)
+    result = run(
+        [*_compose_base(instance),
+         *(ranges.compose_args(instance) if ranges is not None else []),
          # Resolve the compose file's relative paths (./config, ./runtime)
          # against the sandbox ROOT, not the compose file's own dir
          # (runtime/compose/). Without this, `./config/x` would resolve to
@@ -673,6 +679,21 @@ def compose(*args: str, instance: str,
         *args],
         **run_kwargs,
     )
+    if ranges is not None and args[:1] == ("down",) and ("-v" in args or "--volumes" in args) \
+            and (check or getattr(result, "returncode", 0) == 0):
+        ranges.release(instance)
+    return result
+
+
+def _compose_base(instance: str) -> list[str]:
+    return ["docker", "compose", "-p", project_name(instance), "-f", str(compose_file(instance))]
+
+
+def _compose_config(instance: str) -> dict:
+    """The stack's effective Compose config, without any range override."""
+    result = run([*_compose_base(instance), "--project-directory", str(ROOT),
+                  "config", "--format", "json"], check=True, capture=True, timeout=60)
+    return json.loads(result.stdout)
 
 
 def docker_daemon_preflight(*, timeout: float = 5.0) -> dict[str, object]:

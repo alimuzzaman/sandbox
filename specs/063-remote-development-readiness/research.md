@@ -89,6 +89,12 @@
   - A race between admission and allocation therefore refuses at allocation
     with `docker_network_subnet_exhausted` and the table, before any network
     is created. It never yields a half-allocated stack.
+  - The owner is the instance (`instance:<name>`, kind `workspace`), and
+    the hooks live in `compose()` itself: prepare before `up`, the override
+    on every call, release after a successful `down -v`/`--volumes`. Every
+    destroy path (instance destroy, data reset, uninstall, plugin-check
+    teardown) goes through that call. With no range state file on the host
+    the hooks spawn nothing (`sandbox/remote_network/runtime.py`).
 - **Alternatives considered**: Allocating at admission with a placeholder
   network list. Rejected: names are only known after staging, and a
   placeholder grant would leak when the stack used other names.
@@ -104,7 +110,9 @@
   - retention expiry (the existing 7-day TTL) frees them on the reap path.
 
   A killed job's allocation stays attributed and counted until one of those
-  runs (FR-006).
+  runs (FR-006). In the runtime each of the three destroys the workspace's
+  instances, and the release itself is the `compose down -v` hook of the
+  R4 revision, so no separate call is needed in the workspace service.
 - **Rationale**: The workspace lifecycle already owns retention; no new timer
   is needed.
 

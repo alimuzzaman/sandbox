@@ -42,9 +42,14 @@ Owner kind mapping (FR-004):
   cell runs on its own labelled instance, which is its own workspace, so its
   networks are `workspace`-owned and freed with that workspace.
 
-Lifecycle: `allocated` → (removed) on `release-owner` by workspace release,
-reap, or retention expiry. There is no other transition; there is no reuse
-while present.
+In the runtime the owning workspace is the instance that runs the stack:
+`owner_id` = `workspace_id` = `instance:<instance name>` (research R4
+revision), and networks are identified by their project-scoped Docker name.
+
+Lifecycle: `allocated` → (removed) on `release-owner` when the instance's
+stack is torn down with its volumes (`compose down -v`), which workspace
+release, reap and retention expiry all do. There is no other transition;
+there is no reuse while present.
 
 ## Last-proven capacity (`state.json` → `capacity_proof`)
 

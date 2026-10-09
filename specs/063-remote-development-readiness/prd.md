@@ -8,9 +8,9 @@
 
 **Input**: "A project's declared remote for tests, exec and CI must be usable, or the project must be told exactly why and what maintenance would fix it, before a job is submitted: network capacity that never needs a daemon restart on a host serving production, one read-only readiness check per declared remote, typed refusal for a retired remote, and no silent fallback to local"
 
-**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); evidence from the feedback backlog, `docs/remote-hosting.md` (Docker network capacity admission), `docs/remote-job-runtime.md` (workspace ownership repair), and `origin/latest` commit `4ece30f`. No independent readiness review has run.
+**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); evidence from the feedback backlog, `docs/remote-hosting.md` (Docker network capacity admission), `docs/remote-job-runtime.md` (workspace ownership repair), and `origin/latest` commit `4ece30f`. Revised 2026-10-09 by Claude Opus 5.5 root (speckit-refine) applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; cited code re-verified read-only on `origin/latest`.
 
-**Final Validation**: `PENDING` — independent readiness review
+**Final Validation**: `PENDING` — fresh independent readiness review of this revision
 
 **Validated On**: N/A
 
@@ -31,16 +31,22 @@ stopped working for every project on 2026-10-06 when `scaleway-sandbox` was
 retired and `xcloud-london` took its hosting, and it has not come back.
 
 - `xcloud-london` rejects every test and exec job with
-  `docker_network_capacity_unavailable`: the migrated host has no Docker
-  address pools configured (`current_pool_count 0`, `status planned`,
-  `restart_required true`) and 64 running containers. The only remedy the
-  pool plan offers is a daemon restart, which would restart Lenzora production
-  and development, so no agent can apply it, and the operator has not either
+  `docker_network_capacity_unavailable` (evidence reason
+  `missing_pool_evidence`). The migrated host's daemon configuration declares
+  no address pools, so the capacity admission has no pool evidence to count.
+  This is missing evidence, not exhausted capacity: Docker's built-in default
+  pools still allocate networks on that host, but the admission cannot measure
+  them and correctly refuses. The pool plan reports `current_pool_count 0`,
+  `status planned`, `restart_required true` and 64 running containers, and its
+  only remedy is a daemon restart, which would restart Lenzora production and
+  development, so no agent can apply it and the operator has not either
   (feedback `cef740dd`, high; `5598f2d0`).
-- The project's declared test remote is still `scaleway-sandbox` in
-  `sandbox.config.json`, which `sb remote list` no longer knows; the
-  submission fails with `unknown_remote` and there is no remote test target at
-  all (feedback `cebec97a`).
+- A project's runtime target declaration still names `scaleway-sandbox`, which
+  `sb remote list` no longer knows. The submission fails with the existing
+  `unknown_remote` refusal, which points at `sb remote list` but neither lists
+  the registered remotes nor says whether the name came from the caller or the
+  project declaration (feedback `cebec97a`). Sandbox did not fall back to a
+  local run; the agent chose serialized local checks itself.
 - Before the retirement, remote workspace materialization failed `EACCES` on
   a root-owned `node_modules` and `ensure --remote` reported ready while `exec
   --remote` found no instance (feedback `b7451117`; the ownership repair and
@@ -51,51 +57,57 @@ retired and `xcloud-london` took its hosting, and it has not come back.
 
 Every one of these was discovered by submitting a job and reading its refusal,
 then by falling back to serialized local runs. The capacity admission is
-correct to refuse: it must not stage a tree onto a host that cannot give it a
-network. What is wrong is that the only way to restore capacity is a
+correct to refuse: it must not stage a tree onto a host whose capacity it
+cannot prove. What is wrong is that the only way to supply that proof is a
 production-affecting restart, and that nothing tells a project ahead of time
-that its declared remote cannot serve it. The cost is that remote development
-execution, the capability spec 032 and 033 spent 240 tasks on, is unavailable
-on the one remote the operator runs, and agents silently do less testing.
+that its declared remote cannot serve it. `sb doctor` already has a "Remote
+targets" section, but it checks registered remotes only, not the remotes a
+project declares. The cost is that remote development execution, the
+capability spec 032 and 033 spent 240 tasks on, is unavailable on the one
+remote the operator runs, and agents silently do less testing.
 
 ## Users and Desired Outcomes
 
-- **Agent running a project's tests remotely**: a submission to the declared
+- **Agent running a project's tests remotely**: a submission to the selected
   remote is accepted, or refused before any transfer with the exact readiness
   gap and the maintenance that would close it; never with a generic capacity
   code and no path.
 - **Operator of a host that serves production**: can restore development
   network capacity without restarting the daemon and without touching hosted
-  targets, and can see when a daemon-level change would be required and what
-  it would affect.
+  targets, and can see when a daemon-level change would be required and
+  exactly which hosted targets it would restart.
 - **Project owner whose declared remote was retired**: is told the declared
   name is unregistered, which registered remotes exist, and how to re-point
   the declaration; nothing runs locally by surprise.
 - **Agent deciding where to run**: gets one read-only readiness answer per
-  declared remote (registered, reachable, runtime compatible, network
-  capacity, workspace ownership, instance handoff) and chooses local
-  explicitly when the remote is not ready.
+  remote (registered, reachable, runtime compatible, network capacity,
+  workspace ownership, instance handoff), sees how that remote was selected,
+  and chooses local explicitly when the remote is not ready.
 - **Reviewer**: can see, per remote, the Sandbox-owned network ranges, what is
-  allocated to which workspace, and when capacity was last proven.
+  allocated to which workspace or job, and when capacity was last proven.
 
 ## Goals
 
 - Development network capacity on a remote never depends on a Docker daemon
-  restart while the host serves hosted targets. Sandbox allocates explicit
-  subnets for the networks it creates from a Sandbox-owned range recorded in
-  the remote record; daemon default address pools are an optimization, not a
+  restart while the host serves hosted targets. Sandbox gives the networks it
+  creates explicit subnets from a Sandbox-owned range recorded for the remote;
+  configured daemon address pools are an optional second source, not a
   prerequisite.
-- A daemon-level pool change remains a planned maintenance operation: it is
-  refused while hosted targets run unless explicitly scheduled with
-  confirmation and a plan that names every target it would restart.
-- One read-only readiness check per declared remote covers registration,
-  reachability, runtime compatibility (feature 061's verdict), network
-  capacity, workspace ownership repairability, and the ensure-to-exec instance
-  handoff. It runs on request, in `sb doctor`, and before every remote
+- Docker's built-in default pools never count as capacity evidence. A remote
+  with neither configured pools nor a Sandbox-owned range keeps refusing, and
+  the refusal reads "no pool evidence, not exhausted capacity" and names the
+  range remedy.
+- A daemon-level pool change stays a maintenance operation: it is applied only
+  with a confirmation bound to the exact list of hosted targets the plan says
+  it would restart, and is refused if that list changed since the plan.
+- One read-only readiness check per remote covers registration, reachability,
+  runtime compatibility, network capacity, workspace ownership repairability,
+  and the ensure-to-exec instance handoff. It runs on request, in `sb doctor`
+  for every remote the focused project declares, and before every remote
   submission, with the same result shape.
-- A declaration that names an unregistered remote yields a typed refusal
-  listing registered remotes; re-pointing is an explicit, supported change to
-  the project declaration.
+- A remote name, declared or passed explicitly, that is not registered yields
+  a typed refusal listing registered remotes and where the name came from;
+  re-pointing is an explicit change to the project declaration.
 - Fallback to local execution is the caller's decision, never automatic; a
   refused remote submission never starts a local run.
 - Capacity, ranges and allocations are inspectable per remote, bounded and
@@ -104,12 +116,18 @@ on the one remote the operator runs, and agents silently do less testing.
 ## Non-Goals
 
 - Changing the capacity admission's fail-closed rule or letting it retry or
-  delete networks. It keeps refusing on missing evidence.
+  delete networks. It keeps refusing on missing evidence, and the readiness
+  check never replaces the admission at submission time.
+- Counting Docker's built-in default pools as evidence.
+- Assigning a Sandbox-owned range automatically at registration, provision or
+  readiness time; assignment is always an explicit operator action.
+- A maintenance scheduler or time-window concept for daemon restarts.
 - Host-wide resource governance (CPU, memory, disk admission): feature 047.
 - Hosting targets' own networks. Hosted Compose projects keep their current
   network behavior; this feature covers networks Sandbox creates for
   development workspaces, jobs, previews and CI cells.
-- Multi-remote scheduling or picking a remote automatically for a project.
+- Multi-remote scheduling or choosing among several remotes automatically. The
+  existing single-configured-remote inference stays as it is.
 - Remote runtime compatibility rules (feature 061) and per-target hosting
   locks (feature 060); this feature consumes their verdicts.
 - Replacing the retired remote's registration or re-provisioning a new remote.
@@ -125,47 +143,53 @@ on the one remote the operator runs, and agents silently do less testing.
 - **Expected outcome**: The range is recorded, no daemon restart happens, no
   hosted container restarts, and the job is accepted with a subnet allocated
   from the range. The readiness check reports capacity as proven with the
-  measured usable count.
+  measured usable count and the time it was proven.
 
 ### Scenario 2 — Readiness before submission
 
-- **Starting state**: A project declares `xcloud-london` as its test remote.
-- **User action**: The agent runs the readiness check for the project's
-  declared remote.
-- **Expected outcome**: One bounded result with a row per readiness aspect
-  (registration, reachability, runtime compatibility, capacity, ownership
-  repair, instance handoff), each `ready`, `not_ready` with a reason, or
-  `unknown` with the probe state, and for each `not_ready` row the supported
-  maintenance command or declaration change.
+- **Starting state**: A project declares `xcloud-london` as its remote target.
+- **User action**: The agent runs the readiness check for the project.
+- **Expected outcome**: One bounded result naming the remote and its
+  `remote_selection` (`explicit`, `profile`, or `single-configured`), with a
+  row per readiness aspect (registration, reachability, runtime compatibility,
+  capacity, ownership repair, instance handoff), each `ready`, `not_ready`
+  with a reason, `unknown` with the probe state, or `not_applicable` with the
+  reason, and for each `not_ready` or `unknown` row the supported command or
+  declaration change that would resolve or prove it.
 
 ### Scenario 3 — Declared remote retired (negative)
 
 - **Starting state**: The project declares `scaleway-sandbox`; only
   `xcloud-london` is registered.
-- **User action**: `sb test fast --remote scaleway-sandbox` or the readiness
-  check.
-- **Expected outcome**: A typed `declared_remote_unregistered` refusal naming
-  the declared name and the registered remotes, and the supported way to
-  re-point the declaration. No transfer, no local run.
+- **User action**: `sb test fast`, `sb test fast --remote scaleway-sandbox`,
+  or the readiness check.
+- **Expected outcome**: The `unknown_remote` refusal names the unregistered
+  name, whether it came from the caller or the project declaration, the
+  registered remotes, and the supported way to re-point the declaration. No
+  transfer, no local run, exit non-zero.
 
-### Scenario 4 — Daemon-level change refused while production runs (negative)
+### Scenario 4 — Daemon-level change while production runs (negative)
 
 - **Starting state**: As in Scenario 1, and the operator asks the pool plan to
-  configure daemon default pools.
-- **User action**: Apply the plan.
-- **Expected outcome**: Refused with the list of hosted targets the restart
-  would affect and the scheduling command that would make it an explicit
-  maintenance window. The Sandbox-owned range remedy is offered as the
-  no-restart alternative.
+  configure daemon address pools.
+- **User action**: Apply the plan without a confirmation, then with a
+  confirmation bound to an earlier plan after a hosted target was added.
+- **Expected outcome**: The plan lists every hosted target the restart would
+  restart and a digest of that list. The unconfirmed apply is refused; the
+  apply confirmed against a stale list is refused because the list changed
+  since the plan. Both refusals offer the Sandbox-owned range as the
+  no-restart alternative. No daemon restart happens.
 
 ### Scenario 5 — Range exhausted (negative)
 
 - **Starting state**: The Sandbox-owned range is fully allocated to live
-  workspaces.
+  workspaces and jobs.
 - **User action**: A job is submitted.
-- **Expected outcome**: Refused with `docker_network_subnet_exhausted`, the
-  allocation table (workspace or job per subnet, age), and the supported
-  release commands (`workspace release`, `workspace reap`). Nothing is deleted.
+- **Expected outcome**: Refused with `docker_network_subnet_exhausted` and an
+  allocation table giving, per allocation, an opaque owner id, owner kind
+  (workspace or job) and age, plus the supported release commands
+  (`workspace release`, `workspace reap`). Subnets appear only in the
+  per-remote range listing, not in the refusal. Nothing is deleted.
 
 ### Scenario 6 — Ownership repair is verified ahead
 
@@ -182,16 +206,17 @@ on the one remote the operator runs, and agents silently do less testing.
 - **Starting state**: No remote instance for the project.
 - **User action**: `sb ensure --remote NAME` then `sb exec --remote NAME`.
 - **Expected outcome**: Ensure returns the instance record it created; exec
-  uses it. The readiness check's handoff row is `ready` only if this round
-  trip is proven on that remote.
+  uses it. The readiness check's handoff row is `ready` only when a recorded
+  ensure-to-exec round trip exists on that remote at its installed runtime
+  revision; otherwise it is `unknown` and names the command that proves it.
 
 ### Scenario 8 — Caller chooses local explicitly
 
 - **Starting state**: Readiness for the declared remote is `not_ready`.
 - **User action**: The agent runs the tests with an explicit local selector.
-- **Expected outcome**: The local run proceeds and its output states that the
-  declared remote was not ready and why, so the evidence is not mistaken for
-  a remote result.
+- **Expected outcome**: The local run proceeds and its result states that the
+  declared remote was not ready, which row and why, so the evidence is not
+  mistaken for a remote result.
 
 ### Scenario 9 — Old runtime without range support (negative)
 
@@ -199,31 +224,89 @@ on the one remote the operator runs, and agents silently do less testing.
   ranges.
 - **User action**: Assign a range.
 - **Expected outcome**: A typed limitation naming the migrate that is
-  required; the daemon-pool path remains the documented alternative with its
-  restart cost stated.
+  required; nothing is recorded. The daemon-pool path remains the documented
+  alternative with its restart cost and affected targets stated.
+
+### Scenario 10 — Range overlaps a host route (negative)
+
+- **Starting state**: The proposed range overlaps a route on the host, an
+  existing Docker network, or the Tailscale address space (`100.64.0.0/10`).
+- **User action**: Assign the range.
+- **Expected outcome**: Refused at assignment with the overlapping network or
+  route class named; nothing is recorded. When inventory is partial, the
+  assignment is refused as `unknown` rather than accepted.
+
+### Scenario 11 — Concurrent allocation for the last subnet (negative)
+
+- **Starting state**: One subnet remains free in the range.
+- **User action**: Two submissions arrive at the same time.
+- **Expected outcome**: Exactly one receives the subnet; the other is refused
+  with `docker_network_subnet_exhausted`. No subnet is allocated twice.
+
+### Scenario 12 — Orphaned allocation after a killed job (negative)
+
+- **Starting state**: A job was killed before releasing its network.
+- **User action**: Inspect the range, then submit.
+- **Expected outcome**: The allocation stays attributed to the dead job's
+  workspace and counts as used until `workspace release`, `workspace reap`, or
+  the workspace's retention expiry (default 7 days) frees it. It is never
+  silently reused.
+
+### Scenario 13 — Compose file with extra or external networks
+
+- **Starting state**: A job's Compose file declares several networks, one of
+  them external.
+- **User action**: Submit.
+- **Expected outcome**: Each network Sandbox creates receives a subnet from
+  the range and counts toward the required capacity; the external network is
+  not allocated and is reported as outside the range. If the required count
+  exceeds usable capacity, the submission is refused before transfer.
+
+### Scenario 14 — Readiness on a remote with no instance
+
+- **Starting state**: The remote is registered and reachable but has no
+  provisioned instance for the project.
+- **User action**: Readiness check.
+- **Expected outcome**: The ownership-repair row is `not_applicable` with that
+  reason, and the handoff row is `unknown` with the `ensure --remote` command
+  that would prove it; the overall result is not `ready`.
 
 ## Proposed Product Behavior
 
 - A remote record may hold one or more Sandbox-owned development ranges with
   a per-network subnet size. Networks Sandbox creates for workspaces, jobs,
-  previews and CI cells are created with explicit subnets allocated from those
-  ranges and recorded against the owner. Allocation is exact and
-  manifest-first in the style of host storage reclamation; release follows
-  the owning workspace or job.
-- The capacity admission counts usable subnets as the union of daemon-pool
-  capacity (when configured and proven) and unallocated Sandbox-owned range
-  capacity; its evidence rules are unchanged.
-- The daemon-pool plan distinguishes "configure pools" (restart) from "assign
-  a range" (no restart), states the hosted targets a restart would affect, and
-  refuses a restart while any hosted target runs unless scheduled as a
-  confirmed maintenance window.
-- A readiness check for a declared remote is one read-only command and one
-  MCP tool sharing a result shape; `sb doctor` includes it for every declared
-  remote of the focused project; every remote submission runs the same check
-  first and reports the first `not_ready` row as its refusal.
-- A declared remote that is not registered is a typed refusal that lists
-  registered remotes and the declaration change; no command infers a
-  replacement remote.
+  previews and CI cells get explicit subnets allocated from those ranges and
+  recorded against their owner before creation. Release follows the owning
+  workspace or job.
+- Range assignment is explicit only. Provision and the readiness check, when
+  no range is assigned, propose a non-overlapping range and print the exact
+  assign command; they never assign it.
+- The capacity admission counts usable subnets as the union of configured and
+  proven daemon-pool capacity and unallocated Sandbox-owned range capacity.
+  Docker's built-in default pools are not evidence. Its evidence rules are
+  otherwise unchanged; `missing_pool_evidence` stays a refusal, worded as
+  missing evidence rather than exhausted capacity, naming the range remedy.
+- The daemon-pool plan distinguishes "configure pools" (daemon restart) from
+  "assign a range" (no restart), lists exactly the hosted targets in the
+  hosting inventory at plan time that a restart would affect, and shows a
+  digest of that list. Applying it requires a confirmation bound to that
+  digest and is refused if the list changed since the plan.
+- A readiness check is one read-only command and one MCP tool sharing a result
+  shape. `sb doctor`'s existing "Remote targets" section is extended to cover
+  every remote the focused project declares, including declared but
+  unregistered names. Every remote submission runs the same check first and
+  reports the first `not_ready` row as its refusal; the capacity admission
+  still runs at submission. A readiness proof may be reused by a submission
+  within a short bounded window stated in the result, never across a migrate
+  or installed runtime revision change.
+- Every readiness and submission result carries `remote_selection`
+  (`explicit`, `profile`, or `single-configured`). The existing
+  single-configured-remote inference is unchanged.
+- Until feature 061 ships, the runtime compatibility row reports today's
+  exact revision check; afterwards it reports 061's verdict.
+- An unregistered remote name stays the `unknown_remote` refusal, extended
+  with the registered remotes and the source of the name; no command infers
+  a replacement remote.
 - Local fallback is an explicit selector; a refused remote submission exits
   non-zero and runs nothing locally.
 - Ranges, allocations, and last-proven capacity are listed per remote,
@@ -233,31 +316,36 @@ on the one remote the operator runs, and agents silently do less testing.
 
 - The Docker network capacity admission (`docs/remote-hosting.md`, "Docker
   network capacity admission") and its fail-closed codes are the baseline;
-  this feature adds a capacity source and does not relax the admission.
+  this feature adds a capacity source and does not relax the admission. Its
+  refusal envelope forwards no subnets, paths or probe output, and this
+  feature keeps that property.
 - Spec 032 (remote job runtime) owns workspace materialization, ownership
-  repair and job acceptance; spec 033 owns agent-aware sync. The readiness
-  check consumes their supported read-only probes.
+  repair, job acceptance and workspace retention; spec 033 owns agent-aware
+  sync. The readiness check consumes their supported read-only probes.
 - Feature 061 supplies the runtime compatibility verdict; feature 060 supplies
   the hosted-target inventory that a restart plan must name. Until 060 exists,
   the restart plan uses the current hosting inventory.
 - Remote-side range allocation takes effect only after a migrate to a runtime
   that supports it (Scenario 9).
 - Hosted Compose projects on the same daemon may use daemon-default or
-  declared subnets; Sandbox-owned ranges must not overlap any network the
-  inventory can observe, and an overlap is a refusal at range assignment.
-- Project declarations live in `sandbox.config.json`; re-pointing a declared
-  remote is a declaration change the project owner makes, with the merge
-  order (user-global, project, override) unchanged.
+  declared subnets; Sandbox-owned ranges must not overlap any network or route
+  the inventory can observe, and an overlap is a refusal at range assignment.
+- A project selects a remote through its runtime target declaration (default
+  runtime and named remote) or an explicit `--remote`; re-pointing a declared
+  remote is a declaration change the project owner makes, with the merge order
+  (user-global, project, override) unchanged.
 - Constitution and module boundaries: ranges and allocations are new state
-  registered through explicit manifests; the readiness check is a shared
-  service, with adapters owning runtime policy.
+  registered through the project's explicit state contracts.
 
 ## Decisions
 
 | Decision | Choice | Rationale | Confirmed by |
 |----------|--------|-----------|--------------|
-| Capacity source | Sandbox-owned ranges with explicit per-network subnets; daemon pools optional | Daemon pool changes need a restart that stops production; explicit subnets need none | Fable decision (delegated by user), 2026-10-09 |
-| Daemon restart | Refused while hosted targets run unless scheduled as a confirmed maintenance window naming affected targets | A restart on a production host is a maintenance event, not a capacity fix | Fable decision (delegated by user), 2026-10-09 |
+| Capacity source | Sandbox-owned ranges with explicit per-network subnets; configured daemon pools optional | Daemon pool changes need a restart that stops production; explicit subnets need none | Fable decision (delegated by user), 2026-10-09 |
+| Built-in default pools | Not capacity evidence; `missing_pool_evidence` stays a refusal reading "no pool evidence, not exhausted capacity" and names the range remedy | The admission cannot measure built-in pools, and fail-closed on missing evidence is the baseline | Fable decision (delegated by user), 2026-10-09 |
+| Daemon restart | No scheduler. Applied only with `--confirm` bound to the digest of the affected-target list shown in the plan; refused if that list changed since the plan | A restart on a production host is a maintenance event; binding the confirmation to the list prevents restarting a target the operator never saw | Fable decision (delegated by user), 2026-10-09 |
+| Range assignment | Explicit only; provision and readiness propose a non-overlapping range and print the exact assign command | Assignment claims address space on a shared host and needs an operator decision | Fable decision (delegated by user), 2026-10-09 |
+| Remote selection | Keep single-remote inference; every result carries `remote_selection`: `explicit`, `profile`, or `single-configured` | Inference already works; reporting its source makes it visible | Fable decision (delegated by user), 2026-10-09 |
 | Readiness surface | One read-only check shared by CLI, MCP, doctor and pre-submission | Discovering unreadiness by submitting is the cost this feature removes | Fable decision (delegated by user), 2026-10-09 |
 | Retired declared remote | Typed refusal with registered alternatives; re-pointing is an explicit declaration change | Inferring a replacement remote routes work somewhere the project did not declare | Fable decision (delegated by user), 2026-10-09 |
 | Local fallback | Explicit only; refused remote submission runs nothing locally | Silent fallback hides that remote testing is broken and mislabels evidence | Fable decision (delegated by user), 2026-10-09 |
@@ -265,9 +353,7 @@ on the one remote the operator runs, and agents silently do less testing.
 
 ## Open Questions
 
-- None blocking. The independent readiness review should confirm whether a
-  default Sandbox-owned range should be assigned at remote registration (so
-  new remotes are ready without a second step) or only on explicit assignment.
+- None.
 
 ## Acceptance Outcomes
 
@@ -275,18 +361,33 @@ on the one remote the operator runs, and agents silently do less testing.
   assigning a range and submitting a remote test job completes with zero
   daemon restarts and zero hosted container restarts, verified by container
   start times before and after.
-- The readiness check for a declared remote returns within its bound with
-  every aspect row populated; a submission to a `not_ready` remote is refused
-  with the same row as its reason and transfers zero bytes of source.
-- A declaration naming an unregistered remote is refused with the registered
-  remote list in 100% of submission paths (test, exec, E2E, CI) and the
-  readiness check, and starts zero local runs.
-- Applying a daemon-pool restart plan while a hosted target runs is refused
-  and names every affected target; the same plan under a confirmed
-  maintenance window proceeds.
+- On a remote with neither configured pools nor an assigned range, 100% of
+  submissions are refused before transfer with the missing-evidence wording
+  and the range remedy, and the readiness check proposes a non-overlapping
+  range with the exact assign command.
+- The readiness check returns within 30 seconds, with a hard stop at 60
+  seconds that reports unfinished rows as `unknown`, and every aspect row
+  populated; a submission to a `not_ready` remote is refused with the same
+  row as its reason and transfers zero bytes of source.
+- An unregistered remote name is refused with the registered remote list and
+  the name's source on every submission path (`test`/`run_tests`,
+  `e2e`/`run_e2e`, `ci`/`ci_run`, `exec --remote`, `job-start`,
+  `ensure --remote`) and the readiness check, and starts zero local runs.
+- Every readiness and submission result reports `remote_selection`.
+- A daemon-pool restart plan names exactly the hosted targets in the
+  inventory at plan time; applying it unconfirmed, or confirmed against a
+  list that has since changed, is refused with zero daemon restarts; applying
+  it with a confirmation matching the current list proceeds.
 - With a range fully allocated, a submission is refused with the allocation
   table and no network is deleted; after `workspace release` of one
-  allocation, the next submission is accepted.
+  allocation, the next submission is accepted. Two simultaneous submissions
+  for one remaining subnet yield exactly one acceptance.
+- A range overlapping an observed network, host route or `100.64.0.0/10` is
+  refused at assignment in 100% of cases and nothing is recorded.
+- A local run chosen after a `not_ready` readiness result states the declared
+  remote, the failing row and its reason in its result (Scenario 8).
+- Assigning a range on a runtime without range support returns the typed
+  limitation naming the required migrate and records nothing (Scenario 9).
 - Ranges and allocations listed for a remote contain no secret-shaped values
   and are bounded in count and bytes.
 
@@ -298,13 +399,18 @@ on the one remote the operator runs, and agents silently do less testing.
   unknown; a collision at network creation is a typed refusal, never a
   retry.
 - **Risk**: Readiness checks add latency to every submission. Mitigation:
-  bounded, read-only, with a short-lived proof the submission can reuse.
-- **Risk**: A maintenance-window restart on a production host still restarts
-  production. Mitigation: it is explicit, confirmed, and names targets; this
-  feature does not make it safer, only visible and non-default.
-- **Assumption**: The Docker daemon on the operator's remotes accepts explicit
-  `--subnet` network creation without daemon pool configuration; this is
-  standard Docker behavior.
+  bounded, read-only, with a short-lived proof the submission can reuse that
+  never survives a migrate.
+- **Risk**: A confirmed daemon restart on a production host still restarts
+  production. Mitigation: it is explicit, confirmed against the exact target
+  list, and names targets; this feature does not make it safer, only visible
+  and non-default.
+- **Risk**: Orphaned allocations from killed jobs hold capacity until release
+  or retention expiry. Mitigation: they are attributed and listed, and the
+  exhaustion refusal names the release commands.
+- **Assumption**: The Docker daemon on the operator's remotes accepts
+  networks created with an explicit subnet without daemon pool configuration;
+  this is standard Docker behavior.
 - **Assumption**: The operator will assign a range on `xcloud-london` once the
   capability exists; until then remote development stays unavailable there.
 

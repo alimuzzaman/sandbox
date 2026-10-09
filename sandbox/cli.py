@@ -396,7 +396,6 @@ def _config_parse_error_boundary(function):
     return wrapped
 
 
-@_config_parse_error_boundary
 def _consume_strict_runtime(argv: list[str]) -> list[str]:
     """Spec 061 FR-007: ``--strict-runtime`` anywhere before ``--`` turns on
     strict mode for this process (and children) via SANDBOX_STRICT_RUNTIME."""
@@ -414,6 +413,7 @@ def _consume_strict_runtime(argv: list[str]) -> list[str]:
     return out
 
 
+@_config_parse_error_boundary
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()

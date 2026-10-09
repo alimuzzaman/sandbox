@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -154,7 +155,9 @@ class TestRecoveryCliServerCapture(unittest.TestCase):
             "postgres", "--postgres-operation", "readiness", "--remote", REMOTE,
             "--profile", "production-postgres",
         ])
-        with patch.object(RegisteredPostgresRecoveryTransport, "__init__", return_value=None), \
+        # Own, symlink-free state root: never the real or a leaked Sandbox home.
+        with patch.dict(os.environ, {"SANDBOX_HOME": str(Path(self._temporary.name).resolve())}), \
+             patch.object(RegisteredPostgresRecoveryTransport, "__init__", return_value=None), \
              patch.object(PostgresRecovery, "readiness",
                           side_effect=RecoveryError("private path /outside/source.json",
                                                     "source_binding_missing")):

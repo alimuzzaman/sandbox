@@ -22,7 +22,8 @@ from typing import Callable
 SCHEMA = 1
 DEFAULT_TTL_SECONDS = 3600
 MAX_TTL_SECONDS = 4 * 3600
-MAX_LISTED = 64
+MAX_LISTED = 64  # also the remote capacity: registration past it is refused
+FENCE_TTL_SECONDS = 600
 MAX_PURPOSE = 120
 MAX_CHECKOUT = 4096
 TIMEOUT_SECONDS = 15
@@ -35,6 +36,9 @@ BROKEN = "broken"
 
 PIN_UNVERIFIABLE = "strict_pin_unverifiable"
 PINS_UNAVAILABLE = "pins_unavailable"
+REPLACEMENT_IN_PROGRESS = "runtime_replacement_in_progress"
+PINS_UNACKNOWLEDGED = "remote_runtime_pins_unacknowledged"
+PIN_CAPACITY_REACHED = "pin_capacity_reached"
 
 
 class PinError(RuntimeError):
@@ -147,11 +151,20 @@ def parse_pin(value) -> Pin | None:
 # The remote side. Fixed text; its only inputs are the remote Sandbox home and
 # one base64 JSON request. Writes are atomic (temp file + rename, 0600) under
 # an exclusive flock; expired pins are removed on every write.
+#
+# Runtime replacement (FR-015) is one transaction with pin admission: a
+# confirmed install takes the ``.replacing.json`` fence under the same flock
+# that registration takes, after checking every binding pin. While the fence
+# is live, registering a pin for any other revision is refused, so no pin can
+# appear between the check and the install. The installer removes the fence
+# when it finishes; after an indeterminate rollback it is left to expire.
 PROGRAM = r'''
 import base64, fcntl, json, os, re, sys, time
 home = sys.argv[1]
 request = json.loads(base64.b64decode(sys.argv[2]).decode())
 HOLDER = re.compile(r"h-[0-9a-f]{16}")
+CAPACITY = 64
+FENCE = ".replacing.json"
 root = os.path.join(home, "runtime", "remote-pins")
 now = int(time.time())
 if request.get("action") == "list":
@@ -183,13 +196,30 @@ def read(holder):
         return None
     return value if isinstance(value, dict) else None
 
-def write(value):
-    target = path(value.get("holder"))
+def put(target, value):
     temp = target + ".tmp"
     fd = os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w") as handle:
         json.dump(value, handle, sort_keys=True)
     os.replace(temp, target)
+
+def write(value):
+    put(path(value.get("holder")), value)
+
+def fence():
+    try:
+        with open(os.path.join(root, FENCE)) as handle:
+            value = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict) or type(value.get("expires_at")) is not int \
+            or value["expires_at"] <= now:
+        return None
+    return value
+
+def binding(value):
+    expires = value.get("expires_at")
+    return value.get("state") == "active" and type(expires) is int and expires > now
 
 def every():
     out = []
@@ -212,11 +242,42 @@ def sweep():
 action = request.get("action")
 result = {"ok": True, "action": action, "now": now}
 if action == "list":
-    result["pins"] = every()[:64]
+    result["pins"] = every()
 elif action == "register":
     sweep()
-    write(request["pin"])
-    result["pin"] = read(request["pin"]["holder"])
+    pin = request["pin"]
+    live = fence()
+    if live is not None and live.get("target") != pin.get("revision"):
+        result["refused"] = "runtime_replacement_in_progress"
+    elif read(pin.get("holder")) is None and len(every()) >= CAPACITY:
+        result["refused"] = "pin_capacity_reached"
+    else:
+        write(pin)
+        result["pin"] = read(pin["holder"])
+elif action == "fence":
+    sweep()
+    live = fence()
+    if live is not None and live.get("by") != request["by"]:
+        result["refused"] = "runtime_replacement_in_progress"
+    else:
+        blocking = sorted(value.get("holder") for value in every()
+                          if binding(value) and value.get("revision") != request["target"]
+                          and value.get("holder") not in request["acknowledged"])
+        if blocking:
+            result["refused"] = "remote_runtime_pins_unacknowledged"
+            result["blocking"] = blocking
+        else:
+            put(os.path.join(root, FENCE), {"target": request["target"], "by": request["by"],
+                                            "expires_at": now + int(request["ttl"])})
+            result["fenced"] = True
+elif action == "unfence":
+    live = fence()
+    if live is None or live.get("by") == request["by"]:
+        try:
+            os.unlink(os.path.join(root, FENCE))
+        except FileNotFoundError:
+            pass
+    result["unfenced"] = True
 elif action == "release":
     sweep()
     try:
@@ -282,7 +343,10 @@ class PinStore:
         raw = self._call({"action": "list"}).get("pins")
         if not isinstance(raw, list):
             raise PinError(PINS_UNAVAILABLE, "remote pin list is invalid")
-        pins = [pin for pin in (parse_pin(item) for item in raw[:MAX_LISTED]) if pin]
+        if len(raw) > MAX_LISTED:
+            # Never decide on a partial list: an omitted pin may be the binding one.
+            raise PinError(PINS_UNAVAILABLE, "remote pin list exceeds capacity")
+        pins = [pin for pin in (parse_pin(item) for item in raw) if pin]
         return sorted(pins, key=lambda pin: pin.holder)
 
     def get(self, holder: str) -> Pin | None:
@@ -291,10 +355,47 @@ class PinStore:
     def register(self, pin: Pin) -> Pin:
         if parse_pin(pin.stored()) != pin:
             raise PinError(PIN_UNVERIFIABLE, "pin is invalid")
-        stored = parse_pin(self._call({"action": "register", "pin": pin.stored()}).get("pin"))
+        result = self._call({"action": "register", "pin": pin.stored()})
+        if result.get("refused") in (REPLACEMENT_IN_PROGRESS, PIN_CAPACITY_REACHED):
+            raise PinError(result["refused"], "remote refused the pin")
+        stored = parse_pin(result.get("pin"))
         if stored != pin:
             raise PinError(PIN_UNVERIFIABLE, "remote did not store the pin")
         return stored
+
+    def fence(self, target: str, acknowledged, by: str,
+              ttl_seconds: int = FENCE_TTL_SECONDS) -> None:
+        """Take the replacement fence for ``target`` or refuse.
+
+        Checks every binding pin and takes the fence under one remote lock.
+        Raises :class:`PinError` with :data:`PINS_UNACKNOWLEDGED` (``blocking``
+        names the holders) or :data:`REPLACEMENT_IN_PROGRESS`.
+        """
+        acknowledged = sorted(set(acknowledged or ()))
+        if not REVISION_RE.fullmatch(target or "") or not HOLDER_RE.fullmatch(by or "") \
+                or not all(HOLDER_RE.fullmatch(h or "") for h in acknowledged):
+            raise PinError("pin_holder_invalid", "fence request is invalid")
+        result = self._call({"action": "fence", "target": target, "by": by,
+                             "acknowledged": acknowledged,
+                             "ttl": max(1, min(int(ttl_seconds), MAX_TTL_SECONDS))})
+        refused = result.get("refused")
+        if refused == PINS_UNACKNOWLEDGED:
+            blocking = [h for h in result.get("blocking") or ()
+                        if isinstance(h, str) and HOLDER_RE.fullmatch(h)]
+            error = PinError(PINS_UNACKNOWLEDGED, "pass --break-pin HOLDER for: "
+                             + ", ".join(blocking))
+            error.blocking = blocking
+            raise error
+        if refused == REPLACEMENT_IN_PROGRESS:
+            raise PinError(REPLACEMENT_IN_PROGRESS,
+                           "another controller is replacing the remote runtime")
+        if result.get("fenced") is not True:
+            raise PinError(PINS_UNAVAILABLE, "remote did not take the fence")
+
+    def unfence(self, by: str) -> None:
+        if not HOLDER_RE.fullmatch(by or ""):
+            raise PinError("pin_holder_invalid", "holder is invalid")
+        self._call({"action": "unfence", "by": by})
 
     def release(self, holder: str) -> bool:
         if not HOLDER_RE.fullmatch(holder or ""):
@@ -329,7 +430,8 @@ def new_pin(revision: str, purpose: str, *, checkout=None, previous: Pin | None 
 
 
 def strict_gate(entry: dict, status: dict, *, purpose: str, store: PinStore | None = None,
-                checkout=None, now: float | None = None) -> dict:
+                checkout=None, now: float | None = None,
+                recheck: Callable[[], dict] | None = None) -> dict:
     """Apply strict mode to a status envelope before a remote effect.
 
     The returned envelope's ``compatibility`` is refused unless the installed
@@ -337,6 +439,10 @@ def strict_gate(entry: dict, status: dict, *, purpose: str, store: PinStore | No
     or renewed. A refused strict invocation registers nothing; a broken pin is
     reported with who broke it and when; an unverifiable pin fails closed
     (FR-008..FR-011).
+
+    ``status`` was read before the pin existed. ``recheck`` re-reads it after
+    registration: a runtime replaced in between (the fence was already gone)
+    shows a different installed revision, and the new pin is released.
     """
     status = dict(status) if isinstance(status, dict) else {}
     verdict = dict(status.get("compatibility") or {})
@@ -370,6 +476,23 @@ def strict_gate(entry: dict, status: dict, *, purpose: str, store: PinStore | No
                                      previous=previous, now=now))
     except PinError:
         return refuse(PIN_UNVERIFIABLE, state="unknown")
+    if recheck is not None:
+        try:
+            after = recheck()
+        except Exception:  # noqa: BLE001 - transport detail is never forwarded
+            after = None
+        installed_after = after.get("installed_runtime_revision") \
+            if isinstance(after, dict) else None
+        if installed_after != local:
+            try:
+                store.release(pin.holder)
+            except PinError:
+                pass  # it expires; it names this revision, which is no longer installed
+            if installed_after is None:
+                return refuse(PIN_UNVERIFIABLE, state="unknown")
+            status["installed_runtime_revision"] = installed_after
+            status["runtime_revision_state"] = "mismatch"
+            return refuse("strict_requires_exact_revision")
     verdict.update(ok=True, reason="strict_pin_held",
                    pin={"holder": pin.holder, "expires_at": pin.expires_at})
     status["compatibility"] = verdict

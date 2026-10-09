@@ -178,8 +178,15 @@ class RegisteredPostgresRecoveryTransport:
             raise
         # Spec 061: a different revision that serves this controller's
         # control protocol is admitted; the exact rule applies otherwise.
-        from sandbox.remote_runtime.verdict import admitted
+        from sandbox.remote_runtime.verdict import admitted, explicitly_refused
         compatible, _ = admitted(status)
+        if explicitly_refused(status):
+            # A strict refusal leaves the revisions matching; the verdict wins.
+            if operation == 'inspect-restore':
+                return _inspection_bytes(source, request_id, archive,
+                    phase='runtime_compatibility', status='refused',
+                    code='remote_revision_mismatch', runtime_status=status)
+            raise RecoveryError('installed recovery runtime is refused', 'remote_revision_mismatch')
         if operation == 'inspect-restore' and isinstance(status, dict):
             revision_state = status.get('runtime_revision_state')
             if (isinstance(revision_state, str) and revision_state in {'match', 'mismatch'}

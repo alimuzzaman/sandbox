@@ -286,6 +286,19 @@ class TestExtractedRemoteProbe(unittest.TestCase):
             probe_remote_state("scaleway-sandbox", **fakes)
         self.assertEqual(caught.exception.code, "remote_revision_mismatch")
 
+    def test_probe_honors_a_strict_refusal_when_revisions_match(self):
+        """A strict pin failure leaves the revisions matching; the verdict wins."""
+        from sandbox.recovery.errors import RecoveryError
+        from sandbox.transports.remote_recovery import probe_remote_state
+        fakes = self._fakes("match")
+        base = fakes["service_status"]("x")
+        fakes["service_status"] = lambda _entry: dict(base, compatibility={
+            "state": "compatible", "ok": False, "strict": True,
+            "reason": "strict_pin_unverifiable"})
+        with self.assertRaises(RecoveryError) as caught:
+            probe_remote_state("scaleway-sandbox", **fakes)
+        self.assertEqual(caught.exception.code, "remote_revision_mismatch")
+
     def test_declaration_builder_matches_controller_control_plane_capture(self):
         from sandbox.transports.remote_recovery import control_plane_declaration, probe_remote_state
         fakes = self._fakes()

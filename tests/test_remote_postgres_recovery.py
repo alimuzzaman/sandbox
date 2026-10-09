@@ -100,6 +100,24 @@ class RemotePostgresRecoveryTests(unittest.TestCase):
                 source(), "observe", "a" * 64)
         self.assertEqual(process_calls, [True])
 
+    def test_strict_refusal_with_matching_revision_never_reaches_the_helper(self):
+        """A strict pin failure leaves the revisions matching; the verdict wins."""
+        process_calls = []
+        process = lambda *args, **kwargs: process_calls.append(True)
+        status = {"runtime_revision_state": "match", "active": True, "authenticated": True,
+                  "local_runtime_revision": "a" * 24, "installed_runtime_revision": "a" * 24,
+                  "compatibility": {"state": "compatible", "ok": False, "strict": True,
+                                    "reason": "strict_pin_unverifiable"}}
+        for operation in ("observe", "capture", "restore"):
+            with self.subTest(operation=operation), self.assertRaisesRegex(Exception, "runtime"):
+                self._transport(status=lambda _entry: status, process=process).invoke(
+                    source(), operation, "a" * 64)
+        result = json.loads(self._transport(status=lambda _entry: status, process=process)
+                            .invoke(source(), "inspect-restore", "c" * 64, archive=b"x"))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["inspection_diagnostic"]["status"], "refused")
+        self.assertEqual(process_calls, [])
+
     def test_inspection_revision_mismatch_returns_correlated_refusal_without_helper(self):
         process_calls = []
         archive = b"retained-archive"

@@ -1,10 +1,20 @@
 """Control-protocol shape guard (spec 061 FR-006).
 
 The controller-to-runtime transports and the programs they run on the remote
-exchange JSON payloads and receipts. Their shape is fingerprinted as the set
-of string keys each source file builds or reads (dict literal keys, constant
-subscripts, ``.get``/``.pop``/``.setdefault`` keys) and recorded, with the
-protocol version it belongs to, in ``control_shapes.json``.
+exchange JSON payloads and receipts. Each source file's shape is fingerprinted
+as the string keys it builds or reads (dict literal keys, constant subscripts,
+``.get``/``.pop``/``.setdefault`` keys) plus the key set of every dict literal
+(``{a,b}``), so moving an existing key into another payload also counts. A
+Python program embedded as a string constant (one sent over SSH and run on the
+remote) is parsed and fingerprinted the same way. The result is recorded, with
+the protocol version it belongs to, in ``control_shapes.json``.
+
+``sandbox/remote_runtime/pins.py`` is deliberately not a source. Its program is
+sent by the controller and run by the remote ``python3`` directly; the
+installed runtime never executes or reads it, so its keys are not part of the
+controller-to-runtime protocol (FR-006). Pin records are versioned by
+``pins.SCHEMA`` instead, and ``tests/test_remote_runtime_pins.py`` fails when
+the record shape changes without a schema change.
 
 A change to those keys without a ``CONTROL_PROTOCOL_SPOKEN`` bump fails
 ``tests/test_remote_runtime_protocol_shapes.py``. After bumping, record the new
@@ -37,8 +47,12 @@ SHAPE_SOURCES = (
     "sandbox/transports/remote_workspaces.py",
     "sandbox/recovery/server_capture_helper.py",
     "sandbox/recovery/postgres_helper.py",
-    "sandbox/remote_runtime/pins.py",
 )
+
+# Bumped when the fingerprint method changes (not the payloads): a manifest
+# recorded with an older format may be re-recorded under the same protocol.
+FORMAT = 2
+_EMBEDDED_DEPTH = 2
 
 _KEY_METHODS = frozenset({"get", "pop", "setdefault"})
 
@@ -49,12 +63,31 @@ def _text(node) -> str | None:
     return None
 
 
-def payload_keys(source: str) -> list[str]:
-    """Sorted string keys a module builds or reads."""
-    keys: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+def _embedded_program(text: str):
+    """The parsed program if a string constant is Python source, else None."""
+    if "\n" not in text:
+        return None
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    if all(isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+           for node in tree.body):
+        return None  # prose or a docstring, not a program
+    return tree
+
+
+def _collect(tree, keys: set[str], depth: int) -> None:
+    for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
-            keys.update(key for key in map(_text, node.keys) if key is not None)
+            literal = [key for key in map(_text, node.keys) if key is not None]
+            keys.update(literal)
+            if literal:
+                keys.add("{" + ",".join(sorted(set(literal))) + "}")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and depth:
+            embedded = _embedded_program(node.value)
+            if embedded is not None:
+                _collect(embedded, keys, depth - 1)
         elif isinstance(node, ast.Subscript):
             key = _text(node.slice)
             if key is not None:
@@ -64,6 +97,12 @@ def payload_keys(source: str) -> list[str]:
             key = _text(node.args[0])
             if key is not None:
                 keys.add(key)
+
+
+def payload_keys(source: str) -> list[str]:
+    """Sorted keys and dict-literal key sets a module (and its embedded programs) uses."""
+    keys: set[str] = set()
+    _collect(ast.parse(source), keys, _EMBEDDED_DEPTH)
     return sorted(keys)
 
 
@@ -91,14 +130,14 @@ def write_manifest(path: Path = MANIFEST, *, spoken: int = CONTROL_PROTOCOL_SPOK
     shapes = current_shapes() if shapes is None else shapes
     if path.exists():
         recorded = read_manifest(path)
-        if (recorded.get("spoken") == spoken
+        if (recorded.get("spoken") == spoken and recorded.get("format", 1) == FORMAT
                 and shape_diff(recorded.get("shapes", {}), shapes)):
             raise ValueError(
                 f"control payload keys changed under protocol {spoken}; bump "
                 "CONTROL_PROTOCOL_SPOKEN in sandbox/remote_runtime/protocol.py first")
         if isinstance(recorded.get("spoken"), int) and spoken < recorded["spoken"]:
             raise ValueError("protocol version is older than the recorded one")
-    manifest = {"spoken": spoken, "shapes": shapes}
+    manifest = {"format": FORMAT, "spoken": spoken, "shapes": shapes}
     path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
 
@@ -120,7 +159,8 @@ def main(argv=None) -> int:
     diff = shape_diff(recorded.get("shapes", {}), current_shapes())
     print(json.dumps({"recorded_spoken": recorded.get("spoken"),
                       "spoken": CONTROL_PROTOCOL_SPOKEN, "diff": diff}, indent=1))
-    return 0 if not diff and recorded.get("spoken") == CONTROL_PROTOCOL_SPOKEN else 1
+    return 0 if (not diff and recorded.get("spoken") == CONTROL_PROTOCOL_SPOKEN
+                 and recorded.get("format", 1) == FORMAT) else 1
 
 
 if __name__ == "__main__":

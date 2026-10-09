@@ -140,6 +140,93 @@ class PinTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertIsNone(pins.parse_pin({**good, **change}))
 
+    def _other_pin(self, index, revision=REV_A):
+        moment = int(time.time())
+        return pins.Pin(pins.holder_identity("/x", f"/y{index}"), f"/y{index}", "0" * 16,
+                        revision, "p", moment, moment, moment + 600)
+
+    def test_fence_refuses_an_unacknowledged_binding_pin_and_takes_nothing(self):
+        self._gate()
+        holder = self.store.list()[0].holder
+        installer = pins.holder_identity("/installer", "/checkout")
+        with self.assertRaises(pins.PinError) as caught:
+            self.store.fence(REV_B, [], installer)
+        self.assertEqual(caught.exception.code, pins.PINS_UNACKNOWLEDGED)
+        self.assertEqual(caught.exception.blocking, [holder])
+        self.assertFalse((self.remote_home / "runtime" / "remote-pins" / ".replacing.json").exists())
+        self.store.fence(REV_B, [holder], installer)
+        self.store.unfence(installer)
+
+    def test_registration_during_a_replacement_is_refused_for_other_revisions(self):
+        """FR-015: no pin can appear between the migrate check and the install."""
+        installer = pins.holder_identity("/installer", "/checkout")
+        self.store.fence(REV_B, [], installer)
+        fence = self.remote_home / "runtime" / "remote-pins" / ".replacing.json"
+        self.assertEqual(stat.S_IMODE(fence.stat().st_mode), 0o600)
+        refused = self._gate()["compatibility"]
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["reason"], pins.PIN_UNVERIFIABLE)
+        self.assertEqual(self.store.list(), [])
+        # The target revision itself is not harmed by the replacement.
+        self.assertEqual(self._gate(self._status(REV_B, REV_B))["compatibility"]["reason"],
+                         "strict_pin_held")
+        other = pins.holder_identity("/second", "/installer")
+        with self.assertRaises(pins.PinError) as caught:
+            self.store.fence(REV_B, [], other)
+        self.assertEqual(caught.exception.code, pins.REPLACEMENT_IN_PROGRESS)
+        self.store.unfence(installer)
+        self.assertFalse(fence.exists())
+        self.assertTrue(self._gate()["compatibility"]["ok"])
+
+    def test_capacity_is_enforced_and_a_full_list_is_authoritative(self):
+        for index in range(pins.MAX_LISTED):
+            self.store.register(self._other_pin(index))
+        with self.assertRaises(pins.PinError) as caught:
+            self.store.register(self._other_pin(pins.MAX_LISTED))
+        self.assertEqual(caught.exception.code, pins.PIN_CAPACITY_REACHED)
+        self.assertEqual(len(self.store.list()), pins.MAX_LISTED)
+        # Renewing an existing holder is still allowed at capacity.
+        self.store.register(self._other_pin(0))
+
+    def test_a_list_beyond_capacity_is_refused_never_truncated(self):
+        """FR-015: a 65th pin binding another revision must not be hidden."""
+        directory = self.remote_home / "runtime" / "remote-pins"
+        for index in range(pins.MAX_LISTED):
+            self.store.register(self._other_pin(index, REV_B))
+        extra = self._other_pin(999, REV_A)
+        (directory / f"{extra.holder}.json").write_text(json.dumps(extra.stored()))
+        with self.assertRaises(pins.PinError) as caught:
+            self.store.list()
+        self.assertEqual(caught.exception.code, pins.PINS_UNAVAILABLE)
+        installer = pins.holder_identity("/installer", "/checkout")
+        with self.assertRaises(pins.PinError) as caught:
+            self.store.fence(REV_B, [], installer)
+        self.assertEqual(caught.exception.blocking, [extra.holder])
+
+    def test_recheck_releases_the_pin_when_the_runtime_changed_meanwhile(self):
+        replaced = self._status(REV_B, REV_B)
+        result = pins.strict_gate({"name": "fixture"}, self._status(), purpose="p",
+                                  store=self.store, checkout=self.checkout,
+                                  recheck=lambda: replaced)
+        self.assertFalse(result["compatibility"]["ok"])
+        self.assertEqual(result["compatibility"]["reason"], "strict_requires_exact_revision")
+        self.assertEqual(result["runtime_revision_state"], "mismatch")
+        self.assertEqual(self.store.list(), [])
+        held = pins.strict_gate({"name": "fixture"}, self._status(), purpose="p",
+                                store=self.store, checkout=self.checkout,
+                                recheck=lambda: self._status())
+        self.assertTrue(held["compatibility"]["ok"])
+
+    def test_pin_record_shape_is_fixed_for_its_schema(self):
+        """Pin records are versioned by pins.SCHEMA, not the control protocol
+        (shapes.py excludes pins.py). Change a field only with a SCHEMA bump."""
+        record = pins.Pin(pins.holder_identity("/x", "/y"), "/y", "0" * 16, REV_A, "p",
+                          100, 100, 200).stored()
+        expected = {1: {"schema", "holder", "checkout_path", "controller_home_digest",
+                        "revision", "purpose", "registered_at", "renewed_at", "expires_at",
+                        "state", "broken_by", "broken_at"}}
+        self.assertEqual(set(record), expected[pins.SCHEMA])
+
     def test_purpose_is_bounded_and_printable(self):
         purpose = pins.purpose_for("sb\nwp", "/repo/" + "x" * 300)
         self.assertLessEqual(len(purpose), pins.MAX_PURPOSE)

@@ -1204,7 +1204,11 @@ their remote programs exchange must bump the spoken version:
 `tests/test_remote_runtime_protocol_shapes.py` compares those keys with
 `sandbox/remote_runtime/control_shapes.json`, and after a bump
 `python -m sandbox.remote_runtime.shapes --write` records them (it refuses
-changed keys under an unchanged version).
+changed keys under an unchanged version). The fingerprint covers keys inside
+Python programs embedded as strings and the key set of every dict literal, so
+moving an existing key into another payload also counts. The pin program is
+not part of it: the installed runtime never runs it, and pin records are
+versioned by `pins.SCHEMA` instead.
 
 | Verdict | Meaning | Admitted |
 |---|---|---|
@@ -1230,7 +1234,13 @@ file 0600), names the holder (`h-` + 16 hex derived from this machine's
 Sandbox home and the checkout path), the checkout path, the revision, a
 purpose and an expiry (one hour, renewed by each strict call, at most four
 hours). A refused strict call registers nothing; an unreachable or
-unwritable pin store fails closed with `strict_pin_unverifiable`.
+unwritable pin store fails closed with `strict_pin_unverifiable`. After
+registering, the strict call re-reads the installed revision; if the runtime
+was replaced in the meantime it releases the pin and refuses with
+`strict_requires_exact_revision`. A remote holds at most 64 pins: registering
+a new holder past that is refused (`pin_capacity_reached`, so the strict call
+fails closed), and a pin list longer than that is reported as unavailable
+rather than cut short.
 
 ```sh
 ./sb remote pin list NAME [--json]
@@ -1246,6 +1256,19 @@ with `--break-pin HOLDER`; acknowledged pins are marked broken (by whom, when)
 only after the install completes. A strict caller whose pin was broken is
 told who broke it. If pins cannot be read, a confirmed migrate refuses with
 `remote_runtime_pins_unavailable`.
+
+The pin check and the install are one transaction. Every install path
+(`remote service migrate`, `remote up --confirm`, `remote provision`) goes
+through the shared installer, which takes a replacement fence
+(`remote-pins/.replacing.json`, 0600, ten-minute expiry) under the same lock
+that pin registration uses, after re-checking every binding pin. While the
+fence is live, registering a pin for any other revision is refused, and a
+second installer is refused with `runtime_replacement_in_progress`. The fence
+is removed when the install finishes or fails cleanly; after an indeterminate
+rollback or an install timeout it is left to expire. `remote up` and
+`remote provision` take no `--break-pin`, so they refuse over any binding pin;
+migrate is the path that acknowledges pins. Controllers older than this change
+do not check the fence when registering.
 
 Remote workspace list, status, migration planning, creation, reset, and destroy all
 run the same read-only service preflight before sending a workspace request. The

@@ -122,8 +122,11 @@ def probe_remote_state(remote: str, *, lookup: Callable, inventory: Callable,
     if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
         raise RecoveryError("remote runtime revision is unavailable", "remote_unavailable")
     revision_state = status.get("runtime_revision_state") if isinstance(status, dict) else None
-    from sandbox.remote_runtime.verdict import admitted
+    from sandbox.remote_runtime.verdict import admitted, explicitly_refused
     compatible, _ = admitted(status)
+    if explicitly_refused(status):
+        # A strict refusal leaves the revisions matching; the verdict wins.
+        raise RecoveryError("remote runtime is refused", "remote_revision_mismatch")
     if revision_state not in {"match", "unknown"} and not compatible:
         raise RecoveryError("remote runtime revision is stale", "remote_revision_mismatch")
     hostname, code = _completed_ok(hostname_result)

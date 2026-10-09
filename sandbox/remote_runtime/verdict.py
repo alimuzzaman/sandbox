@@ -105,3 +105,20 @@ def admitted(status) -> tuple[bool, str]:
     if revision_state == "mismatch":
         return False, EXACT_ONLY
     return False, UNKNOWN
+
+
+def explicitly_refused(status) -> bool:
+    """True when the envelope carries a verdict that refuses the effect.
+
+    Callers that also accept ``runtime_revision_state == "match"`` must check
+    this first: a strict refusal (``strict_pin_unverifiable``, a broken pin)
+    leaves the revisions matching, and only the verdict says no. An
+    indeterminate (``unknown``) non-strict verdict is not an explicit refusal;
+    those callers keep their own handling of unknown state.
+    """
+    if not isinstance(status, dict):
+        return False
+    verdict = status.get("compatibility")
+    if not isinstance(verdict, dict) or verdict.get("ok") is not False:
+        return False
+    return verdict.get("strict") is True or verdict.get("state") != UNKNOWN

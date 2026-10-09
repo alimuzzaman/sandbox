@@ -2399,6 +2399,14 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
 
 
 class TestStartRemoteMcpServer(unittest.TestCase):
+    def setUp(self):
+        # The pin fence is covered in TestRuntimeReplacementFence; these tests
+        # assert on the single install command.
+        from sandbox.remote_runtime.pins import PinStore
+        self.fence = patch.object(PinStore, "fence").start()
+        self.unfence = patch.object(PinStore, "unfence").start()
+        self.addCleanup(patch.stopall)
+
     @patch("sandbox.core._remote.ssh_run")
     def test_bound_runtime_record_is_rendered_once_and_returned_unchanged(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
@@ -2614,6 +2622,65 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                 source_revision="f" * 40,
                 staged_source=_staged_source(),
             )
+
+
+class TestRuntimeReplacementFence(unittest.TestCase):
+    """Spec 061 FR-015: every install path holds the pin fence (Sol merge gate)."""
+
+    def setUp(self):
+        from sandbox.remote_runtime.pins import PinStore
+        self.fence = patch.object(PinStore, "fence").start()
+        self.unfence = patch.object(PinStore, "unfence").start()
+        self.addCleanup(patch.stopall)
+
+    def _install(self, mock_ssh_run, **kwargs):
+        return sr.migrate_remote_mcp_service(
+            {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64, confirm=True,
+            source_revision="f" * 40, staged_source=_staged_source(), **kwargs)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_unacknowledged_pin_refuses_before_any_install(self, mock_ssh_run):
+        from sandbox.remote_runtime.pins import PINS_UNACKNOWLEDGED, PinError
+        self.fence.side_effect = PinError(PINS_UNACKNOWLEDGED, "pass --break-pin HOLDER")
+        for install in (self._install,
+                        lambda run: sr.start_remote_mcp_server(
+                            {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64,
+                            source_revision="f" * 40, staged_source=_staged_source())):
+            with self.subTest(install=install), \
+                    self.assertRaisesRegex(RuntimeError, PINS_UNACKNOWLEDGED):
+                install(mock_ssh_run)
+        mock_ssh_run.assert_not_called()
+        self.unfence.assert_not_called()
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_fence_targets_the_staged_revision_and_carries_acknowledgments(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        staged = _staged_source()
+        with patch.object(sr, "_remote_mcp_runtime_revision",
+                          return_value=staged["runtime_revision"]):
+            sr.migrate_remote_mcp_service(
+                {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64, confirm=True,
+                source_revision="f" * 40, staged_source=staged,
+                acknowledged_pins=["h-" + "1" * 16])
+        target, acknowledged, _by = self.fence.call_args.args
+        self.assertEqual(target, staged["runtime_revision"])
+        self.assertEqual(acknowledged, ("h-" + "1" * 16,))
+        self.unfence.assert_called_once()
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_fence_is_released_after_a_clean_failure_and_kept_when_indeterminate(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=1)
+        with self.assertRaises(RuntimeError):
+            self._install(mock_ssh_run)
+        self.unfence.assert_called_once()
+        self.unfence.reset_mock()
+        mock_ssh_run.return_value = _completed(returncode=44)
+        with self.assertRaisesRegex(RuntimeError, "rollback_indeterminate"):
+            self._install(mock_ssh_run)
+        mock_ssh_run.side_effect = subprocess.TimeoutExpired("ssh", 300)
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            self._install(mock_ssh_run)
+        self.unfence.assert_not_called()
 
 
 class TestRemoteDoctorChecks(unittest.TestCase):
@@ -3022,7 +3089,7 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
             sr.remote_mcp_service_status(remote)
             command = mock_ssh_run.call_args.args[1]
             parser = shlex.split(command)[shlex.split(command).index("-c") + 1]
-            probe = subprocess.run(
+            probe = run_test_process(
                 [sys.executable, "-c", parser, str(unit)],
                 capture_output=True, text=True, check=True,
             )
@@ -3041,7 +3108,7 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
                 f"Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={local_revision}\n"
                 f"{sr._control_protocol_unit_line()}\n"
             )
-            declared = subprocess.run(
+            declared = run_test_process(
                 [sys.executable, "-c", parser, str(unit)],
                 capture_output=True, text=True, check=True,
             )

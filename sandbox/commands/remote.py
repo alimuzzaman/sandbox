@@ -636,6 +636,7 @@ def _cmd_service(args, as_json: bool) -> None:
                 legacy_pidfile=observed.get("legacy_pidfile") == "present",
                 source_revision=source_revision,
                 staged_source=staged_source if confirmed else None,
+                acknowledged_pins=acknowledged_pins,
             )
             plan["observed"] = observed
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"

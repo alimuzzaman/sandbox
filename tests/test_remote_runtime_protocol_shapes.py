@@ -39,7 +39,7 @@ class ShapeGuardTests(unittest.TestCase):
     def test_keys_cover_literals_subscripts_and_lookups(self):
         source = ("p = {'a': 1, **x}\nq = r['b']\ns = r.get('c')\nt = r.pop('d', 0)\n"
                   "u = r.setdefault('e', [])\nv = r[0]\nw = f('ignored')\n")
-        self.assertEqual(shapes.payload_keys(source), [":p={a}", ":r[e]=", "a", "b", "c", "d", "e"])
+        self.assertEqual(shapes.payload_keys(source), [":p={a}", ":r[e]=", ":read[b]", ":read[c]", ":read[d]", "a", "b", "c", "d", "e"])
 
     def test_keys_inside_an_embedded_program_count(self):
         """A program sent over SSH as a string is part of the payload contract."""
@@ -132,6 +132,32 @@ class ShapeGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "bump CONTROL_PROTOCOL_SPOKEN"):
                 shapes.write_manifest(manifest, spoken=3,
                                       shapes={"m.py": shapes.payload_keys(after)})
+
+    def test_response_read_path_move_requires_protocol_bump(self):
+        """Sol R6: a read moved from a nested to a root response path counts."""
+        before = ("def publish(evidence):\n    gen = evidence['index']['generation']\n"
+                  "    owner = evidence.get('owner')\n    return {'generation': gen}\n")
+        nested_to_root = before.replace("evidence['index']['generation']",
+                                        "evidence['generation']")
+        self.assertEqual(self._diff(before, nested_to_root), {"m.py": {
+            "added": ["publish:read[generation]"],
+            "removed": ["index", "publish:read[index][generation]"]}})
+        get_moved = before.replace("evidence.get('owner')", "evidence['index'].get('owner')")
+        self.assertEqual(self._diff(before, get_moved), {"m.py": {
+            "added": ["publish:read[index][owner]"], "removed": ["publish:read[owner]"]}})
+        renamed = before.replace("evidence", "payload")
+        self.assertEqual(self._diff(before, renamed), {})
+        repeated = before + "    again = evidence['index']['generation']\n"
+        self.assertEqual(self._diff(before, repeated), {})
+
+    def test_sync_generation_read_mutation_is_detected(self):
+        """The concrete remote_sync.py mutation from Sol round 6."""
+        path = ROOT / "sandbox/transports/remote_sync.py"
+        source = path.read_text(encoding="utf-8")
+        self.assertIn('evidence["index"]["generation"]', source)
+        mutated = source.replace('evidence["index"]["generation"]', 'evidence["generation"]', 1)
+        self.assertTrue(shapes.shape_diff({"s.py": shapes.payload_keys(source)},
+                                          {"s.py": shapes.payload_keys(mutated)}))
 
     def test_writer_refuses_changed_keys_under_the_same_version(self):
         with tempfile.TemporaryDirectory() as tmp:

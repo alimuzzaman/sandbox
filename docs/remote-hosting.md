@@ -1256,7 +1256,13 @@ exchanging keys, or dropping a field from one of several identical payloads
 also counts. A field written into a payload after it is built
 (`request["k"] = v` or `request.setdefault("k", v)`) gets its own counted
 `scope:payload[k]=` signature, so moving that write to another payload counts
-too; reads are matched by the key set only. The pin program is
+too. Every read chain (`evidence["index"]["generation"]`, `.get`, `.pop`)
+records its key path without the root variable (`scope:read[index][generation]`),
+so moving a read between a nested and a root response path counts while a local
+rename does not. The guard covers the controller side (the transports and the
+programs they ship); runtime-side response producers are part of the installed
+runtime, so a producer change that alters a response shape still needs a
+deliberate protocol bump by its author. The pin program is
 not part of it: the installed runtime never runs it, and pin records are
 versioned by `pins.SCHEMA` instead.
 

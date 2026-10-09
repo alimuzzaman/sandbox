@@ -56,7 +56,7 @@ SHAPE_SOURCES = (
 
 # Bumped when the fingerprint method changes (not the payloads): a manifest
 # recorded with an older format may be re-recorded under the same protocol.
-FORMAT = 5
+FORMAT = 6
 _EMBEDDED_DEPTH = 2
 
 _KEY_METHODS = frozenset({"get", "pop", "setdefault"})
@@ -160,23 +160,62 @@ def _namer(tree, parents):
 
 
 def _store(target, key: str, parents) -> str:
-    """``scope:payload[key]=`` for a field written into a payload after it is built.
+    """``scope:payload[key]=`` for a field written into a payload after it is built."""
+    return _scope(target, parents) + f":{_target(target)}[{key}]="
 
-    Reads are matched by the key set only: naming them by their local
-    variable would force a protocol bump for a rename.
-    """
-    scope, current = [], target
+
+def _scope(node, parents) -> str:
+    scope, current = [], node
     while current in parents:
         current = parents[current]
         if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             scope.append(current.name)
-    return ".".join(reversed(scope)) + f":{_target(target)}[{key}]="
+    return ".".join(reversed(scope))
 
 
-def _collect(tree, keys: set[str], signatures: list[str], depth: int, prefix: str = "") -> None:
+def _read_link(node):
+    """``(inner, key)`` when ``node`` reads one string key from ``inner``."""
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+        key = _text(node.slice)
+        return (node.value, key) if key is not None else None
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("get", "pop") and node.args):
+        key = _text(node.args[0])
+        return (node.func.value, key) if key is not None else None
+    return None
+
+
+def _read_path(node, parents, prefix: str) -> str | None:
+    """``scope:read[k1][k2]`` for a maximal read chain, else None.
+
+    The root variable is left out, so a local rename keeps the fingerprint
+    while moving a read between nested and root response paths changes it.
+    """
+    if _read_link(node) is None:
+        return None
+    parent = parents.get(node)
+    if isinstance(parent, ast.Subscript) and parent.value is node and _read_link(parent):
+        return None
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        call = parents.get(parent)
+        if isinstance(call, ast.Call) and call.func is parent and _read_link(call):
+            return None
+    path, current = [], node
+    while (link := _read_link(current)) is not None:
+        current, key = link
+        path.append(key)
+    return prefix + _scope(node, parents) + ":read" + "".join(f"[{k}]" for k in reversed(path))
+
+
+def _collect(tree, keys: set[str], signatures: list[str], depth: int, prefix: str = "",
+             reads: set[str] | None = None) -> None:
+    reads = set() if reads is None else reads
     parents = _parents(tree)
     names = _namer(tree, parents)
     for node in ast.walk(tree):
+        read = _read_path(node, parents, prefix)
+        if read is not None:
+            reads.add(read)
         if isinstance(node, ast.Dict):
             literal = [key for key in map(_text, node.keys) if key is not None]
             keys.update(literal)
@@ -187,7 +226,7 @@ def _collect(tree, keys: set[str], signatures: list[str], depth: int, prefix: st
             embedded = _embedded_program(node.value)
             if embedded is not None:
                 _collect(embedded, keys, signatures, depth - 1,
-                         prefix + "<" + names[node] + ">")
+                         prefix + "<" + names[node] + ">", reads)
         elif isinstance(node, ast.Subscript):
             key = _text(node.slice)
             if key is not None:
@@ -207,9 +246,10 @@ def payload_keys(source: str) -> list[str]:
     """Sorted keys and counted payload signatures of a module and its embedded programs."""
     keys: set[str] = set()
     signatures: list[str] = []
-    _collect(ast.parse(source), keys, signatures, _EMBEDDED_DEPTH)
+    reads: set[str] = set()
+    _collect(ast.parse(source), keys, signatures, _EMBEDDED_DEPTH, "", reads)
     counted = Counter(signatures)
-    return sorted(keys | {sig if n == 1 else f"{sig}*{n}" for sig, n in counted.items()})
+    return sorted(keys | reads | {sig if n == 1 else f"{sig}*{n}" for sig, n in counted.items()})
 
 
 def current_shapes(root: Path = ROOT, sources=SHAPE_SOURCES) -> dict[str, list[str]]:

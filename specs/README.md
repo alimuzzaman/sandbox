@@ -78,7 +78,9 @@ gates tracked in `TODO.md` instead. `PRD ready` / `PRD not ready` are pre-spec
 features (`prd.md` only). Two directories share number 042. Features 060–064
 are ranked and sequenced in
 [`docs/roadmap/2026-10-08-next-features.md`](../docs/roadmap/2026-10-08-next-features.md);
-each needs an independent readiness review before `speckit-specify`.
+all five passed readiness review on 2026-10-09 and are ready for
+`speckit-specify`; the final checks of 060, 062 and 064 were root reviews,
+not independent ones (recorded in each PRD's Final Validation).
 
 ## Background: the Novamira comparison (2026-06-22)
 

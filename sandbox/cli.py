@@ -841,9 +841,13 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Runtime pins (strict mode, spec 061):\n"
             "  ./sb remote pin list NAME [--json]\n"
             "  ./sb remote pin release NAME [--holder HOLDER] [--break-pin HOLDER] [--json]\n"
-            "  ./sb remote service migrate NAME --confirm --break-pin HOLDER ..."
+            "  ./sb remote service migrate NAME --confirm --break-pin HOLDER ...\n"
+            "\n"
+            "Development ranges (spec 063):\n"
+            "  ./sb remote network-range propose|list NAME [--json]\n"
+            "  ./sb remote network-range assign NAME --cidr CIDR [--subnet-prefix N] [--confirm] [--json]"
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
@@ -871,6 +875,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--remove-route", dest="remove_route", default=None,
         help="for `remote edge`: remove one Sandbox nginx route (e.g. host-myproj-production) "
              "and its certificates; requires --confirm")
+    remote_p.add_argument("--cidr", default=None,
+        help="for `remote network-range assign`: the IPv4 development range to record")
+    remote_p.add_argument("--subnet-prefix", dest="subnet_prefix", type=int, default=None,
+        help="for `remote network-range assign`: per-network subnet prefix (default 26)")
     remote_p.add_argument("--ipv4", default=None, help="public IPv4 address for hosted DNS records")
     remote_p.add_argument("--ipv6", default=None, help="public IPv6 address for hosted DNS records")
     remote_p.add_argument("--yes", action="store_true",

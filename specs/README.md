@@ -67,7 +67,7 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 060 | Per-Target Hosting Operations | Planned; tasks ready (0 of 32 done) | Roadmap 2026-10-08 #1 | Feedback adccd6b7, 83dd053a, f72c4279 |
 | 061 | Remote Runtime Revision Coexistence | Implemented (T001-T024); live proof T026 open | Roadmap 2026-10-08 #2 | Feedback e41bef3b, be5a6353, f475f422 |
 | 062 | Hosted Delivery Evidence Reconciliation | Planned; tasks ready (0 of 23 done; implementation waits on 054 T040-T047 and 060 conversion) | Roadmap 2026-10-08 #3; amends 054 identity scope | Feedback 48c3e007, bae5cd4e, e4333c7b, f3329d32 |
-| 063 | Remote Development Execution Readiness | In progress (5 of 31 done) | Roadmap 2026-10-08 #5 | Feedback cef740dd, cebec97a, 5598f2d0 |
+| 063 | Remote Development Execution Readiness | In progress (9 of 31 done) | Roadmap 2026-10-08 #5 | Feedback cef740dd, cebec97a, 5598f2d0 |
 | 064 | Transactional Edge and DNS Changes | Planned; tasks ready (0 of 31 done) | Roadmap 2026-10-08 #4 | Feedback 6bd6bd1d, 50735fc8, 83cca354, 34af9b95, 075c6caf |
 
 Statuses are counted from each feature's `tasks.md` (reconciled 2026-10-08). `Ledger closed`

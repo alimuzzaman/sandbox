@@ -16,12 +16,12 @@
 
 ## Phase 3: US1 Development capacity without a daemon restart (P1)
 
-- [ ] T007 [P] [US1] CLI parser and handler tests for `remote network-range propose|assign|list` (planned without `--confirm`, typed refusals, no subnets outside `list`) and for `remote provision` printing a proposed range and assign command when none is assigned, never assigning (FR-003), in `tests/test_remote_network_ranges.py`
-- [ ] T008 [US1] Add `network-range` action, `--cidr`, `--subnet-prefix` in `sandbox/cli.py` and `_cmd_network_range` in `sandbox/commands/remote.py`; record the display echo in the remote block; add the proposal to the provision result
+- [x] T007 [P] [US1] CLI parser and handler tests for `remote network-range propose|assign|list` (planned without `--confirm`, typed refusals, no subnets outside `list`) and for `remote provision` printing a proposed range and assign command when none is assigned, never assigning (FR-003), in `tests/test_remote_network_ranges.py`
+- [x] T008 [US1] Add `network-range` action, `--cidr`, `--subnet-prefix` in `sandbox/cli.py` and `_cmd_network_range` in `sandbox/commands/remote.py`; record the display echo in the remote block; add the proposal to the provision result
 - [ ] T009 [P] [US1] Tests for the Compose override: one ipam subnet per created network, owner kind per the data-model mapping (workspace stack, job, preview, CI cell), externals skipped and reported `outside_range`, refusal before transfer when capacity < N, a network-create collision with an unobserved network → typed refusal with no retry in `tests/test_remote_network_override.py`
 - [ ] T010 [US1] Implement `sandbox/remote_network/override.py` and wire it into the remote compose invocation for workspaces, jobs, previews and CI cells (built-in template via `sandbox/core/_docker.py`, generic Compose instances via the effective config)
-- [ ] T011 [P] [US1] Tests: evaluator counts pool plus range capacity, never default pools; `missing_pool_evidence` wording names the range remedy; exhaustion returns the allocation table (≤32 rows, no subnets) and release commands in `tests/test_resource_network_capacity.py`
-- [ ] T012 [US1] Extend `sandbox/resources/network_capacity.py` for range evidence and the new wording
+- [x] T011 [P] [US1] Tests: evaluator counts pool plus range capacity, never default pools; `missing_pool_evidence` wording names the range remedy; exhaustion returns the allocation table (≤32 rows, no subnets) and release commands in `tests/test_resource_network_capacity.py`
+- [x] T012 [US1] Extend `sandbox/resources/network_capacity.py` for range evidence and the new wording
 - [ ] T013 [US1] Admission allocates in the same remote program call as the pool probe in `sandbox/core/_remote.py` (`remote_network_capacity_admission`), passing owner kind, owner id and workspace; propagate granted ids to the run
 - [ ] T013a [US1] Bump `CONTROL_PROTOCOL_SPOKEN` (next free number; coordinate with 060 T009, oldest served stays 1) in `sandbox/remote_runtime/protocol.py` and re-record `sandbox/remote_runtime/control_shapes.json` with `python -m sandbox.remote_runtime.shapes --write`
 - [ ] T014 [P] [US1] Tests: workspace release, reap and retention expiry free allocations; a killed job's allocation stays attributed in `tests/test_workspace_runtime.py`

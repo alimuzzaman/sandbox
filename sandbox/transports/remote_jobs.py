@@ -75,6 +75,7 @@ _SAFE_ADMISSION_REASONS = frozenset({
     "invalid_ownership_evidence",
     "invalid_pool_capacity",
     "invalid_pool_evidence",
+    "invalid_range_evidence",
     "missing_pool_evidence",
     "network_allocation_conflict",
     "network_ipam_unavailable",
@@ -84,6 +85,7 @@ _SAFE_ADMISSION_REASONS = frozenset({
     "probe_not_successful",
     "probe_output_ambiguous",
     "probe_output_unavailable",
+    "range_exhausted",
 })
 _SAFE_ADMISSION_ID = re.compile(r"^pool-[0-9a-f]{16,64}$")
 _MAX_ADMISSION_INTEGER = 10**18

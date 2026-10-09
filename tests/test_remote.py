@@ -2291,11 +2291,15 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                     start.return_value = {"service": sr.remote_mcp_service_record(
                         "100.64.1.2", 9174)}
                     remote_cmd._cmd_provision(args, as_json=True)
-                provision_ssh_cmd = mock_run.call_args_list[-1][0][0][-1]
+                # The bootstrap is the last command carrying the runtime
+                # revision; the read-only range proposal (spec 063) follows it.
+                provision_ssh_cmd = [c[0][0][-1] for c in mock_run.call_args_list
+                                     if "SANDBOX_RUNTIME_REVISION=" in str(c[0][0][-1])][-1]
                 self.assertIn("SANDBOX_CONTROL_TRANSPORT=tailscale", provision_ssh_cmd)
                 self.assertIn("SANDBOX_DEFER_RUNTIME_ACTIVATION=1", provision_ssh_cmd)
                 self.assertIn("SANDBOX_RUNTIME_REVISION=" + "a" * 40, provision_ssh_cmd)
                 result = json.loads(mock_print.call_args[0][0])
+                self.assertIn(result["network_range"]["state"], {"proposed", "assigned", "unknown"})
                 self.assertEqual(result["control_transport"], "tailscale")
                 self.assertEqual(result["control_url"], "http://100.64.1.2:9174")
 

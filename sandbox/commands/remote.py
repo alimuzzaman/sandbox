@@ -260,6 +260,7 @@ def cmd_remote(cfg, args) -> None:
         "ssh": _cmd_ssh,
         "edge": _cmd_edge,
         "pin": _cmd_pin,
+        "network-range": _cmd_network_range,
     }
     try:
         dispatch[action](args, as_json)
@@ -548,6 +549,102 @@ def _cmd_pin(args, as_json: bool) -> None:
                   f"expires {pin['expires_at']} {pin['checkout_path']}")
     else:
         print(f"remote {name}: pin {payload['data']['holder']} {payload['status']}")
+
+
+def _installed_protocol(entry: dict):
+    from sandbox.remote_runtime.protocol import ControlProtocol
+    installed = ((sr.remote_mcp_service_status(entry) or {}).get("control_protocol") or {}).get("installed")
+    try:
+        return ControlProtocol(installed["spoken"], installed["oldest_served"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _record_network_ranges(name: str, listed: dict) -> None:
+    """Echo assigned ranges into the local remote block for display only."""
+    sr.put_remote(name, network_ranges=[
+        {"range_id": r["range_id"], "cidr": r["cidr"], "subnet_prefix": r["subnet_prefix"]}
+        for r in listed.get("ranges") or []])
+
+
+def _network_range_hint(entry: dict) -> dict:
+    """Best-effort FR-003 proposal for provision: never assigns, never fails."""
+    from sandbox.remote_network import store as range_store
+    from sandbox.remote_network.ranges import RangeError
+    try:
+        store = range_store.RangeStore(entry)
+        assigned = store.list()["ranges"]
+        if assigned:
+            return {"state": "assigned", "ranges": len(assigned)}
+        return {"state": "proposed", **store.propose()}
+    except RangeError as exc:
+        return {"state": "unknown", "reason": exc.code}
+
+
+def _cmd_network_range(args, as_json: bool) -> None:
+    """`sb remote network-range <propose|assign|list> <name>` (spec 063 US1)."""
+    from sandbox.remote_network import store as range_store
+    from sandbox.remote_network.ranges import DEFAULT_SUBNET_PREFIX, RangeError
+    operation = getattr(args, "name", None)
+    name = getattr(args, "ssh_url", None)
+    if operation not in {"propose", "assign", "list"} or not name:
+        die("usage: ./sb remote network-range <propose|assign|list> <name> "
+            "[--cidr CIDR] [--subnet-prefix N] [--confirm] [--json]")
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    confirmed = _arg_true(args, "confirm")
+    try:
+        if operation == "propose":
+            store = range_store.RangeStore(entry)
+            payload = {"ok": True, "name": name, "status": "proposed",
+                       "data": store.propose(), "error": None}
+        elif operation == "assign":
+            cidr = getattr(args, "cidr", None)
+            if not cidr:
+                raise RangeError("range_invalid", "assign needs --cidr")
+            prefix = getattr(args, "subnet_prefix", None)
+            prefix = DEFAULT_SUBNET_PREFIX if prefix is None else prefix
+            store = range_store.RangeStore(
+                entry, installed_protocol=_installed_protocol(entry) if confirmed else None)
+            result = store.assign(cidr, prefix, confirm=confirmed)
+            payload = {"ok": True, "name": name, "status": result["status"],
+                       "data": result, "error": None}
+            if confirmed:
+                _record_network_ranges(name, store.list())
+        else:
+            store = range_store.RangeStore(entry)
+            listed = store.list()
+            _record_network_ranges(name, listed)
+            payload = {"ok": True, "name": name, "status": "observed", "data": listed, "error": None}
+    except RangeError as exc:
+        payload = {"ok": False, "name": name,
+                   "status": "unknown" if exc.code == "range_inventory_unknown" else "refused",
+                   "data": {}, "error": {"code": exc.code, "message": str(exc), "data": exc.data}}
+    if as_json:
+        print(json.dumps(payload))
+        if not payload["ok"]:
+            raise SystemExit(1)
+        return
+    if not payload["ok"]:
+        error = payload["error"]
+        remedy = error["data"].get("remedy")
+        die(f"{error['code']}: {error['message']}" + (f"; run `{remedy}`" if remedy else ""))
+    data = payload["data"]
+    if operation == "propose":
+        print(f"remote {name}: proposed {data['proposed']} (/{data['subnet_prefix']} subnets, "
+              f"capacity {data['capacity']})")
+        print(f"  assign with: {data['assign_command']}")
+    elif operation == "assign":
+        print(f"remote {name}: range {data['range_id']} {payload['status']} (capacity {data['capacity']})")
+        if payload["status"] == "planned":
+            print(f"  re-run with --confirm: {data['confirm_command']}")
+    else:
+        if not data["ranges"]:
+            print(f"remote {name}: no development ranges")
+        for row in data["ranges"]:
+            print(f"{row['range_id']} {row['cidr']} /{row['subnet_prefix']} capacity {row['capacity']}")
+        print(f"allocations: {len(data['allocations'])}" + (" (truncated)" if data["truncated"] else ""))
 
 
 def _cmd_service(args, as_json: bool) -> None:
@@ -1432,13 +1529,16 @@ def _cmd_provision(args, as_json: bool) -> None:
     result = {"ok": True, "name": name, "provisioned": True,
              "control_transport": control_transport, "control_url": control_url,
              "tailscale_host": tailscale_ip, "mcp_port": port,
-             "provision_log": _provision_log_summary(journal), "error": None}
+             "provision_log": _provision_log_summary(journal),
+             "network_range": _network_range_hint(sr.get_remote(name) or entry), "error": None}
     if as_json:
         print(json.dumps(result))
     else:
         ok(f"'{name}' provisioned and its MCP server is reachable at {control_url}")
         print("  credential retained in the owner-only Sandbox secret store; "
               "see docs/remote-hosting.md for client configuration")
+        if result["network_range"].get("state") == "proposed":
+            print(f"  development range proposal: {result['network_range']['assign_command']}")
 
 
 def _cmd_up(args, as_json: bool) -> None:

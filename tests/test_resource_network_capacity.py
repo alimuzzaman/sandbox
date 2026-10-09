@@ -456,3 +456,121 @@ else:
             record = _remote.get_remote("vps")
         self.assertEqual(record["_remote_name"], "vps")
         self.assertNotIn("_remote_name", json.dumps({"ssh": "host"}))
+
+
+def range_evidence(*, capacity=4, allocated=0, granted=(), exhausted=False, table=()):
+    """The admission program's ``range`` result (spec 063 contract)."""
+    return {
+        "granted": [{"allocation_id": g, "network": "default", "subnet": "10.200.0.0/26"}
+                    for g in granted],
+        "exhausted": exhausted, "no_range": capacity == 0,
+        "range": {"capacity": capacity, "allocated": allocated, "usable": capacity - allocated},
+        "table": list(table),
+    }
+
+
+NO_POOLS = {"ok": False, "status": "unavailable", "code": "docker_address_pools_unavailable",
+            "reason": "daemon address-pool configuration is unavailable"}
+GRANT = "a-" + "1" * 16
+
+
+class RangeCapacityTests(unittest.TestCase):
+    """Spec 063 FR-007..FR-009: pool and range capacity are evaluated together."""
+
+    def test_range_alone_admits_when_no_daemon_pool_is_configured(self):
+        result = evaluate_network_capacity(
+            NO_POOLS, required_subnets=1, remote_name="vps",
+            range_evidence=range_evidence(capacity=4, allocated=1, granted=[GRANT]))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["capacity"]["range_usable_subnets"], 3)
+        self.assertEqual(result["capacity"]["usable_subnets"], 3)
+        self.assertEqual(result["granted"], [GRANT])
+        self.assertNotIn("10.200", json.dumps(result))
+
+    def test_pool_and_range_capacity_are_summed(self):
+        result = evaluate_network_capacity(
+            evidence(total=4, allocated=2), required_subnets=1,
+            range_evidence=range_evidence(capacity=4, allocated=1, granted=[GRANT]))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["capacity"]["usable_subnets"], 2 + 3)
+        self.assertEqual(result["capacity"]["range_usable_subnets"], 3)
+
+    def test_no_pool_and_no_range_is_missing_evidence_naming_the_range_remedy(self):
+        for candidate in (NO_POOLS, {"status": "complete", "pools": [], "totals": {
+                "total_subnets": 0, "allocated_subnets": 0, "usable_subnets": 0}}):
+            for ranged in (None, range_evidence(capacity=0)):
+                with self.subTest(candidate=candidate.get("status"), ranged=ranged is not None):
+                    result = evaluate_network_capacity(candidate, remote_name="vps",
+                                                       range_evidence=ranged)
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["code"], "docker_network_capacity_unavailable")
+                    self.assertEqual(result["evidence"]["reason"], "missing_pool_evidence")
+                    self.assertEqual(result["recovery"]["next_command"],
+                                     "./sb remote network-range propose vps")
+                    self.assertIn("missing evidence, not exhausted capacity",
+                                  result["recovery"]["guidance"])
+                    self.assertIsNone(result["capacity"]["usable_subnets"])
+
+    def test_other_probe_failures_stay_fail_closed_despite_a_range(self):
+        ranged = range_evidence(capacity=4, granted=[GRANT])
+        for candidate, reason in (
+            ({"ok": False, "status": "unavailable", "code": "docker_network_inventory_unavailable"},
+             "probe_not_successful"),
+            ({"ok": True, "status": "partial", "reason": "network_ipam_unavailable"},
+             "network_ipam_unavailable"),
+        ):
+            with self.subTest(reason=reason):
+                result = evaluate_network_capacity(candidate, range_evidence=ranged)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["evidence"]["reason"], reason)
+
+    def test_default_pools_never_count(self):
+        # Without daemon pools Docker would fall back to its built-in pools;
+        # the evaluator has no input for them, so only the range counts.
+        result = evaluate_network_capacity(
+            NO_POOLS, required_subnets=2,
+            range_evidence=range_evidence(capacity=1, exhausted=True))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "docker_network_subnet_exhausted")
+        self.assertEqual(result["capacity"]["usable_subnets"], 1)
+
+    def test_range_exhaustion_returns_bounded_table_and_release_commands(self):
+        table = [{"allocation_id": f"a-{i:016x}", "owner_id": f"w{i}", "owner_kind": "workspace",
+                  "workspace_id": f"w{i}", "age_seconds": 60 * i} for i in range(40)]
+        table.append({"owner_id": "x; rm -rf /", "owner_kind": "job",
+                      "workspace_id": "$(id)", "age_seconds": 1})
+        result = evaluate_network_capacity(
+            evidence(total=1, allocated=1, sandbox=1, foreign=0), required_subnets=1,
+            remote_name="vps",
+            range_evidence=range_evidence(capacity=2, allocated=2, exhausted=True, table=table))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "docker_network_subnet_exhausted")
+        rows = result["allocation_table"]
+        self.assertLessEqual(len(rows), 32)
+        self.assertEqual(set(rows[0]), {"owner_id", "owner_kind", "workspace_id", "age_seconds"})
+        self.assertEqual(result["release_commands"][0], "./sb workspace release w0 --remote vps")
+        self.assertLessEqual(len(result["release_commands"]), 32)
+        rendered = json.dumps(result)
+        self.assertNotIn("10.200", rendered)
+        self.assertNotIn("rm -rf", rendered)
+        self.assertNotIn("$(id)", rendered)
+        self.assertFalse(result["recovery"]["automatic_cleanup"])
+
+    def test_granted_ids_are_validated_and_partial_grants_refuse(self):
+        bad = range_evidence(capacity=4, granted=["../etc"])
+        result = evaluate_network_capacity(NO_POOLS, range_evidence=bad)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["evidence"]["reason"], "invalid_range_evidence")
+        for broken in ({"range": {"capacity": -1, "allocated": 0, "usable": -1}},
+                       {"range": {"capacity": 2, "allocated": 3, "usable": 0}}, "nope"):
+            with self.subTest(broken=broken):
+                result = evaluate_network_capacity(evidence(), range_evidence=broken)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["evidence"]["reason"], "invalid_range_evidence")
+
+    def test_without_range_evidence_behaviour_is_unchanged(self):
+        self.assertEqual(evaluate_network_capacity(evidence(), remote_name="vps"),
+                         evaluate_network_capacity(evidence(), remote_name="vps",
+                                                   range_evidence=None))
+        self.assertNotIn("range_usable_subnets",
+                         evaluate_network_capacity(evidence())["capacity"])

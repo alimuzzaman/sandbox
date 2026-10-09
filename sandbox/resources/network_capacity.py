@@ -22,6 +22,15 @@ _OPAQUE_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}-[0-9a-f]{16,64}$")
 _OWNER_CLASSES = frozenset({"sandbox", "foreign", "unattributed"})
 _CAPACITY_STATES = frozenset({"complete", "partial", "unavailable"})
 _SAFE_REASON = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
+# Spec 063: development-range evidence from the admission program.
+_ALLOCATION_ID = re.compile(r"^a-[0-9a-f]{16}$")
+_OWNER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_OWNER_KINDS = frozenset({"workspace", "job"})
+MAX_ALLOCATION_TABLE = 32
+MISSING_POOL_GUIDANCE = (
+    "no Docker address-pool evidence and no Sandbox development range "
+    "(missing evidence, not exhausted capacity); assign a range: "
+)
 
 
 def _non_negative_int(value: Any) -> bool:
@@ -47,6 +56,67 @@ def _capacity_plan_command(remote_name: str | None) -> str:
     return CAPACITY_PLAN_COMMAND
 
 
+def _safe_remote(remote_name: str | None) -> str | None:
+    if isinstance(remote_name, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", remote_name):
+        return remote_name
+    return None
+
+
+def _range_propose_command(remote_name: str | None) -> str:
+    return f"./sb remote network-range propose {_safe_remote(remote_name) or 'REMOTE_NAME'}"
+
+
+def _normalize_range(range_evidence: Any) -> dict | None:
+    """Validate the program's ``range`` result; None when it is malformed.
+
+    Grants are all-or-nothing, so a grant list is either empty or complete.
+    Subnets in the grants are dropped here and never reach the envelope.
+    """
+    if not isinstance(range_evidence, dict):
+        return None
+    stats = range_evidence.get("range")
+    if not isinstance(stats, dict):
+        return None
+    capacity, allocated, usable = (stats.get(k) for k in ("capacity", "allocated", "usable"))
+    if not all(_non_negative_int(v) for v in (capacity, allocated, usable)) \
+            or allocated > capacity or usable != capacity - allocated:
+        return None
+    granted = range_evidence.get("granted", [])
+    if not isinstance(granted, list):
+        return None
+    ids = []
+    for item in granted:
+        value = item.get("allocation_id") if isinstance(item, dict) else None
+        if not isinstance(value, str) or not _ALLOCATION_ID.fullmatch(value):
+            return None
+        ids.append(value)
+    rows = []
+    table = range_evidence.get("table", [])
+    for row in table if isinstance(table, list) else []:
+        if not isinstance(row, dict):
+            continue
+        owner, workspace, kind, age = (row.get(k) for k in (
+            "owner_id", "workspace_id", "owner_kind", "age_seconds"))
+        if (isinstance(owner, str) and _OWNER_ID.fullmatch(owner)
+                and isinstance(workspace, str) and _OWNER_ID.fullmatch(workspace)
+                and kind in _OWNER_KINDS and _non_negative_int(age)):
+            rows.append({"owner_id": owner, "owner_kind": kind,
+                         "workspace_id": workspace, "age_seconds": age})
+        if len(rows) == MAX_ALLOCATION_TABLE:
+            break
+    return {"capacity": capacity, "allocated": allocated, "usable": usable,
+            "granted": ids, "table": rows}
+
+
+def _release_commands(rows: list[dict], remote_name: str | None) -> list[str]:
+    remote = _safe_remote(remote_name) or "REMOTE_NAME"
+    seen: list[str] = []
+    for row in rows:
+        if row["workspace_id"] not in seen:
+            seen.append(row["workspace_id"])
+    return [f"./sb workspace release {workspace} --remote {remote}" for workspace in seen]
+
+
 def _blocked(
     *,
     code: str,
@@ -54,11 +124,14 @@ def _blocked(
     remote_name: str | None,
     capacity: dict,
     evidence: dict | None = None,
+    next_command: str | None = None,
+    guidance: str | None = None,
+    extra: dict | None = None,
 ) -> dict:
     # Remote names are deliberately not interpolated into the command.  The
     # placeholder keeps this envelope safe even when an untrusted record has a
     # path, shell metacharacter, or credential-like value in it.
-    return {
+    blocked = {
         "ok": False,
         "status": "blocked",
         "code": code,
@@ -77,8 +150,8 @@ def _blocked(
             "automatic_cleanup": False,
             "automatic_retry": False,
             "plan": "reviewed_docker_network_capacity",
-            "next_command": _capacity_plan_command(remote_name),
-            "guidance": (
+            "next_command": next_command or _capacity_plan_command(remote_name),
+            "guidance": guidance or (
                 "Review the bounded Docker address-pool plan and scoped "
                 "Sandbox ownership evidence before retrying. Do not delete "
                 "Docker networks directly or infer capacity from disk space "
@@ -88,9 +161,98 @@ def _blocked(
         "retryable": False,
         "side_effects": {"staging_started": False, "network_allocation_started": False},
     }
+    blocked.update(extra or {})
+    return blocked
+
+
+def _missing_pool_evidence(remote_name: str | None, required_subnets: int) -> dict:
+    return _blocked(
+        code="docker_network_capacity_unavailable",
+        state="partial",
+        remote_name=remote_name,
+        capacity={"status": "partial", "usable_subnets": None,
+                  "required_subnets": required_subnets},
+        evidence={"status": "partial", "reason": "missing_pool_evidence"},
+        next_command=_range_propose_command(remote_name),
+        guidance=MISSING_POOL_GUIDANCE + _range_propose_command(remote_name),
+    )
 
 
 def evaluate_network_capacity(
+    evidence: Any,
+    *,
+    required_subnets: int = 1,
+    remote_name: str | None = None,
+    range_evidence: Any = None,
+) -> dict:
+    """Evaluate pool evidence and, when present, development-range evidence.
+
+    Spec 063 FR-008: usable capacity is configured daemon-pool capacity plus
+    unallocated range capacity; Docker's built-in default pools never count.
+    One run's networks come from one source: a complete range grant admits,
+    otherwise the pools must cover the run on their own. Every pool-side
+    fail-closed rule still applies, except that an absent pool configuration
+    is not a failure when a range exists.
+    """
+    if not _non_negative_int(required_subnets) or required_subnets < 1:
+        raise ValueError("required_subnets must be a positive integer")
+    if range_evidence is None:
+        return _evaluate_pools(evidence, required_subnets=required_subnets,
+                               remote_name=remote_name)
+    ranged = _normalize_range(range_evidence)
+    if ranged is None or (ranged["granted"] and len(ranged["granted"]) != required_subnets):
+        return _blocked(
+            code="docker_network_capacity_unavailable",
+            state="partial",
+            remote_name=remote_name,
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
+            evidence={"status": "partial", "reason": "invalid_range_evidence"},
+        )
+    no_pools = isinstance(evidence, dict) and (
+        (evidence.get("ok") is False and evidence.get("code") == "docker_address_pools_unavailable")
+        or (evidence.get("status") == "complete" and evidence.get("pools") == []))
+    if no_pools:
+        if ranged["capacity"] == 0:
+            return _missing_pool_evidence(remote_name, required_subnets)
+        pools = None
+    else:
+        pools = _evaluate_pools(evidence, required_subnets=required_subnets,
+                                remote_name=remote_name)
+        if pools["code"] not in (None, "docker_network_subnet_exhausted"):
+            return pools
+    pool_capacity = pools["capacity"] if pools else {
+        "total_subnets": 0, "allocated_subnets": 0, "usable_subnets": 0, "pools": []}
+    capacity = {
+        "status": "complete",
+        "total_subnets": pool_capacity["total_subnets"] + ranged["capacity"],
+        "allocated_subnets": pool_capacity["allocated_subnets"] + ranged["allocated"],
+        "usable_subnets": pool_capacity["usable_subnets"] + ranged["usable"],
+        "required_subnets": required_subnets,
+        "pools": pool_capacity["pools"],
+        "range_usable_subnets": ranged["usable"],
+    }
+    if ranged["granted"] or (pools and pools["ok"]):
+        summary = dict(pools["evidence"]) if pools else {
+            "status": "complete", "inventory": "development_range"}
+        summary["range"] = "development_range"
+        admitted = _admitted(remote_name, capacity, summary)
+        admitted["granted"] = ranged["granted"]
+        return admitted
+    return _blocked(
+        code="docker_network_subnet_exhausted",
+        state="complete",
+        remote_name=remote_name,
+        capacity=capacity,
+        evidence={"status": "complete", "reason": "range_exhausted"},
+        guidance=("Pool and development-range capacity are exhausted. Release a workspace "
+                  "you no longer need with one of release_commands; nothing was deleted."),
+        extra={"allocation_table": ranged["table"],
+               "release_commands": _release_commands(ranged["table"], remote_name)},
+    )
+
+
+def _evaluate_pools(
     evidence: Any,
     *,
     required_subnets: int = 1,
@@ -113,6 +275,8 @@ def evaluate_network_capacity(
             capacity={"status": "unavailable", "usable_subnets": None},
         )
 
+    if evidence.get("ok") is False and evidence.get("code") == "docker_address_pools_unavailable":
+        return _missing_pool_evidence(remote_name, required_subnets)
     if "ok" in evidence and evidence.get("ok") is not True:
         return _blocked(
             code="docker_network_capacity_unavailable",
@@ -211,14 +375,7 @@ def evaluate_network_capacity(
         )
 
     if not pools:
-        return _blocked(
-            code="docker_network_capacity_unavailable",
-            state="partial",
-            remote_name=remote_name,
-            capacity={"status": "partial", "usable_subnets": None,
-                      "required_subnets": required_subnets},
-            evidence={"status": "partial", "reason": "missing_pool_evidence"},
-        )
+        return _missing_pool_evidence(remote_name, required_subnets)
 
     normalized_pools: list[dict] = []
     pool_ids: set[str] = set()
@@ -336,6 +493,10 @@ def evaluate_network_capacity(
             capacity=capacity,
             evidence=evidence_summary,
         )
+    return _admitted(remote_name, capacity, evidence_summary)
+
+
+def _admitted(remote_name: str | None, capacity: dict, evidence_summary: dict) -> dict:
     return {
         "ok": True,
         "status": "admitted",

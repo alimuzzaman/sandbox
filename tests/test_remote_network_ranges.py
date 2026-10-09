@@ -131,5 +131,169 @@ class FreeSubnetTests(unittest.TestCase):
         self.assertEqual(free, ["10.201.0.64/26", "10.201.0.192/26"])
 
 
+class _Store:
+    """Stand-in RangeStore recording calls (the real one runs in
+    tests/test_remote_network_program.py)."""
+
+    instances = []
+    fail = None
+
+    def __init__(self, entry, ssh_run=None, *, installed_protocol=None):
+        self.entry, self.installed_protocol = entry, installed_protocol
+        self.name = entry.get("name")
+        self.calls = []
+        self.error = None
+        _Store.instances.append(self)
+
+    def _maybe_fail(self):
+        if _Store.fail is not None:
+            raise _Store.fail
+
+    def propose(self):
+        self._maybe_fail()
+        self.calls.append("propose")
+        return {"proposed": "10.200.0.0/20", "subnet_prefix": 26, "capacity": 64,
+                "assign_command": "./sb remote network-range assign vps --cidr 10.200.0.0/20 "
+                                  "--subnet-prefix 26 --confirm"}
+
+    def assign(self, cidr, subnet_prefix, *, confirm=False):
+        self._maybe_fail()
+        self.calls.append(("assign", cidr, subnet_prefix, confirm))
+        return {"status": "assigned" if confirm else "planned", "range_id": "r-" + "a" * 12,
+                "capacity": 64}
+
+    def list(self):
+        self._maybe_fail()
+        self.calls.append("list")
+        return {"ranges": [{"range_id": "r-" + "a" * 12, "cidr": "10.200.0.0/20",
+                            "subnet_prefix": 26, "capacity": 64, "assigned_at": 1,
+                            "assigned_by": "h-" + "1" * 16}],
+                "allocations": [{"allocation_id": "a-" + "b" * 16, "subnet": "10.200.0.0/26",
+                                 "owner_kind": "workspace", "owner_id": "w1",
+                                 "workspace_id": "w1", "network": "default", "allocated_at": 1,
+                                 "range_id": "r-" + "a" * 12}],
+                "capacity_proof": None, "truncated": False}
+
+
+class NetworkRangeCommandTests(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import patch
+        _Store.instances, _Store.fail = [], None
+        self.patch = patch
+        self.put = []
+        patches = [
+            patch("sandbox.remote_network.store.RangeStore", _Store),
+            patch("sandbox.core._remote.get_remote", return_value={"ssh": "target", "name": "vps"}),
+            patch("sandbox.core._remote.put_remote",
+                  side_effect=lambda name, **kw: self.put.append((name, kw))),
+            patch("sandbox.core._remote.remote_mcp_service_status", return_value={
+                "control_protocol": {"installed": {"spoken": 2, "oldest_served": 1}}}),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def _run(self, operation, **extra):
+        import json
+        import types
+        from sandbox.commands import remote as remote_cmd
+        args = types.SimpleNamespace(name=operation, ssh_url="vps", cidr=None, subnet_prefix=None,
+                                     confirm=False, json=True)
+        for key, value in extra.items():
+            setattr(args, key, value)
+        with self.patch("builtins.print") as printed:
+            try:
+                remote_cmd._cmd_network_range(args, as_json=True)
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, json.loads(printed.call_args.args[0])
+
+    def test_propose_is_read_only_and_its_command_parses(self):
+        from tests.test_remote_runtime_refusal import parse_with_cli
+        code, payload = self._run("propose")
+        self.assertEqual((code, payload["status"]), (0, "proposed"))
+        parsed = parse_with_cli(payload["data"]["assign_command"])
+        self.assertEqual((parsed.action, parsed.name, parsed.ssh_url, parsed.cidr,
+                          parsed.subnet_prefix, parsed.confirm),
+                         ("network-range", "assign", "vps", "10.200.0.0/20", 26, True))
+        self.assertEqual(self.put, [])
+
+    def test_assign_without_confirm_is_planned_and_records_nothing(self):
+        code, payload = self._run("assign", cidr="10.200.0.0/20")
+        self.assertEqual((code, payload["status"]), (0, "planned"))
+        self.assertEqual(_Store.instances[-1].calls, [("assign", "10.200.0.0/20", 26, False)])
+        self.assertEqual(self.put, [])
+
+    def test_confirmed_assign_passes_installed_protocol_and_echoes_ranges(self):
+        code, payload = self._run("assign", cidr="10.200.0.0/20", subnet_prefix=27, confirm=True)
+        self.assertEqual((code, payload["status"]), (0, "assigned"))
+        store = _Store.instances[-1]
+        self.assertEqual(store.installed_protocol.spoken, 2)
+        self.assertEqual(store.calls[0], ("assign", "10.200.0.0/20", 27, True))
+        name, fields = self.put[-1]
+        self.assertEqual(name, "vps")
+        self.assertEqual(fields["network_ranges"], [{"range_id": "r-" + "a" * 12,
+                                                     "cidr": "10.200.0.0/20", "subnet_prefix": 26}])
+
+    def test_assign_requires_cidr(self):
+        code, payload = self._run("assign")
+        self.assertEqual((code, payload["error"]["code"]), (1, "range_invalid"))
+
+    def test_typed_refusal_is_nonzero_and_carries_data(self):
+        _Store.fail = RangeError("range_overlap", "overlaps", **{"class": "host_route"})
+        code, payload = self._run("assign", cidr="10.200.0.0/20", confirm=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "refused")
+        self.assertEqual(payload["error"]["code"], "range_overlap")
+        self.assertEqual(payload["error"]["data"], {"class": "host_route"})
+        _Store.fail = RangeError("range_inventory_unknown", "partial")
+        code, payload = self._run("propose")
+        self.assertEqual((code, payload["status"]), (1, "unknown"))
+
+    def test_list_is_the_only_output_with_subnets(self):
+        import json
+        _code, listed = self._run("list")
+        self.assertIn("10.200.0.0/26", json.dumps(listed))
+        for operation, extra in (("propose", {}), ("assign", {"cidr": "10.200.0.0/20"})):
+            _code, payload = self._run(operation, **extra)
+            self.assertNotIn("10.200.0.0/26", json.dumps(payload))
+
+    def test_unknown_operation_or_remote_dies(self):
+        code, _payload = None, None
+        with self.patch("sandbox.core._remote.get_remote", return_value=None), \
+                self.patch("sys.stderr"), self.assertRaises(SystemExit):
+            from sandbox.commands import remote as remote_cmd
+            import types
+            remote_cmd._cmd_network_range(types.SimpleNamespace(
+                name="list", ssh_url="nope", cidr=None, subnet_prefix=None, confirm=False),
+                as_json=False)
+        with self.patch("sys.stderr"), self.assertRaises(SystemExit):
+            from sandbox.commands import remote as remote_cmd
+            import types
+            remote_cmd._cmd_network_range(types.SimpleNamespace(
+                name="bogus", ssh_url="vps", cidr=None, subnet_prefix=None, confirm=False),
+                as_json=False)
+
+    def test_provision_hint_proposes_without_assigning_and_never_fails(self):
+        from sandbox.commands import remote as remote_cmd
+        empty = {"ranges": [], "allocations": [], "capacity_proof": None, "truncated": False}
+        with self.patch.object(_Store, "list", return_value=empty):
+            hint = remote_cmd._network_range_hint({"ssh": "t", "name": "vps"})
+        self.assertEqual(hint["state"], "proposed")
+        self.assertIn("--confirm", hint["assign_command"])
+        self.assertNotIn(("assign",), [c[:1] for c in _Store.instances[-1].calls if isinstance(c, tuple)])
+        _Store.fail = RangeError("range_store_unavailable", "down")
+        self.assertEqual(remote_cmd._network_range_hint({"ssh": "t", "name": "vps"}),
+                         {"state": "unknown", "reason": "range_store_unavailable"})
+
+    def test_provision_hint_is_absent_when_a_range_exists(self):
+        from sandbox.commands import remote as remote_cmd
+        with self.patch.object(_Store, "propose", side_effect=AssertionError("proposed")):
+            # A range is listed, so no proposal is made.
+            self.assertEqual(remote_cmd._network_range_hint({"ssh": "t", "name": "vps"}),
+                             {"state": "assigned", "ranges": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

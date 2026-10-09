@@ -50,12 +50,15 @@ fi
 # behavior are load-bearing). A bare `python3` can be an older interpreter —
 # e.g. a pyenv shim pinned to 3.11 — so pick the newest supported one that is
 # actually present instead of trusting PATH order. Preference: a versioned
-# binary (python3.13/3.12), then plain python3, and only then the repo's
+# binary (python3.14/3.13/3.12), then plain python3, and only then the repo's
 # .cli-venv — each versioned-less candidate must itself report >= 3.12.
 SB_PY=""
-for sb_candidate in python3.13 python3.12 python3 .cli-venv/bin/python; do
-    if [ "${sb_candidate#./}" != "$sb_candidate" ]; then
-        # Repo-relative venv interpreter must exist and be executable.
+# Resolve the repo-local venv against this script, not the caller's cwd, so
+# `/path/to/sb` run from another directory (or a job runner) still finds it.
+sb_self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || sb_self_dir=.
+for sb_candidate in python3.14 python3.13 python3.12 python3 "$sb_self_dir/.cli-venv/bin/python"; do
+    if [ "${sb_candidate#*/}" != "$sb_candidate" ]; then
+        # Repo-local venv interpreter must exist and be executable.
         [ -x "$sb_candidate" ] || continue
     else
         # A pyenv shim passes `command -v` even when the selected version does

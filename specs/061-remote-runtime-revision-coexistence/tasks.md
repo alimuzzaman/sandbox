@@ -50,6 +50,7 @@
 ## Phase 8: Polish
 
 - [x] T024 Docs: `docs/remote-hosting.md`, `docs/remote-job-runtime.md`, CLAUDE.md gotcha 23, CHANGELOG.md
+- [x] T024a FR-006 shape guard: `sandbox/remote_runtime/shapes.py`, recorded `control_shapes.json`, `tests/test_remote_runtime_protocol_shapes.py`; docs in `docs/remote-hosting.md`, CLAUDE.md gotcha 28, CHANGELOG.md
 - [ ] T025 Run `./sb selftest` and the architecture test
 - [ ] T026 Live proof per quickstart on a disposable remote (needs remote install protocol; Lenzora pin bump needs owner approval)
 

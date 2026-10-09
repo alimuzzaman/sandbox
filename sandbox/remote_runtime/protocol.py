@@ -3,6 +3,8 @@
 Bump ``CONTROL_PROTOCOL_SPOKEN`` whenever a controller-to-runtime transport
 payload or receipt shape changes. Raise ``CONTROL_PROTOCOL_OLDEST_SERVED``
 when this runtime stops accepting controllers that speak an older version.
+``sandbox/remote_runtime/shapes.py`` enforces the bump: changed payload keys
+under an unchanged version fail the shape test.
 This module is under ``sandbox/``, so the runtime revision digest covers it.
 """
 from __future__ import annotations

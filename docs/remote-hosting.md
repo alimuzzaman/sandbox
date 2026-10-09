@@ -1199,7 +1199,12 @@ declares a control-protocol range (`sandbox/remote_runtime/protocol.py`):
 the version it speaks and the oldest it still serves. Migrate writes it into
 the unit as `SANDBOX_REMOTE_MCP_CONTROL_PROTOCOL=<spoken>:<oldest>`, and
 `remote service status` reports `control_protocol` (local and installed) and
-one `compatibility` verdict:
+one `compatibility` verdict. A change to the payload keys the transports and
+their remote programs exchange must bump the spoken version:
+`tests/test_remote_runtime_protocol_shapes.py` compares those keys with
+`sandbox/remote_runtime/control_shapes.json`, and after a bump
+`python -m sandbox.remote_runtime.shapes --write` records them (it refuses
+changed keys under an unchanged version).
 
 | Verdict | Meaning | Admitted |
 |---|---|---|

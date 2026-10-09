@@ -16,7 +16,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `--strict-runtime` / `SANDBOX_STRICT_RUNTIME=1` keeps exact matching and
   holds an expiring pin on the remote; `sb remote pin list|release` manages
   pins, and a confirmed `remote service migrate` refuses over unexpired pins
-  unless each is acknowledged with `--break-pin HOLDER`.
+  unless each is acknowledged with `--break-pin HOLDER`. A shape guard fails
+  the test suite when transport payload keys change without a protocol bump
+  (`python -m sandbox.remote_runtime.shapes --write` records them after one).
 - `sb ensure`, `sb apply`, and `sb test`, plus their MCP counterparts, accept
   an explicit project-local `--config-file` selector when paired with
   `--project-dir`. Selection is fail-closed, owns one sibling descriptor

@@ -39,7 +39,7 @@ class ShapeGuardTests(unittest.TestCase):
     def test_keys_cover_literals_subscripts_and_lookups(self):
         source = ("p = {'a': 1, **x}\nq = r['b']\ns = r.get('c')\nt = r.pop('d', 0)\n"
                   "u = r.setdefault('e', [])\nv = r[0]\nw = f('ignored')\n")
-        self.assertEqual(shapes.payload_keys(source), ["a", "b", "c", "d", "e", "{a}"])
+        self.assertEqual(shapes.payload_keys(source), [":p={a}", "a", "b", "c", "d", "e"])
 
     def test_keys_inside_an_embedded_program_count(self):
         """A program sent over SSH as a string is part of the payload contract."""
@@ -48,16 +48,40 @@ class ShapeGuardTests(unittest.TestCase):
         self.assertIn("ok", shapes.payload_keys(before))
         diff = shapes.shape_diff({"m.py": shapes.payload_keys(before)},
                                  {"m.py": shapes.payload_keys(after)})
-        self.assertEqual(diff["m.py"]["added"], ["extra", "{extra,ok}"])
+        self.assertEqual(diff["m.py"]["added"], ["<:PROGRAM>:_={extra,ok}", "extra"])
         prose = 'DOC = """Spec text\nthat is not a program."""\n'
         self.assertEqual(shapes.payload_keys(prose), [])
 
-    def test_moving_an_existing_key_into_another_payload_counts(self):
-        before = "a = {'x': 1}\nb = {'y': 2}\n"
-        after = "a = {'x': 1}\nb = {'x': 1, 'y': 2}\n"
-        diff = shapes.shape_diff({"m.py": shapes.payload_keys(before)},
+    def _diff(self, before, after):
+        return shapes.shape_diff({"m.py": shapes.payload_keys(before)},
                                  {"m.py": shapes.payload_keys(after)})
-        self.assertEqual(diff, {"m.py": {"added": ["{x,y}"], "removed": ["{y}"]}})
+
+    def test_moving_an_existing_key_into_another_payload_counts(self):
+        diff = self._diff("a = {'x': 1}\nb = {'y': 2}\n", "a = {'x': 1}\nb = {'x': 1, 'y': 2}\n")
+        self.assertEqual(diff, {"m.py": {"added": [":b={x,y}"], "removed": [":b={y}"]}})
+
+    def test_exchanging_keys_between_payloads_counts(self):
+        before = "def send():\n    a = {'x': 1}\n    b = {'y': 2}\n"
+        after = "def send():\n    a = {'y': 1}\n    b = {'x': 2}\n"
+        self.assertEqual(self._diff(before, after), {"m.py": {
+            "added": ["send:a={y}", "send:b={x}"], "removed": ["send:a={x}", "send:b={y}"]}})
+
+    def test_removing_a_field_from_one_of_several_identical_payloads_counts(self):
+        before = "rows = [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]\n"
+        after = "rows = [{'a': 1, 'b': 2}, {'a': 3}]\n"
+        self.assertEqual(self._diff(before, after), {"m.py": {
+            "added": [":rows={a,b}", ":rows={a}"], "removed": [":rows={a,b}*2"]}})
+
+    def test_single_line_embedded_programs_count(self):
+        before = "P = \"import json; print(json.dumps({'k': 1}))\"\n"
+        after = before.replace("{'k': 1}", "{'k': 1, 'z': 2}")
+        self.assertEqual(self._diff(before, after)["m.py"]["added"], ["<:P>:_={k,z}", "z"])
+        self.assertEqual(shapes.payload_keys("S = 'ok'\nT = 'set -eu; echo hi'\n"), [])
+
+    def test_keyword_return_and_nested_bindings_are_named(self):
+        source = ("def f():\n    g(body={'a': 1})\n    return {'b': {'c': 1}}\n")
+        self.assertEqual(shapes.payload_keys(source),
+                         ["a", "b", "c", "f:[b]={c}", "f:body=={a}", "f:return={b}"])
 
     def test_writer_refuses_changed_keys_under_the_same_version(self):
         with tempfile.TemporaryDirectory() as tmp:

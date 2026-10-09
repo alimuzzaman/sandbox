@@ -23,7 +23,7 @@ SCHEMA = 1
 DEFAULT_TTL_SECONDS = 3600
 MAX_TTL_SECONDS = 4 * 3600
 MAX_LISTED = 64  # also the remote capacity: registration past it is refused
-FENCE_TTL_SECONDS = 600
+INSTALL_LOCK_WAIT_SECONDS = 20
 MAX_PURPOSE = 120
 MAX_CHECKOUT = 4096
 TIMEOUT_SECONDS = 15
@@ -152,12 +152,14 @@ def parse_pin(value) -> Pin | None:
 # one base64 JSON request. Writes are atomic (temp file + rename, 0600) under
 # an exclusive flock; expired pins are removed on every write.
 #
-# Runtime replacement (FR-015) is one transaction with pin admission: a
-# confirmed install takes the ``.replacing.json`` fence under the same flock
-# that registration takes, after checking every binding pin. While the fence
-# is live, registering a pin for any other revision is refused, so no pin can
-# appear between the check and the install. The installer removes the fence
-# when it finishes; after an indeterminate rollback it is left to expire.
+# Runtime replacement (FR-015) is serialized by that same flock: the install
+# command runs under INSTALL_GATE, which takes the lock, refuses over any
+# binding pin for another revision, and holds the lock until the install
+# process itself exits. Every pin program, including the ones older
+# controllers send, takes this lock, so no pin can be registered between the
+# check and the end of the install, two installs never overlap, and a lost
+# SSH connection cannot release it early. ``.replacing.json`` is the fence an
+# earlier revision of this program wrote; a live one is still honoured.
 PROGRAM = r'''
 import base64, fcntl, json, os, re, sys, time
 home = sys.argv[1]
@@ -254,30 +256,6 @@ elif action == "register":
     else:
         write(pin)
         result["pin"] = read(pin["holder"])
-elif action == "fence":
-    sweep()
-    live = fence()
-    if live is not None and live.get("by") != request["by"]:
-        result["refused"] = "runtime_replacement_in_progress"
-    else:
-        blocking = sorted(value.get("holder") for value in every()
-                          if binding(value) and value.get("revision") != request["target"]
-                          and value.get("holder") not in request["acknowledged"])
-        if blocking:
-            result["refused"] = "remote_runtime_pins_unacknowledged"
-            result["blocking"] = blocking
-        else:
-            put(os.path.join(root, FENCE), {"target": request["target"], "by": request["by"],
-                                            "expires_at": now + int(request["ttl"])})
-            result["fenced"] = True
-elif action == "unfence":
-    live = fence()
-    if live is None or live.get("by") == request["by"]:
-        try:
-            os.unlink(os.path.join(root, FENCE))
-        except FileNotFoundError:
-            pass
-    result["unfenced"] = True
 elif action == "release":
     sweep()
     try:
@@ -301,6 +279,101 @@ else:
     raise SystemExit(2)
 print(json.dumps(result, sort_keys=True))
 '''
+
+
+# Wraps one runtime install command (``sh -c``) on the remote. Exit 45: the
+# lock is held by another install (or a live legacy fence names another
+# target); exit 46: binding pins for another revision, listed as one JSON line
+# on stdout. Otherwise the child's status. The child does not inherit the lock
+# descriptor, so a process it leaves running never holds the lock; SIGHUP is
+# ignored so a dropped connection neither kills the install halfway nor
+# releases the lock while it runs.
+INSTALL_GATE = r'''
+import base64, fcntl, json, os, re, signal, subprocess, sys, time
+home, target = sys.argv[1], sys.argv[2]
+acknowledged = set(json.loads(base64.b64decode(sys.argv[3]).decode()))
+wait, inner = float(sys.argv[4]), sys.argv[5]
+HOLDER = re.compile(r"h-[0-9a-f]{16}")
+root = os.path.join(home, "runtime", "remote-pins")
+os.makedirs(root, mode=0o700, exist_ok=True)
+os.chmod(root, 0o700)
+lock = os.open(os.path.join(root, ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+deadline = time.monotonic() + wait
+while True:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            raise SystemExit(45)
+        time.sleep(0.2)
+now = int(time.time())
+try:
+    with open(os.path.join(root, ".replacing.json")) as handle:
+        fence = json.load(handle)
+except (OSError, ValueError):
+    fence = None
+if isinstance(fence, dict) and type(fence.get("expires_at")) is int \
+        and fence["expires_at"] > now and fence.get("target") != target:
+    raise SystemExit(45)
+blocking = []
+for name in sorted(os.listdir(root)):
+    if not (name.endswith(".json") and HOLDER.fullmatch(name[:-5])):
+        continue
+    try:
+        with open(os.path.join(root, name)) as handle:
+            pin = json.load(handle)
+    except (OSError, ValueError):
+        continue
+    expires = pin.get("expires_at") if isinstance(pin, dict) else None
+    if (isinstance(pin, dict) and pin.get("state") == "active" and type(expires) is int
+            and expires > now and pin.get("revision") != target
+            and name[:-5] not in acknowledged):
+        blocking.append(name[:-5])
+if blocking:
+    print(json.dumps({"pin_gate": "blocked", "blocking": blocking}))
+    raise SystemExit(46)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+raise SystemExit(subprocess.run(["sh", "-c", inner], close_fds=True).returncode)
+'''
+INSTALL_BUSY_EXIT = 45
+INSTALL_BLOCKED_EXIT = 46
+
+
+def install_gate_command(target: str, acknowledged, inner: str, *,
+                         wait_seconds: float = INSTALL_LOCK_WAIT_SECONDS) -> str:
+    """``inner`` wrapped so it runs only under the remote pin lock (FR-015)."""
+    if not REVISION_RE.fullmatch(target or "") \
+            or not all(HOLDER_RE.fullmatch(h or "") for h in acknowledged or ()):
+        raise PinError("pin_holder_invalid", "install gate request is invalid")
+    acknowledged_b64 = base64.b64encode(
+        json.dumps(sorted(set(acknowledged or ()))).encode()).decode()
+    return (f"python3 -c {shlex.quote(INSTALL_GATE)} "
+            f"\"${{SANDBOX_HOME:-$HOME/sandbox}}\" {shlex.quote(target)} "
+            f"{shlex.quote(acknowledged_b64)} {float(wait_seconds)!r} {shlex.quote(inner)}")
+
+
+def install_gate_refusal(returncode: int, stdout) -> PinError | None:
+    """The typed refusal for a gated install's exit status, else None."""
+    if returncode == INSTALL_BUSY_EXIT:
+        return PinError(REPLACEMENT_IN_PROGRESS,
+                        "another install holds the remote runtime replacement lock")
+    if returncode != INSTALL_BLOCKED_EXIT:
+        return None
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    blocking = []
+    for line in (stdout or "").splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("pin_gate") == "blocked":
+            blocking = [h for h in value.get("blocking") or ()
+                        if isinstance(h, str) and HOLDER_RE.fullmatch(h)]
+    error = PinError(PINS_UNACKNOWLEDGED, "pass --break-pin HOLDER for: " + ", ".join(blocking))
+    error.blocking = blocking
+    return error
 
 
 def remote_command(request: dict) -> str:
@@ -362,40 +435,6 @@ class PinStore:
         if stored != pin:
             raise PinError(PIN_UNVERIFIABLE, "remote did not store the pin")
         return stored
-
-    def fence(self, target: str, acknowledged, by: str,
-              ttl_seconds: int = FENCE_TTL_SECONDS) -> None:
-        """Take the replacement fence for ``target`` or refuse.
-
-        Checks every binding pin and takes the fence under one remote lock.
-        Raises :class:`PinError` with :data:`PINS_UNACKNOWLEDGED` (``blocking``
-        names the holders) or :data:`REPLACEMENT_IN_PROGRESS`.
-        """
-        acknowledged = sorted(set(acknowledged or ()))
-        if not REVISION_RE.fullmatch(target or "") or not HOLDER_RE.fullmatch(by or "") \
-                or not all(HOLDER_RE.fullmatch(h or "") for h in acknowledged):
-            raise PinError("pin_holder_invalid", "fence request is invalid")
-        result = self._call({"action": "fence", "target": target, "by": by,
-                             "acknowledged": acknowledged,
-                             "ttl": max(1, min(int(ttl_seconds), MAX_TTL_SECONDS))})
-        refused = result.get("refused")
-        if refused == PINS_UNACKNOWLEDGED:
-            blocking = [h for h in result.get("blocking") or ()
-                        if isinstance(h, str) and HOLDER_RE.fullmatch(h)]
-            error = PinError(PINS_UNACKNOWLEDGED, "pass --break-pin HOLDER for: "
-                             + ", ".join(blocking))
-            error.blocking = blocking
-            raise error
-        if refused == REPLACEMENT_IN_PROGRESS:
-            raise PinError(REPLACEMENT_IN_PROGRESS,
-                           "another controller is replacing the remote runtime")
-        if result.get("fenced") is not True:
-            raise PinError(PINS_UNAVAILABLE, "remote did not take the fence")
-
-    def unfence(self, by: str) -> None:
-        if not HOLDER_RE.fullmatch(by or ""):
-            raise PinError("pin_holder_invalid", "holder is invalid")
-        self._call({"action": "unfence", "by": by})
 
     def release(self, holder: str) -> bool:
         if not HOLDER_RE.fullmatch(holder or ""):

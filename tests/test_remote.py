@@ -2399,14 +2399,6 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
 
 
 class TestStartRemoteMcpServer(unittest.TestCase):
-    def setUp(self):
-        # The pin fence is covered in TestRuntimeReplacementFence; these tests
-        # assert on the single install command.
-        from sandbox.remote_runtime.pins import PinStore
-        self.fence = patch.object(PinStore, "fence").start()
-        self.unfence = patch.object(PinStore, "unfence").start()
-        self.addCleanup(patch.stopall)
-
     @patch("sandbox.core._remote.ssh_run")
     def test_bound_runtime_record_is_rendered_once_and_returned_unchanged(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
@@ -2624,36 +2616,46 @@ class TestStartRemoteMcpServer(unittest.TestCase):
             )
 
 
-class TestRuntimeReplacementFence(unittest.TestCase):
-    """Spec 061 FR-015: every install path holds the pin fence (Sol merge gate)."""
+class TestRuntimeReplacementGate(unittest.TestCase):
+    """Spec 061 FR-015: every install path runs under the remote pin lock.
 
-    def setUp(self):
-        from sandbox.remote_runtime.pins import PinStore
-        self.fence = patch.object(PinStore, "fence").start()
-        self.unfence = patch.object(PinStore, "unfence").start()
-        self.addCleanup(patch.stopall)
+    The gate program itself runs for real in tests/test_remote_runtime_pins.py.
+    """
 
-    def _install(self, mock_ssh_run, **kwargs):
+    def _install(self, **kwargs):
         return sr.migrate_remote_mcp_service(
             {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64, confirm=True,
             source_revision="f" * 40, staged_source=_staged_source(), **kwargs)
 
-    @patch("sandbox.core._remote.ssh_run")
-    def test_unacknowledged_pin_refuses_before_any_install(self, mock_ssh_run):
-        from sandbox.remote_runtime.pins import PINS_UNACKNOWLEDGED, PinError
-        self.fence.side_effect = PinError(PINS_UNACKNOWLEDGED, "pass --break-pin HOLDER")
-        for install in (self._install,
-                        lambda run: sr.start_remote_mcp_server(
-                            {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64,
-                            source_revision="f" * 40, staged_source=_staged_source())):
-            with self.subTest(install=install), \
-                    self.assertRaisesRegex(RuntimeError, PINS_UNACKNOWLEDGED):
-                install(mock_ssh_run)
-        mock_ssh_run.assert_not_called()
-        self.unfence.assert_not_called()
+    def _start(self):
+        return sr.start_remote_mcp_server(
+            {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64,
+            source_revision="f" * 40, staged_source=_staged_source())
 
     @patch("sandbox.core._remote.ssh_run")
-    def test_fence_targets_the_staged_revision_and_carries_acknowledgments(self, mock_ssh_run):
+    def test_gate_refusals_are_typed_on_every_install_path(self, mock_ssh_run):
+        from sandbox.remote_runtime.pins import PINS_UNACKNOWLEDGED, REPLACEMENT_IN_PROGRESS
+        holder = "h-" + "7" * 16
+        cases = (
+            (_completed(returncode=46, stdout='{"pin_gate":"blocked","blocking":["%s"]}\n' % holder),
+             PINS_UNACKNOWLEDGED),
+            (_completed(returncode=45), REPLACEMENT_IN_PROGRESS),
+        )
+        for result, code in cases:
+            for install in (self._install, self._start):
+                mock_ssh_run.reset_mock()
+                mock_ssh_run.return_value = result
+                with self.subTest(code=code, install=install), \
+                        self.assertRaisesRegex(RuntimeError, code) as caught:
+                    install()
+                if code == PINS_UNACKNOWLEDGED:
+                    self.assertIn(holder, str(caught.exception))
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_install_command_is_gated_on_the_staged_revision_with_acknowledgments(self, mock_ssh_run):
+        import base64
+        import json as _json
+        import shlex as _shlex
         mock_ssh_run.return_value = _completed(returncode=0)
         staged = _staged_source()
         with patch.object(sr, "_remote_mcp_runtime_revision",
@@ -2662,25 +2664,97 @@ class TestRuntimeReplacementFence(unittest.TestCase):
                 {"ssh": "host"}, "127.0.0.1", 9174, "d" * 64, confirm=True,
                 source_revision="f" * 40, staged_source=staged,
                 acknowledged_pins=["h-" + "1" * 16])
-        target, acknowledged, _by = self.fence.call_args.args
-        self.assertEqual(target, staged["runtime_revision"])
-        self.assertEqual(acknowledged, ("h-" + "1" * 16,))
-        self.unfence.assert_called_once()
+        self.assertEqual(mock_ssh_run.call_count, 1)
+        argv = _shlex.split(mock_ssh_run.call_args.args[1])
+        self.assertEqual(argv[:2], ["python3", "-c"])
+        self.assertIn("fcntl.flock(lock, fcntl.LOCK_EX", argv[2])
+        self.assertEqual(argv[4], staged["runtime_revision"])
+        self.assertEqual(_json.loads(base64.b64decode(argv[5])), ["h-" + "1" * 16])
+        self.assertIn("systemctl --user restart", argv[7])
 
     @patch("sandbox.core._remote.ssh_run")
-    def test_fence_is_released_after_a_clean_failure_and_kept_when_indeterminate(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(returncode=1)
-        with self.assertRaises(RuntimeError):
-            self._install(mock_ssh_run)
-        self.unfence.assert_called_once()
-        self.unfence.reset_mock()
-        mock_ssh_run.return_value = _completed(returncode=44)
-        with self.assertRaisesRegex(RuntimeError, "rollback_indeterminate"):
-            self._install(mock_ssh_run)
-        mock_ssh_run.side_effect = subprocess.TimeoutExpired("ssh", 300)
-        with self.assertRaisesRegex(RuntimeError, "timed out"):
-            self._install(mock_ssh_run)
-        self.unfence.assert_not_called()
+    def test_no_controller_step_releases_the_lock_after_any_outcome(self, mock_ssh_run):
+        """A lost connection (255), a timeout or an interrupt leaves the lock
+        with the remote install process; nothing here may release it."""
+        from sandbox.remote_runtime.pins import PinStore
+        with patch.object(PinStore, "_call", side_effect=AssertionError("pin call")):
+            for outcome in (_completed(returncode=255), _completed(returncode=1),
+                            _completed(returncode=44),
+                            subprocess.TimeoutExpired("ssh", 300), KeyboardInterrupt()):
+                mock_ssh_run.reset_mock()
+                if isinstance(outcome, BaseException):
+                    mock_ssh_run.side_effect, mock_ssh_run.return_value = outcome, None
+                else:
+                    mock_ssh_run.side_effect, mock_ssh_run.return_value = None, outcome
+                with self.subTest(outcome=outcome), self.assertRaises(BaseException):
+                    self._install()
+                self.assertEqual(mock_ssh_run.call_count, 1)
+
+
+class TestInstallEntryPointsHonourPins(unittest.TestCase):
+    """Sol round 2: `remote up` and provision reach the real installer, whose
+    gated command the remote refuses over a binding pin (exit 46)."""
+
+    HOLDER = "h-" + "8" * 16
+
+    def _blocked(self, _remote, command, **_kwargs):
+        self.commands.append(command)
+        return _completed(returncode=46, stdout='{"pin_gate":"blocked","blocking":["%s"]}\n'
+                          % self.HOLDER)
+
+    def setUp(self):
+        self.commands = []
+
+    def test_remote_up_refuses_over_a_binding_pin_and_records_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="tailscale", tailscale_host="100.64.0.9",
+                    control_url="http://100.64.0.9:9174", mcp_port=9174,
+                    bearer_token="a" * 64)
+                args = types.SimpleNamespace(name="myvps", confirm=True, upload_timeout=300)
+                error = StringIO()
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status",
+                                  return_value={"probe_state": "complete"}), \
+                     patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
+                     patch.object(remote_cmd, "_upload_runtime_source",
+                                  return_value=_staged_source()), \
+                     patch.object(remote_cmd, "_assert_clean_source_revision"), \
+                     patch.object(sr, "ssh_run", side_effect=self._blocked), \
+                     redirect_stderr(error), self.assertRaises(SystemExit):
+                    remote_cmd._cmd_up(args, as_json=True)
+                self.assertIn("remote_runtime_pins_unacknowledged", error.getvalue())
+                self.assertIn(self.HOLDER, error.getvalue())
+                self.assertNotIn("mcp_service", sr.get_remote("myvps"))
+        self.assertEqual(len(self.commands), 1)
+        self.assertTrue(self.commands[0].startswith("python3 -c "))
+
+    def test_provision_refuses_over_a_binding_pin(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = types.SimpleNamespace(
+                    name="myvps", control="https", control_host="sandbox.example.com",
+                    confirm=True, upload_timeout=300)
+                error = StringIO()
+                with patch.object(remote_cmd, "_local_git_revision", return_value="a" * 40), \
+                     patch.object(remote_cmd, "_assert_clean_source_revision"), \
+                     patch.object(remote_cmd, "_read_exact_source_file",
+                                  return_value=b"#!/bin/sh\nexit 0\n"), \
+                     patch.object(remote_cmd, "_upload_runtime_source",
+                                  return_value=_staged_source("a" * 40)), \
+                     patch("subprocess.run", return_value=_completed(returncode=0)), \
+                     patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
+                     patch.object(sr, "configure_https_proxy"), \
+                     patch.object(sr, "ssh_run", side_effect=self._blocked), \
+                     redirect_stderr(error), redirect_stdout(StringIO()), \
+                     self.assertRaises(SystemExit):
+                    remote_cmd._cmd_provision(args, as_json=True)
+                self.assertIn("remote_runtime_pins_unacknowledged", error.getvalue())
+                self.assertFalse(sr.get_remote("myvps").get("provisioned"))
+        self.assertEqual(sum(c.startswith("python3 -c ") and "fcntl.flock" in c
+                             for c in self.commands), 1)
 
 
 class TestRemoteDoctorChecks(unittest.TestCase):

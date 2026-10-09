@@ -3,11 +3,15 @@
 The controller-to-runtime transports and the programs they run on the remote
 exchange JSON payloads and receipts. Each source file's shape is fingerprinted
 as the string keys it builds or reads (dict literal keys, constant subscripts,
-``.get``/``.pop``/``.setdefault`` keys) plus the key set of every dict literal
-(``{a,b}``), so moving an existing key into another payload also counts. A
-Python program embedded as a string constant (one sent over SSH and run on the
-remote) is parsed and fingerprinted the same way. The result is recorded, with
-the protocol version it belongs to, in ``control_shapes.json``.
+``.get``/``.pop``/``.setdefault`` keys) plus one signature per dict literal
+naming the payload it builds (enclosing function, then the name, keyword or
+key it is bound to) with its key set, counted, e.g.
+``f:payload={a,b}`` or ``f:payload={a,b}*2``. Moving a key between payloads,
+or dropping one from one of several identical payloads, therefore changes the
+fingerprint. A Python program embedded as a string constant (one sent over SSH
+and run on the remote, single-line or not) is parsed and fingerprinted the
+same way, scoped under the constant's owner. The result is recorded, with the
+protocol version it belongs to, in ``control_shapes.json``.
 
 ``sandbox/remote_runtime/pins.py`` is deliberately not a source. Its program is
 sent by the controller and run by the remote ``python3`` directly; the
@@ -27,6 +31,7 @@ import argparse
 import ast
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 from sandbox.remote_runtime.protocol import CONTROL_PROTOCOL_SPOKEN
@@ -51,7 +56,7 @@ SHAPE_SOURCES = (
 
 # Bumped when the fingerprint method changes (not the payloads): a manifest
 # recorded with an older format may be re-recorded under the same protocol.
-FORMAT = 2
+FORMAT = 3
 _EMBEDDED_DEPTH = 2
 
 _KEY_METHODS = frozenset({"get", "pop", "setdefault"})
@@ -65,29 +70,69 @@ def _text(node) -> str | None:
 
 def _embedded_program(text: str):
     """The parsed program if a string constant is Python source, else None."""
-    if "\n" not in text:
+    if not text.strip() or not any(ch in text for ch in "\n;(="):
         return None
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         return None
-    if all(isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    if all(isinstance(node, ast.Expr) and isinstance(node.value, (ast.Constant, ast.Name))
            for node in tree.body):
-        return None  # prose or a docstring, not a program
+        return None  # prose, a docstring or a bare word, not a program
     return tree
 
 
-def _collect(tree, keys: set[str], depth: int) -> None:
+def _parents(tree) -> dict:
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _target(node) -> str:
+    try:
+        return ast.unparse(node)
+    except Exception:  # noqa: BLE001 - an unprintable target still has a kind
+        return type(node).__name__
+
+
+def _owner(node, parents) -> str:
+    """``scope:binding`` for a dict literal or string constant."""
+    binding, scope, current = None, [], node
+    while current in parents:
+        parent = parents[current]
+        if binding is None:
+            if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+                binding = ",".join(_target(t) for t in targets)
+            elif isinstance(parent, ast.keyword):
+                binding = f"{parent.arg}="
+            elif isinstance(parent, ast.Return):
+                binding = "return"
+            elif isinstance(parent, ast.Dict) and current in parent.values:
+                key = _text(parent.keys[parent.values.index(current)])
+                binding = f"[{key}]" if key is not None else None
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scope.append(parent.name)
+        current = parent
+    return ".".join(reversed(scope)) + ":" + (binding or "_")
+
+
+def _collect(tree, keys: set[str], signatures: list[str], depth: int, prefix: str = "") -> None:
+    parents = _parents(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             literal = [key for key in map(_text, node.keys) if key is not None]
             keys.update(literal)
             if literal:
-                keys.add("{" + ",".join(sorted(set(literal))) + "}")
+                signatures.append(prefix + _owner(node, parents)
+                                  + "={" + ",".join(sorted(set(literal))) + "}")
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and depth:
             embedded = _embedded_program(node.value)
             if embedded is not None:
-                _collect(embedded, keys, depth - 1)
+                _collect(embedded, keys, signatures, depth - 1,
+                         prefix + "<" + _owner(node, parents) + ">")
         elif isinstance(node, ast.Subscript):
             key = _text(node.slice)
             if key is not None:
@@ -100,10 +145,12 @@ def _collect(tree, keys: set[str], depth: int) -> None:
 
 
 def payload_keys(source: str) -> list[str]:
-    """Sorted keys and dict-literal key sets a module (and its embedded programs) uses."""
+    """Sorted keys and counted payload signatures of a module and its embedded programs."""
     keys: set[str] = set()
-    _collect(ast.parse(source), keys, _EMBEDDED_DEPTH)
-    return sorted(keys)
+    signatures: list[str] = []
+    _collect(ast.parse(source), keys, signatures, _EMBEDDED_DEPTH)
+    counted = Counter(signatures)
+    return sorted(keys | {sig if n == 1 else f"{sig}*{n}" for sig, n in counted.items()})
 
 
 def current_shapes(root: Path = ROOT, sources=SHAPE_SOURCES) -> dict[str, list[str]]:

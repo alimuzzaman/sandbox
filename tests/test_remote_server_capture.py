@@ -124,6 +124,18 @@ class TestTransportInvocation(unittest.TestCase):
         transport, _ssh = local_transport(self.h)
         self.assertEqual(transport.observe("fixture-remote").revision_state, "match")
 
+    def test_strict_refusal_with_matching_revision_is_refused(self):
+        """Server capture goes through probe_remote_state: the verdict wins
+        over a matching revision for both refusal states (Sol round 2)."""
+        for state in ("compatible", "unknown"):
+            with self.subTest(state=state):
+                transport, _ssh = local_transport(
+                    self.h, compatibility={"state": state, "ok": False, "strict": True,
+                                           "reason": "strict_pin_unverifiable"})
+                with self.assertRaises(RecoveryError) as caught:
+                    transport.observe("fixture-remote")
+                self.assertEqual(caught.exception.code, "remote_runtime_stale")
+
     def test_observe_accepts_a_compatible_runtime_and_names_the_remedy(self):
         transport, _ssh = local_transport(
             self.h, revision_state="mismatch",

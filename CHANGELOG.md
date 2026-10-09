@@ -19,11 +19,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unless each is acknowledged with `--break-pin HOLDER`. A shape guard fails
   the test suite when transport payload keys change without a protocol bump
   (`python -m sandbox.remote_runtime.shapes --write` records them after one).
-  Pin protection holds across the install itself: every install path takes a
-  remote replacement fence under the pin lock, strict calls re-check the
-  installed revision after registering, pins are capped at 64 per remote, and
-  the shape guard also fingerprints embedded remote programs and per-payload
-  key sets. Strict refusals are honored by recovery, server capture and
+  Pin protection holds across the install itself: every install path runs its
+  remote install under the pin flock, held until the install process exits
+  (so installs never overlap, older controllers' registrations wait, and a
+  dropped connection releases nothing); strict calls re-check the installed
+  revision after registering; pins are capped at 64 per remote; and the shape
+  guard fingerprints embedded remote programs and counted per-payload
+  signatures (manifest format 3). Strict refusals are honored by recovery, server capture and
   Postgres recovery even when the revisions match.
 - `sb ensure`, `sb apply`, and `sb test`, plus their MCP counterparts, accept
   an explicit project-local `--config-file` selector when paired with

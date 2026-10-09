@@ -1205,8 +1205,11 @@ their remote programs exchange must bump the spoken version:
 `sandbox/remote_runtime/control_shapes.json`, and after a bump
 `python -m sandbox.remote_runtime.shapes --write` records them (it refuses
 changed keys under an unchanged version). The fingerprint covers keys inside
-Python programs embedded as strings and the key set of every dict literal, so
-moving an existing key into another payload also counts. The pin program is
+Python programs embedded as strings (single-line or not) and one counted
+signature per dict literal naming the payload it builds (enclosing function
+plus the name, keyword or key it is bound to), so moving a key between
+payloads, exchanging keys, or dropping a field from one of several identical
+payloads also counts. The pin program is
 not part of it: the installed runtime never runs it, and pin records are
 versioned by `pins.SCHEMA` instead.
 
@@ -1259,16 +1262,22 @@ told who broke it. If pins cannot be read, a confirmed migrate refuses with
 
 The pin check and the install are one transaction. Every install path
 (`remote service migrate`, `remote up --confirm`, `remote provision`) goes
-through the shared installer, which takes a replacement fence
-(`remote-pins/.replacing.json`, 0600, ten-minute expiry) under the same lock
-that pin registration uses, after re-checking every binding pin. While the
-fence is live, registering a pin for any other revision is refused, and a
-second installer is refused with `runtime_replacement_in_progress`. The fence
-is removed when the install finishes or fails cleanly; after an indeterminate
-rollback or an install timeout it is left to expire. `remote up` and
+through the shared installer, whose single remote install command runs under
+`pins.INSTALL_GATE`: it takes the exclusive pin lock
+(`remote-pins/.lock`, the same flock every pin program takes, including the
+ones older controllers send), re-checks every binding pin, and keeps the lock
+until the install process itself exits. So no pin can be registered between
+the check and the end of the install (a registration waits, and a strict call
+fails closed with `strict_pin_unverifiable` if the install outlasts its
+bound); a second install, from any checkout, is refused with
+`runtime_replacement_in_progress` after a 20-second wait; and a dropped SSH
+connection releases nothing, because the gate ignores hangup and holds the
+lock until the install or its rollback finishes on the remote. Processes the
+install leaves running do not inherit the lock. A live
+`remote-pins/.replacing.json` fence written by an earlier revision of this
+program is still honoured until it expires. `remote up` and
 `remote provision` take no `--break-pin`, so they refuse over any binding pin;
-migrate is the path that acknowledges pins. Controllers older than this change
-do not check the fence when registering.
+migrate is the path that acknowledges pins.
 
 Remote workspace list, status, migration planning, creation, reset, and destroy all
 run the same read-only service preflight before sending a workspace request. The

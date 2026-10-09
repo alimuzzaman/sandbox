@@ -4581,50 +4581,6 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
     }
 
 
-# Install failures after which the remote runtime may be either revision.
-_INSTALL_OUTCOME_UNKNOWN = frozenset({
-    "remote_service_rollback_indeterminate",
-    "timed out installing the remote MCP service",
-})
-
-
-class _ReplacementFence:
-    """Spec 061 FR-015: hold the remote pin fence across one runtime install.
-
-    Every installer path (migrate, ``remote up``, provision) goes through
-    :func:`migrate_remote_mcp_service`, so pin protection lives here rather
-    than in one command. Taking the fence checks every binding pin and blocks
-    new registrations for other revisions under the same remote lock, so a pin
-    cannot appear between the check and the install. After an indeterminate
-    rollback the fence is left to expire instead of being removed.
-    """
-
-    def __init__(self, remote: dict, target_revision: str, acknowledged=()):
-        from sandbox.remote_runtime.pins import PinStore, local_holder
-        self.store = PinStore(remote)
-        self.by = local_holder()[0]
-        self.target = target_revision
-        self.acknowledged = tuple(acknowledged or ())
-
-    def __enter__(self):
-        from sandbox.remote_runtime.pins import PinError
-        try:
-            self.store.fence(self.target, self.acknowledged, self.by)
-        except PinError as exc:
-            raise RuntimeError(f"{exc.code}: {exc}") from None
-        return self
-
-    def __exit__(self, exc_type, exc, _tb):
-        from sandbox.remote_runtime.pins import PinError
-        if isinstance(exc, RuntimeError) and str(exc) in _INSTALL_OUTCOME_UNKNOWN:
-            return False
-        try:
-            self.store.unfence(self.by)
-        except PinError:
-            pass  # the fence expires on its own
-        return False
-
-
 def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
                                public_url: str | None = None, *, confirm: bool = False,
                                legacy_pidfile: bool = False,
@@ -4634,8 +4590,11 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     """Install the scoped remote service only after explicit confirmation.
 
     The token is passed through SSH stdin, never embedded in the unit or command.
-    A confirmed install holds the remote pin fence (spec 061 FR-015) and
-    refuses over any binding pin not named in ``acknowledged_pins``.
+    A confirmed install runs under the remote pin lock (spec 061 FR-015,
+    ``pins.INSTALL_GATE``): it refuses over any binding pin not named in
+    ``acknowledged_pins`` and over another running install, and the lock is
+    held by the remote install process itself until it exits. Every installer
+    path (migrate, ``remote up``, provision) comes through here.
     """
     if not confirm:
         return remote_mcp_service_plan(
@@ -4810,20 +4769,29 @@ os.close(fd)'''
         "exit 1; fi; trap - EXIT; source_mode=''; rm -rf -- \"$stage_root\" \"$backup\"; "
         "test ! -e \"$backup\""
     )
-    with _ReplacementFence(remote, record["runtime_revision"], acknowledged_pins):
-        try:
-            res = ssh_run(remote, command, timeout=300, input_data=token + "\n")
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("timed out installing the remote MCP service") from exc
-        if res.returncode != 0:
-            if res.returncode in {42, 43}:
-                raise RuntimeError("remote_service_ownership_unknown")
-            if res.returncode == 44:
-                raise RuntimeError("remote_service_rollback_indeterminate")
-            detail = _safe_remote_diagnostic(res, remote, limit=500)
-            if detail:
-                raise RuntimeError(f"could not install the remote MCP service: {detail}")
-            raise RuntimeError("could not install the remote MCP service")
+    from sandbox.remote_runtime.pins import (
+        PinError, install_gate_command, install_gate_refusal,
+    )
+    try:
+        gated = install_gate_command(record["runtime_revision"], acknowledged_pins, command)
+    except PinError as exc:
+        raise RuntimeError(f"{exc.code}: {exc}") from None
+    try:
+        res = ssh_run(remote, gated, timeout=300, input_data=token + "\n")
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("timed out installing the remote MCP service") from exc
+    if res.returncode != 0:
+        refusal = install_gate_refusal(res.returncode, res.stdout)
+        if refusal is not None:
+            raise RuntimeError(f"{refusal.code}: {refusal}")
+        if res.returncode in {42, 43}:
+            raise RuntimeError("remote_service_ownership_unknown")
+        if res.returncode == 44:
+            raise RuntimeError("remote_service_rollback_indeterminate")
+        detail = _safe_remote_diagnostic(res, remote, limit=500)
+        if detail:
+            raise RuntimeError(f"could not install the remote MCP service: {detail}")
+        raise RuntimeError("could not install the remote MCP service")
     return {**plan, "status": "applied", "service": record}
 
 

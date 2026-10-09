@@ -104,18 +104,22 @@ class RemotePostgresRecoveryTests(unittest.TestCase):
         """A strict pin failure leaves the revisions matching; the verdict wins."""
         process_calls = []
         process = lambda *args, **kwargs: process_calls.append(True)
-        status = {"runtime_revision_state": "match", "active": True, "authenticated": True,
-                  "local_runtime_revision": "a" * 24, "installed_runtime_revision": "a" * 24,
-                  "compatibility": {"state": "compatible", "ok": False, "strict": True,
-                                    "reason": "strict_pin_unverifiable"}}
-        for operation in ("observe", "capture", "restore"):
-            with self.subTest(operation=operation), self.assertRaisesRegex(Exception, "runtime"):
-                self._transport(status=lambda _entry: status, process=process).invoke(
-                    source(), operation, "a" * 64)
-        result = json.loads(self._transport(status=lambda _entry: status, process=process)
-                            .invoke(source(), "inspect-restore", "c" * 64, archive=b"x"))
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["inspection_diagnostic"]["status"], "refused")
+        # A real pin-registration failure reports state "unknown"; an exact
+        # revision refusal under strict mode reports the compatible state.
+        for state in ("compatible", "unknown"):
+            status = {"runtime_revision_state": "match", "active": True, "authenticated": True,
+                      "local_runtime_revision": "a" * 24, "installed_runtime_revision": "a" * 24,
+                      "compatibility": {"state": state, "ok": False, "strict": True,
+                                        "reason": "strict_pin_unverifiable"}}
+            for operation in ("observe", "capture", "restore"):
+                with self.subTest(state=state, operation=operation), \
+                        self.assertRaisesRegex(Exception, "runtime"):
+                    self._transport(status=lambda _entry: status, process=process).invoke(
+                        source(), operation, "a" * 64)
+            result = json.loads(self._transport(status=lambda _entry: status, process=process)
+                                .invoke(source(), "inspect-restore", "c" * 64, archive=b"x"))
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["inspection_diagnostic"]["status"], "refused")
         self.assertEqual(process_calls, [])
 
     def test_inspection_revision_mismatch_returns_correlated_refusal_without_helper(self):

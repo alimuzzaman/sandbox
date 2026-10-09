@@ -214,6 +214,11 @@ runs longer). Combined redacted output is bounded to
 `sb secrets run` exit nonzero after the bounded result is printed; the child
 exit code is preserved when it is safe for the shell to represent it.
 
+A command that is itself `sudo`, `sudoedit`, `doas`, `su`, `pkexec` or `run0`
+is refused with `escalation_unsupported` before any secret is read. Those tools
+drop the environment, so the secret would not arrive anyway, and `sb` could not
+stop a privileged child at its timeout. Run the command without them.
+
 For paired credentials, repeat `--secret KEY=DEST` so both brokered values enter
 one child process, for example:
 
@@ -276,8 +281,8 @@ sb secrets run --session [--lifetime-seconds N]
   `sb` must be that terminal's foreground job. Otherwise the start is refused
   with `tty_required`. This keeps CI, MCP, durable jobs and captured remote
   paths out. A command that is itself `sudo`, `sudoedit`, `doas`, `su`,
-  `pkexec` or `run0` is refused with `escalation_unsupported`, because `sb`
-  could not end the privileged child at the end of the session. All of these
+  `pkexec` or `run0` is refused with `escalation_unsupported`, as in ordinary
+  `run`, because `sb` could not end the privileged child. All of these
   refusals happen before any secret is read.
 - A start line shows the source, key names, the lifetime and the local end
   time. Redacted output is shown live; an end line shows the end reason, the

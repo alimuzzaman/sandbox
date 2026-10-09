@@ -148,6 +148,9 @@ Each `--secret KEY=DEST` is resolved through the same broker and injected into
 the same minimal child environment. Destinations must be unique and safe; the
 key names and destination names are recorded, never the values.
 
+A command that is itself `sudo`, `doas`, `su`, `pkexec` or `run0` is refused
+with `escalation_unsupported` before any read: run it without escalation.
+
 MCP may inspect or validate only explicitly authorized source modes. MCP use is
 limited to a registered reviewed use profile; it never accepts arbitrary
 commands or a candidate secret. There is no MCP reveal tool.

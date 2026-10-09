@@ -582,6 +582,15 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "escalation_unsupported")
         self.assertEqual(self.events(), [])
 
+    def test_run_refuses_escalating_command_before_audit(self):
+        for argv in (["sudo", "true"], ["/usr/bin/doas", "true"]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(SecretBrokerError) as raised:
+                    self.service.run("fixture", "API_TOKEN", argv, destination="API_TOKEN")
+                self.assertEqual(raised.exception.code, "escalation_unsupported")
+                self.assertIn("without sudo", raised.exception.message)
+        self.assertEqual(self.events(), [])
+
     def test_normalize_bindings_refuses_without_audit(self):
         cases = {
             "selection_invalid": [(), [("API_TOKEN",)], [("API_TOKEN", "A"), ("API_TOKEN", "B")]],

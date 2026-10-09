@@ -300,6 +300,8 @@ class SecretService:
         normalized, keys = self._normalize_bindings(source, bindings)
         if surface != "cli":
             raise SecretBrokerError("command_denied", "arbitrary secret commands are local CLI only")
+        refuse_escalation(argv)
+
         def perform(correlation):
             values = self._binding_values(source, normalized)
             result = run_with_secrets(

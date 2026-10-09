@@ -118,7 +118,8 @@ class SessionSignals:
 
 # Commands whose whole purpose is to run their argument with other
 # privileges. A privileged member of the child's group cannot be signalled by
-# the unprivileged broker, so the 5-second end bound (FR-011) could not hold.
+# the unprivileged broker, so neither the run timeout nor the session end
+# bound (FR-011) could hold. Refused for `secrets run` and session mode alike.
 ESCALATION_COMMANDS = frozenset({"sudo", "sudoedit", "doas", "su", "pkexec", "run0"})
 
 
@@ -133,8 +134,9 @@ def refuse_escalation(argv: Sequence[str]) -> None:
     if isinstance(executable, str) and os.path.basename(executable) in ESCALATION_COMMANDS:
         raise SecretBrokerError(
             "escalation_unsupported",
-            "session mode cannot end a privileged child; run the command without "
-            "sudo, sudoedit, doas, su, pkexec or run0",
+            "a brokered secret cannot go to a privileged command: sudo and similar "
+            "tools drop the environment and sb cannot stop a privileged child; run "
+            "the command without sudo, sudoedit, doas, su, pkexec or run0",
         )
 
 

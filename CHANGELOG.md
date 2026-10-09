@@ -20,6 +20,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `python3.14`. Running `/path/to/sb` from another directory, including as a
   `job-start --local` command, no longer fails with "sandbox needs Python >=
   3.12" when only an old system `python3` is on PATH.
+- `sb secrets run` text output labels the selected keys as `  keys=A,B`
+  instead of printing each bare key name on its own line, so a key name can
+  no longer be read as the first line of the child's output. A non-zero child
+  exit now reports `child_failed: the command exited with status N; secret
+  delivery succeeded` after the child's output, not before it.
 - Feature 050 v2 image staging now reports the failed image role and a closed,
   redacted pull-failure class through terminal results and status replay without
   retaining Docker output; v1 staging remains unchanged.

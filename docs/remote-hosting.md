@@ -204,6 +204,45 @@ to the reviewed plan workflow (`./sb remote docker-pool NAME --json`);
 operators must not remove Docker networks directly or treat disk capacity as a
 network-capacity fix.
 
+A remote whose Docker daemon configures no address pools is refused as
+`missing_pool_evidence` (missing evidence, not exhausted capacity), and the
+refusal names the range remedy `./sb remote network-range propose <remote>`.
+
+#### Development ranges (spec 063, in progress)
+
+A development range is an operator-assigned IPv4 range on one remote from
+which Sandbox will carve one fixed subnet per created network, so capacity is
+proven by Sandbox's own allocation table instead of Docker's built-in default
+pools (which never count as capacity). The authoritative ranges and
+allocations live on the remote under `$SANDBOX_HOME/runtime/network-ranges/`
+(directory 0700, `state.json` 0600, writes under an exclusive flock).
+
+```bash
+./sb remote network-range propose <remote> [--json]   # read-only: first free /20 in 10.200.0.0/14
+./sb remote network-range assign <remote> --cidr 10.200.0.0/20 [--subnet-prefix 26]           # plan only
+./sb remote network-range assign <remote> --cidr 10.200.0.0/20 [--subnet-prefix 26] --confirm # record it
+./sb remote network-range list <remote> [--json]      # ranges, allocations (bounded 256 rows / 64 KiB)
+```
+
+- `propose` and `list` never create remote state. `assign` without
+  `--confirm` validates and plans; the range must be `/12`-`/24`, the subnet
+  prefix `/24`-`/29`, and it is refused (`range_overlap` with a class) when it
+  overlaps a Docker network, a host route, Docker's built-in default pools or
+  `100.64.0.0/10`, or (`range_conflict`) another assigned range. A partial
+  remote network inventory refuses with `range_inventory_unknown`; nothing is
+  recorded.
+- A confirmed `assign` needs an installed runtime whose control protocol
+  serves ranges; otherwise it refuses `range_runtime_unsupported` with the
+  `remote service migrate <remote> --confirm` remedy. The current checkout
+  still declares protocol 1, so confirmed assignment refuses everywhere until
+  the protocol bump that ships range admission (spec 063 T013a).
+- `remote provision` adds a best-effort `network_range` entry to its result: a
+  proposal with the exact assign command when the remote has no range, never
+  an assignment, and never a provision failure.
+- Only `list` prints subnets. Run admission and the per-run Compose override
+  that will consume ranges are not wired yet; until then capacity admission
+  uses daemon pools exactly as above.
+
 The Docker-pool transaction also treats a client-side timeout as an unknown
 outcome. The safe error omits the generated transaction command (including its
 encoded program); inspect the remote receipt and running-container state before
@@ -1153,6 +1192,8 @@ reference. Summary:
 | `./sb remote service stop <name> --confirm --json` | Stop only the selected proven service unit |
 | `./sb remote up` / `down <name> --confirm` | Legacy-compatible lifecycle entrypoints; planning is the default and migrated remotes use the owned service |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
+| `./sb remote network-range propose\|list <name> [--json]` | Read-only development-range proposal, or the recorded ranges and allocations (spec 063) |
+| `./sb remote network-range assign <name> --cidr <cidr> [--subnet-prefix N] [--confirm]` | Plan, or with `--confirm` record, a development range on the remote |
 | `./sb deploy --remote <name> [--deploy-timeout <seconds>]` | One-way, on-demand push of local state to the VPS with a bounded Git push budget |
 | `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
 | `./sb delivery inspect --project-dir <dir> --remote <name> (--environment <env> \| --label <label>) [--operation-id <id> \| --request-id <id>] [--observe] [--limit 1..50] [--cursor <token>] [--json]` | Read the executing controller's bounded delivery history; default is recorded-only, while `--observe` adds current read-only evidence |

@@ -212,6 +212,45 @@ class RangeProgramTests(unittest.TestCase):
         self.assertNotIn("secret", str(ctx.exception))
         self.assertNotIn("192.0.2.1", str(ctx.exception))
 
+    def test_allocate_partial_inventory_refuses_without_state_change(self):
+        """Sol R4-1: an unseen foreign network could occupy a granted subnet."""
+        self.assign("10.201.0.0/24", 25)
+        before = (self.state_dir / "state.json").read_bytes()
+        for kwargs in ({"docker_ok": False}, {"ip_ok": False}):
+            with self.subTest(**kwargs):
+                self.set_inventory(**kwargs)
+                with self.assertRaises(RangeError) as ctx:
+                    self.store.allocate(owner_kind="workspace", owner_id="w1",
+                                        workspace_id="w1", networks=["default"])
+                self.assertEqual(ctx.exception.code, "range_inventory_unknown")
+                self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+
+    def test_range_commands_use_registered_remote_name(self):
+        """Sol R4-3: get_remote() records carry ``_remote_name``, not ``name``."""
+        store = range_store.RangeStore({"_remote_name": "vps"}, self.remote, installed_protocol=NEW)
+        self.assertIn(" assign vps ", store.propose()["assign_command"])
+        old = range_store.RangeStore({"_remote_name": "vps"}, self.remote, installed_protocol=OLD)
+        with self.assertRaises(RangeError) as ctx:
+            old.assign("10.200.0.0/20", 26, confirm=True, holder=HOLDER)
+        self.assertIn("migrate vps --confirm", ctx.exception.data["remedy"])
+
+    def test_range_listing_enforces_byte_limit(self):
+        """Sol R4-4: the listing stays within 64 KiB with accurate truncation."""
+        self.assign()
+        state = json.loads((self.state_dir / "state.json").read_text())
+        long_id = "w" + "x" * 127
+        state["allocations"] = [{
+            "allocation_id": f"a-{i:016x}", "range_id": state["ranges"][0]["range_id"],
+            "subnet": "10.200.0.0/26", "owner_kind": "job", "owner_id": long_id + str(i)[-1:],
+            "workspace_id": long_id, "network": "n" * 64, "allocated_at": i,
+        } for i in range(300)]
+        (self.state_dir / "state.json").write_text(json.dumps(state))
+        result = self.remote(None, range_store.program.remote_command({"op": "list"}))
+        self.assertLessEqual(len(result.stdout.encode()), 64 * 1024)
+        listed = self.store.list()
+        self.assertTrue(listed["truncated"])
+        self.assertLess(len(listed["allocations"]), 256)
+
     def test_concurrent_last_subnet_yields_one_grant(self):
         self.assign("10.201.0.0/24", 24)  # capacity 1
         ctx = multiprocessing.get_context("spawn")

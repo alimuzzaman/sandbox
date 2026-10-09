@@ -183,7 +183,7 @@ class NetworkRangeCommandTests(unittest.TestCase):
         self.put = []
         patches = [
             patch("sandbox.remote_network.store.RangeStore", _Store),
-            patch("sandbox.core._remote.get_remote", return_value={"ssh": "target", "name": "vps"}),
+            patch("sandbox.core._remote.get_remote", return_value={"ssh": "target", "_remote_name": "vps"}),
             patch("sandbox.core._remote.put_remote",
                   side_effect=lambda name, **kw: self.put.append((name, kw))),
             patch("sandbox.core._remote.remote_mcp_service_status", return_value={

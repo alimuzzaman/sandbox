@@ -574,3 +574,58 @@ class RangeCapacityTests(unittest.TestCase):
                                                    range_evidence=None))
         self.assertNotIn("range_usable_subnets",
                          evaluate_network_capacity(evidence())["capacity"])
+
+
+class RangeCapacityHardeningTests(unittest.TestCase):
+    """Sol round 4: R4-2 and R4-5 plus grant validation."""
+
+    def test_empty_pools_preserve_other_refusals(self):
+        ranged = range_evidence(capacity=4, granted=[GRANT])
+        empty = {"status": "complete", "pools": [], "totals": {
+            "total_subnets": 0, "allocated_subnets": 0, "usable_subnets": 0}}
+        for candidate, code, reason in (
+            ({**empty, "ok": False}, "docker_network_capacity_unavailable", "probe_not_successful"),
+            ({**empty, "collisions": [{"pool_id": "p"}]}, "network_allocation_conflict",
+             "network_allocation_conflict"),
+            ({**empty, "totals": {"total_subnets": 5, "allocated_subnets": 0,
+                                  "usable_subnets": 5}},
+             "docker_network_capacity_unavailable", "inconsistent_pool_totals"),
+            ({**empty, "totals": {"total_subnets": 0}},
+             "docker_network_capacity_unavailable", "invalid_capacity_totals"),
+        ):
+            with self.subTest(reason=reason):
+                result = evaluate_network_capacity(candidate, range_evidence=ranged)
+                self.assertFalse(result["ok"])
+                self.assertEqual((result["code"], result["evidence"]["reason"]), (code, reason))
+        self.assertTrue(evaluate_network_capacity(empty, range_evidence=ranged)["ok"])
+
+    def test_range_exhaustion_rejects_secret_shaped_ids(self):
+        canary = "ghp_" + "A" * 36
+        table = [
+            {"owner_id": canary, "owner_kind": "job", "workspace_id": "w1", "age_seconds": 1},
+            {"owner_id": "j2", "owner_kind": "job", "workspace_id": "sk-" + "a" * 40,
+             "age_seconds": 2},
+            {"owner_id": "w3", "owner_kind": "workspace", "workspace_id": "w3", "age_seconds": 3},
+        ]
+        result = evaluate_network_capacity(
+            NO_POOLS, remote_name="vps",
+            range_evidence=range_evidence(capacity=1, allocated=1, exhausted=True, table=table))
+        self.assertEqual(result["code"], "docker_network_subnet_exhausted")
+        rendered = json.dumps(result)
+        self.assertNotIn("ghp_", rendered)
+        self.assertNotIn("sk-", rendered)
+        self.assertEqual([row["owner_id"] for row in result["allocation_table"]], ["w3"])
+        self.assertEqual(result["release_commands"], ["./sb workspace release w3 --remote vps"])
+
+    def test_partial_and_duplicate_range_grants_refuse(self):
+        other = "a-" + "2" * 16
+        for granted, required in (([GRANT], 2), ([GRANT, GRANT], 2), ([GRANT, other], 3)):
+            with self.subTest(granted=granted, required=required):
+                result = evaluate_network_capacity(
+                    NO_POOLS, required_subnets=required,
+                    range_evidence=range_evidence(capacity=4, allocated=2, granted=granted))
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["evidence"]["reason"], "invalid_range_evidence")
+        self.assertTrue(evaluate_network_capacity(
+            NO_POOLS, required_subnets=2,
+            range_evidence=range_evidence(capacity=4, allocated=2, granted=[GRANT, other]))["ok"])

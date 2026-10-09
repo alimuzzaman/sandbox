@@ -19,6 +19,10 @@ MAX_LISTED = 256
 MAX_TABLE = 32
 MAX_NETWORKS_PER_REQUEST = 16
 MAX_OBSERVED = 4096
+# The listing is bounded at 64 KiB (contract); allocations get most of it,
+# ranges (at most 16 short rows) and the envelope the rest.
+MAX_LIST_BYTES = 64 * 1024
+MAX_LIST_ALLOCATION_BYTES = 56 * 1024
 
 _DRIVER = r'''
 
@@ -159,11 +163,17 @@ if _op == "list":
     _fd = _lock(False)
     _state = _load()
     _allocs = sorted(_state["allocations"], key=lambda a: (a["allocated_at"], a["allocation_id"]))
+    _shown, _size = [], 0
+    for _row in _allocs[:MAX_LISTED]:
+        _size += len(_json.dumps(_row, sort_keys=True)) + 2
+        if _size > MAX_LIST_ALLOCATION_BYTES:
+            break
+        _shown.append(_row)
     _emit({"ranges": [dict(r, capacity=parse_range(r["cidr"], r["subnet_prefix"]).capacity)
                       for r in _state["ranges"]][:MAX_RANGES],
-           "allocations": _allocs[:MAX_LISTED],
+           "allocations": _shown,
            "capacity_proof": _state.get("capacity_proof"),
-           "truncated": len(_allocs) > MAX_LISTED})
+           "truncated": len(_shown) < len(_allocs)})
 
 if _op == "assign":
     try:
@@ -209,6 +219,10 @@ if _op == "allocate":
     if _missing and _state["ranges"]:
         _used = [a["subnet"] for a in _state["allocations"]]
         _observed = inventory_from_payload(_observe())
+        if not _observed.complete:
+            # An unseen network could already occupy a subnet we would grant.
+            _refuse("range_inventory_unknown",
+                    "the remote network inventory is partial; nothing was allocated")
         # Skip subnets a network Sandbox did not allocate already occupies.
         _foreign = [n for n in _observed.networks if str(n) not in set(_used)]
         for _dev, _subnet in free_subnets(_ranges(_state), _used):
@@ -270,7 +284,8 @@ def program_text() -> str:
     source = (Path(__file__).with_name("ranges.py")).read_text()
     bounds = (f"\nMAX_RANGES = {MAX_RANGES}\nMAX_LISTED = {MAX_LISTED}\n"
               f"MAX_TABLE = {MAX_TABLE}\nMAX_NETWORKS_PER_REQUEST = {MAX_NETWORKS_PER_REQUEST}\n"
-              f"MAX_OBSERVED = {MAX_OBSERVED}\n")
+              f"MAX_OBSERVED = {MAX_OBSERVED}\n"
+              f"MAX_LIST_ALLOCATION_BYTES = {MAX_LIST_ALLOCATION_BYTES}\n")
     return source + bounds + _DRIVER
 
 

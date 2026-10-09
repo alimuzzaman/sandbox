@@ -8,6 +8,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Development ranges on a remote (spec 063, first slice). `sb remote
+  network-range propose|assign|list` proposes, plans or (with `--confirm`)
+  records an operator range checked against Docker networks, host routes,
+  Docker's default pools and CGNAT; `remote provision` reports a proposal and
+  never assigns. Capacity admission now words a remote without daemon pools as
+  `missing_pool_evidence` naming the range remedy, and its evaluator can count
+  unallocated range capacity and refuse range exhaustion with a bounded
+  allocation table and release commands. Confirmed assignment waits for the
+  protocol bump that wires range admission.
 - Remote runtime coexistence (spec 061). Each runtime declares a control
   protocol range; `remote service status` reports `control_protocol` and a
   `compatibility` verdict, and remote consumers (workspace preflight, hosted

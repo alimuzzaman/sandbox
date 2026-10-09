@@ -44,7 +44,8 @@ class RangeStore:
             from sandbox.core._remote import ssh_run as default_ssh_run
             ssh_run = default_ssh_run
         self.entry = entry
-        self.name = str(entry.get("name") or "")
+        # get_remote() marks the record with ``_remote_name``.
+        self.name = str(entry.get("_remote_name") or entry.get("name") or "")
         self._ssh_run = ssh_run
         self.installed_protocol = installed_protocol
 
@@ -89,6 +90,8 @@ class RangeStore:
 
     def list(self) -> dict:
         value = self._call({"op": "list"})
+        if len(json.dumps(value).encode()) > program.MAX_LIST_BYTES:
+            raise RangeError(STORE_UNAVAILABLE, "remote range listing exceeds its bound")
         rows = value.get("allocations")
         listed = value.get("ranges")
         if not isinstance(rows, list) or not isinstance(listed, list) \

@@ -90,6 +90,9 @@ def _normalize_range(range_evidence: Any) -> dict | None:
         if not isinstance(value, str) or not _ALLOCATION_ID.fullmatch(value):
             return None
         ids.append(value)
+    if len(set(ids)) != len(ids):
+        return None
+    from sandbox.services.redaction import redact_text
     rows = []
     table = range_evidence.get("table", [])
     for row in table if isinstance(table, list) else []:
@@ -97,8 +100,10 @@ def _normalize_range(range_evidence: Any) -> dict | None:
             continue
         owner, workspace, kind, age = (row.get(k) for k in (
             "owner_id", "workspace_id", "owner_kind", "age_seconds"))
-        if (isinstance(owner, str) and _OWNER_ID.fullmatch(owner)
+        # Secret-shaped identifiers are dropped, never echoed (SC-009).
+        if (isinstance(owner, str) and _OWNER_ID.fullmatch(owner) and redact_text(owner) == owner
                 and isinstance(workspace, str) and _OWNER_ID.fullmatch(workspace)
+                and redact_text(workspace) == workspace
                 and kind in _OWNER_KINDS and _non_negative_int(age)):
             rows.append({"owner_id": owner, "owner_kind": kind,
                          "workspace_id": workspace, "age_seconds": age})
@@ -209,18 +214,16 @@ def evaluate_network_capacity(
                       "required_subnets": required_subnets},
             evidence={"status": "partial", "reason": "invalid_range_evidence"},
         )
-    no_pools = isinstance(evidence, dict) and (
-        (evidence.get("ok") is False and evidence.get("code") == "docker_address_pools_unavailable")
-        or (evidence.get("status") == "complete" and evidence.get("pools") == []))
-    if no_pools:
+    pools = _evaluate_pools(evidence, required_subnets=required_subnets,
+                            remote_name=remote_name)
+    # Only a probe that passed every other check and found no configured
+    # pool counts as "no pools"; every other refusal stands (FR-009).
+    if pools["evidence"].get("reason") == "missing_pool_evidence":
         if ranged["capacity"] == 0:
-            return _missing_pool_evidence(remote_name, required_subnets)
-        pools = None
-    else:
-        pools = _evaluate_pools(evidence, required_subnets=required_subnets,
-                                remote_name=remote_name)
-        if pools["code"] not in (None, "docker_network_subnet_exhausted"):
             return pools
+        pools = None
+    elif pools["code"] not in (None, "docker_network_subnet_exhausted"):
+        return pools
     pool_capacity = pools["capacity"] if pools else {
         "total_subnets": 0, "allocated_subnets": 0, "usable_subnets": 0, "pools": []}
     capacity = {
@@ -375,6 +378,15 @@ def _evaluate_pools(
         )
 
     if not pools:
+        if total:
+            return _blocked(
+                code="docker_network_capacity_unavailable",
+                state="partial",
+                remote_name=remote_name,
+                capacity={"status": "partial", "usable_subnets": None,
+                          "required_subnets": required_subnets},
+                evidence={"status": "partial", "reason": "inconsistent_pool_totals"},
+            )
         return _missing_pool_evidence(remote_name, required_subnets)
 
     normalized_pools: list[dict] = []

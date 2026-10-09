@@ -38,6 +38,24 @@ class NetworkSelectionTests(unittest.TestCase):
         self.assertEqual(override.compose_networks(config), ([], ["pinned"]))
 
 
+class DockerNameTests(unittest.TestCase):
+    def test_allocation_uses_project_scoped_docker_names(self):
+        self.assertEqual(override.docker_names(CONFIG, ["backend", "default"]),
+                         {"backend": "proj_backend", "default": "proj_default"})
+
+    def test_two_stacks_declaring_default_get_distinct_names(self):
+        one = override.docker_names({"name": "sandbox-a", "networks": {"default": {}}}, ["default"])
+        two = override.docker_names({"name": "sandbox-b", "networks": {"default": {}}}, ["default"])
+        self.assertNotEqual(one["default"], two["default"])
+
+    def test_unusable_names_are_refused(self):
+        with self.assertRaises(override.OverrideError):
+            override.docker_names({"networks": {"default": {}}}, ["default"])
+        with self.assertRaises(override.OverrideError):
+            override.docker_names({"name": "p", "networks": {
+                "a": {"name": "same"}, "b": {"name": "same"}}}, ["a", "b"])
+
+
 class RenderTests(unittest.TestCase):
     def test_one_ipam_subnet_per_created_network(self):
         plan = override.plan(CONFIG, {"default": "10.200.0.0/26", "backend": "10.200.0.64/26"})

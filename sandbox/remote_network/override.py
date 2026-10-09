@@ -11,6 +11,8 @@ import ipaddress
 import re
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+# The range program's network-name bound.
+_DOCKER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _WORKSPACE_RUNS = frozenset({"workspace", "job", "preview", "exec", "ci_cell"})
 _COLLISION = re.compile(r"pool overlaps", re.IGNORECASE)
 
@@ -39,8 +41,30 @@ def compose_networks(config: dict) -> tuple[list[str], list[str]]:
     return sorted(created), sorted(outside)
 
 
+def docker_names(config: dict, keys: list[str]) -> dict[str, str]:
+    """Compose key -> the project-scoped Docker network name it creates.
+
+    Allocation is keyed by the Docker name, so two stacks in one workspace
+    that both declare ``default`` never share a subnet.
+    """
+    project = config.get("name") if isinstance(config, dict) else None
+    networks = config.get("networks") if isinstance(config, dict) else {}
+    names = {}
+    for key in keys:
+        spec = networks.get(key) if isinstance(networks, dict) else None
+        name = spec.get("name") if isinstance(spec, dict) else None
+        if not isinstance(name, str) and isinstance(project, str):
+            name = f"{project}_{key}"
+        if not isinstance(name, str) or not _DOCKER_NAME.fullmatch(name):
+            raise OverrideError("range_override_invalid", "compose network name is invalid")
+        names[key] = name
+    if len(set(names.values())) != len(names):
+        raise OverrideError("range_override_invalid", "compose networks share a Docker name")
+    return names
+
+
 def plan(config: dict, granted: dict[str, str]) -> dict:
-    """The override text for ``granted`` (network -> subnet); every created network needs one."""
+    """The override text for ``granted`` (compose key -> subnet); every created network needs one."""
     created, outside = compose_networks(config)
     missing = [name for name in created if name not in granted]
     if missing:

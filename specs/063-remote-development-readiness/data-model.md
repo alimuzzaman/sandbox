@@ -27,7 +27,10 @@ prefix is a no-op; a different prefix for an assigned CIDR is refused
 | `network` | name | Compose network name it was granted for, bounded 64 chars |
 | `allocated_at` | int epoch | |
 
-Identity: an allocation is unique per `(workspace_id, network)`. Allocating
+Identity: an allocation is unique per `(workspace_id, network)`, where
+`network` is the project-scoped Docker network name the effective Compose
+config creates (for example `sandbox-<instance>_default`), not the Compose
+key, so two stacks in one workspace never share a subnet. Allocating
 for a pair that already holds one returns the existing allocation, so a job,
 preview or later run in the same workspace stack reuses its workspace's
 subnets and allocations stay bounded by live workspaces times their networks.

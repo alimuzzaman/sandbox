@@ -1,6 +1,6 @@
 # Product Requirements Draft: Per-Target Hosting Operations
 
-**Status**: Refined
+**Status**: Validated
 
 **Created**: 2026-10-08
 
@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions.
 
-**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (reasoning effort high, read-only, 2026-10-09). Round 1: lease expiry could admit a successor while the predecessor's remote phase still ran; fixed. Round 2: cessation alone admitted past an unresolved recovery fence; fixed (Scenario 7b). Round 3: hold expiry still promised unconditional admission; fixed (expiry removes only the hold blocker; Scenario 9 and its timed acceptance apply to idle, unfenced targets, fenced targets follow 7a/7b), with the non-blocking alignment of "finishes" and "no further forward effects"; round 4 pending
+**Final Validation**: `PASS` — independent GPT-6.1-Sol review (reasoning effort high, read-only, 2026-10-09, round 4): no blocking findings. Round 1: lease expiry could admit a successor while the predecessor's remote phase still ran; fixed. Round 2: cessation alone admitted past an unresolved recovery fence; fixed (Scenario 7b). Round 3: hold expiry still promised unconditional admission; fixed (expiry removes only the hold blocker; Scenario 9 and its timed acceptance apply to idle, unfenced targets, fenced targets follow 7a/7b), with the non-blocking alignment of "finishes" and "no further forward effects"
 
 **Validated On**: 2026-10-09
 
@@ -577,8 +577,8 @@ more sites move to the shared xCloud server.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest readiness review verdict is `PASS` (independent Sol round 4 pending; see Final Validation).
+- [x] The latest readiness review verdict is `PASS` (independent Sol round 4; see Final Validation).
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

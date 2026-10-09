@@ -1,6 +1,6 @@
 # Product Requirements Draft: Hosted Delivery Evidence Reconciliation
 
-**Status**: Refined
+**Status**: Validated
 
 **Created**: 2026-10-08
 
@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); revised 2026-10-09 by a Claude Opus 5.5 root applying one independent Opus readiness review (verdict `REOPEN`) and the Fable product decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions. Evidence: the feedback backlog, spec 054 ledger, `docs/remote-hosting.md`, `docs/delivery-outcomes.md`, `docs/remote-job-runtime.md`, `docs/roadmap/2026-10-08-next-features.md`, and `origin/latest` commits `543f179`, `d2d123c`, `ed3cf56`, `66d35ee`.
 
-**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09, round 1) found two blocking gaps: revision/config equality could adopt success without required edge or initializer proof, and the "started remote phase" prohibition contradicted image `recovery_no_effect` after preflight. Both fixed (adoption requires every applicable proof and no unresolved journal; prohibition scoped to source deliveries; image case and complete corroboration stated); round 2 pending
+**Final Validation**: `PASS` — independent GPT-6.1-Sol review (reasoning effort high, read-only, 2026-10-09, round 2): no blocking findings; the round-1 adoption and started-phase gaps are resolved. The non-blocking note (Adoption guard decision row lagging the behavior section) is applied
 
 **Validated On**: 2026-10-09
 
@@ -435,7 +435,7 @@ targets apply at once.
 | Controller scope | Any clean checkout on the same controller; other controllers out of scope | Delivery records live under the submitting controller's home | Fable decision (delegated by user), 2026-10-09 |
 | Source of truth for reconciliation | Exact live observation bound to the attempt's own digests; remote operation receipts when a runtime provides them (follow-up) | The remote retains no operation receipt for source deliveries today; exact observation extends the existing receipt repair without guessing | Fable decision (delegated by user), 2026-10-09 |
 | Image delivery evidence | The image-delivery proof of no effect. Reconciliation may use the remote's request-bound terminal record for the attempt's request id (`committed` adopts, `recovery_no_effect` proves no effect), corroborated by one live observation that must not contradict it (`diverged` if it does); source deliveries use exact observation only until a remote receipt exists (follow-up) | Image activation already keeps request-bound evidence; corroboration guards against a stale record | Fable decision (delegated by user), 2026-10-09 |
-| Adoption guard | `adopted_by_observation` only when observed revision and configuration equal the attempt's and no later attempt exists for the target; a later attempt yields `diverged` with reason `later_attempt` | Prevents adopting a runtime another attempt produced | Fable decision (delegated by user), 2026-10-09 |
+| Adoption guard | `adopted_by_observation` only when observed revision and configuration equal the attempt's, every applicable requested-outcome proof (edge route and certificate, DNS, initializers) is present, no edge or DNS journal for the target is unresolved, and no later attempt exists for the target; a later attempt yields `diverged` with reason `later_attempt`, a missing proof or unresolved journal yields `insufficient_evidence` | Prevents adopting a runtime another attempt produced | Fable decision (delegated by user), 2026-10-09 |
 | `no_effect_proven` | For deliveries without a remote request-bound terminal record (source deliveries): only when retained attempt evidence shows no transfer, edge, DNS or Compose phase started on the remote and one live observation equals the revision and configuration recorded at admission; otherwise `insufficient_evidence`; no recorded pre-attempt state means no proof | Proof of no effect must rest on both the attempt's own phase record and the live state | Fable decision (delegated by user), 2026-10-09 |
 | Compose rollback fact | Neither delivery kind has an automatic Compose rollback on failure; follow-up "Compose rollback on failure" covers both. Supersedes the earlier row that credited image activation with one, which the code does not have | Source apply rollback restores reservation, DNS, SSL mode and edge only; image activation fences a failure without rolling back | Root decision by Claude Opus 5.5 under delegated authority (user), 2026-10-09, correcting a Fable decision's premise |
 | Fence release | Source attempt: automatic only when retained phase evidence shows Compose never started and the edge rollback recorded complete. Image attempt: automatic when the retained activation record is terminal `refused` with no runtime effect entered and the edge rollback, if any, is complete; or on `committed` / `recovery_no_effect` per the image-evidence row. Any attempt: on adoption or proven no effect. Pre-feature records without phase evidence stay fenced until retired; otherwise explicit retire | A fence that protects nothing is pure cost; one that protects an unknown state must stay | Fable decision (delegated by user), 2026-10-09 |
@@ -533,8 +533,8 @@ targets apply at once.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest readiness review verdict is `PASS` (independent Sol round 2 pending; see Final Validation).
+- [x] The latest readiness review verdict is `PASS` (independent Sol round 2; see Final Validation).
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

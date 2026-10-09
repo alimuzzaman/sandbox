@@ -1,6 +1,6 @@
 # Product Requirements Draft: Transactional Edge and DNS Changes
 
-**Status**: Refined
+**Status**: Validated
 
 **Created**: 2026-10-09
 
@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); evidence from the feedback backlog, `docs/remote-hosting.md` (DNS, edge verification, rollback, nginx front door), and `origin/latest` commits `e5fc88b`, `ac9070b`, `7d04606`. Revised 2026-10-09 by Claude Opus 5.5 root (speckit-refine) applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; cited code re-verified read-only on `origin/latest`. Revised again 2026-10-09 by Claude Opus 5.5 root applying the second-round review (C1, C2, N3-N9, drift ruling) and Fable decisions E1 and E2; cited code re-verified on `origin/latest`.
 
-**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09, round 1) found one blocking gap: rollback after the lease is released could overwrite a later change another apply relies on. Fixed (conditional restoration, `rollback_conflict`, Scenarios 11a and 11b, acceptance) with the two non-blocking clarifications (owned record changed to an uncovered type; origin connection only for DNS-only hostnames); round 2 pending
+**Final Validation**: `PASS` — independent GPT-6.1-Sol review (reasoning effort high, read-only, 2026-10-09, round 2): no blocking findings; the round-1 rollback gap is resolved. The non-blocking note (Record types decision row now carries the owned-record-changed-to-uncovered-type exception) is applied
 
 **Validated On**: 2026-10-09
 
@@ -543,7 +543,7 @@ grows with every hostname moved and every alias added.
 |----------|--------|-----------|--------------|
 | Ownership rule | Only records carrying this target's marker are ever changed or removed; any other record of a covered type on a declared hostname is a preflight refusal, and uncovered types are left alone (see Record types) | A record Sandbox did not create may be someone's production; a provider error mid-apply is too late | Fable decision (delegated by user), 2026-10-09 |
 | Ownership marker | "managed by Sandbox hosting; target=<project>/<environment>". Same project and environment on another remote is owned (a move, `50735fc8`); different is `foreign_record`; the legacy comment is `unmarked`, claimable by adoption | The current shared comment cannot tell two targets apart | Fable decision (delegated by user), 2026-10-09 |
-| Record types | Covered types are A, AAAA and CNAME. On a declared hostname an unmarked or foreign-marked A/AAAA, any CNAME outside the redirect adoption case, and a read-only or provider-managed record of a covered type refuse the apply. Every other type (MX, TXT, CAA, NS, SRV, ...) is listed left_alone and is never changed, removed, or treated as a conflict | Hosting touches only same-type A/AAAA and the redirect CNAME today; an apex normally carries MX and TXT and must keep applying | Fable decision (delegated by user), 2026-10-09 |
+| Record types | Covered types are A, AAAA and CNAME. On a declared hostname an unmarked or foreign-marked A/AAAA, any CNAME outside the redirect adoption case, and a read-only or provider-managed record of a covered type refuse the apply. Every other type (MX, TXT, CAA, NS, SRV, ...) is listed left_alone and is never changed, removed, or treated as a conflict, except that a record this target owned whose type was changed at the provider to an uncovered type is a foreign_record preflight refusal | Hosting touches only same-type A/AAAA and the redirect CNAME today; an apex normally carries MX and TXT and must keep applying | Fable decision (delegated by user), 2026-10-09 |
 | Redirect CNAME | Sandbox never creates a CNAME. A redirect route's desired state is A/AAAA at the origin, redirected by the front door. An operator CNAME whose content is the redirect target is adoptable: the plan shows it, --adopt-records marks it, sets proxied and journals its prior state, after which it is owned like any marked record (removed on teardown). Without --adopt-records, with a CNAME to any other content, or on a DNS-only target, the apply refuses conflicting_cname naming the remedy: adopt, or delete the CNAME so A/AAAA can be written. CNAME content is never rewritten | Today's flip-only path works for existing users but leaves the record unmarked forever, which the ownership rule cannot express; adoption makes the change explicit, journaled and reversible with one mechanism | Fable decision (delegated by user), 2026-10-09 |
 | Adoption flag | Adoption of unmarked, leftover, interrupted or redirect-CNAME records requires `--adopt-records`; `--confirm` keeps its existing meaning and never adopts | `host apply --confirm` already authorizes protected applies, so reusing it would make every protected apply adopt silently | Root decision by Claude Opus 5.5 under delegated authority (user), 2026-10-09 |
 | Zone SSL mode | A journaled step: shown in the plan, still refused without `--allow-zone-ssl-change`, restored on rollback | It is a zone-wide change made by the apply and must be undone with it | Fable decision (delegated by user), 2026-10-09 |
@@ -667,8 +667,8 @@ grows with every hostname moved and every alias added.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest readiness review verdict is `PASS` (independent Sol round 2 pending; see Final Validation).
+- [x] The latest readiness review verdict is `PASS` (independent Sol round 2; see Final Validation).
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

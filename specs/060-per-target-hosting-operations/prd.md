@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions.
 
-**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09, round 1) found one blocking gap: lease expiry could admit a successor while the predecessor's dispatched remote phase still ran. Fixed (lease expiry never clears the uncertainty fence; Scenario 7a; acceptance) together with the non-blocking "zero writes" wording; round 2 pending
+**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09). Round 1 found that lease expiry could admit a successor while the predecessor's remote phase still ran; fixed. Round 2 found that cessation alone still admitted the successor past an unresolved recovery fence; fixed (cessation is necessary, never sufficient; ordinary admission and every applicable 054/062 fence must clear; Scenario 7b; acceptance) with the non-blocking "zero further forward effects" wording; round 3 pending
 
 **Validated On**: 2026-10-09
 
@@ -237,8 +237,22 @@ more sites move to the shared xCloud server.
 - **Expected outcome**: Lease expiry alone does not admit it. The target keeps
   the predecessor's uncertainty fence until the remote phase is proven to have
   stopped or reached a terminal state; until then the successor is refused
-  with the predecessor's operation identity and the inspect command. Once the
-  phase is proven stopped or terminal, the successor is admitted.
+  with the predecessor's operation identity and the inspect command. Proof
+  that the phase stopped or is terminal is necessary but not sufficient:
+  the successor is then admitted only if the ordinary admission checks pass
+  and every applicable recovery fence (054 FR-008, 062) is cleared, that is,
+  the predecessor's outcome is adopted, proven to have had no effect, or
+  rolled back under the applicable rollback conditions.
+
+### Scenario 7b — Phase stopped after effects began (negative)
+
+- **Starting state**: As 7a, but the remote phase ended terminal-failed after
+  the Compose step had entered and partially changed the runtime.
+- **User action**: Another session asks to apply to the same target.
+- **Expected outcome**: The successor stays refused. The phase is terminal,
+  but its unresolved effect keeps the predecessor's uncertainty fence in
+  place until the outcome is adopted, proven no-effect, or rolled back; the
+  refusal names the predecessor's operation identity and the inspect command.
 
 ### Scenario 8 — Claim a hold
 
@@ -342,8 +356,11 @@ more sites move to the shared xCloud server.
 - Lease expiry alone never clears the predecessor's uncertainty fence. If the
   expired holder had dispatched a remote phase, no successor from any
   controller is admitted to effects on that target until the phase is proven
-  to have ceased or reached a terminal state; expiry only stops the
-  predecessor from starting new effects.
+  to have ceased or reached a terminal state, and even then only once the
+  ordinary admission checks pass and every applicable recovery fence is
+  cleared (adopted, proven no-effect, or rolled back). Cessation is
+  necessary, never sufficient. Expiry only stops the predecessor from
+  starting new effects.
 - Holds: the default duration is one hour and the maximum is four hours
   measured from the original claim; the holder may renew, but no renewal
   extends expiry past four hours after the claim; a hold needed longer is
@@ -484,7 +501,8 @@ more sites move to the shared xCloud server.
   that expiry carries a new identity and start time.
 - With the cap at two, a third concurrent build never starts while two are
   running.
-- A returning holder whose lease expired performs zero effects and its
+- A returning holder whose lease expired performs zero further forward
+  effects (rollback under a reacquired lease remains permitted) and its
   operation is recorded as `effect_unknown`.
 - A session on the same controller as a hold's holder, not presenting the
   hold identity, is never admitted on the held target.
@@ -494,7 +512,10 @@ more sites move to the shared xCloud server.
   written).
 - A successor on a target whose expired holder dispatched a still-running
   remote phase is refused until that phase is proven stopped or terminal,
-  from every controller.
+  from every controller; after that, it is still refused while the
+  predecessor's recovery fence is unresolved (a phase that stopped after
+  Compose entered keeps the successor fenced until adoption, proven
+  no-effect, or rollback).
 - Host storage reclamation started while a target on the remote has an
   admitted operation or a live hold, but no remote-wide lease or edge/pool
   transaction is active, runs and removes nothing belonging to any hosted
@@ -545,7 +566,7 @@ more sites move to the shared xCloud server.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest readiness review verdict is `PASS` (independent Sol round 2 pending; see Final Validation).
+- [ ] The latest readiness review verdict is `PASS` (independent Sol round 3 pending; see Final Validation).
 
 **Readiness**: `NOT READY`
 

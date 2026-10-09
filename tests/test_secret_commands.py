@@ -196,6 +196,26 @@ class SecretCommandTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 11)
         self.assertIn("child_failed", stderr.getvalue())
         self.assertIn("exit_code=11", stdout.getvalue())
+        self.assertIn("the command exited with status 11", stderr.getvalue())
+        self.assertNotIn("secret use command failed", stderr.getvalue())
+
+    def test_run_labels_selected_keys_apart_from_child_output(self):
+        args = SimpleNamespace(
+            action="run", source="fixture", key=None, secrets=["A_KEY=A", "B_KEY=B"],
+            project_dir=".", destination=None, timeout_seconds=5, command=["--", "child"],
+        )
+        service = SimpleNamespace(run_many=lambda *a, **k: {
+            "ok": True, "operation": "run", "keys": ["A_KEY", "B_KEY"],
+            "result": {"termination": "exited", "exit_code": 0, "output": "first\n"},
+        })
+        stdout = io.StringIO()
+        with patch.object(command, "_service", return_value=service), \
+             redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            command.cmd_secrets({}, args)
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(lines[1], "  keys=A_KEY,B_KEY")
+        self.assertEqual(lines[2], "first")
+        self.assertNotIn("A_KEY", lines[2:])
 
     def test_run_many_passes_pair_without_nested_child_invocation(self):
         args = SimpleNamespace(
@@ -490,7 +510,7 @@ class SecretSessionCommandTests(unittest.TestCase):
                 code, out, err = self.invoke(self.args(), SessionService("child_exited", child))
                 self.assertEqual(code, expected)
                 if expected:
-                    self.assertIn("error: child_failed: secret use command failed", err)
+                    self.assertIn("error: child_failed: the command exited with status", err)
                 self.assertIn(f"exit_code={child}", out)
 
     def test_non_child_end_exit_codes(self):

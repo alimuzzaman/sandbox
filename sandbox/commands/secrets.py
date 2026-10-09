@@ -142,8 +142,13 @@ def _emit(payload: dict, as_json: bool) -> None:
     operation = payload.get("operation", "secrets")
     print(f"secrets {operation}: {'ok' if payload.get('ok') else 'failed'}")
     if "keys" in payload:
-        for key in payload["keys"]:
-            print(key)
+        if operation == "run":
+            # Label the selection so a bare key name is never mistaken for
+            # the first line of the child's own output.
+            print(f"  keys={','.join(payload['keys'])}")
+        else:
+            for key in payload["keys"]:
+                print(key)
     for entry in payload.get("entries", ()):
         fields = ", ".join(
             f"{name}={entry[name]}" for name in _DISPLAY_ENTRY_FIELDS if name in entry
@@ -318,7 +323,12 @@ def _child_failed(exit_code) -> None:
         from sandbox.core import die
         # Preserve the trusted child's failure without rendering its
         # command, environment, or raw output in the error message.
-        die("child_failed: secret use command failed", code=exit_code if 1 <= exit_code <= 125 else 1)
+        # Flush first so the error follows the child's output instead of
+        # jumping ahead of it when stdout is a pipe.
+        sys.stdout.flush()
+        die(f"child_failed: the command exited with status {exit_code}; "
+            "secret delivery succeeded",
+            code=exit_code if 1 <= exit_code <= 125 else 1)
 
 
 def _duration(seconds: int) -> str:

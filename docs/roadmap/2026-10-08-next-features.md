@@ -81,10 +81,24 @@ ergonomics, Hermes dashboard lifecycle, launcher determinism) stay in
 ```
 
 Feature 047 (Host Resource Governance, `READY FOR SPECKIT`) is not in the set
-but 060 names it as the owner of capacity admission; if the 060 readiness
-review decides the interim "concurrency without a cap" risk is unacceptable on
-the 16 GB host, 047 (or a minimal per-remote cap inside 060) moves ahead of
-060's implementation.
+but 060 names it as the owner of capacity admission. The 2026-10-09 readiness
+review settled the interim risk: 060 carries a minimal cap of two concurrent
+build phases per remote until 047 ships, so 047 does not have to move ahead of
+060.
+
+### Follow-ups split out during readiness review (2026-10-09)
+
+The independent reviews of 060–062 narrowed each PRD. These parts were moved
+to named follow-ups, to be refined after their parent ships:
+
+| Parent | Follow-up | What it covers |
+|--------|-----------|----------------|
+| 060 | Selective host teardown | Planned removal of one target from a shared remote: DNS records of removed targets, retained history kept read-only, refusal for fenced targets, and the plan expiring when the inventory changes. |
+| 061 | Runtime revision history | A bounded record of past installed revisions on a remote. |
+| 061 | Compatible-controller registration | Registering controllers that run in compatible mode, not only strict pins, so migrate can name them. |
+| 061 | Capability-level degradation | Per-command compatibility checks instead of one protocol-version verdict. |
+| 062 | Apply log identity and failure steps | Request-scoped apply logs and the phase or step where an apply failed. |
+| 062 | Remote operation receipts | A per-operation receipt retained on the remote for source deliveries; comes after 061. |
 
 ## PRD-stage specs considered and where they land
 

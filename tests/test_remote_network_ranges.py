@@ -321,5 +321,76 @@ class NetworkRangeCommandTests(unittest.TestCase):
                              {"state": "assigned", "ranges": 1})
 
 
+class RangeRefusalRedactionTests(unittest.TestCase):
+    """Remote refusal text never reaches CLI output (Sol R7-2)."""
+
+    CANARY = "ghp_" + "A1b2C3d4" * 5
+
+    def _refusal(self, entry, command, timeout):
+        import json
+        import types
+        op = "list" if "list" in self._ops else self._ops[0]
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({
+            "op": op, "ok": False, "code": self._code,
+            "message": f"token {self.CANARY}",
+            "data": {"class": self.CANARY, "range_id": self.CANARY, "remedy": self.CANARY},
+        }))
+
+    def _run(self, *, as_json, code="range_overlap"):
+        import io
+        import json
+        import types
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from sandbox.commands import remote as remote_cmd
+        self._ops, self._code = ["list"], code
+        args = types.SimpleNamespace(name="list", ssh_url="vps", cidr=None,
+                                     subnet_prefix=None, confirm=False, json=as_json)
+        out = io.StringIO()
+        with patch("sandbox.core._remote.get_remote",
+                   return_value={"ssh": "target", "_remote_name": "vps"}), \
+                patch("sandbox.core._remote.ssh_run", side_effect=self._refusal), \
+                patch.object(remote_cmd, "die",
+                             side_effect=lambda message: (_ for _ in ()).throw(SystemExit(message))), \
+                redirect_stdout(out):
+            try:
+                remote_cmd._cmd_network_range(args, as_json=as_json)
+                exit_value = 0
+            except SystemExit as exc:
+                exit_value = exc.code
+        text = out.getvalue() + (exit_value if isinstance(exit_value, str) else "")
+        return exit_value, text, (json.loads(out.getvalue()) if as_json else None)
+
+    def test_range_refusal_redacts_remote_message_and_data(self):
+        for code in ("range_overlap", "range_conflict", "range_made_up_code"):
+            exit_value, text, payload = self._run(as_json=True, code=code)
+            self.assertNotIn(self.CANARY, text)
+            self.assertEqual(exit_value, 1)
+            self.assertEqual(payload["error"]["code"], code)
+            self.assertNotIn("class", payload["error"]["data"])
+            self.assertNotIn("range_id", payload["error"]["data"])
+            self.assertNotIn("remedy", payload["error"]["data"])
+            _, text, _ = self._run(as_json=False, code=code)
+            self.assertNotIn(self.CANARY, text)
+            self.assertIn(code, text)
+
+    def test_valid_refusal_class_and_range_id_are_kept(self):
+        import json
+        import types
+        from sandbox.remote_network import store as range_store
+        from sandbox.remote_network.ranges import RangeError
+
+        def run(entry, command, timeout):
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({
+                "op": "list", "ok": False, "code": "range_overlap", "message": "x",
+                "data": {"class": "host_route", "range_id": "r-0123456789ab"}}))
+
+        with self.assertRaises(RangeError) as caught:
+            range_store.RangeStore({"_remote_name": "vps"}, run).list()
+        self.assertEqual(caught.exception.data,
+                         {"class": "host_route", "range_id": "r-0123456789ab"})
+        self.assertEqual(str(caught.exception), "range overlaps a host route")
+
+
 if __name__ == "__main__":
     unittest.main()

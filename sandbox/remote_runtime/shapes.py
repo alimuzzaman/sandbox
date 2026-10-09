@@ -1,7 +1,7 @@
 """Control-protocol shape guard (spec 061 FR-006).
 
-The controller-to-runtime transports and the programs they run on the remote
-exchange JSON payloads and receipts. Each source file's shape is fingerprinted
+The controller-to-runtime transports, the programs they run on the remote and
+the installed runtime's response producers exchange JSON payloads and receipts. Each source file's shape is fingerprinted
 as the string keys it builds or reads (dict literal keys, constant subscripts,
 ``.get``/``.pop``/``.setdefault`` keys) plus one signature per dict literal
 naming the payload it builds (enclosing function, then the name, keyword or
@@ -39,7 +39,21 @@ from sandbox.remote_runtime.protocol import CONTROL_PROTOCOL_SPOKEN
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(__file__).resolve().with_name("control_shapes.json")
 
-# Controller-side transports plus the programs they execute on the remote.
+# The installed runtime's producers of the responses the transports read: the
+# ``sb workspace`` and ``sb job-*`` handlers and the services and records they
+# serialize (Sol R7-1). A key change here changes what older controllers read.
+RUNTIME_PRODUCERS = (
+    "sandbox/commands/workspaces.py",
+    "sandbox/application/workspace_service.py",
+    "sandbox/commands/jobs_runtime.py",
+    "sandbox/application/job_service.py",
+    "sandbox/jobs/models.py",
+    "sandbox/jobs/listing.py",
+    "sandbox/jobs/output.py",
+)
+
+# Controller-side transports plus the programs they execute on the remote,
+# then the runtime-side response producers.
 SHAPE_SOURCES = (
     "sandbox/transports/remote_hosting_activation.py",
     "sandbox/transports/remote_hosting_images.py",
@@ -52,11 +66,11 @@ SHAPE_SOURCES = (
     "sandbox/transports/remote_workspaces.py",
     "sandbox/recovery/server_capture_helper.py",
     "sandbox/recovery/postgres_helper.py",
-)
+) + RUNTIME_PRODUCERS
 
 # Bumped when the fingerprint method changes (not the payloads): a manifest
 # recorded with an older format may be re-recorded under the same protocol.
-FORMAT = 6
+FORMAT = 7
 _EMBEDDED_DEPTH = 2
 
 _KEY_METHODS = frozenset({"get", "pop", "setdefault"})

@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from sandbox.remote_runtime import pins  # noqa: E402
+from tests.subprocess_support import synthetic_environment  # noqa: E402
 
 REV_A = "a" * 24
 REV_B = "b" * 24
@@ -33,8 +34,8 @@ class _LocalRemote:
         self.calls += 1
         if self.fail:
             raise OSError("ssh: connect to host 192.0.2.1 token=secret")
-        env = {"SANDBOX_HOME": str(self.home), "HOME": str(self.home),
-               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"}
+        env = synthetic_environment({"SANDBOX_HOME": str(self.home), "HOME": str(self.home),
+               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
         return subprocess.run(["sh", "-c", command], env=env, capture_output=True,
                               text=True, timeout=timeout)
 
@@ -157,8 +158,8 @@ class PinTests(unittest.TestCase):
         release = self.remote_home / "release"
         started = self.remote_home / "started"
         script = f"touch {started}; while [ ! -e {release} ]; do sleep 0.05; done; {inner}"
-        env = {"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
-               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"}
+        env = synthetic_environment({"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
+               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
         proc = subprocess.Popen(["sh", "-c", pins.install_gate_command(target, (), script)],
                                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=new_session)
@@ -186,8 +187,8 @@ class PinTests(unittest.TestCase):
 
     def test_gate_passes_stdin_and_the_child_status_through(self):
         command = pins.install_gate_command(REV_B, (), "IFS= read -r t; test \"$t\" = tok; exit 7")
-        env = {"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
-               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"}
+        env = synthetic_environment({"SANDBOX_HOME": str(self.remote_home), "HOME": str(self.remote_home),
+               "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
         result = subprocess.run(["sh", "-c", command], env=env, input="tok\n",
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 7)

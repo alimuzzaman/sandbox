@@ -159,6 +159,25 @@ class ShapeGuardTests(unittest.TestCase):
         self.assertTrue(shapes.shape_diff({"s.py": shapes.payload_keys(source)},
                                           {"s.py": shapes.payload_keys(mutated)}))
 
+    def test_runtime_receipt_shape_mutation_requires_protocol_bump(self):
+        """The installed runtime's response producers are sources too (Sol R7-1)."""
+        producer = "sandbox/application/workspace_service.py"
+        self.assertIn(producer, shapes.SHAPE_SOURCES)
+        source = (ROOT / producer).read_text(encoding="utf-8")
+        original = '"index": {"generation": generation, "complete": complete},'
+        self.assertIn(original, source)
+        mutated = source.replace(
+            original, '"index": {"index_generation": generation, "complete": complete},', 1)
+        recorded = shapes.read_manifest()["shapes"]
+        current = shapes.current_shapes()
+        current[producer] = shapes.payload_keys(mutated)
+        self.assertIn(producer, shapes.shape_diff(recorded, current))
+
+    def test_runtime_producers_of_sb_responses_are_sources(self):
+        for producer in shapes.RUNTIME_PRODUCERS:
+            self.assertIn(producer, shapes.SHAPE_SOURCES)
+            self.assertTrue((ROOT / producer).is_file(), producer)
+
     def test_writer_refuses_changed_keys_under_the_same_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / "shapes.json"

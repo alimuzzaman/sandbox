@@ -37,6 +37,33 @@ def assign_command(remote: str, dev_range: ranges.DevRange) -> str:
                        "--subnet-prefix", str(dev_range.subnet_prefix), "--confirm"])
 
 
+_OVERLAP_CLASSES = frozenset({ranges.DOCKER_NETWORK, ranges.HOST_ROUTE,
+                              ranges.DOCKER_DEFAULT_POOL, ranges.CGNAT_CLASS})
+# Remote refusal text is never forwarded (Sol R7-2): each code maps to a fixed
+# message, and only vocabulary-checked data survives.
+_REFUSAL_MESSAGES = {
+    "range_invalid": "the remote refused the range as invalid",
+    "range_conflict": "range overlaps an assigned development range",
+    "range_inventory_unknown": "the remote network inventory is incomplete; nothing was changed",
+    "range_capacity_reached": "the remote already has the maximum number of ranges",
+    "range_request_invalid": "the remote refused the range request as invalid",
+    "range_state_invalid": "remote range state is invalid; nothing was changed",
+}
+
+
+def _refusal(code: str, data: dict) -> RangeError:
+    safe = {}
+    if data.get("class") in _OVERLAP_CLASSES:
+        safe["class"] = data["class"]
+    if isinstance(data.get("range_id"), str) and _RANGE_ID.fullmatch(data["range_id"]):
+        safe["range_id"] = data["range_id"]
+    if code == "range_overlap" and "class" in safe:
+        message = f"range overlaps a {safe['class'].replace('_', ' ')}"
+    else:
+        message = _REFUSAL_MESSAGES.get(code, f"the remote range store refused the request ({code})")
+    return RangeError(code, message, **safe)
+
+
 class RangeStore:
     def __init__(self, entry: dict, ssh_run: Callable | None = None, *,
                  installed_protocol: ControlProtocol | None = None):
@@ -71,9 +98,7 @@ class RangeStore:
             data = value.get("data") if isinstance(value.get("data"), dict) else {}
             if not isinstance(code, str) or not re.fullmatch(r"[a-z_]{3,48}", code):
                 raise RangeError(STORE_UNAVAILABLE, "remote range program output is invalid")
-            safe = {k: v for k, v in data.items()
-                    if k in ("class", "range_id") and isinstance(v, str)}
-            raise RangeError(code, str(value.get("message") or code)[:200], **safe)
+            raise _refusal(code, data)
         return value
 
     def _require_runtime(self) -> None:

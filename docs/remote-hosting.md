@@ -1259,10 +1259,11 @@ also counts. A field written into a payload after it is built
 too. Every read chain (`evidence["index"]["generation"]`, `.get`, `.pop`)
 records its key path without the root variable (`scope:read[index][generation]`),
 so moving a read between a nested and a root response path counts while a local
-rename does not. The guard covers the controller side (the transports and the
-programs they ship); runtime-side response producers are part of the installed
-runtime, so a producer change that alters a response shape still needs a
-deliberate protocol bump by its author. The pin program is
+rename does not. The guard covers both sides: the transports and the programs
+they ship, and the installed runtime's producers of the responses they read
+(`shapes.RUNTIME_PRODUCERS`: the `sb workspace` and `sb job-*` handlers and the
+services and records they serialize), so renaming a field in, say, the
+workspace record's `index` needs a protocol bump too (manifest format 7). The pin program is
 not part of it: the installed runtime never runs it, and pin records are
 versioned by `pins.SCHEMA` instead.
 

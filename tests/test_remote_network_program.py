@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from tests.subprocess_support import synthetic_environment  # noqa: E402
 from sandbox.remote_network import store as range_store  # noqa: E402
 from sandbox.remote_network.ranges import RangeError  # noqa: E402
 from sandbox.remote_runtime.protocol import ControlProtocol  # noqa: E402
@@ -32,8 +33,8 @@ class _LocalRemote:
     def __call__(self, _entry, command, timeout=30):
         if self.fail:
             raise OSError("ssh: connect to host 192.0.2.1 token=secret")
-        env = {"SANDBOX_HOME": str(self.home), "HOME": str(self.home),
-               "PATH": f"{self.bin_dir}:{os.path.dirname(sys.executable)}:/usr/bin:/bin"}
+        env = synthetic_environment({"SANDBOX_HOME": str(self.home), "HOME": str(self.home),
+               "PATH": f"{self.bin_dir}:{os.path.dirname(sys.executable)}:/usr/bin:/bin"})
         return subprocess.run(["sh", "-c", command], env=env, capture_output=True,
                               text=True, timeout=timeout)
 

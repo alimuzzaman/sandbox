@@ -8,9 +8,9 @@
 
 **Input**: "Per-target hosting operations: independent locks and delivery state per remote, project and environment, bounded queueing, and selective host teardown that preserves named projects"
 
-**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. No independent readiness review has run.
+**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user.
 
-**Final Validation**: `PENDING` — independent readiness review
+**Final Validation**: `PENDING` — fresh independent readiness review of this revision
 
 **Validated On**: N/A
 
@@ -28,69 +28,78 @@ One remote now hosts several unrelated projects. On the retired
 `scaleway-sandbox` and on its replacement `xcloud-london`, Lenzora
 (development and production), xspeed-hub, Amar Sonar Bangla, and
 alimuzzaman.me share one server. Each project is deployed from its own agent
-session, often within seconds of another.
+session, often within seconds of another, and often from different controller
+machines.
 
-Hosted apply treats the whole remote as one unit of work. A `sb host apply`
-holds the remote-wide hosting lease for its entire build-and-deliver phase,
-which takes minutes. A second apply for an unrelated project on the same remote
-fails with `operation_busy` (feedback `adccd6b7`, critical, 2026-10-06 and
-2026-10-07), the failed attempt leaves a delivery record that has to be retired
-by hand, and `sb host login-url` waits on the same lease. The stop-gap since
-commit `5d76399` queues an apply for up to a bounded wait instead of failing,
-which turns a failure into a stall: every parallel session still serializes
-behind every other, and a long build on one project delays an unrelated
-one-line change on another.
-
-The same whole-remote model has no way to remove hosting for everything except
-a named project. When the operator authorized removing every remote container
-resource except one hosted project, there was no supported teardown; the
-resources inventory timed out and could not express "preserve this project",
-so the work was done through the SSH escape hatch with a hand-made dependency
-inventory (feedback `83dd053a`). A concurrent deploy refused with
-`operation_busy` also leaves no retained pre-admission refusal evidence that
-delivery inspect can show (feedback `04439999`), so the caller cannot tell
-whether anything happened before retrying.
+Hosted apply holds a controller-wide state lock on the submitting machine for
+its whole build-and-deliver phase, so applies to different remotes from one
+machine serialize, while the same target applied from two machines is not
+serialized at all. A per-target lock already exists on the controller, but
+apply also takes the controller-wide lock, so the per-target lock buys no
+concurrency. A second apply from the same controller, for an unrelated
+project or even a different remote, fails with `operation_busy` (feedback
+`adccd6b7`, critical, 2026-10-06 and 2026-10-07). That refusal is raised
+before any delivery attempt is recorded, so it leaves a failed job and no
+retained delivery evidence: `sb delivery inspect` cannot show it, and the
+caller cannot tell whether anything happened before retrying (feedback
+`04439999`). `sb host login-url` contends for the same controller-wide lock:
+today it waits up to 30 seconds and then fails with `operation_busy`. The
+stop-gap since commit `5d76399` queues an apply for up to a bounded wait
+instead of failing, which turns a failure into a stall: every parallel session
+on one controller still serializes behind every other, and a long build on one
+project delays an unrelated one-line change on another. The operator
+documentation repeats the wrong framing, describing the lock as shared per
+host rather than per controller.
 
 There is also no way for sessions that share one target to coordinate on
 purpose. On 2026-10-08 four agent threads took turns deploying Lenzora
 development by messaging each other, because Sandbox offers no claim or hold
 on a hosted environment; the project added a controller-local hold under its
 own home directory, which no other controller machine can see (feedback
-`f72c4279`).
+`f72c4279`). Because the contending sessions run on different controllers,
+any lease or hold that lives only on a controller cannot coordinate them.
 
 The cost is paid on every parallel agent session: detect busy, find the holder,
-poll, retry, retire the failed record. It will grow as more sites move to the
-shared xCloud server.
+poll, retry, and reconstruct what happened from a failed job. It will grow as
+more sites move to the shared xCloud server.
 
 ## Users and Desired Outcomes
 
 - **Agent session deploying one project**: an apply for its own project is
   admitted and runs even while an unrelated project's apply is in progress on
-  the same remote, with no manual retry and no record to retire afterwards.
+  the same remote, or on another remote from the same controller, with no
+  manual retry.
+- **Sessions on different controllers sharing one target**: their operations
+  on that target are serialized by the remote, not by whichever controller
+  they happen to run on, and they can claim an explicit hold to coordinate.
 - **Operator running several projects on one remote**: can see, per remote,
-  which targets are busy, who holds each, and which operations are waiting,
-  without reading lock files over SSH.
-- **Operator decommissioning a shared remote**: can plan and apply a teardown
-  that removes every hosted target except named ones, with a reviewable plan
-  before anything is removed and evidence afterwards.
-- **Owner of a hosted production site**: a teardown or a concurrent apply for a
-  different project never touches their site's containers, volumes, routes, or
-  retained delivery and recovery state.
+  which targets are busy or held, who holds each, and which operations are
+  waiting, without reading lock files over SSH.
+- **Owner of a hosted production site**: a concurrent apply for a different
+  project never touches their site's containers, volumes, routes, or retained
+  delivery and recovery state.
 - **Reviewer of a failed or refused deploy**: a busy refusal is retained and
   inspectable like any other pre-admission refusal, including which target and
-  operation held the lease.
+  operation or hold was in the way.
 
 ## Goals
 
 - Hosting operations are scoped and serialized per target, where a target is
   one (remote, project, environment). Two applies for different targets on one
-  remote proceed concurrently.
+  remote proceed concurrently, and applies to different remotes from one
+  controller never serialize against each other.
+- The lease, hold, and per-target operation state for a target are
+  authoritative on the remote, so operations on one target from any number of
+  controllers are serialized against each other. A controller keeps only a
+  cache of that state plus its own retained outcomes.
 - Only genuinely shared steps on a remote (public edge routing changes, DNS
-  record changes, shared ingress reloads, shared pool allocation) are serialized
-  remote-wide, and they are held briefly, never for the length of a build.
-- When a target is busy, a new operation on the same target either waits for a
-  bounded, caller-chosen time and reports the holder while waiting, or refuses
-  immediately with a typed result that names the holder; the caller chooses.
+  record changes, shared ingress reloads) take a remote-wide lease, and no
+  remote-wide lease is held longer than 60 seconds. Verification waits are
+  never inside it.
+- When a target is busy or held, a new operation on the same target either
+  waits for a bounded, caller-chosen time and reports the holder while
+  waiting, or refuses immediately with a typed result that names the holder;
+  the caller chooses.
 - A busy refusal creates no delivery effects, advances no generation, and is
   retained as a pre-admission refusal that delivery inspect can show for that
   target.
@@ -101,32 +110,46 @@ shared xCloud server.
   recovery receipts, and generations for every existing target remain
   readable and authoritative after the change, with a supported one-way
   conversion and a visible, refusable mixed state.
-- A selective teardown exists: plan first, then confirmed apply, removing every
-  hosted target on a remote except explicitly named preserved targets and
-  the shared infrastructure those preserved targets need.
-- Operators can list, per remote, every target with its current operation,
-  holder identity, start time, and queue of waiting operations.
-- A session can claim an explicit, expiring hold on a target, visible to
-  every controller through the same listing; while a hold exists, other
-  sessions' operations on that target wait or refuse exactly as they do for a
-  running operation, naming the hold's holder and purpose. The holder, or an
-  expiry, releases it.
+- Operators can list, per remote, every target with its current operation or
+  hold, holder identity, start time, and queue of waiting operations.
+- A session can claim an explicit, expiring hold on a target, visible to every
+  controller through the same listing; while a hold exists, other sessions'
+  operations on that target wait or refuse exactly as they do for a running
+  operation, naming the hold's holder and purpose.
+- Until host resource governance exists, a remote admits at most a declared
+  number of concurrent build phases (default two); further applies wait or
+  refuse by caller choice.
 
 ## Non-Goals
 
+- **Follow-up "selective host teardown"**: removing every hosted target on a
+  remote except named preserved targets (feedback `83dd053a`). Moved out of
+  this feature. Decisions already taken for that follow-up: plan first, then
+  confirmed apply with the confirmation bound to the digest of the target
+  inventory the plan was made from, so the apply refuses if the inventory
+  changed; remove only ownership-proven items under the exact-identity,
+  manifest-before-delete, no-wildcard rules of spec 042 (host storage
+  reclamation); the plan lists Sandbox-marked DNS records of removed targets
+  and removes them by default, with `--keep-dns` to retain them; retained
+  delivery and recovery history of removed targets is kept read-only and never
+  deleted; a fenced target refuses teardown until it is retired; a held target
+  refuses teardown. It reuses this feature's per-target leases and holds.
 - Changing what one apply does to its own target (build, deliver, initializers,
   edge proof). Spec 054 owns delivery outcomes and spec 051 owns immutable
-  activation; this feature only changes which operations may run at once and
-  how state is partitioned.
+  activation; this feature only changes which operations may run at once,
+  where their coordination state is authoritative, and how state is
+  partitioned.
 - Running two operations on the same target at once. Same-target operations
   stay strictly serialized.
 - Host-wide resource governance (CPU, memory, disk admission). Feature 047 owns
-  that; this feature does not decide whether a remote has capacity for two
-  concurrent builds, only that locking no longer forbids it.
+  that. This feature adds only a fixed per-remote cap on concurrent build
+  phases as an interim guard.
 - Tearing down non-hosting resources (durable jobs, workspaces, node stores,
   disposable instances). Those stay with `sb resources` and `sb workspace`.
 - Removing a remote's registration or its control-plane service.
-- Cross-remote coordination.
+- Coordination of one operation that spans several remotes. Independence
+  between remotes (no shared lock across them) is in scope; a joint
+  multi-remote transaction is not.
 - Any change to the local (non-remote) instance lifecycle.
 
 ## Product Scenarios
@@ -144,20 +167,22 @@ shared xCloud server.
 ### Scenario 2 — Same target, second apply waits
 
 - **Starting state**: Lenzora development is mid-apply.
-- **User action**: Another session applies Lenzora development with a bounded
-  wait.
+- **User action**: Another session, on the same or a different controller,
+  applies Lenzora development with a bounded wait.
 - **Expected outcome**: The second apply reports that it is waiting, names the
-  holder (operation, request, start time) while it waits, and starts when the
-  first finishes. If the bound expires, it ends with a typed busy result that
-  names the holder; nothing was changed and the refusal is retained.
+  holder (operation, request, controller, start time) while it waits, and
+  starts when the first finishes. If the bound expires, it ends with a typed
+  busy result that names the holder; nothing was changed and the refusal is
+  retained.
 
 ### Scenario 3 — Same target, refuse-immediately mode
 
 - **Starting state**: As in Scenario 2.
 - **User action**: A deployment frontend applies the same target with no wait.
 - **Expected outcome**: An immediate typed busy refusal naming the holder, no
-  effects, and `sb host delivery inspect` for that target shows the refusal as
-  a retained pre-admission outcome with the holder identity.
+  effects, and `sb delivery inspect` for that target shows the refusal as a
+  retained pre-admission outcome with the holder identity. The job, if any,
+  is not left as an unexplained failure.
 
 ### Scenario 4 — Shared step contention is brief
 
@@ -165,16 +190,17 @@ shared xCloud server.
   their edge-routing step at the same moment.
 - **User action**: None; the operations proceed.
 - **Expected outcome**: One edge change waits for the other to finish its brief
-  shared step, then proceeds; neither waits for the other's build or delivery.
+  shared step, then proceeds; neither waits for the other's build, delivery,
+  or post-change verification.
 
 ### Scenario 5 — Operator inventory of busy targets
 
-- **Starting state**: Three targets on one remote: one applying, one waiting,
-  one idle.
+- **Starting state**: Four targets on one remote: one applying, one waiting,
+  one held, one idle.
 - **User action**: The operator asks for the remote's hosting operation status.
 - **Expected outcome**: One bounded, secret-free listing shows each target, its
-  current operation and holder, how long it has held, and what is queued
-  behind it.
+  current operation or hold and holder, how long it has held, the hold's
+  expiry and purpose, and what is queued behind it.
 
 ### Scenario 6 — Interrupted apply isolates its own target
 
@@ -185,98 +211,136 @@ shared xCloud server.
 - **Expected outcome**: The unaffected target completes normally. The
   interrupted target is the only one in an uncertain state; its retained
   operation is discoverable by the original identity (spec 054 behavior), and
-  no other target's state file was touched.
+  no other target's state was touched.
 
-### Scenario 7 — Selective teardown preserving one project
+### Scenario 7 — Expired lease, holder returns (negative)
 
-- **Starting state**: A remote hosting four targets. The operator wants only
-  Amar Sonar Bangla production kept.
-- **User action**: The operator requests a teardown plan preserving that
-  target, reviews it, then applies with confirmation.
-- **Expected outcome**: The plan lists, per target to be removed, the exact
-  containers, images, named and anonymous volumes, bind paths, routes, and
-  certificates that will go, and per preserved target what is kept, including
-  shared ingress it needs. The apply removes exactly the planned items, keeps
-  the preserved target serving throughout, and records post-apply evidence
-  showing the preserved target intact and the removed targets absent.
+- **Starting state**: A session's lease on a target expired while it was
+  disconnected, and another session has since been admitted on that target.
+- **User action**: The original session reconnects and tries to continue.
+- **Expected outcome**: The returning session performs no further effects on
+  the target and records its own operation as `effect_unknown` with the
+  reason, so delivery inspect shows what it may have done before losing the
+  lease.
 
-### Scenario 8 — Teardown refuses on an ambiguous dependency (negative)
+### Scenario 8 — Claim a hold
 
-- **Starting state**: As in Scenario 7, but a volume or network is used by
-  both a target to be removed and the preserved target.
-- **User action**: The operator requests the plan.
-- **Expected outcome**: The plan marks the shared item as preserved with the
-  reason, or if ownership cannot be proven, refuses to include it and says so.
-  The apply never removes an item whose sole ownership by a removed target is
-  unproven.
+- **Starting state**: Lenzora development is idle.
+- **User action**: A session claims a hold on it with a purpose and the
+  default duration, then runs an apply under that hold.
+- **Expected outcome**: The hold is visible in the remote listing from every
+  controller with holder, purpose, and expiry. The holder's own apply is
+  admitted. Another session's apply on that target waits or refuses, naming
+  the hold. The holder may renew the hold up to the maximum duration and may
+  release it.
 
-### Scenario 9 — Teardown on a busy remote (negative)
+### Scenario 9 — Hold expires (negative)
 
-- **Starting state**: One target is mid-apply.
-- **User action**: The operator applies a teardown that would remove that
-  target.
-- **Expected outcome**: Refused before any effect, naming the active operation.
-  A teardown that preserves the busy target may still be refused if a shared
-  step would conflict; the refusal says which.
+- **Starting state**: A session holds a target and then dies without
+  releasing it.
+- **User action**: Another session applies the target with a bounded wait.
+- **Expected outcome**: The hold ends at its expiry and the waiting apply is
+  admitted then; expiry is the only way an abandoned hold is detected. A
+  request for a hold longer than the maximum is refused with the maximum
+  named.
 
-### Scenario 10 — Existing remote after upgrade (negative)
+### Scenario 10 — Break another session's hold
 
-- **Starting state**: A remote with retained delivery history from before this
-  feature, mid-way between old and new state layouts because a conversion was
-  interrupted.
-- **User action**: Any hosting command.
+- **Starting state**: A target is held by another session whose purpose is
+  stale.
+- **User action**: The operator releases the hold without `--break-hold`, then
+  again with `--break-hold` and a reason.
+- **Expected outcome**: The first attempt is refused, naming the holder. The
+  second releases the hold and records the breaker's identity, the reason,
+  and the broken hold in the target's retained history.
+
+### Scenario 11 — Third concurrent build waits for the cap
+
+- **Starting state**: Two targets on `xcloud-london` are in their build phase
+  and the remote's declared cap is two.
+- **User action**: A third session applies a third target, first with a
+  bounded wait, then in a separate attempt with no wait.
+- **Expected outcome**: With a wait, the apply reports the cap and the two
+  current build holders while waiting, and starts its build when one finishes.
+  With no wait, it returns a typed, retained refusal naming the cap and the
+  holders, with no effects.
+
+### Scenario 12 — Existing remote after upgrade (negative)
+
+- **Starting state**: A controller with retained delivery history for a remote
+  from before this feature, mid-way between old and new state layouts because
+  a conversion was interrupted.
+- **User action**: Any hosting command for that remote.
 - **Expected outcome**: The command reports the mixed state and the supported
-  conversion step, and refuses to mutate until the state is consistent. No
+  conversion step, and refuses to mutate until the state is consistent. The
+  conversion converts this controller's retained state for the remote to the
+  per-target layout and establishes the remote-side lease authority. No
   history is lost, and the conversion can be re-run to completion.
 
-### Scenario 11 — Older controller against a converted remote (negative)
+### Scenario 13 — Older controller against a converted remote (negative)
 
-- **Starting state**: The remote has per-target state; a local checkout
-  predating this feature targets it.
+- **Starting state**: The remote has remote-side lease authority; a controller
+  checkout predating this feature targets it.
 - **User action**: The old checkout runs host apply.
-- **Expected outcome**: A typed limitation naming the required capability. No
-  partial writes to either state layout.
+- **Expected outcome**: The remote returns the spec 061 protocol verdict
+  `protocol_too_old` naming the required protocol. No partial writes to either
+  the remote's or the controller's state.
 
 ## Proposed Product Behavior
 
 - The unit of hosting serialization becomes the target. A target's apply,
-  recover, retire-delivery, login-url, and teardown-of-that-target are mutually
-  exclusive with each other and with nothing else.
-- Shared-remote steps are named explicitly in product output (for example edge
-  routing, DNS, shared ingress reload, pool allocation) and are the only steps
-  that take a remote-wide lease. A remote-wide lease is never held across a
-  build, a source transfer, or a delivery wait.
+  recover, retire-delivery, and login-url are mutually exclusive with each
+  other and with nothing else, except the shared steps and the build cap
+  below.
+- The lease for a target, any hold on it, and its current-operation record are
+  authoritative on the remote's runtime service. A controller may cache them
+  for display but never decides admission from its cache.
+- Shared-remote steps are named explicitly in product output and are the only
+  steps that take a remote-wide lease: DNS and edge routing mutation and shared
+  ingress reload. A remote-wide lease is never held across a build, a source
+  transfer, a delivery wait, or a verification wait, and never longer than 60
+  seconds.
+- A lease whose holder disappears expires. A holder that returns after its
+  lease expired performs no further effects and records `effect_unknown` for
+  its own operation.
+- Holds: the default duration is one hour and the maximum is four hours; the
+  holder may renew within the maximum; expiry is the only dead-holder
+  detection. Only the holder may release a hold, except that another session
+  may break it with `--break-hold` and a reason, which is recorded with the
+  breaker's identity.
+- Interim build cap: each remote record declares a maximum number of
+  concurrent build phases, default two, until feature 047 provides capacity
+  admission. An apply that would exceed it waits (bounded, holders shown) or
+  refuses, by caller choice, with the same retained-refusal rules as a busy
+  target.
 - Waiting is the caller's choice with a bounded maximum; waiting output
-  identifies the holder. Refusing is typed and retained.
+  identifies the holder. Refusing is typed and retained as a spec 054
+  pre-admission outcome.
 - Per-target delivery and recovery state means a corrupt, locked, or in-flight
   state for one target has no effect on commands for another target. Existing
-  remote-wide records are converted once, in a supported direction, with the
-  result verifiable before mutation resumes.
-- Teardown is a protected two-step operation (plan, then confirmed apply) with
-  an exact item-level plan, explicit preserved targets, ownership-proven
-  removal only, and post-apply evidence. It uses the existing exact-identity
-  and no-wildcard rules of host storage reclamation.
+  controller-wide records are converted once, in a supported direction, with
+  the result verifiable before mutation resumes.
 - Every result in this feature is bounded and secret-free, and CLI and MCP
   agree on its meaning.
 
 ## Constraints and Dependencies
 
-- Ownership note: the hosting command and delivery modules
-  (`sandbox/commands/hosting.py`, `sandbox/delivery/hosting.py`,
-  `sandbox/core/_remote.py`, `sandbox/core/_hosting.py`) are currently owned
-  by thread `6343a530` (host-apply observability). Specification and
-  implementation of this feature must be coordinated with that owner.
+- Ownership note: the hosting command, delivery, and remote modules are under
+  active change by the host-apply observability work. Specification and
+  implementation of this feature must be coordinated with that owner; the
+  plan records the specific modules and owner.
 - Spec 054 (Recoverable Delivery Outcomes) defines admission, retained
-  refusals, and the diagnosis query. This feature's busy refusal must be one of
-  054's retained pre-admission outcomes, not a parallel mechanism.
+  refusals, `effect_unknown`, and the diagnosis query. This feature's busy and
+  cap refusals must be 054 retained pre-admission outcomes, not a parallel
+  mechanism.
 - Spec 051 (Immutable Activation and Recovery) and spec 052 (Owned Storage
   Authority) define the state this feature partitions; their fences and
   receipts must survive the per-target split unchanged in meaning.
-- Spec 042 (One-Click Host Storage Reclamation) sets the exact-identity,
-  manifest-before-delete, no-wildcard rules that teardown inherits.
+- Spec 061 (Remote Runtime Revision Coexistence) supplies the protocol verdict
+  an older controller receives; this feature does not define its own
+  compatibility check.
 - Feature 047 (Host Resource Governance) decides capacity admission. Until it
-  ships, concurrent applies are admitted without a capacity check; the
-  operator accepts that risk on a 16 GB host and can fall back to waiting.
+  ships, the per-remote build cap is the only capacity guard.
 - Remote-side behavior changes take effect only after a remote runtime
   migrate; the Lenzora repin procedure applies.
 - Constitution and CLAUDE.md module boundaries: new state and commands register
@@ -287,20 +351,20 @@ shared xCloud server.
 | Decision | Choice | Rationale | Confirmed by |
 |----------|--------|-----------|--------------|
 | Unit of serialization | Target = (remote, project, environment) | Matches how operators think and how the shared remote is used; projects share nothing but the edge | Fable decision (delegated by user), 2026-10-08 |
-| Remote-wide lease scope | Only named shared steps, held briefly; never across build, transfer, or delivery wait | Removes the multi-minute stall without allowing edge/DNS races | Fable decision (delegated by user), 2026-10-08 |
+| Remote-wide lease scope | Only DNS/edge mutation and shared ingress reload; never build, transfer, delivery wait, or verification wait; hard bound 60 seconds | Removes the multi-minute stall without allowing edge/DNS races | Fable decision (delegated by user), 2026-10-09 |
 | Busy handling | Caller chooses bounded wait (holder shown) or immediate typed refusal; both retained | Frontends want fail-fast, interactive sessions want wait; both need evidence | Fable decision (delegated by user), 2026-10-08 |
 | State partition | Delivery and recovery state kept per target, with a one-way supported conversion and a refusable mixed state | Independent targets cannot share a single state file without sharing failure modes | Fable decision (delegated by user), 2026-10-08 |
-| Teardown shape | Plan then confirmed apply; preserve-list explicit; remove only ownership-proven items; post-apply evidence | Same protected two-step pattern as reclamation and recovery | Fable decision (delegated by user), 2026-10-08 |
-| Teardown scope | Hosted targets and their routes, certificates, containers, images, volumes only | Jobs, workspaces and registration have their own owners | Fable decision (delegated by user), 2026-10-08 |
-| Capacity admission | Out of scope; feature 047 owns it | Keeps this feature small; concurrency without governance is an accepted interim risk | Fable decision (delegated by user), 2026-10-08 |
-| Explicit holds | A target hold is the same primitive as a running operation's lease, claimed on purpose with an expiry and purpose string, visible remote-wide | Agents coordinating over chat and controller-local hold files are the symptom; one shared lease with a CLI is the fix | Fable decision (delegated by user), 2026-10-09 |
+| Coordination authority | Lease, hold, and per-target operation state authoritative on the remote runtime service; controllers keep a cache plus their own retained outcomes | The real contention (feedback `f72c4279`) is several controllers on one target, which controller-local state cannot serialize | Fable decision (delegated by user), 2026-10-09 |
+| Upgrade conversion | Converts the controller's retained state for the remote to per-target layout and establishes remote-side lease authority; older controllers get the spec 061 `protocol_too_old` verdict | State is controller-local today; compatibility verdicts belong to 061 | Fable decision (delegated by user), 2026-10-09 |
+| Explicit holds | Same primitive as a running operation's lease, claimed on purpose with purpose string; default 1 h, max 4 h, renewable by holder; expiry is the only dead-holder detection; non-holder release needs `--break-hold` with a reason, recorded with breaker identity | Agents coordinating over chat and controller-local hold files are the symptom; one remote-wide lease with a CLI is the fix | Fable decision (delegated by user), 2026-10-09 |
+| Expired lease, returning holder | No further effects; own operation recorded `effect_unknown` | A fenced-out holder must not race the new owner | Fable decision (delegated by user), 2026-10-09 |
+| Interim concurrency cap | 2 build phases per remote until 047, declared in the remote record; further applies wait (bounded, holders shown) or refuse by caller choice | Memory on a shared production host | Fable decision (delegated by user), 2026-10-09 |
+| Capacity admission | Out of scope beyond the interim cap; feature 047 owns it | Keeps this feature small | Fable decision (delegated by user), 2026-10-08 |
+| Selective teardown | Moved to follow-up "selective host teardown"; its decisions are recorded in Non-Goals | Shrinks this feature to coordination and state partition | Fable decision (delegated by user), 2026-10-09 |
 
 ## Open Questions
 
-- None blocking. The independent readiness review should confirm whether the
-  interim "concurrency without capacity admission" risk is acceptable on the
-  16 GB xCloud server, or whether a simple concurrent-apply cap per remote
-  should be added as a product rule.
+- None.
 
 ## Acceptance Outcomes
 
@@ -308,41 +372,59 @@ shared xCloud server.
   of each other, both succeed with no retry, and the second starts its build
   no later than ten seconds after admission regardless of the first's build
   duration.
+- Two applies from one controller to two different remotes run concurrently;
+  neither waits on the other at any point.
+- Two applies for the same target from two different controllers never
+  overlap: the second waits or refuses, naming the first.
 - A same-target apply with a bounded wait reports the holder within two seconds
   and starts within five seconds of the holder finishing; with no wait it
   returns a typed busy refusal within two seconds.
-- Every busy refusal appears in delivery inspect for its target as a retained
-  pre-admission outcome with the holder's operation identity; zero busy
+- Every busy or cap refusal appears in delivery inspect for its target as a
+  retained pre-admission outcome with the holder's operation identity; zero
   refusals leave a record that needs retiring.
-- No remote-wide lease is held longer than the declared shared-step bound (to
-  be set in specification, expected well under one minute) in a run of ten
-  concurrent mixed-target applies.
+- In a run of ten concurrent mixed-target applies, no remote-wide lease is held
+  longer than 60 seconds.
+- In the same run, every untouched target's edge health check, sampled every
+  five seconds, records zero failures.
+- `sb host login-url` for an idle target returns within five seconds while an
+  apply for a different target on the same remote is in progress.
+- The per-remote listing returns within five seconds and shows every target's
+  operation or hold, holder, start time, hold expiry, and waiting queue.
+- A hold is visible from a second controller within five seconds of being
+  claimed; an expired hold admits the next waiting operation within five
+  seconds of expiry; a hold request above four hours is refused; a non-holder
+  release without `--break-hold` is refused, and with it is recorded with the
+  breaker's identity and reason.
+- With the cap at two, a third concurrent build never starts while two are
+  running.
+- A returning holder whose lease expired performs zero effects and its
+  operation is recorded as `effect_unknown`.
 - After an interrupted apply on one target, every other target's commands
   succeed and their retained history is byte-for-byte unchanged.
 - After conversion of an existing remote, every previously retained delivery
   outcome, recovery receipt, and generation remains queryable with the same
   identity and meaning; an interrupted conversion is reported and resumable,
   and no hosting mutation is admitted in the mixed state.
-- A selective teardown preserving one target removes every planned item and
-  nothing else, the preserved site answers its edge health check throughout,
-  and the post-apply evidence lists zero unplanned removals and zero
-  unproven-ownership removals.
-- An older controller against a converted remote receives a typed limitation
+- An older controller against a converted remote receives `protocol_too_old`
   and causes zero state writes.
 
 ## Risks and Assumptions
 
-- **Risk**: Concurrent builds on a 16 GB host can exhaust memory before
-  feature 047 exists. Mitigation is operator discretion and the wait option;
-  the review may add a per-remote concurrency cap.
+- **Risk**: Concurrent builds on the shared xCloud host can exhaust memory
+  before feature 047 exists. The per-remote cap of two limits this; the
+  operator can lower it in the remote record.
 - **Risk**: Splitting shared state can break fences that assumed one file
   (generation, effect_unknown, initializer receipts). The conversion must be
   specified against 051/054 fixtures, not assumed.
-- **Risk**: Teardown is destructive and remote; ownership proof for anonymous
-  volumes and shared networks may be unavailable, in which case the plan must
-  leave them and say so, which may leave residue the operator must handle.
-- **Risk**: The hosting modules are under active change by another thread;
-  specification must be scheduled after their current work lands.
+- **Risk**: Moving lease authority to the remote makes every hosting operation
+  depend on the remote runtime service being reachable and migrated; an
+  unreachable service means no admission rather than a controller-local
+  fallback.
+- **Risk**: A lease or hold that is too short can expire under a slow but live
+  holder, turning a successful operation into `effect_unknown`; specification
+  must set lease renewal so a live holder does not lose it.
+- **Risk**: The hosting modules are under active change by another work
+  stream; specification must be scheduled after their current work lands.
 - **Assumption**: Projects on one remote share only the public edge and host
   pools; they do not share containers, volumes, or secrets.
 - **Assumption**: The remote control plane can be migrated with the standard

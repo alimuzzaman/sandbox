@@ -1,6 +1,6 @@
 # Product Requirements Draft: Per-Target Hosting Operations
 
-**Status**: Validated
+**Status**: Refined
 
 **Created**: 2026-10-08
 
@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions.
 
-**Final Validation**: `PASS` — third independent Opus 5.5 review (read-only, 2026-10-09, on `bf0bcc4`) returned `REOPEN` on one decision (reclaim scope) and one ambiguity (hold maximum); both were decided by Fable (delegated by user) and applied with the reviewer's wording fixes. The check of those edits was a root review by Claude Opus 5.5, not an independent one, because the user stopped further sub-agents on 2026-10-09
+**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09, round 1) found one blocking gap: lease expiry could admit a successor while the predecessor's dispatched remote phase still ran. Fixed (lease expiry never clears the uncertainty fence; Scenario 7a; acceptance) together with the non-blocking "zero writes" wording; round 2 pending
 
 **Validated On**: 2026-10-09
 
@@ -227,6 +227,19 @@ more sites move to the shared xCloud server.
   reason, so delivery inspect shows what it may have done before losing the
   lease.
 
+### Scenario 7a — Holder vanishes while its remote phase keeps running (negative)
+
+- **Starting state**: A session dispatched a remote delivery phase on a target
+  and then its controller disappeared (machine asleep, network lost). The
+  remote phase is still running; the lease expires.
+- **User action**: Another session, from any controller, asks to apply to the
+  same target.
+- **Expected outcome**: Lease expiry alone does not admit it. The target keeps
+  the predecessor's uncertainty fence until the remote phase is proven to have
+  stopped or reached a terminal state; until then the successor is refused
+  with the predecessor's operation identity and the inspect command. Once the
+  phase is proven stopped or terminal, the successor is admitted.
+
 ### Scenario 8 — Claim a hold
 
 - **Starting state**: Lenzora development is idle.
@@ -326,6 +339,11 @@ more sites move to the shared xCloud server.
 - A lease whose holder disappears expires. A holder that returns after its
   lease expired performs no further effects and records `effect_unknown` for
   its own operation.
+- Lease expiry alone never clears the predecessor's uncertainty fence. If the
+  expired holder had dispatched a remote phase, no successor from any
+  controller is admitted to effects on that target until the phase is proven
+  to have ceased or reached a terminal state; expiry only stops the
+  predecessor from starting new effects.
 - Holds: the default duration is one hour and the maximum is four hours
   measured from the original claim; the holder may renew, but no renewal
   extends expiry past four hours after the claim; a hold needed longer is
@@ -472,7 +490,11 @@ more sites move to the shared xCloud server.
   hold identity, is never admitted on the held target.
 - With the remote runtime service unreachable or not migrated, every hosting
   mutation refuses with `lease_authority_unavailable` within 15 seconds and
-  makes zero writes.
+  makes zero protected delivery effects (only the retained refusal is
+  written).
+- A successor on a target whose expired holder dispatched a still-running
+  remote phase is refused until that phase is proven stopped or terminal,
+  from every controller.
 - Host storage reclamation started while a target on the remote has an
   admitted operation or a live hold, but no remote-wide lease or edge/pool
   transaction is active, runs and removes nothing belonging to any hosted
@@ -523,8 +545,8 @@ more sites move to the shared xCloud server.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [x] The latest readiness review verdict is `PASS` (root review of the final edits; see Final Validation).
+- [ ] The latest readiness review verdict is `PASS` (independent Sol round 2 pending; see Final Validation).
 
-**Readiness**: `READY FOR SPECKIT`
+**Readiness**: `NOT READY`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

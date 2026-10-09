@@ -1,6 +1,6 @@
 # Product Requirements Draft: Hosted Delivery Evidence Reconciliation
 
-**Status**: Validated
+**Status**: Refined
 
 **Created**: 2026-10-08
 
@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); revised 2026-10-09 by a Claude Opus 5.5 root applying one independent Opus readiness review (verdict `REOPEN`) and the Fable product decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions. Evidence: the feedback backlog, spec 054 ledger, `docs/remote-hosting.md`, `docs/delivery-outcomes.md`, `docs/remote-job-runtime.md`, `docs/roadmap/2026-10-08-next-features.md`, and `origin/latest` commits `543f179`, `d2d123c`, `ed3cf56`, `66d35ee`.
 
-**Final Validation**: `PASS` — third independent Opus 5.5 review (read-only, 2026-10-09, on `75ddd02`) returned `REOPEN` on one factual premise: image activation has no rollback on failure. The image rule was corrected to mirror the source rule (root decision under delegated authority), and the reviewer's wording fixes were applied. The check of those edits was a root review by Claude Opus 5.5, not an independent one, because the user stopped further sub-agents on 2026-10-09
+**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09, round 1) found two blocking gaps: revision/config equality could adopt success without required edge or initializer proof, and the "started remote phase" prohibition contradicted image `recovery_no_effect` after preflight. Both fixed (adoption requires every applicable proof and no unresolved journal; prohibition scoped to source deliveries; image case and complete corroboration stated); round 2 pending
 
 **Validated On**: 2026-10-09
 
@@ -180,7 +180,9 @@ targets apply at once.
 - **Expected outcome**: `delivery inspect` stays local-only and reports the
   attempt as reconcilable without reading the remote. On reconcile or the
   next apply, the live runtime's source revision and configuration
-  equal the attempt's own, and no later attempt exists, so the local record
+  equal the attempt's own, every requested-outcome proof that applies to the
+  attempt (edge route and certificate, DNS, initializers) is present, no edge
+  journal is unresolved, and no later attempt exists, so the local record
   shows the attempt as `succeeded` with reconciliation result
   `adopted_by_observation`, the observation time, and the evidence used. The
   job stays `interrupted` with a `succeeded` delivery outcome. The next apply
@@ -197,7 +199,10 @@ targets apply at once.
 - **Expected outcome**: The observation does not match the attempt's revision
   and configuration, so the result is `insufficient_evidence` or `diverged`.
   The local outcome and the fence are unchanged, and the output names the
-  supported exits (observation-only recover, or explicit retire).
+  supported exits (observation-only recover, or explicit retire). The same
+  holds when the runtime revision and configuration do match but a required
+  edge or initializer proof is missing or an edge journal is unresolved: the
+  result is `insufficient_evidence` and the fence stays.
 
 ### Scenario 3 — Failed attempt, rollback complete, no fence
 
@@ -311,9 +316,12 @@ targets apply at once.
   holds a request-bound terminal record for the attempt's request id.
 - **User action**: The agent reconciles.
 - **Expected outcome**: `committed` adopts the outcome and
-  `recovery_no_effect` proves no effect, each only after one live observation
-  that does not contradict it. A contradicting observation yields
-  `diverged`.
+  `recovery_no_effect` proves no effect, each only after one complete live
+  observation that corroborates it. A contradicting observation yields
+  `diverged`; an unavailable or incomplete observation yields
+  `insufficient_evidence` (or `unavailable`) and changes nothing. A
+  `recovery_no_effect` record proves no effect even when the remote preflight
+  ran, provided the record shows no effect entered.
 
 ## Proposed Product Behavior
 
@@ -332,8 +340,13 @@ targets apply at once.
   `insufficient_evidence`, `diverged`, `authority_pending`, `unavailable`.
   Only `adopted_by_observation` and `no_effect_proven` write the local record.
   Adoption requires the observed source revision and configuration to equal
-  the attempt's own retained ones and no later attempt to exist for the
-  target; a later attempt yields `diverged` with reason `later_attempt`.
+  the attempt's own retained ones, every requested-outcome proof that applies
+  to the attempt (edge route and certificate, DNS, initializers; the same
+  success rule as spec 054) to be present, no unresolved edge or DNS journal
+  for the target (spec 064), and no later attempt to exist for the target; a
+  later attempt yields `diverged` with reason `later_attempt`, and a missing
+  proof or unresolved journal yields `insufficient_evidence` and keeps the
+  fence. Revision and configuration equality alone never adopts success.
 - For deliveries without a remote request-bound terminal record (source
   deliveries), `no_effect_proven` is recorded only when retained attempt evidence shows no
   protected effect entered (no transfer, edge, DNS or Compose phase started on
@@ -343,8 +356,10 @@ targets apply at once.
   state cannot be proven.
 - For image deliveries, reconciliation may use the remote's request-bound
   terminal record for the attempt's request id (`committed` adopts the
-  outcome; `recovery_no_effect` proves no effect), corroborated by one live
-  observation that must not contradict it (`diverged` if it does). Source
+  outcome; `recovery_no_effect` proves no effect, including after a remote
+  preflight that recorded no effect entering), corroborated by one complete
+  live observation (`diverged` if it contradicts; `insufficient_evidence` if
+  it is unavailable or incomplete). Source
   deliveries use exact observation only until a remote receipt exists
   (follow-up).
 - `delivery inspect` stays local-only: it never reads the remote, and reports
@@ -443,10 +458,17 @@ targets apply at once.
 - In runs where the client is killed before the last remote phase starts but
   after an earlier one started, zero local outcomes change and every fence
   stays.
-- 100% of attempts with a started remote phase are never `no_effect_proven`;
-  an attempt killed during build, with no remote phase started and live
-  state equal to the pre-attempt state, is `no_effect_proven` and the next
-  apply is admitted.
+- 100% of source-delivery attempts with a started remote phase are never
+  `no_effect_proven`; a source attempt killed during build, with no remote
+  phase started and live state equal to the pre-attempt state, is
+  `no_effect_proven` and the next apply is admitted.
+- An image activation whose remote record is `recovery_no_effect` after its
+  remote preflight ran, with a complete corroborating observation, is
+  `no_effect_proven`; the same record with an unavailable observation
+  changes nothing.
+- An attempt whose runtime revision and configuration match but whose edge
+  proof is pending or whose edge journal is unresolved is
+  `insufficient_evidence` in 100% of runs, and its fence stays.
 - A failed source attempt whose Compose step never started and whose edge
   rollback is complete, and an image activation refused before any runtime
   effect with its edge rollback (if any) complete, are each followed by an admitted apply with
@@ -511,8 +533,8 @@ targets apply at once.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [x] The latest readiness review verdict is `PASS` (root review of the final edits; see Final Validation).
+- [ ] The latest readiness review verdict is `PASS` (independent Sol round 2 pending; see Final Validation).
 
-**Readiness**: `READY FOR SPECKIT`
+**Readiness**: `NOT READY`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

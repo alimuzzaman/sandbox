@@ -1,6 +1,6 @@
 # Product Requirements Draft: Transactional Edge and DNS Changes
 
-**Status**: Validated
+**Status**: Refined
 
 **Created**: 2026-10-09
 
@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); evidence from the feedback backlog, `docs/remote-hosting.md` (DNS, edge verification, rollback, nginx front door), and `origin/latest` commits `e5fc88b`, `ac9070b`, `7d04606`. Revised 2026-10-09 by Claude Opus 5.5 root (speckit-refine) applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; cited code re-verified read-only on `origin/latest`. Revised again 2026-10-09 by Claude Opus 5.5 root applying the second-round review (C1, C2, N3-N9, drift ruling) and Fable decisions E1 and E2; cited code re-verified on `origin/latest`.
 
-**Final Validation**: `PASS` — root readiness review by Claude Opus 5.5 on 2026-10-09 of the revision applying the second independent review (`9189c1e`); not independent, because the user stopped further sub-agents on 2026-10-09. It found one consequential overlap (adoption reusing `--confirm`), decided under delegated authority, and two wording fixes, all applied
+**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09, round 1) found one blocking gap: rollback after the lease is released could overwrite a later change another apply relies on. Fixed (conditional restoration, `rollback_conflict`, Scenarios 11a and 11b, acceptance) with the two non-blocking clarifications (owned record changed to an uncovered type; origin connection only for DNS-only hostnames); round 2 pending
 
 **Validated On**: 2026-10-09
 
@@ -292,6 +292,28 @@ grows with every hostname moved and every alias added.
   lease cannot be acquired within the bound, the result is
   `rollback_incomplete` naming every journaled change still in place.
 
+### Scenario 11a — A later apply relies on the changed state (negative)
+
+- **Starting state**: Apply A changed the zone SSL mode from `full` to
+  `strict` and released the lease. Apply B for another target on the same
+  zone then succeeded relying on `strict`. A's verification now fails.
+- **User action**: None; A is rolling back.
+- **Expected outcome**: A re-reads the zone setting before restoring. Because
+  the zone's journal shows a later transaction (B) that depends on `strict`,
+  A does not restore `full`; the item is reported `rollback_conflict` naming
+  B's operation, and A's result is `rollback_incomplete`. B's state is
+  unchanged.
+
+### Scenario 11b — A stale DNS journal meets a later move (negative)
+
+- **Starting state**: Apply A changed a hostname's record and its rollback
+  was left pending. Since then a later apply from another remote moved the
+  same hostname (the record now carries that target's marker and content).
+- **User action**: A's rollback, or an operator resolving A's journal, runs.
+- **Expected outcome**: The live record no longer equals what A wrote, so A
+  does not overwrite it. The item is `rollback_conflict` naming the live
+  owner, A's result is `rollback_incomplete`, and the later move stands.
+
 ### Scenario 12 — Zone SSL mode change
 
 - **Starting state**: A proxied hostname's zone SSL mode is `full`.
@@ -400,7 +422,10 @@ grows with every hostname moved and every alias added.
   type are listed `left_alone` and never changed. A record carrying the old
   unattributed comment is `unmarked` and claimable only by adoption, unless
   its hostname matches a recorded preview, in which case it is
-  `preview_owned` and never adoptable.
+  `preview_owned` and never adoptable. The `left_alone` rule covers records
+  this target never owned; a record this target owned whose type was changed
+  at the provider to one outside the covered types is a `foreign_record`
+  preflight refusal, not `left_alone`.
 - More than one record of the same covered type on a declared hostname,
   where any of them is not owned by this target, is refused
   `ambiguous_records` naming each record. Sandbox never picks one of several
@@ -419,7 +444,13 @@ grows with every hostname moved and every alias added.
   runs under feature 060's remote-wide lease; verification runs after the
   lease is released. A verification failure still rolls back: rollback
   re-acquires the lease within a bounded wait, stays inside the same
-  60-second bound, and is itself journaled. The front-door fragment change
+  60-second bound, and is itself journaled. Restoration is conditional: each
+  record or zone setting is restored only if its live state still equals what
+  this transaction wrote and no later transaction on the same zone (from any
+  target or remote) has applied a change that depends on it. Otherwise the
+  item is reported `rollback_conflict` with the later owner or operation, the
+  live state is left as it is, and the transaction result is
+  `rollback_incomplete`. Rollback never overwrites a later change. The front-door fragment change
   reports its own rollback result in the same shape. Journals are retained
   with the delivery outcome and are inspectable.
 - If the lease expires during the mutation step, no further forward change is
@@ -558,9 +589,15 @@ grows with every hostname moved and every alias added.
 - A verification failure after the lease is released ends with every
   journaled change restored, or `rollback_incomplete` naming each one still in
   place; zero changes remain unreported.
+- In a controlled run where a later apply on the same zone relies on a
+  changed zone SSL mode, the earlier transaction's rollback leaves the mode
+  unchanged, reports `rollback_conflict` naming the later operation, and ends
+  `rollback_incomplete`; the same holds for a record moved since by another
+  remote, whose content and marker are unchanged afterward.
 - With the controller's system resolver deliberately pinned to the origin
-  address, verification never connects to the origin and the evidence names
-  the authoritative or edge source for every address checked.
+  address, verification of proxied hostnames never connects to the origin and
+  the evidence names the authoritative or edge source for every address
+  checked; DNS-only hostnames are verified against the origin as intended.
 - Wildcard records appear in the plan and journal, and their verification
   result is `skipped_wildcard` in 100% of applies.
 - Provisioning a remote with a proxied control hostname that the provider
@@ -630,8 +667,8 @@ grows with every hostname moved and every alias added.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [x] The latest readiness review verdict is `PASS` (root review; see Final Validation).
+- [ ] The latest readiness review verdict is `PASS` (independent Sol round 2 pending; see Final Validation).
 
-**Readiness**: `READY FOR SPECKIT`
+**Readiness**: `NOT READY`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

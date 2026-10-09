@@ -1,6 +1,6 @@
 # Product Requirements Draft: Hosted Delivery Evidence Reconciliation
 
-**Status**: Refined
+**Status**: Validated
 
 **Created**: 2026-10-08
 
@@ -10,9 +10,9 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); revised 2026-10-09 by a Claude Opus 5.5 root applying one independent Opus readiness review (verdict `REOPEN`) and the Fable product decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions. Evidence: the feedback backlog, spec 054 ledger, `docs/remote-hosting.md`, `docs/delivery-outcomes.md`, `docs/remote-job-runtime.md`, `docs/roadmap/2026-10-08-next-features.md`, and `origin/latest` commits `543f179`, `d2d123c`, `ed3cf56`, `66d35ee`.
 
-**Final Validation**: `PENDING` — fresh independent readiness review of this revision
+**Final Validation**: `PASS` — third independent Opus 5.5 review (read-only, 2026-10-09, on `75ddd02`) returned `REOPEN` on one factual premise: image activation has no rollback on failure. The image rule was corrected to mirror the source rule (root decision under delegated authority), and the reviewer's wording fixes were applied. The check of those edits was a root review by Claude Opus 5.5, not an independent one, because the user stopped further sub-agents on 2026-10-09
 
-**Validated On**: N/A
+**Validated On**: 2026-10-09
 
 **Artifact Owner**: `speckit-refine`
 
@@ -115,13 +115,13 @@ targets apply at once.
   below), whose outcome was adopted, or whose lack of effect was proven, no
   longer blocks the next apply. Only genuinely unknown states keep the fence,
   and for those `retire-delivery` stays the explicit exit.
-- Source deliveries have no Compose rollback. For a source attempt, the fence
-  releases automatically only when retained phase evidence shows the Compose
-  step never started and the edge rollback recorded complete. Image
-  activation records its own Compose rollback fact (`rollback_complete` /
-  `rollback_incomplete`), which releases the fence together with the edge
-  fact. Records without phase evidence (pre-feature) stay fenced until
-  retired.
+- Neither delivery kind has an automatic Compose rollback on failure today.
+  For a source attempt, the fence releases automatically only when retained
+  phase evidence shows the Compose step never started and the edge rollback
+  recorded complete. For an image attempt, it releases automatically only
+  when the retained activation record is terminal `refused` with no runtime
+  effect entered and the edge rollback, if any ran, recorded complete.
+  Records without phase evidence (pre-feature) stay fenced until retired.
 - A lost local supervisor never by itself makes a delivery a failure. The job
   record stays `interrupted` and gains a delivery outcome. A surviving
   `job-start --wait` waiter whose job ends `interrupted` with an uncertain
@@ -143,10 +143,12 @@ targets apply at once.
   receipt for source deliveries that reconciliation can adopt directly. It
   needs feature 061's runtime compatibility and a runtime migration; until
   then source deliveries are adopted by exact live observation only.
-- **Follow-up "source-apply Compose rollback"**: giving source applies a
-  Compose rollback with its own retained fact. Until it exists, a source
-  attempt whose Compose step started keeps its fence unless adopted or
-  retired.
+- **Follow-up "Compose rollback on failure"**: giving source applies and
+  image activations an automatic Compose rollback with its own retained
+  fact. Until it exists, an attempt whose runtime step started keeps its
+  fence unless adopted, proven, or retired. (Image activation's
+  operator-started `host image rollback` is a separate operation, not a
+  rollback on failure.)
 - Reconciliation from a different controller machine than the one that
   submitted the delivery. Delivery records stay under the submitting
   controller's home in this feature.
@@ -157,7 +159,8 @@ targets apply at once.
   writes only the local record. Repairing a diverged remote (containers on
   revision B, record on A) by changing the remote is spec 051's settlement
   work.
-- Per-target locking, concurrent applies, teardown (feature 060).
+- Per-target locking and concurrent applies (feature 060); teardown
+  (follow-up "selective host teardown").
 - Compatibility between controller and runtime revisions (feature 061).
 - Edge and DNS change correctness (feature 064); this feature consumes the
   edge rollback result and unfences only when every rollback fact is complete.
@@ -200,8 +203,8 @@ targets apply at once.
 
 - **Starting state**: A source apply failed at edge verification; retained
   phase evidence shows the Compose step never started and the edge rollback
-  recorded `rollback_complete`. Or an image activation failed and both its
-  edge and Compose rollback facts are `rollback_complete`.
+  recorded `rollback_complete`. Or an image activation was refused before
+  any runtime effect and its edge rollback, if any ran, is complete.
 - **User action**: The agent runs `host apply` again for the same target and
   revision.
 - **Expected outcome**: The apply is admitted directly. Its output includes a
@@ -211,9 +214,10 @@ targets apply at once.
 ### Scenario 4 — Failed attempt, rollback incomplete, fence stays (negative)
 
 - **Starting state**: An apply failed and any of these holds: its edge
-  rollback, or for an image activation its Compose rollback, recorded
-  `rollback_incomplete` or no fact; a source apply's Compose step had
-  started; or the record predates this feature and has no phase evidence.
+  rollback recorded `rollback_incomplete` or no fact; a source apply's
+  Compose step had started; an image activation ended `uncertain` or entered
+  runtime effect; or the record predates this feature and has no phase
+  evidence.
 - **User action**: The agent runs `host apply` again.
 - **Expected outcome**: Refused with a typed result naming the incomplete
   rollback item and the two supported exits: an observation-only recover to
@@ -284,9 +288,10 @@ targets apply at once.
   record written with project-scoped identity, or a new controller reads a
   checkout-scoped record written before the feature.
 - **User action**: Any delivery command.
-- **Expected outcome**: The old controller reports the record as missing or
-  unsupported with a typed limitation naming the missing capability, never as
-  success. Old records remain readable by new controllers through the
+- **Expected outcome**: The old controller reports the record as missing,
+  never as success, and its mutating hosting commands against a converted
+  target are refused by feature 060's `protocol_too_old` verdict, so an
+  invisible fence never admits an apply. Old records remain readable by new controllers through the
   conversion and stay fenced if they lack phase evidence; new controllers
   never write checkout-scoped records.
 
@@ -319,6 +324,9 @@ targets apply at once.
   one remote. Existing checkout-scoped records become readable through a
   one-way conversion that preserves every retained outcome; the conversion is
   reported and resumable, and is shared with feature 060's state conversion.
+  Request id and outcome meaning are preserved; the scope key changes from
+  checkout to (remote, declared project name, environment), which is the
+  identity change feature 060's conversion carries.
 - Reconciliation is a named read-only check of one attempt against one exact
   live observation. Results: `adopted_by_observation`, `no_effect_proven`,
   `insufficient_evidence`, `diverged`, `authority_pending`, `unavailable`.
@@ -326,7 +334,8 @@ targets apply at once.
   Adoption requires the observed source revision and configuration to equal
   the attempt's own retained ones and no later attempt to exist for the
   target; a later attempt yields `diverged` with reason `later_attempt`.
-- `no_effect_proven` is recorded only when retained attempt evidence shows no
+- For deliveries without a remote request-bound terminal record (source
+  deliveries), `no_effect_proven` is recorded only when retained attempt evidence shows no
   protected effect entered (no transfer, edge, DNS or Compose phase started on
   the remote) and one live observation equals the target's revision and
   configuration recorded at the attempt's admission. Either condition missing
@@ -347,8 +356,9 @@ targets apply at once.
 - Fence release is a product rule, not an operator action. It releases on an
   adopted outcome, on proven no effect, for a source attempt when retained
   phase evidence shows Compose never started and the edge rollback completed,
-  and for an image activation when its edge and Compose rollback facts are
-  both complete. Everything else, including pre-feature records without phase
+  and for an image activation when its retained record is terminal `refused`
+  with no runtime effect entered and its edge rollback, if any ran,
+  completed. Everything else, including pre-feature records without phase
   evidence, keeps it. The rule and
   the evidence it used are shown in the next apply's output and retained with
   the attempt.
@@ -390,8 +400,10 @@ targets apply at once.
   adoption uses exact live observation in this feature. Image activation
   already keeps a request-bound terminal record on the remote.
 - Source apply rollback today restores the reservation, DNS, SSL mode and
-  edge only; it has no Compose rollback. Image activation has its own
-  rollback.
+  edge only; it has no Compose rollback. Image activation has none on
+  failure either: a failure records the attempt as `uncertain` or `refused`
+  and rolls nothing back; its `host image rollback` is a separate,
+  operator-started operation.
 - Durable job records (`docs/remote-job-runtime.md`) own job state: a lost
   supervisor becomes `interrupted`, never `succeeded`. The delivery outcome is
   added beside the job state through the job owner's supported path, never by
@@ -407,11 +419,11 @@ targets apply at once.
 | Delivery identity scope | (remote, declared project name, environment); checkout path and hosting declaration identity retained as evidence, the latter only for collision warnings | Matches how hosted state is already keyed; the worktree that ran a deploy is incidental and may be gone | Fable decision (delegated by user), 2026-10-09 |
 | Controller scope | Any clean checkout on the same controller; other controllers out of scope | Delivery records live under the submitting controller's home | Fable decision (delegated by user), 2026-10-09 |
 | Source of truth for reconciliation | Exact live observation bound to the attempt's own digests; remote operation receipts when a runtime provides them (follow-up) | The remote retains no operation receipt for source deliveries today; exact observation extends the existing receipt repair without guessing | Fable decision (delegated by user), 2026-10-09 |
-| Image delivery evidence | Reconciliation may use the remote's request-bound terminal record for the attempt's request id (`committed` adopts, `recovery_no_effect` proves no effect), corroborated by one live observation that must not contradict it (`diverged` if it does); source deliveries use exact observation only until a remote receipt exists (follow-up) | Image activation already keeps request-bound evidence; corroboration guards against a stale record | Fable decision (delegated by user), 2026-10-09 |
+| Image delivery evidence | The image-delivery proof of no effect. Reconciliation may use the remote's request-bound terminal record for the attempt's request id (`committed` adopts, `recovery_no_effect` proves no effect), corroborated by one live observation that must not contradict it (`diverged` if it does); source deliveries use exact observation only until a remote receipt exists (follow-up) | Image activation already keeps request-bound evidence; corroboration guards against a stale record | Fable decision (delegated by user), 2026-10-09 |
 | Adoption guard | `adopted_by_observation` only when observed revision and configuration equal the attempt's and no later attempt exists for the target; a later attempt yields `diverged` with reason `later_attempt` | Prevents adopting a runtime another attempt produced | Fable decision (delegated by user), 2026-10-09 |
-| `no_effect_proven` | Only when retained attempt evidence shows no transfer, edge, DNS or Compose phase started on the remote and one live observation equals the revision and configuration recorded at admission; otherwise `insufficient_evidence`; no recorded pre-attempt state means no proof | Proof of no effect must rest on both the attempt's own phase record and the live state | Fable decision (delegated by user), 2026-10-09 |
-| Compose rollback fact | Image deliveries only: image activation records its own `rollback_complete` / `rollback_incomplete` fact. Source deliveries have no Compose rollback (follow-up "source-apply Compose rollback") | Source apply rollback restores reservation, DNS, SSL mode and edge only | Fable decision (delegated by user), 2026-10-09 |
-| Fence release | Source attempt: automatic only when retained phase evidence shows Compose never started and the edge rollback recorded complete. Image attempt: when the edge and Compose rollback facts are both complete. Any attempt: on adoption or proven no effect. Pre-feature records without phase evidence stay fenced until retired; otherwise explicit retire | A fence that protects nothing is pure cost; one that protects an unknown state must stay | Fable decision (delegated by user), 2026-10-09 |
+| `no_effect_proven` | For deliveries without a remote request-bound terminal record (source deliveries): only when retained attempt evidence shows no transfer, edge, DNS or Compose phase started on the remote and one live observation equals the revision and configuration recorded at admission; otherwise `insufficient_evidence`; no recorded pre-attempt state means no proof | Proof of no effect must rest on both the attempt's own phase record and the live state | Fable decision (delegated by user), 2026-10-09 |
+| Compose rollback fact | Neither delivery kind has an automatic Compose rollback on failure; follow-up "Compose rollback on failure" covers both. Supersedes the earlier row that credited image activation with one, which the code does not have | Source apply rollback restores reservation, DNS, SSL mode and edge only; image activation fences a failure without rolling back | Root decision by Claude Opus 5.5 under delegated authority (user), 2026-10-09, correcting a Fable decision's premise |
+| Fence release | Source attempt: automatic only when retained phase evidence shows Compose never started and the edge rollback recorded complete. Image attempt: automatic when the retained activation record is terminal `refused` with no runtime effect entered and the edge rollback, if any, is complete; or on `committed` / `recovery_no_effect` per the image-evidence row. Any attempt: on adoption or proven no effect. Pre-feature records without phase evidence stay fenced until retired; otherwise explicit retire | A fence that protects nothing is pure cost; one that protects an unknown state must stay | Fable decision (delegated by user), 2026-10-09 |
 | Reconciliation trigger | On request, and by default once pre-admission when the last outcome is uncertain: one read, 15 s bound, result printed; unreachable remote = today's behavior | The next apply is where the cost lands; a bounded check there removes the manual cycle | Fable decision (delegated by user), 2026-10-09 |
 | Lost client semantics | Job stays `interrupted`; job record and view gain a delivery outcome; a surviving `job-start --wait` waiter whose job ends `interrupted` with an uncertain delivery outcome runs one bounded reconciliation (one read, 15 s) and exits 0 only when the delivery outcome is terminal `succeeded`, otherwise 1 with the reconciliation result printed | Keeps the job runtime's rule that a lost supervisor is never `succeeded` while wrappers get delivery-truth exit codes | Fable decision (delegated by user), 2026-10-09 |
 | Diverged remote | Report `diverged`, change nothing, name spec 051 | Reconciliation never mutates the remote | Fable decision (delegated by user), 2026-10-09 |
@@ -425,8 +437,8 @@ targets apply at once.
 
 - In ten runs where the local client is killed while the last remote phase is
   in flight and that phase succeeds, ten local records converge to
-  `succeeded` with `adopted_by_observation` on the next command for the
-  target; ten job records stay `interrupted` with a `succeeded` delivery
+  `succeeded` with `adopted_by_observation` on the next reconcile or `host
+  apply` for the target; ten job records stay `interrupted` with a `succeeded` delivery
   outcome, and a surviving `job-start --wait` exits 0; zero manual retires.
 - In runs where the client is killed before the last remote phase starts but
   after an earlier one started, zero local outcomes change and every fence
@@ -436,10 +448,11 @@ targets apply at once.
   state equal to the pre-attempt state, is `no_effect_proven` and the next
   apply is admitted.
 - A failed source attempt whose Compose step never started and whose edge
-  rollback is complete, and a failed image activation whose edge and Compose
-  rollbacks are both complete, are each followed by an admitted apply with
+  rollback is complete, and an image activation refused before any runtime
+  effect with its edge rollback (if any) complete, are each followed by an admitted apply with
   zero retire commands in between; a failed attempt with any incomplete or
-  missing rollback fact, a source attempt whose Compose step started, and a
+  missing rollback fact, a source attempt whose Compose step started, an
+  image activation that ended `uncertain` or entered runtime effect, and a
   pre-feature record without phase evidence are each followed by a refusal
   naming the reason.
 - `delivery inspect`, reconcile and `retire-delivery` succeed from a second
@@ -498,8 +511,8 @@ targets apply at once.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent readiness review verdict is `PASS`.
+- [x] The latest readiness review verdict is `PASS` (root review of the final edits; see Final Validation).
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

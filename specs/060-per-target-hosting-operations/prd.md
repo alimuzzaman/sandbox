@@ -482,7 +482,8 @@ more sites move to the shared xCloud server.
   succeed and their retained history is byte-for-byte unchanged.
 - After conversion of an existing remote, every previously retained delivery
   outcome, recovery receipt, and generation remains queryable with the same
-  identity and meaning; an interrupted conversion is reported and resumable,
+  request id and meaning (the scope key moves from checkout to project, per
+  feature 062); an interrupted conversion is reported and resumable,
   and no hosting mutation is admitted in the mixed state, including from a
   second controller that has not converted its own state.
 - An older controller against a converted remote receives `protocol_too_old`

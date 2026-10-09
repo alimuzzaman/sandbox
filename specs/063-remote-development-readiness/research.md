@@ -69,6 +69,30 @@
   and it keeps today's fail-closed rules. Pool evidence and range evidence
   are evaluated together; built-in default pools never count.
 
+### R4 revision (2026-10-10, during T009/T013)
+
+- **Finding**: The pre-deploy admission check runs before staging, so it
+  knows neither the workspace id nor the network names the stack's effective
+  Compose config creates. It cannot allocate per `(workspace_id, network)`.
+  `docker compose` for a remote instance runs on the remote, in the installed
+  runtime (`sandbox/core/_docker.py::compose`), not in the controller.
+- **Decision**: Split R4 in two.
+  - Pre-deploy admission stays count-only: pools plus unallocated range
+    capacity against `required` (T011/T012). It refuses exhaustion with the
+    allocation table before any transfer (FR-005).
+  - Allocation happens in the runtime, immediately before the stack's first
+    `up`. The runtime reads `docker compose config --format json`, allocates
+    the created networks through the same fixed range program run locally
+    (all-or-nothing, idempotent per `(workspace_id, network)` under the
+    flock), writes the override from `sandbox/remote_network/override.py`, and
+    passes it last in every later `compose` call for that instance.
+  - A race between admission and allocation therefore refuses at allocation
+    with `docker_network_subnet_exhausted` and the table, before any network
+    is created. It never yields a half-allocated stack.
+- **Alternatives considered**: Allocating at admission with a placeholder
+  network list. Rejected: names are only known after staging, and a
+  placeholder grant would leak when the stack used other names.
+
 ## R5. Freeing allocations
 
 - **Decision**: Allocations are unique per `(workspace_id, network)` and

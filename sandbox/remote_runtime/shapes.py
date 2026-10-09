@@ -75,7 +75,7 @@ SHAPE_SOURCES = (
 
 # Bumped when the fingerprint method changes (not the payloads): a manifest
 # recorded with an older format may be re-recorded under the same protocol.
-FORMAT = 8
+FORMAT = 9
 _EMBEDDED_DEPTH = 2
 
 _KEY_METHODS = frozenset({"get", "pop", "setdefault"})

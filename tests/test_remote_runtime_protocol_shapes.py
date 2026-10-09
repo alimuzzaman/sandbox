@@ -222,6 +222,35 @@ class ShapeGuardTests(unittest.TestCase):
         with patch.object(JobRepository, "snapshot", renamed):
             self.assertIn("receipt:job_snapshot", self._receipt_diff())
 
+    def test_snapshot_receipts_cover_populated_child_records(self):
+        """Every SQL-derived child record is sampled populated (Sol R9-1)."""
+        recorded = shapes.read_manifest()["shapes"]
+        snapshot = set(recorded["receipt:job_snapshot"])
+        for path in ("process.supervisor_pid", "heartbeat.supervisor_at",
+                     "heartbeat.health_evidence", "output[].bytes_stored",
+                     "metrics.samples", "artifacts[].size_bytes",
+                     "artifacts[].stored_relative_path",
+                     "compatibility_differences[].severity"):
+            self.assertIn(path, snapshot)
+        self.assertIn("artifacts[].size_bytes", recorded["receipt:job_artifacts"])
+
+    def test_artifact_metadata_sql_alias_requires_protocol_bump(self):
+        """``size_bytes AS byte_count`` in the producer's projection is caught (Sol R9-1)."""
+        from unittest.mock import patch
+        from sandbox.jobs.registry import JobRepository
+        original = JobRepository.snapshot
+
+        def aliased(self, job_id):
+            value = original(self, job_id)
+            for row in value["artifacts"]:
+                row["byte_count"] = row.pop("size_bytes")
+            return value
+
+        with patch.object(JobRepository, "snapshot", aliased):
+            diff = self._receipt_diff()
+        self.assertIn("receipt:job_snapshot", diff)
+        self.assertIn("receipt:job_artifacts", diff)
+
     def test_materialization_receipt_mutation_requires_protocol_bump(self):
         """Renaming the refusal's ``errno`` breaks the ownership repair (Sol R8-1)."""
         from unittest.mock import patch

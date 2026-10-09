@@ -1121,16 +1121,50 @@ class WorkspaceRuntimeTests(unittest.TestCase):
                     service.list(TargetRequest("/p", remote="vps", workspace="e2e"))
                 self.assertEqual(refused.exception.code, expected_code)
                 self.assertEqual(control_calls, [])
+                compatibility = {"match": "exact_only", "mismatch": "exact_only"}.get(
+                    revision, "unknown")
                 self.assertEqual(
                     refused.exception.details["observed"],
-                    {"ownership": ownership, "runtime_revision_state": revision},
+                    {"ownership": ownership, "runtime_revision_state": revision,
+                     "compatibility": compatibility},
                 )
                 self.assertEqual(
                     refused.exception.details["recovery_command"],
-                    "./sb remote service migrate <name> --confirm --json",
+                    "./sb remote service migrate vps --confirm --json",
                 )
                 self.assertNotIn("/Users/private", str(refused.exception))
                 self.assertNotIn("remote-secret-like-value", str(refused.exception))
+
+    def test_remote_workspace_preflight_follows_the_compatibility_verdict(self):
+        """Spec 061 FR-003: a different revision speaking the same protocol is
+        accepted; a runtime that cannot serve this controller is refused."""
+        cases = (
+            ("mismatch", {"state": "compatible", "ok": True}, None),
+            ("mismatch", {"state": "protocol_newer", "ok": False},
+             "workspace_remote_revision_mismatch"),
+            ("match", {"state": "unknown", "ok": True},
+             "workspace_remote_compatibility_unknown"),
+            ("mismatch", {"state": "bogus", "ok": True},
+             "workspace_remote_revision_mismatch"),
+        )
+        for revision, verdict, expected in cases:
+            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as temp:
+                calls = []
+                service = WorkspaceService(
+                    _RemoteTarget(), JobStorage(temp, free_disk_reserve=0),
+                    remote_service_status=lambda _t, r=revision, v=verdict: {
+                        "ownership": "proven", "runtime_revision_state": r,
+                        "compatibility": v},
+                    remote_control=lambda _t, action: calls.append(action) or {
+                        "ok": True, "action": action})
+                request = TargetRequest("/p", remote="vps", workspace="e2e")
+                if expected is None:
+                    self.assertEqual(service.status(request)["action"], "status")
+                    continue
+                with self.assertRaises(Exception) as refused:
+                    service.status(request)
+                self.assertEqual(refused.exception.code, expected)
+                self.assertEqual(calls, [])
 
     def test_remote_workspace_missing_or_failed_preflight_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1145,7 +1179,8 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(control_calls, [])
             self.assertEqual(
                 missing.exception.details["observed"],
-                {"ownership": "unknown", "runtime_revision_state": "unavailable"},
+                {"ownership": "unknown", "runtime_revision_state": "unavailable",
+                 "compatibility": "unknown"},
             )
 
             service.remote_service_status = lambda _target: (_ for _ in ()).throw(

@@ -1075,6 +1075,9 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
     remote-specific probe policy.
     """
     checks: list[dict] = []
+    # Spec 061 FR-017: remedies name the remote when the record carries it.
+    label = remote.get("_remote_name") if isinstance(remote.get("_remote_name"), str) \
+        and _NAME_RE.fullmatch(remote.get("_remote_name")) else "<name>"
     ssh_configured = bool(remote.get("ssh"))
     checks.append({"label": "SSH configured", "ok": ssh_configured,
                    "hint": "register it with `./sb remote add <name> <ssh-url>`"})
@@ -1134,11 +1137,11 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
     except Exception:
         endpoint_ok = False
     checks.append({"label": "MCP endpoint reachable", "ok": endpoint_ok,
-                   "hint": "run `./sb remote up <name>` and verify its route"})
+                   "hint": f"run `./sb remote up {label}` and verify its route"})
     service_record = remote.get("mcp_service")
     if not isinstance(service_record, dict):
         checks.append({"label": "MCP service ownership", "ok": False,
-                       "hint": "run `./sb remote service migrate <name> --plan` and review the protected migration"})
+                       "hint": f"run `./sb remote service migrate {label} --plan` and review the protected migration"})
         return checks
     try:
         service = remote_mcp_service_status(remote)
@@ -1161,7 +1164,7 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
             probe_error = "remote_service_probe_unavailable"
         checks.append({
             "label": "MCP service status", "ok": False,
-            "hint": f"{probe_error}; retry `./sb remote service status <name>` after SSH/systemd responds",
+            "hint": f"{probe_error}; retry `./sb remote service status {label}` after SSH/systemd responds",
         })
         return checks
     checks.extend(front_door_doctor_checks(remote))

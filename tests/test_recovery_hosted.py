@@ -136,7 +136,10 @@ class TestHostedRecoveryMaterializer(unittest.TestCase):
         result = service.create_materialized("hosted-set", ("site",), confirm=True,
                                              remote="scaleway-sandbox")
         self.assertEqual(result["error"]["code"], "remote_revision_mismatch")
-        self.assertIn("sync the remote runtime revision, then retry", result["error"]["message"])
+        self.assertIn("./sb remote service status scaleway-sandbox", result["error"]["message"])
+        self.assertIn("./sb remote service migrate scaleway-sandbox --plan",
+                      result["error"]["message"])
+        self.assertNotIn("<", result["error"]["message"])
         self.assertNotIn("private/path", str(result))
         self.assertNotIn("password", str(result))
 

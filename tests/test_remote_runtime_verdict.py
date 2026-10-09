@@ -78,5 +78,22 @@ class VerdictTests(unittest.TestCase):
         self.assertFalse(v.strict_requested(None, {}))
 
 
+class ExactChecksStayExactTests(unittest.TestCase):
+    """Spec 061 FR-004: binding checks keep exact revision comparison."""
+
+    def test_exact_sites_do_not_consult_the_verdict(self):
+        root = Path(__file__).resolve().parent.parent / "sandbox"
+        for relative in ("resources/cleanup_routine/host.py",
+                         "resources/host_memory/remote.py",
+                         "delivery/trace_context.py"):
+            with self.subTest(path=relative):
+                self.assertNotIn("sandbox.remote_runtime", (root / relative).read_text())
+
+    def test_cleanup_routine_host_refuses_a_different_revision(self):
+        source = (Path(__file__).resolve().parent.parent / "sandbox" / "resources"
+                  / "cleanup_routine" / "host.py").read_text()
+        self.assertIn('request["expected_runtime_revision"] != revision', source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1955,18 +1955,31 @@ class WorkspaceService:
             ownership = None
         if not isinstance(revision, str):
             revision = None
+        from sandbox.remote_runtime.verdict import admitted
+        _, compatibility = admitted(status)
         return {
             "ownership": ownership if ownership in _REMOTE_OWNERSHIP_STATES else "unknown",
             "runtime_revision_state": revision if revision in _REMOTE_REVISION_STATES else "unknown",
+            "compatibility": compatibility,
         }
 
     @staticmethod
-    def _remote_failure_message(message: str, observed: dict[str, str]) -> str:
+    def _remote_recovery_command(target) -> str:
+        """The migrate remedy for this remote, never a placeholder when the
+        target names a valid remote (spec 061 FR-017)."""
+        from sandbox.remote_runtime.refusal import migrate_confirm_remedy, remote_name_or_none
+        name = remote_name_or_none(getattr(target, "remote_name", None))
+        return f"{migrate_confirm_remedy(name)} --json" if name else _REMOTE_WORKSPACE_RECOVERY
+
+    @staticmethod
+    def _remote_failure_message(message: str, observed: dict[str, str],
+                                recovery: str = _REMOTE_WORKSPACE_RECOVERY) -> str:
         """Render finite preflight evidence for adapters that flatten errors."""
         return (
             f"{message} (observed ownership={observed['ownership']}, "
-            f"runtime_revision_state={observed['runtime_revision_state']}; "
-            f"recovery: {_REMOTE_WORKSPACE_RECOVERY})"
+            f"runtime_revision_state={observed['runtime_revision_state']}, "
+            f"compatibility={observed.get('compatibility', 'unknown')}; "
+            f"recovery: {recovery})"
         )
 
     def _assert_remote_service_ready(self, target) -> None:
@@ -1979,6 +1992,7 @@ class WorkspaceService:
         """
         status: Any = None
         probe_failed = False
+        recovery = self._remote_recovery_command(target)
         if not callable(self.remote_service_status):
             probe_failed = True
         else:
@@ -1991,15 +2005,16 @@ class WorkspaceService:
 
         observed = self._safe_remote_observation(status)
         if probe_failed and not isinstance(status, dict):
-            observed = {"ownership": "unknown", "runtime_revision_state": "unavailable"}
+            observed = {"ownership": "unknown", "runtime_revision_state": "unavailable",
+                        "compatibility": "unknown"}
         if probe_failed:
             raise WorkspaceIndexError(
                 "workspace_remote_preflight_unavailable",
                 self._remote_failure_message(
                     "remote MCP service revision evidence is unavailable; refresh the owned service before retrying",
-                    observed,
+                    observed, recovery,
                 ),
-                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+                observed=observed, recovery_command=recovery,
             )
 
         if observed["ownership"] != "proven":
@@ -2007,21 +2022,27 @@ class WorkspaceService:
                 "workspace_remote_service_unproven",
                 self._remote_failure_message(
                     "remote MCP service ownership could not be proven; refresh the owned service before retrying",
-                    observed,
+                    observed, recovery,
                 ),
-                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+                observed=observed, recovery_command=recovery,
             )
 
+        # Spec 061: a different revision that serves this controller's
+        # control protocol is accepted; everything else keeps the old codes.
+        from sandbox.remote_runtime.verdict import admitted
+        ok, _ = admitted(status)
         revision_state = observed["runtime_revision_state"]
-        if revision_state != "match":
+        if not ok:
             code = f"workspace_remote_revision_{revision_state}"
+            if revision_state == "match":
+                code = f"workspace_remote_compatibility_{observed['compatibility']}"
             raise WorkspaceIndexError(
                 code,
                 self._remote_failure_message(
-                    "remote MCP service runtime revision is not verified; refresh the owned service before retrying",
-                    observed,
+                    "remote MCP service runtime is not compatible with this checkout; refresh the owned service before retrying",
+                    observed, recovery,
                 ),
-                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+                observed=observed, recovery_command=recovery,
             )
 
     def _legacy_root(self, namespace: str) -> Path:

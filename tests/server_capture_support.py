@@ -196,7 +196,7 @@ def remote_inventory() -> dict:
 
 
 def local_transport(harness: HelperHarness, *, revision_state: str = "match",
-                    ssh=None, provisioned: bool = True):
+                    ssh=None, provisioned: bool = True, compatibility: dict | None = None):
     """A real ``RegisteredServerCaptureTransport`` wired to the local helper."""
     from sandbox.transports.remote_server_capture import RegisteredServerCaptureTransport
     ssh = ssh or LocalSsh(harness)
@@ -209,7 +209,9 @@ def local_transport(harness: HelperHarness, *, revision_state: str = "match",
         ssh_run=ssh_run, ssh_process=ssh,
         resolve_home=lambda _entry: str(harness.home),
         service_status=lambda _entry: {"installed_runtime_revision": "b" * 40,
-                                       "runtime_revision_state": revision_state},
+                                       "runtime_revision_state": revision_state,
+                                       **({"compatibility": compatibility}
+                                          if compatibility is not None else {})},
         inventory=lambda _remote: remote_inventory(),
     )
     return transport, ssh

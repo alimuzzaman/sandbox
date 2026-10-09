@@ -81,3 +81,27 @@ def compatibility(*, local_revision: str | None, installed_revision: str | None,
     if strict and ok and not same_revision:
         return make(state, False, "strict_requires_exact_revision")
     return make(state, ok, reason)
+
+
+def admitted(status) -> tuple[bool, str]:
+    """Read the verdict a ``remote service status`` envelope already carries.
+
+    Returns ``(ok, state)`` with ``state`` always one of :data:`STATES`. The
+    envelope is remote-derived input, so only the finite ``state`` and the
+    boolean ``ok`` are trusted. An envelope without a verdict (an older
+    controller module or a test double) falls back to the exact rule.
+    """
+    if not isinstance(status, dict):
+        return False, UNKNOWN
+    verdict = status.get("compatibility")
+    if isinstance(verdict, dict):
+        state = verdict.get("state")
+        if state in STATES and isinstance(verdict.get("ok"), bool):
+            return verdict["ok"] and state != UNKNOWN, state
+        return False, UNKNOWN
+    revision_state = status.get("runtime_revision_state")
+    if revision_state == "match":
+        return True, EXACT_ONLY
+    if revision_state == "mismatch":
+        return False, EXACT_ONLY
+    return False, UNKNOWN

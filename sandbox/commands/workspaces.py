@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from sandbox.application.context import durable_job_dependencies
 from sandbox.jobs.models import TargetRequest
@@ -69,6 +70,16 @@ _REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --jso
 _LOCAL_WORKSPACE_RECOVERY = "./sb workspace migrate --local --json"
 _REMOTE_REVISION_STATES = frozenset({"match", "mismatch", "unavailable", "unknown"})
 _REMOTE_OWNERSHIP_STATES = frozenset({"proven", "missing", "ambiguous", "unknown"})
+# Spec 061: the preflight names the remote in its remedy and reports the
+# finite compatibility verdict state.
+_REMOTE_NAMED_RECOVERY = re.compile(
+    r"\./sb remote service migrate [a-z0-9][a-z0-9_-]* --confirm --json")
+
+
+def _safe_recovery_command(value) -> bool:
+    return isinstance(value, str) and (
+        value in {_REMOTE_WORKSPACE_RECOVERY, _LOCAL_WORKSPACE_RECOVERY}
+        or _REMOTE_NAMED_RECOVERY.fullmatch(value) is not None)
 
 
 def _reclaim_excludes(cfg, args) -> tuple[str, ...]:
@@ -201,19 +212,21 @@ def cmd_workspace(_cfg, args) -> None:
             # exception detail from a remote boundary.
             if isinstance(details, dict):
                 observed = details.get("observed")
+                from sandbox.remote_runtime.verdict import STATES as _COMPATIBILITY_STATES
                 if (isinstance(observed, dict) and
-                        set(observed) == {"ownership", "runtime_revision_state"} and
+                        set(observed) - {"compatibility"} == {"ownership", "runtime_revision_state"} and
                         isinstance(observed.get("ownership"), str) and
                         isinstance(observed.get("runtime_revision_state"), str) and
                         observed.get("ownership") in _REMOTE_OWNERSHIP_STATES and
-                        observed.get("runtime_revision_state") in _REMOTE_REVISION_STATES):
+                        observed.get("runtime_revision_state") in _REMOTE_REVISION_STATES and
+                        observed.get("compatibility", "unknown") in _COMPATIBILITY_STATES):
                     error["observed"] = {
                         "ownership": observed["ownership"],
                         "runtime_revision_state": observed["runtime_revision_state"],
                     }
-                if details.get("recovery_command") in {
-                    _REMOTE_WORKSPACE_RECOVERY, _LOCAL_WORKSPACE_RECOVERY,
-                }:
+                    if "compatibility" in observed:
+                        error["observed"]["compatibility"] = observed["compatibility"]
+                if _safe_recovery_command(details.get("recovery_command")):
                     error["recovery_command"] = details["recovery_command"]
             print(json.dumps({
                 "ok": False,
@@ -224,9 +237,8 @@ def cmd_workspace(_cfg, args) -> None:
         message = str(exc)
         details = getattr(exc, "details", None)
         if (isinstance(details, dict) and
-                details.get("recovery_command") in {
-                    _REMOTE_WORKSPACE_RECOVERY, _LOCAL_WORKSPACE_RECOVERY,
-                } and details.get("recovery_command") not in message):
+                _safe_recovery_command(details.get("recovery_command"))
+                and details.get("recovery_command") not in message):
             message += f"; recovery: {details['recovery_command']}"
         die(f"{getattr(exc, 'code', 'workspace_operation_failed')}: {message}")
     if args.json:

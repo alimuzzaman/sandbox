@@ -124,6 +124,20 @@ class TestTransportInvocation(unittest.TestCase):
         transport, _ssh = local_transport(self.h)
         self.assertEqual(transport.observe("fixture-remote").revision_state, "match")
 
+    def test_observe_accepts_a_compatible_runtime_and_names_the_remedy(self):
+        transport, _ssh = local_transport(
+            self.h, revision_state="mismatch",
+            compatibility={"state": "compatible", "ok": True})
+        state = transport.observe("fixture-remote")
+        self.assertTrue(state.compatible)
+        transport, _ssh = local_transport(
+            self.h, revision_state="mismatch",
+            compatibility={"state": "protocol_newer", "ok": False})
+        with self.assertRaises(RecoveryError) as caught:
+            transport.observe("fixture-remote")
+        self.assertEqual(caught.exception.code, "remote_runtime_stale")
+        self.assertIn("./sb remote service migrate fixture-remote --plan", str(caught.exception))
+
     def test_read_chunk_rejects_a_header_that_does_not_match_the_bytes(self):
         header = json.dumps({"ok": True, "offset": 0, "length": 3, "sha256": "0" * 64}).encode()
         ssh, _calls = _canned(header + b"\nabc")

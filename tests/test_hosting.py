@@ -4569,7 +4569,7 @@ class TestRuntimeApplyRefusalDiagnostics(unittest.TestCase):
         
         with patch.object(hosting_cmd.remote, "get_remote", return_value={"host": "1.2.3.4"}), \
              patch.object(hosting_cmd.remote, "registered_remote_lock",
-                          side_effect=lambda **_kw: contextlib.nullcontext()), \
+                          side_effect=lambda *_a, **_kw: contextlib.nullcontext()), \
              patch.object(hosting_cmd, "_host_recovery_eligibility", return_value={"eligible": True}), \
              patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
              patch.object(hosting_cmd, "_validate_apply_source", return_value="main"), \

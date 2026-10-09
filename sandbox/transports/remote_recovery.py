@@ -68,6 +68,7 @@ class _RemoteState:
     machine_identity: str
     source_digest: str
     revision_state: str = ""
+    compatible: bool = False
 
 
 RemoteSourceState = _RemoteState
@@ -96,7 +97,9 @@ def probe_remote_state(remote: str, *, lookup: Callable, inventory: Callable,
 
     Shared by the one-shot controller and the server-first capture transport.
     Accepts a ``match`` or ``unknown`` runtime revision state, as the one-shot
-    path always has; callers needing a strict ``match`` check ``revision_state``.
+    path always has, and a different revision whose control protocol serves
+    this controller (spec 061). Callers needing more check ``revision_state``
+    and ``compatible``.
     """
     if not isinstance(remote, str) or not _REMOTE.fullmatch(remote):
         raise RecoveryError("remote name is invalid", "remote_unavailable")
@@ -119,7 +122,9 @@ def probe_remote_state(remote: str, *, lookup: Callable, inventory: Callable,
     if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
         raise RecoveryError("remote runtime revision is unavailable", "remote_unavailable")
     revision_state = status.get("runtime_revision_state") if isinstance(status, dict) else None
-    if revision_state not in {"match", "unknown"}:
+    from sandbox.remote_runtime.verdict import admitted
+    compatible, _ = admitted(status)
+    if revision_state not in {"match", "unknown"} and not compatible:
         raise RecoveryError("remote runtime revision is stale", "remote_revision_mismatch")
     hostname, code = _completed_ok(hostname_result)
     hostname_text = hostname.decode("utf-8", errors="replace").strip()
@@ -140,7 +145,7 @@ def probe_remote_state(remote: str, *, lookup: Callable, inventory: Callable,
         "repository": observed.get("repositories", {}).get("amarsonar-bangla", {}),
     }
     return _RemoteState(entry, observed, revision, machine_identity,
-                        _safe_json_digest(digest_input), revision_state)
+                        _safe_json_digest(digest_input), revision_state, compatible)
 
 
 def control_plane_declaration(remote: str, artifact: ArtifactPlan, state: _RemoteState,

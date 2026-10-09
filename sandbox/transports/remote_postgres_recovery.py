@@ -176,6 +176,10 @@ class RegisteredPostgresRecoveryTransport:
                     phase='runtime_compatibility', status='unavailable',
                     code='remote_status_unavailable')
             raise
+        # Spec 061: a different revision that serves this controller's
+        # control protocol is admitted; the exact rule applies otherwise.
+        from sandbox.remote_runtime.verdict import admitted
+        compatible, _ = admitted(status)
         if operation == 'inspect-restore' and isinstance(status, dict):
             revision_state = status.get('runtime_revision_state')
             if (isinstance(revision_state, str) and revision_state in {'match', 'mismatch'}
@@ -184,7 +188,7 @@ class RegisteredPostgresRecoveryTransport:
                 return _inspection_bytes(source, request_id, archive,
                     phase='runtime_compatibility', status='unavailable',
                     code='remote_status_unavailable', runtime_status=status)
-            if revision_state == 'mismatch':
+            if revision_state == 'mismatch' and not compatible:
                 return _inspection_bytes(source, request_id, archive,
                     phase='runtime_compatibility', status='refused',
                     code='remote_revision_mismatch', runtime_status=status)
@@ -192,7 +196,8 @@ class RegisteredPostgresRecoveryTransport:
                 return _inspection_bytes(source, request_id, archive,
                     phase='runtime_compatibility', status='unavailable',
                     code='remote_authentication_unavailable', runtime_status=status)
-        if (not isinstance(status, dict) or status.get('runtime_revision_state') != 'match'
+        if (not isinstance(status, dict)
+                or (status.get('runtime_revision_state') != 'match' and not compatible)
                 or not status.get('active') or not status.get('authenticated')):
             if operation == 'inspect-restore':
                 return _inspection_bytes(source, request_id, archive,

@@ -89,17 +89,53 @@ def node_store_service(remote: str | None = None):
     )
 
 
-def _revision_mismatch_message(installed: object, controller: object) -> str:
-    """Name both runtime revisions (short, hex-only) and the inspection command."""
+def _revision_mismatch_message(installed: object, controller: object,
+                               remote: str | None = None, state: str | None = None) -> str:
+    """Name both runtime revisions (short, hex-only), the verdict and the remedies."""
     import re
+    from sandbox.remote_runtime.refusal import (
+        migrate_plan_remedy, remote_name_or_none, status_remedy,
+    )
 
     def short(value: object) -> str:
         text = str(value or "")
         return text[:12] if re.fullmatch(r"[0-9a-f]{7,64}", text) else "unknown"
-    return (f"installed remote runtime {short(installed)} does not match this "
-            f"controller {short(controller)}; compare with `sb remote service status NAME`, "
-            f"then `sb remote up NAME --confirm` or use a controller "
+    name = remote_name_or_none(remote)
+    verdict = f" (compatibility: {state})" if state else ""
+    if name:
+        remedy = f"inspect with `{status_remedy(name)}`, then `{migrate_plan_remedy(name)}`"
+    else:
+        remedy = "inspect with `./sb remote service status <remote>`"
+    return (f"installed remote runtime {short(installed)} is not compatible with this "
+            f"controller {short(controller)}{verdict}; {remedy}, or use a controller "
             f"checkout at the installed revision")
+
+
+def _require_compatible_runtime(remote: str, record: dict) -> None:
+    """Spec 061 FR-003: admit the registered runtime when it is this exact
+    revision, or when the live status verdict says it serves this
+    controller's protocol. The live probe runs only on a revision difference.
+    """
+    from sandbox.core import _remote
+    from sandbox.remote_runtime.verdict import UNKNOWN, admitted
+    from .host_memory.remote import RemoteProtocolError
+
+    installed = (record.get("mcp_service") or {}).get("runtime_revision")
+    controller = _remote._remote_mcp_runtime_revision()
+    if installed == controller:
+        return
+    try:
+        status = _remote.remote_mcp_service_status(record)
+    except Exception:  # noqa: BLE001 - remote detail is never forwarded
+        status = None
+    ok, state = admitted(status)
+    if ok:
+        return
+    raise RemoteProtocolError(
+        "remote_runtime_revision_mismatch",
+        _revision_mismatch_message(installed, controller, remote,
+                                   state if status is not None else UNKNOWN),
+    )
 
 
 def _build_host_memory_service(remote: str | None = None):
@@ -113,13 +149,7 @@ def _build_host_memory_service(remote: str | None = None):
     record = _remote.get_remote(remote)
     if not isinstance(record, dict):
         raise ValueError("unknown_remote")
-    service = record.get("mcp_service") or {}
-    local_revision = _remote._remote_mcp_runtime_revision()
-    if service.get("runtime_revision") != local_revision:
-        raise RemoteProtocolError(
-            "remote_runtime_revision_mismatch",
-            _revision_mismatch_message(service.get("runtime_revision"), local_revision),
-        )
+    _require_compatible_runtime(remote, record)
 
     def request(selected, payload):
         return _remote.remote_host_memory_request(selected, payload)
@@ -154,11 +184,7 @@ def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) ->
     record = _remote.get_remote(remote)
     if not isinstance(record, dict):
         raise ValueError("recovery_target_identity_unavailable")
-    installed = (record.get("mcp_service") or {}).get("runtime_revision")
-    controller = _remote._remote_mcp_runtime_revision()
-    if installed != controller:
-        raise RemoteProtocolError("remote_runtime_revision_mismatch",
-                                  _revision_mismatch_message(installed, controller))
+    _require_compatible_runtime(remote, record)
     adapter = HostMemoryRemote(remote, record, _remote.remote_host_memory_request)
     value = adapter.call("host_memory_status", budget_seconds=budget_seconds)
     identity = value.get("target_identity")

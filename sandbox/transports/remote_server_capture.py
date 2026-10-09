@@ -87,7 +87,11 @@ class RegisteredServerCaptureTransport:
     # -- source binding (start only) ----------------------------------------
 
     def observe(self, remote: str) -> RemoteSourceState:
-        """Probe the remote; capture start requires runtime revision state ``match``."""
+        """Probe the remote; capture start requires a runtime that is the same
+        revision or one that serves this controller's protocol (spec 061)."""
+        from sandbox.remote_runtime.refusal import migrate_plan_remedy, remote_name_or_none
+        name = remote_name_or_none(remote)
+        remedy = f"; run {migrate_plan_remedy(name)}" if name else ""
         try:
             state = probe_remote_state(
                 remote, lookup=self._lookup, inventory=self._inventory,
@@ -95,11 +99,11 @@ class RegisteredServerCaptureTransport:
                 ssh_run=self._ssh_run)
         except RecoveryError as exc:
             if exc.code == "remote_revision_mismatch":
-                raise RecoveryError("remote runtime revision is stale; run sb remote service migrate",
+                raise RecoveryError(f"remote runtime is not compatible with this checkout{remedy}",
                                     "remote_runtime_stale") from exc
             raise
-        if state.revision_state != "match":
-            raise RecoveryError("remote runtime revision is not confirmed current",
+        if state.revision_state != "match" and not state.compatible:
+            raise RecoveryError(f"remote runtime is not confirmed compatible{remedy}",
                                 "remote_runtime_stale")
         return state
 

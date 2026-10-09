@@ -80,6 +80,26 @@ class RemotePostgresRecoveryTests(unittest.TestCase):
                 transport.invoke(source(), "observe", "a" * 64)
         self.assertEqual(process_calls, [])
 
+    def test_compatible_different_revision_reaches_the_helper(self):
+        """Spec 061 FR-003: protocol compatibility admits a different revision;
+        an incompatible verdict is still refused before the helper runs."""
+        process_calls = []
+
+        def process(*args, **kwargs):
+            process_calls.append(True)
+            return SimpleNamespace(returncode=0, stdout=b'{"ok":true,"code":"observed"}')
+
+        status = {"runtime_revision_state": "mismatch", "active": True, "authenticated": True,
+                  "compatibility": {"state": "compatible", "ok": True}}
+        self._transport(status=lambda _entry: status, process=process).invoke(
+            source(), "observe", "a" * 64)
+        self.assertEqual(process_calls, [True])
+        refused = dict(status, compatibility={"state": "protocol_newer", "ok": False})
+        with self.assertRaisesRegex(Exception, "runtime"):
+            self._transport(status=lambda _entry: refused, process=process).invoke(
+                source(), "observe", "a" * 64)
+        self.assertEqual(process_calls, [True])
+
     def test_inspection_revision_mismatch_returns_correlated_refusal_without_helper(self):
         process_calls = []
         archive = b"retained-archive"

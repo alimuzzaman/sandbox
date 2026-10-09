@@ -6,6 +6,7 @@ the real CLI parser.
 """
 from __future__ import annotations
 
+import re
 import shlex
 
 from sandbox.remote_runtime.verdict import (
@@ -16,6 +17,13 @@ MISMATCH_CODE = "remote_runtime_revision_mismatch"
 STRICT_PIN_UNVERIFIABLE = "strict_pin_unverifiable"
 
 _SB = "./sb"
+# Same grammar as registered remote names (sandbox.core._remote._NAME_RE).
+_REMOTE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
+def remote_name_or_none(value) -> str | None:
+    """A registered-remote name safe to embed in a remedy, else None."""
+    return value if isinstance(value, str) and _REMOTE_NAME.fullmatch(value) else None
 
 
 def _command(*argv: str) -> str:

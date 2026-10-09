@@ -36,19 +36,27 @@ def _safe_atom(value: object) -> bool:
 _CAUSE_HINTS = {
     "remote_unavailable": "check that the remote is reachable with `sb remote status`",
     "remote_source_unavailable": "the declared source path is missing on the remote",
-    "remote_revision_mismatch": "sync the remote runtime revision, then retry",
+    "remote_revision_mismatch": ("the installed remote runtime is not compatible with this "
+                                 "checkout; inspect with `{status}`, then `{migrate}`"),
     "missing_database_credential": "register the database credential for this profile",
     "source_changed": "the source changed during observation; retry",
 }
 
 
 def _controller_error(message: str, fallback_code: str,
-                      exc: BaseException) -> RecoveryError:
+                      exc: BaseException, remote: str | None = None) -> RecoveryError:
     """Expose reviewed controller codes with fixed hints, never raw diagnostics."""
+    from sandbox.remote_runtime.refusal import (
+        migrate_plan_remedy, remote_name_or_none, status_remedy,
+    )
     cause = getattr(exc, "code", None)
     hint = _CAUSE_HINTS.get(cause) if isinstance(cause, str) else None
     if hint is None:
         return RecoveryError(message, fallback_code)
+    name = remote_name_or_none(remote)
+    hint = hint.format(
+        status=status_remedy(name) if name else "./sb remote service status <remote>",
+        migrate=migrate_plan_remedy(name) if name else "./sb remote service migrate <remote> --plan")
     return RecoveryError(f"{message} (cause: {cause}; {hint})", cause)
 
 
@@ -179,7 +187,7 @@ class HostedRecoveryMaterializer(MaterializationAdapter):
             # Do not reflect controller transport/path diagnostics in the
             # public result envelope.
             raise _controller_error("hosted source observation failed",
-                                    "materialization_observe_failed", exc) from exc
+                                    "materialization_observe_failed", exc, remote) from exc
         except Exception as exc:
             raise RecoveryError("hosted source observation failed", "materialization_observe_failed") from exc
         if not isinstance(observation, HostedObservation):
@@ -199,7 +207,7 @@ class HostedRecoveryMaterializer(MaterializationAdapter):
             # diagnostics. Keep the public recovery envelope stable and
             # secret/path-free even when the controller returns a typed error.
             raise _controller_error("hosted capture failed",
-                                    "materialization_capture_failed", exc) from exc
+                                    "materialization_capture_failed", exc, remote) from exc
         except Exception as exc:
             raise RecoveryError("hosted capture failed", "materialization_capture_failed") from exc
         if not isinstance(receipt, HostedCaptureReceipt):

@@ -21,9 +21,9 @@
 - [x] T008 [US1] Test: status probe parses the protocol env line; legacy unit yields `exact_only`; status JSON carries `control_protocol` and `compatibility` in `tests/test_remote.py`
 - [x] T009 [US1] Status probe reads `SANDBOX_REMOTE_MCP_CONTROL_PROTOCOL`; `remote_mcp_service_status` adds `control_protocol` and `compatibility` in `sandbox/core/_remote.py`
 - [x] T010 [US1] Migrate writes the protocol env line into the unit in `sandbox/core/_remote.py`
-- [ ] T011 [US1] Tests: each FR-003 consumer accepts `compatible` at a different revision and refuses `protocol_newer` in the shared shape (workspace preflight, hosted apply eligibility, recovery, Postgres recovery, resources context, host memory)
-- [ ] T012 [US1] Route FR-003 consumers through the verdict: `sandbox/application/workspace_service.py`, `sandbox/commands/hosting.py`, `sandbox/transports/remote_recovery.py`, `sandbox/transports/remote_postgres_recovery.py`, `sandbox/resources/context.py`, `sandbox/resources/host_memory/remote.py`
-- [ ] T013 [US1] Test that artifact-binding checks, remote WP-CLI signatures and cleanup-routine enable still refuse a revision difference
+- [x] T011 [US1] Tests: each FR-003 consumer accepts `compatible` at a different revision and refuses `protocol_newer` in the shared shape (workspace preflight, hosted apply eligibility, recovery, Postgres recovery, resources context, host memory)
+- [x] T012 [US1] Route FR-003 consumers through the verdict: `sandbox/application/workspace_service.py`, `sandbox/commands/hosting.py`, `sandbox/transports/remote_recovery.py`, `sandbox/transports/remote_postgres_recovery.py`, `sandbox/resources/context.py`, `sandbox/resources/host_memory/remote.py`
+- [x] T013 [US1] Test that artifact-binding checks, remote WP-CLI signatures and cleanup-routine enable still refuse a revision difference
 
 ## Phase 4: US2 Strict mode and pins (P1)
 
@@ -39,8 +39,8 @@
 
 ## Phase 6: US4 Refusals and remedies (P2)
 
-- [ ] T020 [US4] Replace emitted mismatch hints (`--remote NAME`, `<name>` placeholder, "sync the remote runtime revision") with refusal remedies; `unknown` verdict remedies name status and diagnostics
-- [ ] T021 [US4] Recovery create reports the shared mismatch shape instead of `materialization_observe_failed`
+- [x] T020 [US4] Replace emitted mismatch hints (`--remote NAME`, `<name>` placeholder, "sync the remote runtime revision") with refusal remedies; `unknown` verdict remedies name status and diagnostics
+- [x] T021 [US4] Recovery create reports the shared mismatch shape instead of `materialization_observe_failed`
 
 ## Phase 7: US5 Per-remote registration lock (P3)
 

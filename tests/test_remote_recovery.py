@@ -270,6 +270,22 @@ class TestExtractedRemoteProbe(unittest.TestCase):
             probe_remote_state("scaleway-sandbox", **fakes)
         self.assertEqual(caught.exception.code, "remote_source_unavailable")
 
+    def test_probe_accepts_a_compatible_different_revision(self):
+        from sandbox.recovery.errors import RecoveryError
+        from sandbox.transports.remote_recovery import probe_remote_state
+        fakes = self._fakes("mismatch")
+        fakes["service_status"] = lambda _entry: {
+            "installed_runtime_revision": "b" * 40, "runtime_revision_state": "mismatch",
+            "compatibility": {"state": "compatible", "ok": True}}
+        state = probe_remote_state("scaleway-sandbox", **fakes)
+        self.assertTrue(state.compatible)
+        fakes["service_status"] = lambda _entry: {
+            "installed_runtime_revision": "b" * 40, "runtime_revision_state": "mismatch",
+            "compatibility": {"state": "protocol_too_old", "ok": False}}
+        with self.assertRaises(RecoveryError) as caught:
+            probe_remote_state("scaleway-sandbox", **fakes)
+        self.assertEqual(caught.exception.code, "remote_revision_mismatch")
+
     def test_declaration_builder_matches_controller_control_plane_capture(self):
         from sandbox.transports.remote_recovery import control_plane_declaration, probe_remote_state
         fakes = self._fakes()

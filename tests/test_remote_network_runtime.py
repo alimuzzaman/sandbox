@@ -199,8 +199,11 @@ class ComposeHookTests(unittest.TestCase):
             _docker.compose("up", "-d", instance="x")
             _docker.compose("run", "--rm", "wpcli", "wp", instance="x")
             _docker.compose("ps", instance="x")
+            _docker.compose("kill", instance="x")
+            _docker.compose("stop", instance="x")
             _docker.compose("down", instance="x")
             _docker.compose("down", "-v", instance="x")
+        # A killed or stopped stack keeps its subnets attributed (FR-006).
         self.assertEqual(fake.events, [("prepare", "x"), ("prepare", "x"), ("release", "x")])
         for cmd in argv:
             files = [cmd[i + 1] for i, item in enumerate(cmd) if item == "-f"]

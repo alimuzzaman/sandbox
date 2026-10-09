@@ -33,7 +33,7 @@
 - **Alternatives considered**: a control-service (MCP) endpoint. Rejected
   because it would exist only on new runtimes, and assignment must be able to
   report "runtime predates ranges" precisely (FR-002). The program probes for
-  the runtime's `range_support` marker and returns a typed limitation when it
+  the installed control-protocol marker (R10) and returns a typed limitation when it
   is absent.
 
 ## R3. Overlap classes for assignment and proposal
@@ -143,10 +143,13 @@
 
 ## R10. Range support marker and 061 status
 
-- **Decision**: `remote service migrate` at this feature's revision writes the
-  runtime capability `network_ranges` into the installed runtime record. The
-  store checks it before any program call and returns
-  `range_runtime_unsupported` naming the migrate when it is absent (FR-002).
+- **Decision**: The marker is the installed unit's declared control protocol
+  (061 `SANDBOX_REMOTE_MCP_CONTROL_PROTOCOL`, written by `remote service
+  migrate`). Ranges need a declared spoken protocol of at least the number
+  T013a assigns. `assign` and admission allocation check it first and return
+  `range_runtime_unsupported` naming the migrate when it is lower or absent
+  (FR-002); `propose`, `inventory` and `list` are read-only and need no
+  marker.
   Feature 061 has shipped (`remote_runtime.verdict.admitted`,
   `CONTROL_PROTOCOL_SPOKEN = 1`), so the runtime-compatibility row uses its
   verdict; the "exact revision" branch of FR-017 no longer applies.

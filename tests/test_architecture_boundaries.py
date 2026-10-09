@@ -275,6 +275,8 @@ target.update(imported_parent.values())
             ROOT / "sandbox" / "services",
             ROOT / "sandbox" / "transports",
             ROOT / "sandbox" / "hermes",
+            ROOT / "sandbox" / "remote_network",
+            ROOT / "sandbox" / "readiness",
         )
         violations = []
         for package in roots:

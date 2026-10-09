@@ -5,14 +5,14 @@
 
 ## Phase 1: Setup
 
-- [ ] T001 Create packages `sandbox/remote_network/__init__.py` and `sandbox/readiness/__init__.py`; register them wherever `tests/test_architecture_boundaries.py` requires
+- [x] T001 Create packages `sandbox/remote_network/__init__.py` and `sandbox/readiness/__init__.py`; register them wherever `tests/test_architecture_boundaries.py` requires
 
 ## Phase 2: Foundational
 
-- [ ] T002 [P] Tests for CIDR validation, subnet math, each overlap class (docker network, host route, docker default pool, CGNAT), partial inventory → unknown, and proposal inside `10.200.0.0/14` in `tests/test_remote_network_ranges.py`
-- [ ] T003 Implement `sandbox/remote_network/ranges.py` (validation, overlap classification, proposal, capacity)
-- [ ] T004 [P] Tests running the remote program for real against a temp home via a local `sh -c` stand-in: inventory, assign (idempotent, conflict, overlap, unsupported), allocate all-or-nothing and idempotent per `(workspace_id, network)`, concurrent last-subnet allocation yields one grant, release-owner, `list` returns `capacity_proof`, read-only list without mkdir, file modes 0700/0600, missing `network_ranges` marker → `range_runtime_unsupported` naming the migrate, no secret-shaped values in any output (SC-009) in `tests/test_remote_network_program.py`
-- [ ] T005 Implement `sandbox/remote_network/program.py` (fixed program, flock, typed errors, `capacity_proof`) and `sandbox/remote_network/store.py` (RangeStore over `ssh_run`, 15 s bound, bounded listing, redaction, `network_ranges` marker check); write the marker in `remote service migrate` (`sandbox/core/_remote.py`)
+- [x] T002 [P] Tests for CIDR validation, subnet math, each overlap class (docker network, host route, docker default pool, CGNAT), partial inventory → unknown, and proposal inside `10.200.0.0/14` in `tests/test_remote_network_ranges.py`
+- [x] T003 Implement `sandbox/remote_network/ranges.py` (validation, overlap classification, proposal, capacity)
+- [x] T004 [P] Tests running the remote program for real against a temp home via a local `sh -c` stand-in: inventory, assign (idempotent, conflict, overlap, unsupported), allocate all-or-nothing and idempotent per `(workspace_id, network)`, concurrent last-subnet allocation yields one grant, release-owner, `list` returns `capacity_proof`, read-only list without mkdir, file modes 0700/0600, installed protocol below the ranges protocol (or undeclared) → `range_runtime_unsupported` naming the migrate, no secret-shaped values in any output (SC-009) in `tests/test_remote_network_program.py`
+- [x] T005 Implement `sandbox/remote_network/program.py` (fixed program, flock, typed errors, `capacity_proof`) and `sandbox/remote_network/store.py` (RangeStore over `ssh_run`, 15 s bound, bounded listing, redaction, installed-protocol marker check per research R10)
 
 ## Phase 3: US1 Development capacity without a daemon restart (P1)
 

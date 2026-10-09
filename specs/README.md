@@ -64,7 +64,7 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 057 | Scheduled Safe Cleanup on a Remote | Open (1 of 26) | — | Feedback 8a3e8c35 |
 | 058 | Server-First Recovery Capture and Later Drive Promotion | Open (1 of 56) | — | Feedback 9e54f17b |
 | 059 | Supervised Long-Running Secret Session | Open (1 of 30) | — | Feedback 2cfab06f |
-| 060 | Per-Target Hosting Operations | PRD not ready | Roadmap 2026-10-08 #1 | Feedback adccd6b7, 83dd053a, f72c4279 |
+| 060 | Per-Target Hosting Operations | PRD ready for speckit | Roadmap 2026-10-08 #1 | Feedback adccd6b7, 83dd053a, f72c4279 |
 | 061 | Remote Runtime Revision Coexistence | PRD ready for speckit | Roadmap 2026-10-08 #2 | Feedback e41bef3b, be5a6353, f475f422 |
 | 062 | Hosted Delivery Evidence Reconciliation | PRD not ready | Roadmap 2026-10-08 #3; amends 054 identity scope | Feedback 48c3e007, bae5cd4e, e4333c7b, f3329d32 |
 | 063 | Remote Development Execution Readiness | PRD ready for speckit | Roadmap 2026-10-08 #5 | Feedback cef740dd, cebec97a, 5598f2d0 |

@@ -1,6 +1,6 @@
 # Product Requirements Draft: Per-Target Hosting Operations
 
-**Status**: Refined
+**Status**: Validated
 
 **Created**: 2026-10-08
 
@@ -10,9 +10,9 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions.
 
-**Final Validation**: `PENDING` — fresh independent readiness review of this revision
+**Final Validation**: `PASS` — third independent Opus 5.5 review (read-only, 2026-10-09, on `bf0bcc4`) returned `REOPEN` on one decision (reclaim scope) and one ambiguity (hold maximum); both were decided by Fable (delegated by user) and applied with the reviewer's wording fixes. The check of those edits was a root review by Claude Opus 5.5, not an independent one, because the user stopped further sub-agents on 2026-10-09
 
-**Validated On**: N/A
+**Validated On**: 2026-10-09
 
 **Artifact Owner**: `speckit-refine`
 
@@ -236,8 +236,8 @@ more sites move to the shared xCloud server.
   controller with holder, hold identity, purpose, and expiry. The holder's own
   apply, presenting the hold identity, is admitted. Another session's apply on
   that target, including one on the same controller without the hold
-  identity, waits or refuses, naming the hold. The holder may renew the hold up to the maximum duration and may
-  release it.
+  identity, waits or refuses, naming the hold. The holder may renew the hold, never past four hours after the claim,
+  and may release it.
 
 ### Scenario 9 — Hold expires (negative)
 
@@ -326,9 +326,11 @@ more sites move to the shared xCloud server.
 - A lease whose holder disappears expires. A holder that returns after its
   lease expired performs no further effects and records `effect_unknown` for
   its own operation.
-- Holds: the default duration is one hour and the maximum is four hours; the
-  holder may renew within the maximum; expiry is the only dead-holder
-  detection. A hold belongs to the session that claimed it, identified by the
+- Holds: the default duration is one hour and the maximum is four hours
+  measured from the original claim; the holder may renew, but no renewal
+  extends expiry past four hours after the claim; a hold needed longer is
+  claimed again after expiry or release, as a new hold with a new identity
+  that queues like any other; expiry is the only dead-holder detection. A hold belongs to the session that claimed it, identified by the
   hold identity Sandbox issues at claim (secret-free, shown in the listing
   with controller, purpose and expiry). Renew, release and operations run
   under the hold present that identity by flag or environment setting; a
@@ -355,10 +357,12 @@ more sites move to the shared xCloud server.
   agree on its meaning.
 - If the remote runtime service is unreachable or not yet migrated, no hosting
   mutation is admitted (see Scenario 14).
-- Host storage reclamation keeps yielding to hosting work: while any target on
-  the remote has an admitted operation or a live hold, reclamation reports
-  `host_reclaim_busy` and removes nothing, as it does today for an active
-  apply.
+- Host storage reclamation yields only to shared-remote work: while a
+  remote-wide lease is held, or a host edge or address-pool transaction lock
+  is held, reclamation reports `host_reclaim_busy` and removes nothing. A
+  per-target operation or hold never blocks reclamation; reclamation never
+  touches a hosted target's containers, volumes, routes, or retained state,
+  and that exclusion is unchanged by this feature.
 - Re-registering a remote must not repoint an operation already admitted on
   one of its targets. Taking the controller-wide registration lock out of the
   long phases keeps that guarantee.
@@ -390,7 +394,10 @@ more sites move to the shared xCloud server.
 - Feature 064 (Edge and DNS Change Transactions) defines the edge and DNS
   step. That step, including its rollback, must fit under this feature's
   remote-wide lease and its 60-second bound; a rollback that runs after the
-  lease was released re-acquires the lease first.
+  lease was released re-acquires the lease first. The no-further-effects rule
+  for an expired lease covers forward changes; rolling back journaled edge and
+  DNS changes after re-acquiring the remote-wide lease is permitted and stays
+  inside the 60-second bound.
 - Today the remote registration lock is controller-wide: one lock on a
   controller covers every registered remote, shared by registration writers
   and authority readers.
@@ -407,8 +414,10 @@ more sites move to the shared xCloud server.
 | State partition | Delivery and recovery state kept per target, with a one-way supported conversion and a refusable mixed state | Independent targets cannot share a single state file without sharing failure modes | Fable decision (delegated by user), 2026-10-08 |
 | Coordination authority | Lease, hold, and per-target operation state authoritative on the remote runtime service; controllers keep a cache plus their own retained outcomes | The real contention (feedback `f72c4279`) is several controllers on one target, which controller-local state cannot serialize | Fable decision (delegated by user), 2026-10-09 |
 | Upgrade conversion | Converts the controller's retained state for the remote to per-target layout and establishes remote-side lease authority; older controllers get the spec 061 `protocol_too_old` verdict | State is controller-local today; compatibility verdicts belong to 061 | Fable decision (delegated by user), 2026-10-09 |
-| Explicit holds | Same primitive as a running operation's lease, claimed on purpose with purpose string; default 1 h, max 4 h, renewable by holder; expiry is the only dead-holder detection; non-holder release needs `--break-hold` with a reason, recorded with breaker identity | Agents coordinating over chat and controller-local hold files are the symptom; one remote-wide lease with a CLI is the fix | Fable decision (delegated by user), 2026-10-09 |
+| Explicit holds | Same primitive as a running operation's lease, claimed on purpose with purpose string; default 1 h, max 4 h, renewable by holder within four hours of claim; expiry is the only dead-holder detection; non-holder release needs `--break-hold` with a reason, recorded with breaker identity | Agents coordinating over chat and controller-local hold files are the symptom; one remote-wide lease with a CLI is the fix | Fable decision (delegated by user), 2026-10-09 |
 | Expired lease, returning holder | No further effects; own operation recorded `effect_unknown` | A fenced-out holder must not race the new owner | Fable decision (delegated by user), 2026-10-09 |
+| Hold maximum | Four hours bounds total life from claim to expiry across renewals; renewals past that are refused; longer work re-claims | Unlimited renewal would recreate the abandoned-holder problem the maximum exists to stop | Fable decision (delegated by user), 2026-10-09 |
+| Reclaim vs hosting work | Reclaim yields to the remote-wide lease and host edge/pool transaction locks only; per-target operations and holds never block it | Hosted target resources are already excluded from every reclaim tier, and a hold can last four hours while the shared steps last at most 60 s | Fable decision (delegated by user), 2026-10-09 |
 | Hold ownership | A hold belongs to the claiming session, identified by the secret-free hold identity issued at claim; renew, release and operations under the hold present it by flag or environment setting; any other session, including one on the same controller, is not the holder | One controller runs many agent sessions, so a controller cannot stand for a holder | Fable decision (delegated by user), 2026-10-09 |
 | Same-target exclusion | Every registered target-mutation operation, plus retire-delivery and hold claim, renew and release, is exclusive with every other on the same target and with nothing on other targets except the shared steps and the build cap | Listing only four operations left the other target mutations unserialized | Fable decision (delegated by user), 2026-10-09 |
 | Lease authority unreachable | Typed, retained refusal `lease_authority_unavailable` within 15 s, zero effects, no controller-local fallback; remedy names the standard migrate/repin procedure | Admission without the authority would reopen cross-controller races | Fable decision (delegated by user), 2026-10-09 |
@@ -424,11 +433,12 @@ more sites move to the shared xCloud server.
 ## Acceptance Outcomes
 
 - Two applies for different targets on one remote, started within five seconds
-  of each other, both succeed with no retry, and the second starts its build
+  of each other, both succeed with no retry, the second starts its build
   no later than ten seconds after admission regardless of the first's build
-  duration.
+  duration, and the second apply's total wait on the first is under 60
+  seconds.
 - Two applies from one controller to two different remotes run concurrently;
-  neither waits on the other at any point, and the second starts its build no
+  neither waits on the other for longer than two seconds at any point, and the second starts its build no
   later than ten seconds after admission.
 - Two applies for the same target from two different controllers never
   overlap: the second waits or refuses, naming the first.
@@ -451,6 +461,9 @@ more sites move to the shared xCloud server.
   seconds of expiry; a hold request above four hours is refused; a non-holder
   release without `--break-hold` is refused, and with it is recorded with the
   breaker's identity and reason.
+- A renewal that would set expiry later than four hours after the original
+  claim is refused, naming the remaining allowance; a hold claimed after
+  that expiry carries a new identity and start time.
 - With the cap at two, a third concurrent build never starts while two are
   running.
 - A returning holder whose lease expired performs zero effects and its
@@ -461,8 +474,10 @@ more sites move to the shared xCloud server.
   mutation refuses with `lease_authority_unavailable` within 15 seconds and
   makes zero writes.
 - Host storage reclamation started while a target on the remote has an
-  admitted operation or live hold reports `host_reclaim_busy` and removes
-  nothing.
+  admitted operation or a live hold, but no remote-wide lease or edge/pool
+  transaction is active, runs and removes nothing belonging to any hosted
+  target; started during a remote-wide lease, it reports `host_reclaim_busy`
+  and removes nothing.
 - After an interrupted apply on one target, every other target's commands
   succeed and their retained history is byte-for-byte unchanged.
 - After conversion of an existing remote, every previously retained delivery
@@ -507,8 +522,8 @@ more sites move to the shared xCloud server.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent readiness review verdict is `PASS`.
+- [x] The latest readiness review verdict is `PASS` (root review of the final edits; see Final Validation).
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

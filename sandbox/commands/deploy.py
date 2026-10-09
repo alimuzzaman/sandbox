@@ -518,7 +518,7 @@ def _warn_unstaged_composer_vendor(root, include_paths, *, as_json: bool) -> lis
 
 def cmd_deploy(cfg, args):
     if getattr(args, 'ensure', False) or getattr(args, 'expose', False):
-        with sr.registered_remote_lock():
+        with sr.registered_remote_lock(sr.registration_lock_name(getattr(args, 'remote', None))):
             return _cmd_deploy(cfg, args)
     return _cmd_deploy(cfg, args)
 

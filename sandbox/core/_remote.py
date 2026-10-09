@@ -308,44 +308,154 @@ def get_remote(name: str) -> dict | None:
     return copy
 
 
-@contextmanager
-def registered_remote_lock(*, timeout_seconds: float = 30):
-    """Serialize supported remote registration writers and authority readers."""
+class RemoteRegistrationBusy(TimeoutError):
+    """The registration lock stayed held past its wait budget.
+
+    ``str()`` stays ``remote_registration_busy`` for existing callers;
+    ``holder`` carries the secret-free record the holder wrote, when readable.
+    """
+
+    def __init__(self, holder: dict | None = None):
+        super().__init__("remote_registration_busy")
+        self.holder = holder
+
+
+def _registration_lock_directory(*parts: str) -> Path:
     directory = Path(RUNTIME_DIR).expanduser().resolve() / "remote-registration"
-    if directory.is_symlink():
-        raise ValueError("remote registration lock directory is unsafe")
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directory_info = directory.lstat()
-    if (not stat.S_ISDIR(directory_info.st_mode) or
-            directory_info.st_uid != os.geteuid() or
-            stat.S_IMODE(directory_info.st_mode) & 0o077):
-        raise ValueError("remote registration lock directory is unsafe")
-    path = directory / "registry.lock"
+    for part in (None, *parts):
+        path = directory if part is None else directory / part
+        if path.is_symlink():
+            raise ValueError("remote registration lock directory is unsafe")
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) & 0o077):
+            raise ValueError("remote registration lock directory is unsafe")
+        directory = path
+    return directory
+
+
+def _open_registration_lock(path: Path) -> int:
     if path.is_symlink():
         raise ValueError("remote registration lock file is unsafe")
     descriptor = os.open(
         path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    deadline = time.monotonic() + timeout_seconds
+    info = os.fstat(descriptor)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+            info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
+        os.close(descriptor)
+        raise ValueError("remote registration lock file is unsafe")
+    return descriptor
+
+
+def _flock_until(descriptor: int, operation: int, deadline: float) -> bool:
+    while True:
+        try:
+            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+
+
+def _read_registration_holder(descriptor: int) -> dict | None:
     try:
-        lock_info = os.fstat(descriptor)
-        if (not stat.S_ISREG(lock_info.st_mode) or
-                lock_info.st_uid != os.geteuid() or lock_info.st_nlink != 1 or
-                stat.S_IMODE(lock_info.st_mode) & 0o077):
-            raise ValueError("remote registration lock file is unsafe")
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("remote_registration_busy")
-                time.sleep(0.02)
-        yield
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        value = json.loads(os.read(descriptor, 4096).decode("utf-8") or "null")
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    holder = {key: value.get(key) for key in ("pid", "command", "remote", "started_at")}
+    if not isinstance(holder["pid"], int):
+        return None
+    return holder
+
+
+def _write_registration_holder(descriptor: int, name: str | None) -> None:
+    argv = [os.path.basename(sys.argv[0] or "")] + list(sys.argv[1:3])
+    record = {
+        "pid": os.getpid(),
+        "command": " ".join(part for part in argv if part)[:120],
+        "remote": name,
+        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    try:
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, json.dumps(record, sort_keys=True).encode("utf-8"))
+    except OSError:
+        pass
+
+
+def registration_lock_name(value) -> str | None:
+    """The remote name to lock, or None when the caller has no valid name
+    (the lock then covers the whole registry, as before spec 061)."""
+    return value if isinstance(value, str) and _NAME_RE.fullmatch(value) else None
+
+
+@contextmanager
+def registered_remote_lock(name: str | None = None, *, timeout_seconds: float = 30):
+    """Serialize supported remote registration writers and authority readers.
+
+    With a remote name the lock covers that remote only (spec 061 FR-020): it
+    takes a shared lock on ``registry.lock`` and an exclusive lock on
+    ``remotes/<name>.lock``, so work holding one remote never delays another.
+    Without a name it takes ``registry.lock`` exclusively and so excludes every
+    named holder; only callers that cannot name the remote use that form.
+    """
+    if name is not None:
+        name = validate_remote_name(name)
+    directory = _registration_lock_directory()
+    deadline = time.monotonic() + timeout_seconds
+    registry = _open_registration_lock(directory / "registry.lock")
+    acquired: list[int] = []
+    try:
+        if name is None:
+            if not _flock_until(registry, fcntl.LOCK_EX, deadline):
+                raise RemoteRegistrationBusy(_read_registration_holder(registry))
+            acquired.append(registry)
+            _write_registration_holder(registry, None)
+            yield
+            return
+        if not _flock_until(registry, fcntl.LOCK_SH, deadline):
+            raise RemoteRegistrationBusy(_read_registration_holder(registry))
+        acquired.append(registry)
+        own = _open_registration_lock(
+            _registration_lock_directory("remotes") / f"{name}.lock")
+        try:
+            if not _flock_until(own, fcntl.LOCK_EX, deadline):
+                raise RemoteRegistrationBusy(_read_registration_holder(own))
+            acquired.append(own)
+            _write_registration_holder(own, name)
+            yield
+        finally:
+            os.close(own)
     finally:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if acquired:
+                fcntl.flock(registry, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
+            os.close(registry)
+
+
+@contextmanager
+def _registry_write_lock(timeout_seconds: float = 30):
+    """Short exclusive lock around one read-modify-write of the remote block,
+    so concurrent changes to different remotes cannot overwrite each other."""
+    descriptor = _open_registration_lock(
+        _registration_lock_directory() / "registry-write.lock")
+    try:
+        if not _flock_until(descriptor, fcntl.LOCK_EX,
+                            time.monotonic() + timeout_seconds):
+            raise RemoteRegistrationBusy(None)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
@@ -527,11 +637,13 @@ def register_workspace_deployment_receipt(
     return receipt_id
 
 
-def put_remote(name: str, **fields) -> dict:
+def put_remote(name: str, _lock_timeout: float = 30, **fields) -> dict:
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's
     idempotency expectation, applied to registration too)."""
-    with registered_remote_lock():
+    with registered_remote_lock(registration_lock_name(name),
+                                timeout_seconds=_lock_timeout), \
+            _registry_write_lock():
         block = _remote_block()
         entry = dict(block.get(name) or {})
         entry.update({k: v for k, v in fields.items() if v is not None})
@@ -543,7 +655,7 @@ def put_remote(name: str, **fields) -> dict:
 def remove_remote(name: str) -> bool:
     """Forget a remote locally. NEVER touches the VPS itself (spec FR-003) --
     any instance already running there is unaffected by this call."""
-    with registered_remote_lock():
+    with registered_remote_lock(registration_lock_name(name)), _registry_write_lock():
         block = _remote_block()
         existed = block.pop(name, None) is not None
         if existed:
@@ -2551,6 +2663,7 @@ def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None, 
         f"EnvironmentFile={_REMOTE_MCP_UNIT_ENV}",
         f"Environment=SANDBOX_REMOTE_MCP_MARKER={record['ownership_marker']}",
         f"Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={record['runtime_revision']}",
+        _control_protocol_unit_line(),
         "WorkingDirectory=%h/sandbox/sb-src",
         "ExecStart=%h/sandbox/sb-src/sb mcp --transport streamable-http "
         f"--bind {shlex.quote(bind)} --port {port}{public_arg}",
@@ -2561,6 +2674,11 @@ def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None, 
         "WantedBy=default.target",
         "",
     ))
+
+
+def _control_protocol_unit_line() -> str:
+    from sandbox.remote_runtime.protocol import unit_environment_line
+    return unit_environment_line()
 
 
 def remote_diagnostics(remote: dict, *, timeout: int = 10,
@@ -4174,6 +4292,32 @@ def verify_remote(remote: dict, *, name: str | None = None, timeout: int = 10) -
     }
 
 
+def _runtime_compatibility_fields(local_revision, installed_revision, declared,
+                                  *, determinate: bool) -> dict:
+    """Spec 061: report both protocol declarations and the one verdict.
+
+    ``declared`` is the probe's ``remote_protocol`` value: ``spoken:oldest``,
+    ``none`` for a unit written before declarations, or ``invalid``.
+    """
+    from sandbox.remote_runtime.protocol import local_protocol, parse_protocol
+    from sandbox.remote_runtime.verdict import compatibility, strict_requested
+
+    installed_protocol = parse_protocol(declared)
+    if declared not in (None, "none") and installed_protocol is None:
+        determinate = False
+    verdict = compatibility(
+        local_revision=local_revision, installed_revision=installed_revision,
+        installed_protocol=installed_protocol, determinate=determinate,
+        strict=strict_requested())
+    return {
+        "control_protocol": {
+            "local": local_protocol().as_mapping(),
+            "installed": installed_protocol.as_mapping() if installed_protocol else None,
+        },
+        "compatibility": verdict.as_mapping(),
+    }
+
+
 def remote_mcp_service_status(remote: dict) -> dict:
     """Read only the selected Sandbox unit state; never inspect generic argv."""
     record = dict(remote.get("mcp_service") or {})
@@ -4197,6 +4341,9 @@ def remote_mcp_service_status(remote: dict) -> dict:
             "local_runtime_revision": local_revision if local_revision_valid else None,
             "installed_runtime_revision": None,
             "runtime_revision_state": "unavailable" if local_revision_valid else "unknown",
+            **_runtime_compatibility_fields(
+                local_revision if local_revision_valid else None, None, None,
+                determinate=False),
             "bind": record.get("bind"), "port": record.get("port"),
             "probe_state": "unavailable", "probe_error": error,
         }
@@ -4230,7 +4377,11 @@ def remote_mcp_service_status(remote: dict) -> dict:
         " print('remote_revision=' + ('unavailable' if not matches else 'unknown'))\n"
         " raise SystemExit\n"
         "value=matches[0]\n"
-        "print('remote_revision=' + value if re.fullmatch(r'[0-9a-f]{24}', value) else 'remote_revision=unknown')"
+        "print('remote_revision=' + value if re.fullmatch(r'[0-9a-f]{24}', value) else 'remote_revision=unknown')\n"
+        "pprefix='Environment=SANDBOX_REMOTE_MCP_CONTROL_PROTOCOL='\n"
+        "declared=[line[len(pprefix):] for line in lines if line.startswith(pprefix)]\n"
+        "value=declared[0] if len(declared)==1 else ''\n"
+        "print('remote_protocol=' + (value if re.fullmatch(r'[1-9][0-9]{0,5}:[1-9][0-9]{0,5}', value) else ('none' if not declared else 'invalid')))"
     )
     revision_probe = (
         f"if test -r \"{unit_path}\" && command -v python3 >/dev/null 2>&1; then "
@@ -4329,7 +4480,7 @@ def remote_mcp_service_status(remote: dict) -> dict:
     values: dict[str, str] = {}
     for line in (res.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "remote_revision", "pid_ownership", "listener", "auth", "legacy_pidfile", "probe_state", "probe_error"}:
+        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "remote_revision", "remote_protocol", "pid_ownership", "listener", "auth", "legacy_pidfile", "probe_state", "probe_error"}:
             normalized = value.strip()
             values[key] = normalized if key == "remote_revision" else normalized.lower()
     probe_state = values.get("probe_state")
@@ -4379,6 +4530,10 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "local_runtime_revision": local_revision if local_revision_valid else None,
         "installed_runtime_revision": installed_revision,
         "runtime_revision_state": revision_state,
+        **_runtime_compatibility_fields(
+            local_revision if local_revision_valid else None, installed_revision,
+            values.get("remote_protocol"),
+            determinate=revision_state in {"match", "mismatch"}),
         "bind": record.get("bind"), "port": record.get("port"),
         "probe_state": probe_state,
         "probe_error": probe_error,

@@ -2265,7 +2265,7 @@ def _authenticated_machine_identity(remote_name: str, *, allow_partial: bool = F
 def _registered_recovery_authority(validated: dict, remote_name: str, operation: dict,
                                    authority: dict):
     """Hold supported registration stable from validation through commit."""
-    with remote.registered_remote_lock():
+    with remote.registered_remote_lock(remote.registration_lock_name(remote_name)):
         current = remote.get_remote(remote_name)
         if not isinstance(current, dict) or not current.get("provisioned"):
             raise RecoveryAuthorityError("registered remote is unavailable")
@@ -6012,7 +6012,7 @@ def _cmd_host_image(validated: dict, args) -> None:
                 raise ValueError("activation transaction digest is required")
             target_key = hosting.state_key(args.remote, validated)
             with activation_repository.operation_transaction(target_key), \
-                    remote.registered_remote_lock():
+                    remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
                 entry = remote.get_remote(args.remote)
                 if not entry:
                     raise ValueError("registered remote is unavailable")
@@ -6292,7 +6292,7 @@ def _cmd_host_image(validated: dict, args) -> None:
                     return
             proof_target = proof.target.as_mapping() if not is_v2 else proof.target.as_mapping()
             with activation_repository.operation_transaction(proof_target["target_identity"]), \
-                    remote.registered_remote_lock():
+                    remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
                 entry = remote.get_remote(args.remote)
                 if not entry or proof_target["target_identity"] != hosting.state_key(args.remote, validated) \
                         or proof_target["machine_identity"] != _authenticated_machine_identity(
@@ -6454,7 +6454,7 @@ def _cmd_host_image_status(validated: dict, args) -> None:
     from sandbox.hosting.images.activation.status import activation_status
 
     try:
-        with remote.registered_remote_lock():
+        with remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
             if not remote.get_remote(args.remote):
                 raise ValueError("registered remote unavailable")
             target = hosting.state_key(args.remote, validated)
@@ -6493,7 +6493,7 @@ def _cmd_host_image_settle(validated: dict, args) -> None:
                 # Durable apply replay never enters this closure, the broker,
                 # registered transport, or the runtime observation helper.
                 authority = transaction["recovery_context"]["target"]
-                with remote.registered_remote_lock():
+                with remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
                     entry = remote.get_remote(args.remote)
                     if entry is None or authority["target_identity"] != target:
                         raise ValueError("evidence_changed")
@@ -6844,7 +6844,7 @@ def cmd_host(cfg, args) -> None:
         with recovery_repository.target_mutation_port(
                 "apply").target_mutation_transaction(target_key), \
                 recovery_repository.state_lock(timeout_seconds=lock_wait):
-            with remote.registered_remote_lock():
+            with remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
                 # Resolve registration only after target ownership. Supported
                 # re-registration cannot repoint it before durable authority
                 # and effects finish.

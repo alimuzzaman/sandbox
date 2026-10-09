@@ -267,12 +267,18 @@ def cmd_remote(cfg, args) -> None:
             raise
         # Another process (usually a running `sb host apply`) holds the
         # remote registration lock past the wait budget.
-        message = "another Sandbox command is updating the remote registry"
+        holder = getattr(exc, "holder", None)
+        message = "another Sandbox command holds this remote's registration"
+        if isinstance(holder, dict):
+            message += (f" (pid {holder.get('pid')}, {holder.get('command') or 'unknown command'},"
+                        f" since {holder.get('started_at') or 'unknown'})")
         hint = ("retry after it finishes; check running work with "
                 "`./sb job-status --json`")
         if as_json:
-            print(json.dumps({"ok": False, "error": {
-                "code": "remote_registration_busy", "message": message, "hint": hint}}))
+            error = {"code": "remote_registration_busy", "message": message, "hint": hint}
+            if isinstance(holder, dict):
+                error["holder"] = holder
+            print(json.dumps({"ok": False, "error": error}))
             raise SystemExit(1)
         die(f"remote_registration_busy: {message}; {hint}")
 

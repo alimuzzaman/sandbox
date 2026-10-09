@@ -3026,14 +3026,36 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
                 [sys.executable, "-c", parser, str(unit)],
                 capture_output=True, text=True, check=True,
             )
-            self.assertEqual(probe.stdout.strip(), f"remote_revision={local_revision}")
+            self.assertEqual(probe.stdout.strip(),
+                             f"remote_revision={local_revision}\nremote_protocol=none")
             mock_ssh_run.return_value = _completed(
                 stdout=self._complete_probe_output(
                     f"enabled=enabled\nactive=active\n{probe.stdout}")
             )
             status = sr.remote_mcp_service_status(remote)
+            # A unit written before spec 061 declares no protocol: exact only.
+            self.assertEqual(status["compatibility"]["state"], "exact_only")
+            self.assertIsNone(status["control_protocol"]["installed"])
+            unit.write_text(
+                "[Service]\n"
+                f"Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={local_revision}\n"
+                f"{sr._control_protocol_unit_line()}\n"
+            )
+            declared = subprocess.run(
+                [sys.executable, "-c", parser, str(unit)],
+                capture_output=True, text=True, check=True,
+            )
+            mock_ssh_run.return_value = _completed(
+                stdout=self._complete_probe_output(
+                    f"enabled=enabled\nactive=active\n{declared.stdout}")
+            )
+            declared_status = sr.remote_mcp_service_status(remote)
         self.assertEqual(status["installed_runtime_revision"], local_revision)
         self.assertEqual(status["runtime_revision_state"], "match")
+        self.assertEqual(declared_status["compatibility"]["state"], "compatible")
+        self.assertTrue(declared_status["compatibility"]["ok"])
+        self.assertEqual(declared_status["control_protocol"]["installed"],
+                         declared_status["control_protocol"]["local"])
 
     @patch("sandbox.core._remote.ssh_run")
     def test_status_reports_mismatching_runtime_revisions_without_reclassifying_ownership(self, mock_ssh_run):

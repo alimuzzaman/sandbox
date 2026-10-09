@@ -325,7 +325,7 @@ def _cmd_preview(cfg, args) -> None:
 
 def cmd_preview(cfg, args):
     if args.action == 'create':
-        with remote.registered_remote_lock():
+        with remote.registered_remote_lock(remote.registration_lock_name(getattr(args, 'remote', None))):
             return _cmd_preview(cfg, args)
     return _cmd_preview(cfg, args)
 

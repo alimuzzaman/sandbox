@@ -1,6 +1,6 @@
 # Product Requirements Draft: Remote Runtime Revision Coexistence
 
-**Status**: Refined
+**Status**: Validated
 
 **Created**: 2026-10-08
 
@@ -10,9 +10,9 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); refined by Claude Opus 5.5 on 2026-10-09 against an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user, with every cited code fact re-read on `origin/latest` `1325a8b`; refined again on 2026-10-09 against the second-round review (verdict `REOPEN`) and Fable decisions D5 and D6, with cited code re-read on `origin/latest` `36e9597`. Evidence: the feedback backlog, `docs/remote-hosting.md`, `docs/remote-job-runtime.md`, `TODO.md`, the Lenzora deploy wrapper, and the 2026-10-08 roadmap.
 
-**Final Validation**: `PENDING` — fresh independent readiness review after the 2026-10-09 round-2 revision
+**Final Validation**: `PASS` — independent Opus 5.5 reviewer, read-only, third review on 2026-10-09 of `83d5347`; its non-blocking edits applied
 
-**Validated On**: N/A
+**Validated On**: 2026-10-09
 
 **Artifact Owner**: `speckit-refine`
 
@@ -134,7 +134,8 @@ worktrees and with the number of remotes that production wrappers depend on.
   bridge; this feature covers the Sandbox controller to Sandbox runtime
   protocol only.
 - Relaxing checks that bind a remote-written artifact to the runtime that
-  wrote it (deployment receipts, delivery traces). Those stay exact-revision.
+  wrote it (deployment receipts, delivery traces, revision-keyed staging
+  helpers). Those stay exact-revision.
 - Remote WP-CLI request signatures and cleanup-routine enable stay
   exact-revision in version one: the remote verifies each request against its
   live runtime at dispatch, so relaxing them is a remote-side protocol change
@@ -224,8 +225,8 @@ worktrees and with the number of remotes that production wrappers depend on.
 - **User action**: Run remote WP-CLI, then `remote service status`, against
   that remote.
 - **Expected outcome**: Remote WP-CLI is refused `runtime_revision_mismatch`
-  with the complete migrate remedy in the shared refusal shape; hosting status
-  on the same remote succeeds.
+  with the complete migrate remedy in the shared refusal shape; `remote service
+  status` on the same remote succeeds and reports the `compatible` verdict.
 
 ### Scenario 6 — Strict pin cannot be registered or verified (negative)
 
@@ -327,7 +328,8 @@ worktrees and with the number of remotes that production wrappers depend on.
   recovery materialization and create, remote resources commands, host memory,
   server capture, Postgres recovery, and the cleanup-broker install. Checks
   that bind a remote-written artifact to the runtime that wrote it stay exact:
-  deployment receipts and delivery traces. Remote WP-CLI request signatures
+  deployment receipts, delivery traces and revision-keyed staging helpers.
+  Remote WP-CLI request signatures
   and cleanup-routine enable, which the remote checks against its live runtime
   at dispatch, stay exact in version one and refuse in the shared shape.
 - Strict mode is selected per invocation by a declared flag
@@ -337,8 +339,13 @@ worktrees and with the number of remotes that production wrappers depend on.
   checkout path, revision, purpose, expiry) or renews it, with purpose derived
   from the command and checkout path and a default expiry of one hour (maximum
   four, renewable). Release is optional (`remote pin release`); an unreleased
-  pin lapses at expiry. For MCP, strict mode is the `SANDBOX_STRICT_RUNTIME=1`
-  setting on the server process and applies to every remote tool call; no
+  pin lapses at expiry. A strict invocation registers or renews its pin only
+  when its revision equals the installed revision; a refused strict invocation
+  registers nothing. A pin marked broken is reported as broken, with who broke
+  it and when, until it expires or its holder releases it, and never requires
+  acknowledgment for a later migrate. For MCP, strict mode is the
+  `SANDBOX_STRICT_RUNTIME=1` setting on the local Sandbox MCP server process
+  (the controller), not the remote `/mcp` service, and applies to every remote tool call; no
   per-call selection in version one. The pin is visible to every other controller, listed by migrate plans, and
   protected by an explicit acknowledgment on confirmed migrate and on release by
   a non-holder. A strict caller whose pin cannot be registered or verified fails
@@ -388,8 +395,8 @@ worktrees and with the number of remotes that production wrappers depend on.
 | Compatibility rule | Declared control-protocol version alone in version one; revision is evidence only; capability-level degradation is a follow-up | Revision equality refuses unrelated Python changes; a protocol version refuses only real incompatibility and keeps the first version small | Fable decision (delegated by user), 2026-10-09 |
 | Which checks relax | Controller-revision-versus-installed checks consume the one protocol verdict; checks binding a remote-written artifact (deployment receipt, delivery trace) to its writer stay exact | Artifact binding protects integrity of records, not session compatibility | Fable decision (delegated by user), 2026-10-09 |
 | Remote WP-CLI signatures and cleanup-routine enable | Stay exact-revision in version one; the refusal uses the shared shape and complete migrate remedy; follow-up "protocol-verdict remote dispatch" | The remote verifies these against its live runtime at dispatch, so relaxing them is a remote-side protocol change | Fable decision (delegated by user), 2026-10-09 |
-| Strict mode selection | Declared flag `--strict-runtime` or `SANDBOX_STRICT_RUNTIME=1`; no wrapper code change required; the pin is additive visibility, not the guarantee | Lenzora keeps its exact guarantee under a compatible default without depending on pin registration | Fable decision (delegated by user), 2026-10-09 |
-| Strict pin lifecycle and MCP | Every strict invocation registers or renews the holder's pin, purpose derived from command and checkout path, default expiry one hour (maximum four, renewable); release optional (`remote pin release`), an unreleased pin lapses at expiry; MCP strict mode is `SANDBOX_STRICT_RUNTIME=1` on the server process for every remote tool call, no per-call selection in version one | Keeps the wrapper unchanged and bounds stale pins without a release step | Fable decision (delegated by user), 2026-10-09 |
+| Strict mode selection | Declared flag `--strict-runtime` or `SANDBOX_STRICT_RUNTIME=1`; no wrapper code change required; the pin is additive visibility, not the guarantee | Lenzora keeps its exact guarantee under a compatible default; the exact check is the guarantee, and pin registration is required for a strict command to run (fail closed) but the guarantee never rests on it | Fable decision (delegated by user), 2026-10-09 |
+| Strict pin lifecycle and MCP | Every strict invocation registers or renews the holder's pin, purpose derived from command and checkout path, default expiry one hour (maximum four, renewable); release optional (`remote pin release`), an unreleased pin lapses at expiry; MCP strict mode is `SANDBOX_STRICT_RUNTIME=1` on the local Sandbox MCP server process (not the remote `/mcp` service) for every remote tool call, no per-call selection in version one | Keeps the wrapper unchanged and bounds stale pins without a release step | Fable decision (delegated by user), 2026-10-09 |
 | Unverifiable strict pin | Fail closed with `strict_pin_unverifiable` and a remedy | A strict caller must never be silently served under compatible rules | Fable decision (delegated by user), 2026-10-09 |
 | Migrate over a pin | Plan lists it; confirmed apply refuses without an explicit acknowledgment; the broken pin records who broke it | Breaking a production pin must be a deliberate, attributable act | Fable decision (delegated by user), 2026-10-09 |
 | Registration scope | Version one registers strict pins only; migrate plan adds one generic line for compatible-mode controllers below the served protocol | Keeps first contact free of remote writes and the feature small; individual registration is a follow-up | Fable decision (delegated by user), 2026-10-09 |
@@ -416,6 +423,8 @@ worktrees and with the number of remotes that production wrappers depend on.
 - A strict invocation with no prior pin registers one expiring in one hour; a
   later strict invocation renews it; with no further strict invocation it
   lapses at expiry and no longer blocks a migrate.
+- A strict invocation at a revision different from the installed one
+  registers no pin and reports any broken pin's breaker and time.
 - With a strict pin registered, a migrate plan from another checkout lists
   that pin under "would break" with holder, checkout path and revision, and
   states the compatible-mode protocol range it stops serving. The plan, the dry
@@ -434,6 +443,8 @@ worktrees and with the number of remotes that production wrappers depend on.
   `remote list`, `remote up B --confirm`, and `remote service status B` each
   complete without waiting on A; a wait on the same remote's registration never
   exceeds 30 seconds and reports the holder on timeout.
+- Two registration changes to different remotes made concurrently both
+  persist; neither is lost or overwritten.
 - Against a runtime that predates this feature, a new controller reports
   exact-match mode explicitly and offers the migrate remedy; no pin is
   registered.
@@ -468,10 +479,10 @@ worktrees and with the number of remotes that production wrappers depend on.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent readiness review verdict is `PASS`.
+- [x] The latest independent readiness review verdict is `PASS`.
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
-Remaining: a fresh independent readiness review of this revision.
+Next: `speckit-specify`.
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

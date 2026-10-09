@@ -117,15 +117,15 @@ def _require_compatible_runtime(remote: str, record: dict) -> None:
     controller's protocol. The live probe runs only on a revision difference.
     """
     from sandbox.core import _remote
-    from sandbox.remote_runtime.verdict import UNKNOWN, admitted
+    from sandbox.remote_runtime.verdict import UNKNOWN, admitted, strict_requested
     from .host_memory.remote import RemoteProtocolError
 
     installed = (record.get("mcp_service") or {}).get("runtime_revision")
     controller = _remote._remote_mcp_runtime_revision()
-    if installed == controller:
+    if installed == controller and not strict_requested():
         return
     try:
-        status = _remote.remote_mcp_service_status(record)
+        status = _remote.remote_runtime_status_for_operation(record)
     except Exception:  # noqa: BLE001 - remote detail is never forwarded
         status = None
     ok, state = admitted(status)

@@ -172,7 +172,10 @@ Sandbox executable in the child command:
 ```
 
 The application commit (`FULLHEAD`), Sandbox source/control revision, and
-installed controller runtime revision are separate facts. Do not start a job
+installed controller runtime revision are separate facts; the installed runtime
+is accepted when its control protocol serves this controller (spec 061, see
+`remote service status` → `compatibility`), or only at the exact revision under
+`--strict-runtime`. Do not start a job
 from the control checkout merely to obtain a job ID. A direct apply with only a
 request flag, or a legacy direct caller without a durable receipt, is fenced
 with `recovery_context_required` before effects.

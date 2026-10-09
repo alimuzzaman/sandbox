@@ -3343,7 +3343,25 @@ class TestRemoteDomainInventory(unittest.TestCase):
         self.assertNotIn("MCP service ownership", [item["label"] for item in checks])
 
 
+class _NoPins:
+    """Stand-in for the remote pin store: no pins, no SSH (spec 061)."""
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def list(self):
+        return []
+
+    def break_pins(self, holders, _by):
+        return list(holders)
+
+
 class TestRemoteServiceCommand(unittest.TestCase):
+    def setUp(self):
+        pins = patch("sandbox.remote_runtime.pins.PinStore", _NoPins)
+        pins.start()
+        self.addCleanup(pins.stop)
+
     def test_status_transport_failure_is_degraded_and_nonzero(self):
         args = types.SimpleNamespace(name="status", ssh_url="myvps", confirm=False)
         status = {

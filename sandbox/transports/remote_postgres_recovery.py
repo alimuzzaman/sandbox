@@ -112,7 +112,7 @@ class RegisteredPostgresRecoveryTransport:
         if any(value is None for value in (lookup, status, resolve_home, process)):
             from sandbox.core import _remote
             lookup = lookup or _remote.get_remote
-            status = status or _remote.remote_mcp_service_status
+            status = status or _remote.remote_runtime_status_for_operation
             resolve_home = resolve_home or _remote.resolve_sandbox_home
             process = process or _remote.ssh_process
         self.lookup, self.status, self.home, self.process = lookup, status, resolve_home, process

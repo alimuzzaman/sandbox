@@ -8,6 +8,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Remote runtime coexistence (spec 061). Each runtime declares a control
+  protocol range; `remote service status` reports `control_protocol` and a
+  `compatibility` verdict, and remote consumers (workspace preflight, hosted
+  apply eligibility, recovery, server capture, Postgres recovery, host memory)
+  accept a different revision that serves this controller's protocol.
+  `--strict-runtime` / `SANDBOX_STRICT_RUNTIME=1` keeps exact matching and
+  holds an expiring pin on the remote; `sb remote pin list|release` manages
+  pins, and a confirmed `remote service migrate` refuses over unexpired pins
+  unless each is acknowledged with `--break-pin HOLDER`.
 - `sb ensure`, `sb apply`, and `sb test`, plus their MCP counterparts, accept
   an explicit project-local `--config-file` selector when paired with
   `--project-dir`. Selection is fail-closed, owns one sibling descriptor
@@ -15,6 +24,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a validated project-relative path.
 
 ### Changed
+- The local remote-registration lock is per remote: work holding one remote no
+  longer blocks registration changes or listing of another, and a busy lock
+  reports its holder (pid, command, start time). Mismatch refusals name the
+  real remote in runnable remedies instead of `<name>`, `--remote NAME` or
+  "sync the remote runtime revision".
 - `sb` resolves its repo-local `.cli-venv` interpreter against the script's own
   directory instead of the caller's working directory, and also tries
   `python3.14`. Running `/path/to/sb` from another directory, including as a

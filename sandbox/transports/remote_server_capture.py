@@ -73,7 +73,7 @@ class RegisteredServerCaptureTransport:
             ssh_run = ssh_run or _remote.ssh_run
             ssh_process = ssh_process or _remote.ssh_process
             resolve_home = resolve_home or _remote.resolve_sandbox_home
-            service_status = service_status or _remote.remote_mcp_service_status
+            service_status = service_status or _remote.remote_runtime_status_for_operation
             inventory = inventory or SandboxRemoteInventory().discover
         self._lookup = remote_lookup
         self._ssh_run = ssh_run

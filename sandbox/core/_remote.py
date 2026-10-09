@@ -4321,6 +4321,25 @@ def _runtime_compatibility_fields(local_revision, installed_revision, declared,
     }
 
 
+def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = None) -> dict:
+    """The service status a remote effect is gated on (spec 061).
+
+    Identical to :func:`remote_mcp_service_status` unless strict mode is
+    requested (``--strict-runtime`` or ``SANDBOX_STRICT_RUNTIME=1``); then the
+    exact revision is required and this checkout's pin is registered or
+    renewed on the remote before the caller acts.
+    """
+    from sandbox.remote_runtime.verdict import strict_requested
+
+    status = remote_mcp_service_status(remote)
+    if not strict_requested():
+        return status
+    from sandbox.core._paths import ROOT
+    from sandbox.remote_runtime.pins import purpose_for, strict_gate
+    command = " ".join(["sb", *[arg for arg in sys.argv[1:3] if not arg.startswith("-")]])
+    return strict_gate(remote, status, purpose=purpose or purpose_for(command, str(ROOT)))
+
+
 def remote_mcp_service_status(remote: dict) -> dict:
     """Read only the selected Sandbox unit state; never inspect generic argv."""
     record = dict(remote.get("mcp_service") or {})

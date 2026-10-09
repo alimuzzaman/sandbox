@@ -1406,7 +1406,7 @@ def _remote_workspace_service_status(resolved_target):
         # Let the application boundary classify absent evidence as unavailable
         # without exposing the requested name or any registry payload.
         return {"ownership": "unknown", "runtime_revision_state": "unavailable"}
-    return _remote.remote_mcp_service_status(remote)
+    return _remote.remote_runtime_status_for_operation(remote)
 
 
 def _resolve_workspace_deployment_receipt(receipt_id: str, project_identity: str) -> dict:

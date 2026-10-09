@@ -397,6 +397,23 @@ def _config_parse_error_boundary(function):
 
 
 @_config_parse_error_boundary
+def _consume_strict_runtime(argv: list[str]) -> list[str]:
+    """Spec 061 FR-007: ``--strict-runtime`` anywhere before ``--`` turns on
+    strict mode for this process (and children) via SANDBOX_STRICT_RUNTIME."""
+    from sandbox.remote_runtime.verdict import STRICT_ENVIRONMENT
+    out, strict, passthrough = [], False, False
+    for arg in argv:
+        if arg == "--":
+            passthrough = True
+        if not passthrough and arg == "--strict-runtime":
+            strict = True
+            continue
+        out.append(arg)
+    if strict:
+        os.environ[STRICT_ENVIRONMENT] = "1"
+    return out
+
+
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -420,6 +437,12 @@ Per-project (each plugin carries its own sandbox.config.json):
     p.add_argument(
         "--version", action="version", version=f"%(prog)s {_cli_version()}",
         help="show the checked-in Sandbox CLI version and exit",
+    )
+    p.add_argument(
+        "--strict-runtime", action="store_true",
+        help="require the exact installed remote runtime revision and hold a "
+             "visible pin on the remote while acting (also SANDBOX_STRICT_RUNTIME=1); "
+             "accepted anywhere on the command line",
     )
     sub = p.add_subparsers(dest="cmd")
 
@@ -813,9 +836,14 @@ Per-project (each plugin carries its own sandbox.config.json):
             "  ./sb remote service diagnostics NAME [--processes] [--json]\n"
             "  ./sb remote service migrate NAME --plan|--confirm [--json]\n"
             "  ./sb remote service cleanup-broker NAME --plan|--confirm [--json]\n"
-            "  ./sb remote service stop NAME --confirm [--json]"
+            "  ./sb remote service stop NAME --confirm [--json]\n"
+            "\n"
+            "Runtime pins (strict mode, spec 061):\n"
+            "  ./sb remote pin list NAME [--json]\n"
+            "  ./sb remote pin release NAME [--holder HOLDER] [--break-pin HOLDER] [--json]\n"
+            "  ./sb remote service migrate NAME --confirm --break-pin HOLDER ..."
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
@@ -879,6 +907,13 @@ Per-project (each plugin carries its own sandbox.config.json):
              "over SSH; that command also requires `--confirm`")
     remote_p.add_argument("--reason", default=None,
         help="required with `remote ssh`: short operator reason for the command")
+    remote_p.add_argument("--holder", default=None,
+        help="for `remote pin release`: the pin holder to release (default: this checkout)")
+    remote_p.add_argument("--break-pin", dest="break_pins", action="append", default=[],
+        metavar="HOLDER",
+        help="acknowledge breaking HOLDER's strict-mode pin: required by a confirmed "
+             "`remote service migrate` for every unexpired pin it would break, and by "
+             "`remote pin release` of another controller's pin (repeatable)")
     remote_p.add_argument("--upload-timeout", dest="upload_timeout", type=int,
         default=300, metavar="SECONDS",
         help="SSH runtime-source upload timeout for provision, up, and confirmed "
@@ -1346,7 +1381,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
             sp_parser.add_argument("--label", default=argparse.SUPPRESS)
 
-    raw_argv = _normalize_test_routing_options(list(sys.argv[1:]))
+    raw_argv = _consume_strict_runtime(
+        _normalize_test_routing_options(list(sys.argv[1:])))
     args = p.parse_args(raw_argv)
     if getattr(args, "mode", None) == _TEST_MODE_OMITTED_SENTINEL:
         args.mode = None

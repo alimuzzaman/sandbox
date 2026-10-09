@@ -27,15 +27,15 @@
 
 ## Phase 4: US2 Strict mode and pins (P1)
 
-- [ ] T014 [P] [US2] Tests for holder identity, pin validation, expiry cap, register/renew/list/release/break against a local fake remote home in `tests/test_remote_runtime_pins.py`
-- [ ] T015 [US2] Implement `sandbox/remote_runtime/pins.py` (remote program, ssh transport, parse/validate)
-- [ ] T016 [US2] Strict gate in the verdict entry point: exact revision, pin register/renew, `strict_pin_unverifiable`, broken-pin report; `--strict-runtime` and `SANDBOX_STRICT_RUNTIME=1` in `sandbox/cli.py`
-- [ ] T017 [US2] `remote pin list|release` with `--break-pin` for non-holders in `sandbox/commands/remote.py` and `sandbox/cli.py`
+- [x] T014 [P] [US2] Tests for holder identity, pin validation, expiry cap, register/renew/list/release/break against a local fake remote home in `tests/test_remote_runtime_pins.py`
+- [x] T015 [US2] Implement `sandbox/remote_runtime/pins.py` (remote program, ssh transport, parse/validate)
+- [x] T016 [US2] Strict gate in the verdict entry point: exact revision, pin register/renew, `strict_pin_unverifiable`, broken-pin report; `--strict-runtime` and `SANDBOX_STRICT_RUNTIME=1` in `sandbox/cli.py`
+- [x] T017 [US2] `remote pin list|release` with `--break-pin` for non-holders in `sandbox/commands/remote.py` and `sandbox/cli.py`
 
 ## Phase 5: US3 Migrate shows and protects pins (P2)
 
-- [ ] T018 [US3] Tests: plan/dry run list pins and the protocol line; confirm without acknowledgment refuses with zero writes; with `--break-pin` marks broken; pins re-read at apply
-- [ ] T019 [US3] Implement in `sandbox/commands/remote.py` migrate path
+- [x] T018 [US3] Tests: plan/dry run list pins and the protocol line; confirm without acknowledgment refuses with zero writes; with `--break-pin` marks broken; pins re-read at apply
+- [x] T019 [US3] Implement in `sandbox/commands/remote.py` migrate path
 
 ## Phase 6: US4 Refusals and remedies (P2)
 
@@ -49,7 +49,7 @@
 
 ## Phase 8: Polish
 
-- [ ] T024 Docs: `docs/remote-hosting.md`, `docs/remote-job-runtime.md`, CLAUDE.md gotcha 23, CHANGELOG.md
+- [x] T024 Docs: `docs/remote-hosting.md`, `docs/remote-job-runtime.md`, CLAUDE.md gotcha 23, CHANGELOG.md
 - [ ] T025 Run `./sb selftest` and the architecture test
 - [ ] T026 Live proof per quickstart on a disposable remote (needs remote install protocol; Lenzora pin bump needs owner approval)
 

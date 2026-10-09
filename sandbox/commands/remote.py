@@ -259,6 +259,7 @@ def cmd_remote(cfg, args) -> None:
         "plugins": _cmd_plugins,
         "ssh": _cmd_ssh,
         "edge": _cmd_edge,
+        "pin": _cmd_pin,
     }
     try:
         dispatch[action](args, as_json)
@@ -458,6 +459,97 @@ def _cmd_docker_pool(args, as_json: bool) -> None:
     die(f"{payload['error']['code']}: {payload['error']['message']}")
 
 
+def _pin_listing(entry: dict) -> dict:
+    """Pins for status and migrate plans; unavailable pins never fail them."""
+    from sandbox.remote_runtime.pins import PINS_UNAVAILABLE, PinError, PinStore
+    try:
+        listed = PinStore(entry).list()
+    except PinError:
+        return {"pins": None, "pins_state": PINS_UNAVAILABLE}
+    return {"pins": [pin.as_mapping() for pin in listed], "pins_state": "observed"}
+
+
+def _break_pin_args(args) -> list[str]:
+    values = getattr(args, "break_pins", None) or []
+    return sorted({value for value in values if isinstance(value, str)})
+
+
+def _migrate_pin_gate(entry: dict, args, target_revision: str | None) -> tuple[list, list]:
+    """Spec 061 FR-015: pins a confirmed migrate would break, re-read now.
+
+    Returns ``(would_break, acknowledged)``. Refuses before any write when a
+    binding pin is not acknowledged with ``--break-pin HOLDER`` or when pins
+    cannot be read.
+    """
+    from sandbox.remote_runtime.pins import PinError, PinStore
+    try:
+        listed = PinStore(entry).list()
+    except PinError as exc:
+        raise RuntimeError("remote_runtime_pins_unavailable") from exc
+    would_break = [pin for pin in listed
+                   if pin.binding() and pin.revision != target_revision]
+    acknowledged = set(_break_pin_args(args))
+    missing = [pin.holder for pin in would_break if pin.holder not in acknowledged]
+    if missing:
+        raise RuntimeError("remote_runtime_pins_unacknowledged: " + ", ".join(
+            f"{pin.holder} ({pin.checkout_path}, expires {pin.expires_at})"
+            for pin in would_break if pin.holder in missing)
+            + "; pass --break-pin HOLDER for each to proceed")
+    return would_break, [pin.holder for pin in would_break]
+
+
+def _cmd_pin(args, as_json: bool) -> None:
+    """`sb remote pin <list|release> <name>` (spec 061 FR-012, FR-014)."""
+    from sandbox.remote_runtime.pins import PinError, PinStore, local_holder
+    operation = getattr(args, "name", None)
+    name = getattr(args, "ssh_url", None)
+    if operation not in {"list", "release"} or not name:
+        die("usage: ./sb remote pin <list|release> <name> [--holder HOLDER] [--break-pin HOLDER] [--json]")
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    own = local_holder()[0]
+    try:
+        store = PinStore(entry)
+        if operation == "list":
+            pins = [pin.as_mapping() for pin in store.list()]
+            payload = {"ok": True, "name": name, "status": "observed",
+                       "data": {"holder": own, "pins": pins}, "error": None}
+        else:
+            holder = getattr(args, "holder", None) or own
+            if holder != own and holder not in _break_pin_args(args):
+                payload = {"ok": False, "name": name, "status": "refused", "data": {},
+                           "error": {"code": "remote_pin_not_owned",
+                                     "message": f"pin {holder} belongs to another controller; "
+                                                f"pass --break-pin {holder} to release it"}}
+            else:
+                released = store.release(holder)
+                payload = {"ok": True, "name": name,
+                           "status": "released" if released else "absent",
+                           "data": {"holder": holder, "released": released}, "error": None}
+    except PinError as exc:
+        payload = {"ok": False, "name": name, "status": "degraded", "data": {},
+                   "error": {"code": exc.code, "message": str(exc)}}
+    if as_json:
+        print(json.dumps(payload))
+        if not payload["ok"]:
+            raise SystemExit(1)
+        return
+    if not payload["ok"]:
+        die(f"{payload['error']['code']}: {payload['error']['message']}")
+    if operation == "list":
+        pins = payload["data"]["pins"]
+        if not pins:
+            print(f"remote {name}: no runtime pins")
+        for pin in pins:
+            flag = "expired" if pin["expired"] else pin["state"]
+            mine = " (this checkout)" if pin["holder"] == own else ""
+            print(f"{pin['holder']}{mine} {flag} revision {pin['revision']} "
+                  f"expires {pin['expires_at']} {pin['checkout_path']}")
+    else:
+        print(f"remote {name}: pin {payload['data']['holder']} {payload['status']}")
+
+
 def _cmd_service(args, as_json: bool) -> None:
     """`sb remote service <status|diagnostics|migrate|stop> <name>` service contract."""
     operation = getattr(args, "name", None)
@@ -490,6 +582,8 @@ def _cmd_service(args, as_json: bool) -> None:
         elif operation == "status":
             service = sr.remote_mcp_service_status(entry)
             available = service.get("probe_state", "complete") == "complete"
+            if available:
+                service.update(_pin_listing(entry))
             payload = {
                 "ok": available, "name": name,
                 "status": "observed" if available else "degraded",
@@ -523,7 +617,12 @@ def _cmd_service(args, as_json: bool) -> None:
                 raise RuntimeError(
                     observed.get("probe_error") or "remote_service_probe_unavailable")
             source_revision = None
+            target_revision = observed.get("local_runtime_revision")
+            acknowledged_pins: list[str] = []
             if confirmed:
+                # Re-read pins at the moment of acting; refuse before any write.
+                _would_break, acknowledged_pins = _migrate_pin_gate(
+                    entry, args, target_revision)
                 source_revision = _local_git_revision()
                 upload_timeout = _runtime_source_upload_timeout_arg(args)
                 staged_source = _upload_runtime_source(
@@ -540,6 +639,20 @@ def _cmd_service(args, as_json: bool) -> None:
             )
             plan["observed"] = observed
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
+            if not confirmed:
+                listing = _pin_listing(entry)
+                plan["pins_state"] = listing["pins_state"]
+                plan["would_break_pins"] = [
+                    pin for pin in listing["pins"] or ()
+                    if not pin["expired"] and pin["state"] == "active"
+                    and pin["revision"] != target_revision]
+                from sandbox.remote_runtime.protocol import local_protocol
+                oldest = local_protocol().oldest_served
+                plan["stops_serving_below_protocol"] = oldest
+                plan["protocol_note"] = (
+                    f"after this migrate the remote serves compatible-mode controllers "
+                    f"speaking control protocol {oldest} through {local_protocol().spoken}; "
+                    f"controllers below {oldest} are refused")
             if observed.get("runtime_revision_state") == "mismatch":
                 # One remote serves one runtime revision. Replacing it breaks
                 # any other checkout or deploy that requires the installed one.
@@ -552,6 +665,18 @@ def _cmd_service(args, as_json: bool) -> None:
                     "runtime check until they migrate again"]
             if confirmed:
                 sr.put_remote(name, mcp_service=plan["service"])
+                if acknowledged_pins:
+                    # Only after a completed install: a failed or indeterminate
+                    # migrate raised above and breaks no pin.
+                    from sandbox.remote_runtime.pins import PinError, PinStore, local_holder
+                    try:
+                        plan["broken_pins"] = PinStore(entry).break_pins(
+                            acknowledged_pins, local_holder()[0])
+                    except PinError:
+                        plan["broken_pins"] = []
+                        plan.setdefault("warnings", []).append(
+                            "acknowledged pins could not be marked broken; their holders "
+                            "will see an exact-revision refusal instead")
                 # Report the post-apply state; the pre-apply observation still
                 # showed the old revision and read as a failed migration.
                 plan["observed"] = sr.remote_mcp_service_status(
@@ -610,12 +735,14 @@ def _cmd_service(args, as_json: bool) -> None:
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
         if isinstance(exc, (RemoteRuntimeSourceTimeout, RemoteRuntimeSourceIndeterminate)):
             code = exc.code
+        elif str(exc).startswith("remote_runtime_pins_unacknowledged:"):
+            code = "remote_runtime_pins_unacknowledged"
         else:
             code = (str(exc) if str(exc) in {
                 "remote_service_ownership_unknown", "remote_service_rollback_indeterminate",
                 "remote_service_probe_timeout", "remote_service_probe_transport_failed",
                 "remote_service_probe_output_missing", "remote_service_probe_output_invalid",
-                "remote_service_probe_unavailable",
+                "remote_service_probe_unavailable", "remote_runtime_pins_unavailable",
                 "systemd_unavailable", "timeout_command_unavailable",
                 "systemctl_probe_timeout", "systemctl_probe_unavailable",
                 "systemctl_probe_incomplete", "loginctl_probe_timeout",

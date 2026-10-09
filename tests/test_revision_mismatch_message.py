@@ -32,7 +32,7 @@ class RevisionMismatchMessageTests(unittest.TestCase):
 
 class RequireCompatibleRuntimeTests(unittest.TestCase):
     def _run(self, local, status):
-        probe = patch("sandbox.core._remote.remote_mcp_service_status",
+        probe = patch("sandbox.core._remote.remote_runtime_status_for_operation",
                       side_effect=status if isinstance(status, Exception) else None,
                       return_value=None if isinstance(status, Exception) else status)
         with patch("sandbox.core._remote._remote_mcp_runtime_revision", return_value=local), \

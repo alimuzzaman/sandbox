@@ -1192,15 +1192,65 @@ exact process's PID, working directory, bind, and port before handing it off. If
 new unit cannot start, its prior files are restored and only that proven legacy process
 is restarted. No generic process search or termination is used.
 
-Remote workspace list, status, migration planning, creation, reset, and destroy all
-run the same read-only service preflight before sending a workspace request. The
-selected owned MCP service must report `ownership=proven` and
-`runtime_revision_state=match`; mismatch, unavailable, unknown, or unproven evidence
-is refused without dispatching the workspace command. Refresh the service through the
-supported lifecycle command, then retry:
+### Runtime compatibility, strict mode and pins (spec 061)
+
+Several controller checkouts can share one remote. Each Sandbox runtime
+declares a control-protocol range (`sandbox/remote_runtime/protocol.py`):
+the version it speaks and the oldest it still serves. Migrate writes it into
+the unit as `SANDBOX_REMOTE_MCP_CONTROL_PROTOCOL=<spoken>:<oldest>`, and
+`remote service status` reports `control_protocol` (local and installed) and
+one `compatibility` verdict:
+
+| Verdict | Meaning | Admitted |
+|---|---|---|
+| `compatible` | the installed runtime serves this controller's protocol | yes, at any revision |
+| `protocol_newer` | this controller speaks a newer protocol than the runtime | no |
+| `protocol_too_old` | the runtime no longer serves this controller's protocol | no |
+| `exact_only` | the unit declares no protocol (written before 061) | only at the same revision |
+| `unknown` | installed state could not be established | no |
+
+Workspace preflight, hosted apply eligibility, hosted recovery and server
+capture, Postgres recovery and host memory all consume this verdict, so a
+different revision that speaks the same protocol is accepted. Checks that bind
+a remote-written artifact to its runtime (deployment receipts, delivery
+traces, staging helpers), remote WP-CLI signatures and cleanup-routine enable
+stay exact-revision.
+
+**Strict mode** (`--strict-runtime` anywhere on the command line, or
+`SANDBOX_STRICT_RUNTIME=1`, which also applies to every tool call of a local
+MCP server started with it) requires the exact installed revision, as before
+061, and registers a visible pin on the remote before acting. A pin lives at
+`<remote SANDBOX_HOME>/runtime/remote-pins/<holder>.json` (directory 0700,
+file 0600), names the holder (`h-` + 16 hex derived from this machine's
+Sandbox home and the checkout path), the checkout path, the revision, a
+purpose and an expiry (one hour, renewed by each strict call, at most four
+hours). A refused strict call registers nothing; an unreachable or
+unwritable pin store fails closed with `strict_pin_unverifiable`.
 
 ```sh
-./sb remote service migrate <name> --confirm --json
+./sb remote pin list NAME [--json]
+./sb remote pin release NAME                      # this checkout's pin
+./sb remote pin release NAME --holder H --break-pin H   # another controller's
+```
+
+`remote service migrate NAME --plan` lists `would_break_pins` (every unexpired
+active pin at a revision other than the one being installed) and the protocol
+range the target serves. A confirmed migrate re-reads pins before any write and
+refuses with `remote_runtime_pins_unacknowledged` unless each such pin is named
+with `--break-pin HOLDER`; acknowledged pins are marked broken (by whom, when)
+only after the install completes. A strict caller whose pin was broken is
+told who broke it. If pins cannot be read, a confirmed migrate refuses with
+`remote_runtime_pins_unavailable`.
+
+Remote workspace list, status, migration planning, creation, reset, and destroy all
+run the same read-only service preflight before sending a workspace request. The
+selected owned MCP service must report `ownership=proven` and an admitted
+compatibility verdict; an incompatible, unavailable, unknown, or unproven state
+is refused without dispatching the workspace command. The refusal carries the
+observed `compatibility` state and a remedy naming the remote, for example:
+
+```sh
+./sb remote service migrate my-remote --confirm --json
 ```
 
 When a label matches more than one remote record, lifecycle control fails closed and
@@ -1847,7 +1897,8 @@ changes require human review before release.
 
 Database and artifact preservation use the bounded [hosted data recovery](hosted-data-recovery.md)
 operations. Public interface additions require source gates and a supported remote
-service migration; verify installed/local runtime revision equality before use.
+service migration; verify the `compatibility` verdict in `remote service status`
+before use (exact revision equality under `--strict-runtime`).
 
 `host image status --request-id ID` returns the exact retained terminal result,
 active status, unknown status, or retained-without-result marker through the

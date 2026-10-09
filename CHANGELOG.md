@@ -37,8 +37,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   signatures named by function, binding site and nested key path, plus
   per-payload subscript writes and read key paths, on both the controller
   transports and the runtime's `sb workspace` / `sb job-*` / checkout
-  response producers, plus key paths of real runtime receipts sampled from
-  those producers (manifest format 9). Strict refusals are honored by recovery, server capture and
+  response producers, plus key paths of real runtime receipts (jobs,
+  artifacts, workspace status, checkout) sampled from those producers (manifest format 10). Strict refusals are honored by recovery, server capture and
   Postgres recovery even when the revisions match.
 - `sb ensure`, `sb apply`, and `sb test`, plus their MCP counterparts, accept
   an explicit project-local `--config-file` selector when paired with

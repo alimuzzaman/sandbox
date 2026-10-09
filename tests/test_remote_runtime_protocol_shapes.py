@@ -251,6 +251,22 @@ class ShapeGuardTests(unittest.TestCase):
         self.assertIn("receipt:job_snapshot", diff)
         self.assertIn("receipt:job_artifacts", diff)
 
+    def test_workspace_deployment_proof_field_removal_requires_protocol_bump(self):
+        """Dropping ``source_commit`` from the status projection is caught (Sol R10-1)."""
+        from unittest.mock import patch
+        from sandbox.application import workspace_service
+        recorded = shapes.read_manifest()["shapes"]["receipt:workspace_status"]
+        self.assertIn("deployment_proof.source_commit", recorded)
+        original = workspace_service._public_record
+
+        def without_commit(*args, **kwargs):
+            value = original(*args, **kwargs)
+            (value.get("deployment_proof") or {}).pop("source_commit", None)
+            return value
+
+        with patch.object(workspace_service, "_public_record", without_commit):
+            self.assertIn("receipt:workspace_status", self._receipt_diff())
+
     def test_materialization_receipt_mutation_requires_protocol_bump(self):
         """Renaming the refusal's ``errno`` breaks the ownership repair (Sol R8-1)."""
         from unittest.mock import patch

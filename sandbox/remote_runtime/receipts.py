@@ -7,7 +7,8 @@ runtime's real producers against a throwaway home and records each receipt's
 key paths (``a``, ``a.b``, ``a[].c``). A key renamed anywhere along the way
 changes the recorded shape and needs a protocol bump. Every child record a
 receipt can carry (process, heartbeat, output, metrics, artifacts,
-compatibility differences) is seeded first, so SQL-derived keys are sampled
+compatibility differences) is seeded first, a workspace status is sampled
+with its full deployment proof, so SQL-derived keys are sampled
 populated rather than as empty lists or nulls.
 """
 from __future__ import annotations
@@ -118,11 +119,41 @@ def _materialization_receipts(home: Path) -> dict[str, object]:
     return {"materialization_receipt": succeeded, "materialization_refusal": refused}
 
 
+def _workspace_receipts(home: Path) -> dict[str, object]:
+    """``sb workspace status`` for a ready workspace with a full deployment proof."""
+    import hashlib
+
+    from sandbox.application import workspace_service
+    from sandbox.workspaces.repository import WorkspaceRepository
+
+    checkout = home / "checkout"
+    source = home / "source-checkout"
+    checkout.mkdir()
+    source.mkdir()
+
+    def digest(path: Path) -> str:
+        return "sha256:" + hashlib.sha256(str(path).encode()).hexdigest()
+
+    repository = WorkspaceRepository(home / "index.sqlite3", home / "legacy")
+    record = repository.register("p", "default", path=str(home / "workspace"), metadata={
+        "checkout_locator": str(checkout), "checkout_locator_digest": digest(checkout),
+        "source_checkout_locator": str(source),
+        "source_checkout_locator_digest": digest(source),
+        "source_identity": "sha256:" + "1" * 64, "source_commit": "2" * 40,
+        "source_dirty_digest": "sha256:" + "3" * 64,
+    })
+    return {"workspace_status": {"ok": True,
+                                 **workspace_service._public_record(record, repository)}}
+
+
 def receipt_shapes() -> dict[str, list[str]]:
     """``receipt:<name>`` -> sorted key paths of each sampled runtime receipt."""
     with tempfile.TemporaryDirectory() as temp:
         home = Path(temp)
         jobs = home / "jobs"
         jobs.mkdir()
-        samples = {**_job_receipts(jobs), **_materialization_receipts(home)}
+        workspaces = home / "workspaces"
+        workspaces.mkdir()
+        samples = {**_job_receipts(jobs), **_materialization_receipts(home),
+                   **_workspace_receipts(workspaces)}
     return {f"receipt:{name}": sorted(key_paths(value)) for name, value in samples.items()}

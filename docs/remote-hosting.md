@@ -1269,8 +1269,9 @@ snapshot's columns come from the registry schema, a materialization refusal's
 `detail` from a helper) are also sampled: `sandbox/remote_runtime/receipts.py`
 runs the real producers against a throwaway home, with every child record a
 job receipt can carry seeded (process, heartbeat, output, metrics, artifacts,
-compatibility differences), and records each receipt's
-key paths as `receipt:<name>` (manifest format 9). The remote entry points are
+compatibility differences) and a ready workspace's status with its full
+deployment proof sampled, and records each receipt's
+key paths as `receipt:<name>` (manifest format 10). The remote entry points are
 derived, not listed: a test fails when a transport invokes a `python3 -m
 sandbox.*` module or an `sb` command whose handler is not a runtime producer.
 The pin program is

@@ -8,7 +8,7 @@
 
 **Input**: "Per-target hosting operations: independent locks and delivery state per remote, project and environment, bounded queueing, and selective host teardown that preserves named projects"
 
-**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user.
+**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions.
 
 **Final Validation**: `PENDING` — fresh independent readiness review of this revision
 
@@ -31,12 +31,13 @@ alimuzzaman.me share one server. Each project is deployed from its own agent
 session, often within seconds of another, and often from different controller
 machines.
 
-Hosted apply holds a controller-wide state lock on the submitting machine for
-its whole build-and-deliver phase, so applies to different remotes from one
-machine serialize, while the same target applied from two machines is not
-serialized at all. A per-target lock already exists on the controller, but
-apply also takes the controller-wide lock, so the per-target lock buys no
-concurrency. A second apply from the same controller, for an unrelated
+Hosted apply holds two controller-wide locks on the submitting machine for
+its whole build-and-deliver phase: the hosting state lock and the remote
+registration lock, which covers every registered remote on that controller.
+Applies to different remotes from one machine therefore serialize, while the
+same target applied from two machines is not serialized at all. A per-target
+lock already exists on the controller, but apply also takes both
+controller-wide locks, so the per-target lock buys no concurrency. A second apply from the same controller, for an unrelated
 project or even a different remote, fails with `operation_busy` (feedback
 `adccd6b7`, critical, 2026-10-06 and 2026-10-07). That refusal is raised
 before any delivery attempt is recorded, so it leaves a failed job and no
@@ -87,7 +88,9 @@ more sites move to the shared xCloud server.
 - Hosting operations are scoped and serialized per target, where a target is
   one (remote, project, environment). Two applies for different targets on one
   remote proceed concurrently, and applies to different remotes from one
-  controller never serialize against each other.
+  controller never serialize against each other. No controller-wide lock,
+  including the remote registration lock, is held across a build, a source
+  transfer, a delivery, or a verification wait.
 - The lease, hold, and per-target operation state for a target are
   authoritative on the remote, so operations on one target from any number of
   controllers are serialized against each other. A controller keeps only a
@@ -116,9 +119,10 @@ more sites move to the shared xCloud server.
   controller through the same listing; while a hold exists, other sessions'
   operations on that target wait or refuse exactly as they do for a running
   operation, naming the hold's holder and purpose.
-- Until host resource governance exists, a remote admits at most a declared
-  number of concurrent build phases (default two); further applies wait or
-  refuse by caller choice.
+- Until host resource governance exists, a remote admits at most a set number
+  of concurrent build phases, held by the remote runtime service (default two,
+  one value for every controller); further applies wait or refuse by caller
+  choice.
 
 ## Non-Goals
 
@@ -229,9 +233,10 @@ more sites move to the shared xCloud server.
 - **User action**: A session claims a hold on it with a purpose and the
   default duration, then runs an apply under that hold.
 - **Expected outcome**: The hold is visible in the remote listing from every
-  controller with holder, purpose, and expiry. The holder's own apply is
-  admitted. Another session's apply on that target waits or refuses, naming
-  the hold. The holder may renew the hold up to the maximum duration and may
+  controller with holder, hold identity, purpose, and expiry. The holder's own
+  apply, presenting the hold identity, is admitted. Another session's apply on
+  that target, including one on the same controller without the hold
+  identity, waits or refuses, naming the hold. The holder may renew the hold up to the maximum duration and may
   release it.
 
 ### Scenario 9 — Hold expires (negative)
@@ -257,7 +262,7 @@ more sites move to the shared xCloud server.
 ### Scenario 11 — Third concurrent build waits for the cap
 
 - **Starting state**: Two targets on `xcloud-london` are in their build phase
-  and the remote's declared cap is two.
+  and the remote's build cap is two.
 - **User action**: A third session applies a third target, first with a
   bounded wait, then in a separate attempt with no wait.
 - **Expected outcome**: With a wait, the apply reports the cap and the two
@@ -276,6 +281,11 @@ more sites move to the shared xCloud server.
   conversion converts this controller's retained state for the remote to the
   per-target layout and establishes the remote-side lease authority. No
   history is lost, and the conversion can be re-run to completion.
+- **Across controllers**: conversion is per controller, so a remote may
+  already have lease authority while a second controller still holds
+  unconverted retained state for it. That controller's hosting mutations for
+  the remote refuse with the same mixed-state result until it runs its own
+  conversion; the converted controller and the remote are unaffected.
 
 ### Scenario 13 — Older controller against a converted remote (negative)
 
@@ -286,12 +296,25 @@ more sites move to the shared xCloud server.
   `protocol_too_old` naming the required protocol. No partial writes to either
   the remote's or the controller's state.
 
+### Scenario 14 — Lease authority unreachable (negative)
+
+- **Starting state**: The remote runtime service is unreachable or not yet
+  migrated.
+- **User action**: Any hosting mutation for a target on that remote.
+- **Expected outcome**: A typed, retained pre-admission refusal
+  `lease_authority_unavailable` within 15 seconds, with zero effects and no
+  controller-local fallback admission; the remedy names the standard remote
+  runtime migrate/repin procedure.
+
 ## Proposed Product Behavior
 
-- The unit of hosting serialization becomes the target. A target's apply,
-  recover, retire-delivery, and login-url are mutually exclusive with each
-  other and with nothing else, except the shared steps and the build cap
-  below.
+- The unit of hosting serialization becomes the target. Every registered
+  target-mutation operation (apply, sync, login-url, edge-continue,
+  failed-apply recover, and the image stage, provision, activate, adopt,
+  rollback, recover and settle operations), plus retire-delivery and hold
+  claim, renew and release, is mutually exclusive with every other on the same
+  target, and with nothing on any other target except the shared steps and the
+  build cap.
 - The lease for a target, any hold on it, and its current-operation record are
   authoritative on the remote's runtime service. A controller may cache them
   for display but never decides admission from its cache.
@@ -305,16 +328,24 @@ more sites move to the shared xCloud server.
   its own operation.
 - Holds: the default duration is one hour and the maximum is four hours; the
   holder may renew within the maximum; expiry is the only dead-holder
-  detection. Only the holder may release a hold, except that another session
-  may break it with `--break-hold` and a reason, which is recorded with the
-  breaker's identity.
-- Interim build cap: each remote record declares a maximum number of
-  concurrent build phases, default two, until feature 047 provides capacity
-  admission. An apply that would exceed it waits (bounded, holders shown) or
+  detection. A hold belongs to the session that claimed it, identified by the
+  hold identity Sandbox issues at claim (secret-free, shown in the listing
+  with controller, purpose and expiry). Renew, release and operations run
+  under the hold present that identity by flag or environment setting; a
+  session that does not present it, including another session on the same
+  controller, is not the holder and must wait, refuse, or use `--break-hold`.
+  `--break-hold` needs a reason and is recorded with the breaker's identity.
+- Interim build cap, until feature 047 provides capacity admission: the build
+  cap is a property of the remote runtime service: one value per remote,
+  default two, applied to every controller. It is read in the per-remote
+  listing and changed only by an explicit, confirmed remote operation that
+  records who changed it and when; a controller's remote record never carries
+  or overrides it. An apply that would exceed it waits (bounded, holders shown) or
   refuses, by caller choice, with the same retained-refusal rules as a busy
   target.
-- Waiting is the caller's choice with a bounded maximum; waiting output
-  identifies the holder. Refusing is typed and retained as a spec 054
+- Waiting is the caller's choice: the default wait is 600 seconds, the maximum
+  3600 seconds, and a wait of 0 refuses immediately. Waiting output identifies
+  the holder. Refusing is typed and retained as a spec 054
   pre-admission outcome.
 - Per-target delivery and recovery state means a corrupt, locked, or in-flight
   state for one target has no effect on commands for another target. Existing
@@ -322,6 +353,15 @@ more sites move to the shared xCloud server.
   the result verifiable before mutation resumes.
 - Every result in this feature is bounded and secret-free, and CLI and MCP
   agree on its meaning.
+- If the remote runtime service is unreachable or not yet migrated, no hosting
+  mutation is admitted (see Scenario 14).
+- Host storage reclamation keeps yielding to hosting work: while any target on
+  the remote has an admitted operation or a live hold, reclamation reports
+  `host_reclaim_busy` and removes nothing, as it does today for an active
+  apply.
+- Re-registering a remote must not repoint an operation already admitted on
+  one of its targets. Taking the controller-wide registration lock out of the
+  long phases keeps that guarantee.
 
 ## Constraints and Dependencies
 
@@ -341,8 +381,19 @@ more sites move to the shared xCloud server.
   compatibility check.
 - Feature 047 (Host Resource Governance) decides capacity admission. Until it
   ships, the per-remote build cap is the only capacity guard.
-- Remote-side behavior changes take effect only after a remote runtime
-  migrate; the Lenzora repin procedure applies.
+- Remote-side behavior changes take effect only after the standard remote
+  runtime migrate/repin procedure.
+- Feature 062 (Hosted Delivery Evidence Reconciliation) changes delivery
+  identity in the same retained records this feature partitions. The two
+  features use one shared conversion and one fixture set; which feature owns
+  them is decided at plan time.
+- Feature 064 (Edge and DNS Change Transactions) defines the edge and DNS
+  step. That step, including its rollback, must fit under this feature's
+  remote-wide lease and its 60-second bound; a rollback that runs after the
+  lease was released re-acquires the lease first.
+- Today the remote registration lock is controller-wide: one lock on a
+  controller covers every registered remote, shared by registration writers
+  and authority readers.
 - Constitution and CLAUDE.md module boundaries: new state and commands register
   through explicit manifests; no raw state file reads by consumers.
 
@@ -358,7 +409,11 @@ more sites move to the shared xCloud server.
 | Upgrade conversion | Converts the controller's retained state for the remote to per-target layout and establishes remote-side lease authority; older controllers get the spec 061 `protocol_too_old` verdict | State is controller-local today; compatibility verdicts belong to 061 | Fable decision (delegated by user), 2026-10-09 |
 | Explicit holds | Same primitive as a running operation's lease, claimed on purpose with purpose string; default 1 h, max 4 h, renewable by holder; expiry is the only dead-holder detection; non-holder release needs `--break-hold` with a reason, recorded with breaker identity | Agents coordinating over chat and controller-local hold files are the symptom; one remote-wide lease with a CLI is the fix | Fable decision (delegated by user), 2026-10-09 |
 | Expired lease, returning holder | No further effects; own operation recorded `effect_unknown` | A fenced-out holder must not race the new owner | Fable decision (delegated by user), 2026-10-09 |
-| Interim concurrency cap | 2 build phases per remote until 047, declared in the remote record; further applies wait (bounded, holders shown) or refuse by caller choice | Memory on a shared production host | Fable decision (delegated by user), 2026-10-09 |
+| Hold ownership | A hold belongs to the claiming session, identified by the secret-free hold identity issued at claim; renew, release and operations under the hold present it by flag or environment setting; any other session, including one on the same controller, is not the holder | One controller runs many agent sessions, so a controller cannot stand for a holder | Fable decision (delegated by user), 2026-10-09 |
+| Same-target exclusion | Every registered target-mutation operation, plus retire-delivery and hold claim, renew and release, is exclusive with every other on the same target and with nothing on other targets except the shared steps and the build cap | Listing only four operations left the other target mutations unserialized | Fable decision (delegated by user), 2026-10-09 |
+| Lease authority unreachable | Typed, retained refusal `lease_authority_unavailable` within 15 s, zero effects, no controller-local fallback; remedy names the standard migrate/repin procedure | Admission without the authority would reopen cross-controller races | Fable decision (delegated by user), 2026-10-09 |
+| Interim concurrency cap | 2 build phases per remote until 047; further applies wait (bounded, holders shown) or refuse by caller choice | Memory on a shared production host | Fable decision (delegated by user), 2026-10-09 |
+| Build cap location | A property of the remote runtime service: one value per remote, default two, applied to every controller; read in the per-remote listing; changed only by an explicit, confirmed remote operation that records who and when; never carried or overridden by a controller's remote record | A per-controller value cannot cap builds that several controllers start on one host | Fable decision (delegated by user), 2026-10-09 |
 | Capacity admission | Out of scope beyond the interim cap; feature 047 owns it | Keeps this feature small | Fable decision (delegated by user), 2026-10-08 |
 | Selective teardown | Moved to follow-up "selective host teardown"; its decisions are recorded in Non-Goals | Shrinks this feature to coordination and state partition | Fable decision (delegated by user), 2026-10-09 |
 
@@ -373,7 +428,8 @@ more sites move to the shared xCloud server.
   no later than ten seconds after admission regardless of the first's build
   duration.
 - Two applies from one controller to two different remotes run concurrently;
-  neither waits on the other at any point.
+  neither waits on the other at any point, and the second starts its build no
+  later than ten seconds after admission.
 - Two applies for the same target from two different controllers never
   overlap: the second waits or refuses, naming the first.
 - A same-target apply with a bounded wait reports the holder within two seconds
@@ -399,12 +455,21 @@ more sites move to the shared xCloud server.
   running.
 - A returning holder whose lease expired performs zero effects and its
   operation is recorded as `effect_unknown`.
+- A session on the same controller as a hold's holder, not presenting the
+  hold identity, is never admitted on the held target.
+- With the remote runtime service unreachable or not migrated, every hosting
+  mutation refuses with `lease_authority_unavailable` within 15 seconds and
+  makes zero writes.
+- Host storage reclamation started while a target on the remote has an
+  admitted operation or live hold reports `host_reclaim_busy` and removes
+  nothing.
 - After an interrupted apply on one target, every other target's commands
   succeed and their retained history is byte-for-byte unchanged.
 - After conversion of an existing remote, every previously retained delivery
   outcome, recovery receipt, and generation remains queryable with the same
   identity and meaning; an interrupted conversion is reported and resumable,
-  and no hosting mutation is admitted in the mixed state.
+  and no hosting mutation is admitted in the mixed state, including from a
+  second controller that has not converted its own state.
 - An older controller against a converted remote receives `protocol_too_old`
   and causes zero state writes.
 
@@ -412,14 +477,14 @@ more sites move to the shared xCloud server.
 
 - **Risk**: Concurrent builds on the shared xCloud host can exhaust memory
   before feature 047 exists. The per-remote cap of two limits this; the
-  operator can lower it in the remote record.
+  operator can lower it with the confirmed remote operation.
 - **Risk**: Splitting shared state can break fences that assumed one file
   (generation, effect_unknown, initializer receipts). The conversion must be
   specified against 051/054 fixtures, not assumed.
 - **Risk**: Moving lease authority to the remote makes every hosting operation
   depend on the remote runtime service being reachable and migrated; an
-  unreachable service means no admission rather than a controller-local
-  fallback.
+  unreachable service means a `lease_authority_unavailable` refusal rather
+  than a controller-local fallback.
 - **Risk**: A lease or hold that is too short can expire under a slow but live
   holder, turning a successful operation into `effect_unknown`; specification
   must set lease renewal so a live holder does not lose it.
@@ -428,7 +493,8 @@ more sites move to the shared xCloud server.
 - **Assumption**: Projects on one remote share only the public edge and host
   pools; they do not share containers, volumes, or secrets.
 - **Assumption**: The remote control plane can be migrated with the standard
-  repin procedure before this ships to a production remote.
+  remote runtime migrate/repin procedure before this ships to a production
+  remote.
 
 ## Readiness for Specification
 

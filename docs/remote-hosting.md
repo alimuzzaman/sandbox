@@ -1262,8 +1262,16 @@ so moving a read between a nested and a root response path counts while a local
 rename does not. The guard covers both sides: the transports and the programs
 they ship, and the installed runtime's producers of the responses they read
 (`shapes.RUNTIME_PRODUCERS`: the `sb workspace` and `sb job-*` handlers and the
-services and records they serialize), so renaming a field in, say, the
-workspace record's `index` needs a protocol bump too (manifest format 7). The pin program is
+services and records they serialize, the job registry and the checkout
+materializer), so renaming a field in, say, the workspace record's `index`
+needs a protocol bump too. Receipts whose keys come from elsewhere (a job
+snapshot's columns come from the registry schema, a materialization refusal's
+`detail` from a helper) are also sampled: `sandbox/remote_runtime/receipts.py`
+runs the real producers against a throwaway home and records each receipt's
+key paths as `receipt:<name>` (manifest format 8). The remote entry points are
+derived, not listed: a test fails when a transport invokes a `python3 -m
+sandbox.*` module or an `sb` command whose handler is not a runtime producer.
+The pin program is
 not part of it: the installed runtime never runs it, and pin records are
 versioned by `pins.SCHEMA` instead.
 

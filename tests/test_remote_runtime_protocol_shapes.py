@@ -32,7 +32,8 @@ class ShapeGuardTests(unittest.TestCase):
 
     def test_every_shape_source_exists_and_is_recorded(self):
         recorded = shapes.read_manifest()["shapes"]
-        self.assertEqual(sorted(recorded), sorted(shapes.SHAPE_SOURCES))
+        self.assertEqual(sorted(k for k in recorded if not k.startswith("receipt:")),
+                         sorted(shapes.SHAPE_SOURCES))
         for path in shapes.SHAPE_SOURCES:
             self.assertTrue((ROOT / path).is_file(), path)
 
@@ -177,6 +178,63 @@ class ShapeGuardTests(unittest.TestCase):
         for producer in shapes.RUNTIME_PRODUCERS:
             self.assertIn(producer, shapes.SHAPE_SOURCES)
             self.assertTrue((ROOT / producer).is_file(), producer)
+
+    def test_every_remote_entry_point_is_a_runtime_producer(self):
+        """Derived, not listed: a new remote module or sb command fails here (Sol R8-1)."""
+        import re
+        from sandbox.commands.manifest import LEGACY_BRIDGE_COMMANDS
+        transports = [path for path in shapes.SHAPE_SOURCES
+                      if path not in shapes.RUNTIME_PRODUCERS]
+        modules, commands = set(), set()
+        for path in transports:
+            text = (ROOT / path).read_text(encoding="utf-8")
+            modules |= set(re.findall(r'"-m",\s*"(sandbox(?:\.[a-z_]+)+)"', text))
+            modules |= set(re.findall(r"-m (sandbox(?:\.[a-z_]+)+)", text))
+            commands |= set(re.findall(r'\[\s*"((?:job-[a-z-]+)|workspace)"', text))
+        self.assertIn("sandbox.workspaces.checkout", modules)
+        self.assertIn("job-status", commands)
+        for module in modules:
+            self.assertIn(module.replace(".", "/") + ".py", shapes.RUNTIME_PRODUCERS, module)
+        for command in commands:
+            handler = f"sandbox/commands/{LEGACY_BRIDGE_COMMANDS[command]}.py"
+            self.assertIn(handler, shapes.RUNTIME_PRODUCERS, command)
+
+    def _receipt_diff(self):
+        from sandbox.remote_runtime import receipts
+        recorded = shapes.read_manifest()["shapes"]
+        current = {**recorded, **receipts.receipt_shapes()}
+        return shapes.shape_diff(recorded, current)
+
+    def test_recorded_receipts_match_the_runtime_producers(self):
+        self.assertEqual(self._receipt_diff(), {})
+
+    def test_job_snapshot_receipt_mutation_requires_protocol_bump(self):
+        """A registry-side key rename changes the job-status receipt (Sol R8-1)."""
+        from unittest.mock import patch
+        from sandbox.jobs.registry import JobRepository
+        original = JobRepository.snapshot
+
+        def renamed(self, job_id):
+            value = original(self, job_id)
+            value["heart_beat"] = value.pop("heartbeat")
+            return value
+
+        with patch.object(JobRepository, "snapshot", renamed):
+            self.assertIn("receipt:job_snapshot", self._receipt_diff())
+
+    def test_materialization_receipt_mutation_requires_protocol_bump(self):
+        """Renaming the refusal's ``errno`` breaks the ownership repair (Sol R8-1)."""
+        from unittest.mock import patch
+        from sandbox.workspaces import checkout
+        original = checkout._failure_detail
+
+        def renamed(*args, **kwargs):
+            detail = original(*args, **kwargs)
+            detail["error_number"] = detail.pop("errno")
+            return detail
+
+        with patch.object(checkout, "_failure_detail", renamed):
+            self.assertIn("receipt:materialization_refusal", self._receipt_diff())
 
     def test_writer_refuses_changed_keys_under_the_same_version(self):
         with tempfile.TemporaryDirectory() as tmp:

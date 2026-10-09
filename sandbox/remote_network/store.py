@@ -53,7 +53,7 @@ _REFUSAL_MESSAGES = {
 
 def _refusal(code: str, data: dict) -> RangeError:
     safe = {}
-    if data.get("class") in _OVERLAP_CLASSES:
+    if isinstance(data.get("class"), str) and data["class"] in _OVERLAP_CLASSES:
         safe["class"] = data["class"]
     if isinstance(data.get("range_id"), str) and _RANGE_ID.fullmatch(data["range_id"]):
         safe["range_id"] = data["range_id"]

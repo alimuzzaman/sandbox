@@ -333,7 +333,8 @@ class RangeRefusalRedactionTests(unittest.TestCase):
         return types.SimpleNamespace(returncode=0, stdout=json.dumps({
             "op": op, "ok": False, "code": self._code,
             "message": f"token {self.CANARY}",
-            "data": {"class": self.CANARY, "range_id": self.CANARY, "remedy": self.CANARY},
+            "data": getattr(self, "_data", None) or {
+                "class": self.CANARY, "range_id": self.CANARY, "remedy": self.CANARY},
         }))
 
     def _run(self, *, as_json, code="range_overlap"):
@@ -373,6 +374,25 @@ class RangeRefusalRedactionTests(unittest.TestCase):
             _, text, _ = self._run(as_json=False, code=code)
             self.assertNotIn(self.CANARY, text)
             self.assertIn(code, text)
+
+    def test_malformed_refusal_class_stays_a_typed_refusal(self):
+        """A list or object ``class`` never escapes as a TypeError (Sol R8-2)."""
+        from unittest.mock import patch
+        from sandbox.commands import remote as remote_cmd
+        for malformed in ([self.CANARY], {"k": self.CANARY}):
+            self._data = {"class": malformed, "range_id": [self.CANARY]}
+            exit_value, text, payload = self._run(as_json=True)
+            self.assertEqual(exit_value, 1)
+            self.assertNotIn(self.CANARY, text)
+            self.assertEqual(payload["error"]["code"], "range_overlap")
+            self.assertEqual(payload["error"]["data"], {})
+            _, text, _ = self._run(as_json=False)
+            self.assertNotIn(self.CANARY, text)
+            self._ops, self._code = ["list"], "range_overlap"
+            with patch("sandbox.core._remote.ssh_run", side_effect=self._refusal):
+                hint = remote_cmd._network_range_hint({"ssh": "target", "_remote_name": "vps"})
+            self.assertEqual(hint, {"state": "unknown", "reason": "range_overlap"})
+        del self._data
 
     def test_valid_refusal_class_and_range_id_are_kept(self):
         import json

@@ -10,8 +10,11 @@ key it is bound to) with its key set, counted, e.g.
 or dropping one from one of several identical payloads, therefore changes the
 fingerprint. A Python program embedded as a string constant (one sent over SSH
 and run on the remote, single-line or not) is parsed and fingerprinted the
-same way, scoped under the constant's owner. The result is recorded, with the
-protocol version it belongs to, in ``control_shapes.json``.
+same way, scoped under the constant's owner. Receipts whose keys come from
+elsewhere (a registry schema, a helper) are also sampled from the real
+producers (``receipts.py``) and recorded as ``receipt:<name>`` key paths. The
+result is recorded, with the protocol version it belongs to, in
+``control_shapes.json``.
 
 ``sandbox/remote_runtime/pins.py`` is deliberately not a source. Its program is
 sent by the controller and run by the remote ``python3`` directly; the
@@ -50,6 +53,8 @@ RUNTIME_PRODUCERS = (
     "sandbox/jobs/models.py",
     "sandbox/jobs/listing.py",
     "sandbox/jobs/output.py",
+    "sandbox/jobs/registry.py",
+    "sandbox/workspaces/checkout.py",
 )
 
 # Controller-side transports plus the programs they execute on the remote,
@@ -70,7 +75,7 @@ SHAPE_SOURCES = (
 
 # Bumped when the fingerprint method changes (not the payloads): a manifest
 # recorded with an older format may be re-recorded under the same protocol.
-FORMAT = 7
+FORMAT = 8
 _EMBEDDED_DEPTH = 2
 
 _KEY_METHODS = frozenset({"get", "pop", "setdefault"})
@@ -267,7 +272,12 @@ def payload_keys(source: str) -> list[str]:
 
 
 def current_shapes(root: Path = ROOT, sources=SHAPE_SOURCES) -> dict[str, list[str]]:
-    return {path: payload_keys((root / path).read_text(encoding="utf-8")) for path in sources}
+    """Source fingerprints plus, for the default sources, sampled runtime receipts."""
+    shapes = {path: payload_keys((root / path).read_text(encoding="utf-8")) for path in sources}
+    if sources == SHAPE_SOURCES:
+        from sandbox.remote_runtime.receipts import receipt_shapes
+        shapes.update(receipt_shapes())
+    return shapes
 
 
 def read_manifest(path: Path = MANIFEST) -> dict:

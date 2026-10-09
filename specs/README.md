@@ -68,7 +68,7 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 061 | Remote Runtime Revision Coexistence | PRD ready for speckit | Roadmap 2026-10-08 #2 | Feedback e41bef3b, be5a6353, f475f422 |
 | 062 | Hosted Delivery Evidence Reconciliation | PRD ready for speckit | Roadmap 2026-10-08 #3; amends 054 identity scope | Feedback 48c3e007, bae5cd4e, e4333c7b, f3329d32 |
 | 063 | Remote Development Execution Readiness | PRD ready for speckit | Roadmap 2026-10-08 #5 | Feedback cef740dd, cebec97a, 5598f2d0 |
-| 064 | Transactional Edge and DNS Changes | PRD not ready | Roadmap 2026-10-08 #4 | Feedback 6bd6bd1d, 50735fc8, 83cca354, 34af9b95, 075c6caf |
+| 064 | Transactional Edge and DNS Changes | PRD ready for speckit | Roadmap 2026-10-08 #4 | Feedback 6bd6bd1d, 50735fc8, 83cca354, 34af9b95, 075c6caf |
 
 Statuses are counted from each feature's `tasks.md` (reconciled 2026-10-08). `Ledger closed`
 means no unchecked task; `Open (n of m)` counts unchecked tasks, which are mostly

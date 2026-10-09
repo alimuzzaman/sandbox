@@ -1,6 +1,6 @@
 # Product Requirements Draft: Transactional Edge and DNS Changes
 
-**Status**: Refined
+**Status**: Validated
 
 **Created**: 2026-10-09
 
@@ -10,9 +10,9 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); evidence from the feedback backlog, `docs/remote-hosting.md` (DNS, edge verification, rollback, nginx front door), and `origin/latest` commits `e5fc88b`, `ac9070b`, `7d04606`. Revised 2026-10-09 by Claude Opus 5.5 root (speckit-refine) applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; cited code re-verified read-only on `origin/latest`. Revised again 2026-10-09 by Claude Opus 5.5 root applying the second-round review (C1, C2, N3-N9, drift ruling) and Fable decisions E1 and E2; cited code re-verified on `origin/latest`.
 
-**Final Validation**: `PENDING` — fresh independent readiness review of this revision
+**Final Validation**: `PASS` — root readiness review by Claude Opus 5.5 on 2026-10-09 of the revision applying the second independent review (`9189c1e`); not independent, because the user stopped further sub-agents on 2026-10-09. It found one consequential overlap (adoption reusing `--confirm`), decided under delegated authority, and two wording fixes, all applied
 
-**Validated On**: N/A
+**Validated On**: 2026-10-09
 
 **Artifact Owner**: `speckit-refine`
 
@@ -278,7 +278,7 @@ grows with every hostname moved and every alias added.
   rollback on that hostname with the journal reference. Apply refuses until
   the leftover is resolved manually or adopted. Adoption re-reads the live
   record, shows it in the plan, and records it as the new prior state only
-  after an explicit `--confirm`; the old journal's view of the record is never
+  after an explicit `--adopt-records`; the old journal's view of the record is never
   trusted.
 
 ### Scenario 11 — Verification fails after the lease is released (negative)
@@ -316,50 +316,10 @@ grows with every hostname moved and every alias added.
   content was edited by hand at the provider.
 - **User action**: `host plan`, then apply.
 - **Expected outcome**: The legacy record is reported `unmarked` and refused
-  until adopted with explicit confirmation. The hand-edited record is
+  until adopted with `--adopt-records`. The hand-edited record is
   reported `drifted` with the differing fields named (for example content or
   proxy status); apply journals its live state as the prior state before
   overwriting it, so a rollback restores the hand edit.
-
-### Scenario 17 — Apex with mail and verification records
-
-- **Starting state**: A declared apex carries MX and TXT records and a
-  Sandbox-marked A record for this target.
-- **User action**: `host plan`, then apply.
-- **Expected outcome**: The plan lists MX and TXT as `left_alone` and the A
-  record as updated; the apply succeeds and the MX and TXT records are
-  byte-for-byte unchanged.
-
-### Scenario 18 — Redirect route with an operator CNAME
-
-- **Starting state**: A redirect route's hostname has an operator-created
-  CNAME whose content is the redirect target.
-- **User action**: `host plan`, apply without `--confirm`, then apply with
-  `--confirm`.
-- **Expected outcome**: The plan shows the CNAME as `adoptable` and says that
-  once adopted it is owned and removed on teardown. Without `--confirm` the
-  apply refuses `conflicting_cname` with zero provider changes and names the
-  remedy (adopt, or delete the CNAME so A/AAAA can be written). With
-  `--confirm` the CNAME's prior state is journaled, then it is marked and
-  proxied; its content is unchanged and no A/AAAA is written beside it.
-
-### Scenario 19 — First plan after upgrade
-
-- **Starting state**: A target's hostnames carry records with only the legacy
-  comment, written by Sandbox before attributed markers existed.
-- **User action**: `host plan`, apply, then apply with `--confirm`.
-- **Expected outcome**: The first plan lists every legacy record of the
-  target as `unmarked` and adoptable. The apply without `--confirm` makes zero
-  provider changes. One `--confirm` adopts all of them in the same
-  transaction as the apply, journaling each prior state.
-
-### Scenario 20 — Several records of one type (negative)
-
-- **Starting state**: A declared hostname has two A records, one marked for
-  this target and one unmarked.
-- **User action**: `host plan`.
-- **Expected outcome**: The hostname is `refused: ambiguous_records` naming
-  both records; Sandbox never picks one of them to update.
 
 ### Scenario 15 — Provider unreachable during rollback (negative)
 
@@ -379,6 +339,46 @@ grows with every hostname moved and every alias added.
   interrupted transaction with each journaled change and its prior state;
   apply refuses until the leftovers are resolved or adopted as in
   Scenario 10.
+
+### Scenario 17 — Apex with mail and verification records
+
+- **Starting state**: A declared apex carries MX and TXT records and a
+  Sandbox-marked A record for this target.
+- **User action**: `host plan`, then apply.
+- **Expected outcome**: The plan lists MX and TXT as `left_alone` and the A
+  record as updated; the apply succeeds and the MX and TXT records are
+  unchanged in every field.
+
+### Scenario 18 — Redirect route with an operator CNAME
+
+- **Starting state**: A redirect route's hostname has an operator-created
+  CNAME whose content is the redirect target.
+- **User action**: `host plan`, apply without `--adopt-records`, then apply with
+  `--adopt-records`.
+- **Expected outcome**: The plan shows the CNAME as `adoptable` and says that
+  once adopted it is owned and removed on teardown. Without `--adopt-records` the
+  apply refuses `conflicting_cname` with zero provider changes and names the
+  remedy (adopt, or delete the CNAME so A/AAAA can be written). With
+  `--adopt-records` the CNAME's prior state is journaled, then it is marked and
+  proxied; its content is unchanged and no A/AAAA is written beside it.
+
+### Scenario 19 — First plan after upgrade
+
+- **Starting state**: A target's hostnames carry records with only the legacy
+  comment, written by Sandbox before attributed markers existed.
+- **User action**: `host plan`, apply, then apply with `--adopt-records`.
+- **Expected outcome**: The first plan lists every legacy record of the
+  target as `unmarked` and adoptable. The apply without `--adopt-records` makes zero
+  provider changes. One `--adopt-records` adopts all of them in the same
+  transaction as the apply, journaling each prior state.
+
+### Scenario 20 — Several records of one type (negative)
+
+- **Starting state**: A declared hostname has two A records, one marked for
+  this target and one unmarked.
+- **User action**: `host plan`.
+- **Expected outcome**: The hostname is `refused: ambiguous_records` naming
+  both records; Sandbox never picks one of them to update.
 
 ## Proposed Product Behavior
 
@@ -427,26 +427,30 @@ grows with every hostname moved and every alias added.
   Rollback of the changes already journaled re-acquires the lease as in
   Scenario 11; if it cannot, the result is `rollback_incomplete` listing every
   journaled change still in place.
+- Adoption has its own flag, `--adopt-records`. `--confirm` keeps its
+  current meaning (a protected apply, or a separately confirmed edge
+  continuation) and never adopts a record, so a routine protected apply
+  cannot take ownership of an operator's record.
 - The zone SSL mode change is a journaled step: shown in the plan, refused
   without `--allow-zone-ssl-change`, and restored on rollback.
 - The edge continuation path follows the same ownership, journal and
   rollback rules as a full apply.
 - Adoption of a leftover, unmarked or interrupted record re-reads the live
   record, shows it in the plan, and records it as the new prior state only
-  after explicit `--confirm`. An old journal is never trusted as the record's
+  after explicit `--adopt-records`. An old journal is never trusted as the record's
   current state. Manual cleanup at the provider remains supported. Without
-  `--confirm`, adoption makes zero provider changes.
+  `--adopt-records`, adoption makes zero provider changes.
 - Redirect CNAME adoption: an operator CNAME whose content is the redirect
-  target is shown `adoptable`; `--confirm` journals its prior state, writes
+  target is shown `adoptable`; `--adopt-records` journals its prior state, writes
   the marker and sets proxy status, after which it is owned like any marked
   record (rolled back on failure, removed on teardown, and the plan says so).
-  Without `--confirm`, with a CNAME to any other content, or on a DNS-only
+  Without `--adopt-records`, with a CNAME to any other content, or on a DNS-only
   target, the apply refuses `conflicting_cname` naming the remedy: adopt, or
   delete the CNAME so A/AAAA can be written. While an owned CNAME stands, no
   A/AAAA is written beside it.
 - Upgrade: the first plan after upgrade lists every legacy-comment record of
-  the target as `unmarked` and adoptable. An apply without `--confirm` makes
-  zero provider changes; one `--confirm` adopts them all in the apply's
+  the target as `unmarked` and adoptable. An apply without `--adopt-records` makes
+  zero provider changes; one `--adopt-records` adopts them all in the apply's
   transaction.
 - Verification resolves through the authoritative answer or the proxy edge
   addresses, verifies each address, classifies results into propagation,
@@ -509,13 +513,14 @@ grows with every hostname moved and every alias added.
 | Ownership rule | Only records carrying this target's marker are ever changed or removed; any other record of a covered type on a declared hostname is a preflight refusal, and uncovered types are left alone (see Record types) | A record Sandbox did not create may be someone's production; a provider error mid-apply is too late | Fable decision (delegated by user), 2026-10-09 |
 | Ownership marker | "managed by Sandbox hosting; target=<project>/<environment>". Same project and environment on another remote is owned (a move, `50735fc8`); different is `foreign_record`; the legacy comment is `unmarked`, claimable by adoption | The current shared comment cannot tell two targets apart | Fable decision (delegated by user), 2026-10-09 |
 | Record types | Covered types are A, AAAA and CNAME. On a declared hostname an unmarked or foreign-marked A/AAAA, any CNAME outside the redirect adoption case, and a read-only or provider-managed record of a covered type refuse the apply. Every other type (MX, TXT, CAA, NS, SRV, ...) is listed left_alone and is never changed, removed, or treated as a conflict | Hosting touches only same-type A/AAAA and the redirect CNAME today; an apex normally carries MX and TXT and must keep applying | Fable decision (delegated by user), 2026-10-09 |
-| Redirect CNAME | Sandbox never creates a CNAME. A redirect route's desired state is A/AAAA at the origin, redirected by the front door. An operator CNAME whose content is the redirect target is adoptable: the plan shows it, --confirm marks it, sets proxied and journals its prior state, after which it is owned like any marked record (removed on teardown). Without --confirm, with a CNAME to any other content, or on a DNS-only target, the apply refuses conflicting_cname naming the remedy: adopt, or delete the CNAME so A/AAAA can be written. CNAME content is never rewritten | Today's flip-only path works for existing users but leaves the record unmarked forever, which the ownership rule cannot express; adoption makes the change explicit, journaled and reversible with one mechanism | Fable decision (delegated by user), 2026-10-09 |
+| Redirect CNAME | Sandbox never creates a CNAME. A redirect route's desired state is A/AAAA at the origin, redirected by the front door. An operator CNAME whose content is the redirect target is adoptable: the plan shows it, --adopt-records marks it, sets proxied and journals its prior state, after which it is owned like any marked record (removed on teardown). Without --adopt-records, with a CNAME to any other content, or on a DNS-only target, the apply refuses conflicting_cname naming the remedy: adopt, or delete the CNAME so A/AAAA can be written. CNAME content is never rewritten | Today's flip-only path works for existing users but leaves the record unmarked forever, which the ownership rule cannot express; adoption makes the change explicit, journaled and reversible with one mechanism | Fable decision (delegated by user), 2026-10-09 |
+| Adoption flag | Adoption of unmarked, leftover, interrupted or redirect-CNAME records requires `--adopt-records`; `--confirm` keeps its existing meaning and never adopts | `host apply --confirm` already authorizes protected applies, so reusing it would make every protected apply adopt silently | Root decision by Claude Opus 5.5 under delegated authority (user), 2026-10-09 |
 | Zone SSL mode | A journaled step: shown in the plan, still refused without `--allow-zone-ssl-change`, restored on rollback | It is a zone-wide change made by the apply and must be undone with it | Fable decision (delegated by user), 2026-10-09 |
 | Wildcard hostnames | Planned, journaled and rolled back like any record; verification is a v1 Non-Goal, reported as `verification: skipped_wildcard` | A wildcard has no single hostname to probe, but its record still changes | Fable decision (delegated by user), 2026-10-09 |
 | Stale family records | A Sandbox-managed record of a family the new origin lacks is removed in the transaction | Leaving it points traffic at a stopped server | Fable decision (delegated by user), 2026-10-09 |
 | Rollback | Durably journaled, reverse-order, per-record reporting; `rollback_incomplete` names leftovers and blocks the next apply until resolved or adopted | A half-restored zone must be visible and must not be papered over by the next apply | Fable decision (delegated by user), 2026-10-09 |
 | Verification after lease release | A verification failure after the lease is released rolls DNS back; rollback re-acquires the lease (bounded) and is journaled | Leaving a failed edge change in place is worse than a short second lease | Fable decision (delegated by user), 2026-10-09 |
-| Adoption | Re-read the live record, show it in the plan, record it as the new prior state only after explicit `--confirm`; the old journal is never trusted; manual cleanup stays available | The live record is the only trustworthy state after an incomplete rollback | Fable decision (delegated by user), 2026-10-09 |
+| Adoption | Re-read the live record, show it in the plan, record it as the new prior state only after explicit `--adopt-records`; the old journal is never trusted; manual cleanup stays available | The live record is the only trustworthy state after an incomplete rollback | Fable decision (delegated by user), 2026-10-09 |
 | Resolution source | Authoritative or proxy edge answers; never the controller's system resolver | The controller's cache cost five applies; the edge is what users reach | Fable decision (delegated by user), 2026-10-09 |
 | Retry budget | One bounded budget per hostname shared by unauthenticated and authenticated checks; propagation-class results retry, real failures confirm then fail | Removes the single-request trap without retrying genuine misconfiguration for minutes | Fable decision (delegated by user), 2026-10-09 |
 | Proxied control endpoint | Verified at provision with the apply-time client; supported alternatives are a DNS-only control hostname or a Tailscale-reached control endpoint; provider-side allowances are a Non-Goal | Provision is where the operator can still change the mode cheaply, without weakening the provider's security settings | Fable decision (delegated by user), 2026-10-09 |
@@ -565,13 +570,14 @@ grows with every hostname moved and every alias added.
   the apply succeeds, and a read-only zone listing afterward shows them
   unchanged.
 - For a redirect route with an operator CNAME to the redirect target, an
-  apply without `--confirm` refuses `conflicting_cname` with zero provider
-  changes; with `--confirm` the CNAME carries this target's marker, its
+  apply without `--adopt-records` refuses `conflicting_cname` with zero provider
+  changes; with `--adopt-records` the CNAME carries this target's marker, its
   content is unchanged, and a forced rollback restores its journaled prior
   state.
 - Adoption of any `unmarked`, leftover or interrupted record without
-  `--confirm` makes zero provider changes; the first plan after upgrade lists
-  every legacy-comment record of the target, and one `--confirm` adopts all
+  `--adopt-records` makes zero provider changes, including on a protected
+  apply run with `--confirm`; the first plan after upgrade lists
+  every legacy-comment record of the target, and one `--adopt-records` adopts all
   of them.
 - A legacy-comment record on a recorded preview hostname is reported
   `preview_owned` and is never adopted, changed or removed.
@@ -598,11 +604,11 @@ grows with every hostname moved and every alias added.
   removed, the plan shows the removal, and the journal allows restore.
 - **Risk**: Records written before attributed markers carry only the legacy
   comment and are refused on hostnames Sandbox does manage. Mitigation: the
-  first plan after upgrade lists them all as `unmarked`; one `--confirm`
+  first plan after upgrade lists them all as `unmarked`; one `--adopt-records`
   adopts them.
 - **Risk**: Adopting a redirect CNAME makes Sandbox the owner of a record the
   operator created, so teardown removes it. Mitigation: adoption needs
-  `--confirm`, and the plan states that an adopted record is removed on
+  `--adopt-records`, and the plan states that an adopted record is removed on
   teardown.
 - **Risk**: Re-acquiring the remote-wide lease for a rollback can wait behind
   another target. Mitigation: the wait is bounded, and a timeout ends as
@@ -624,8 +630,8 @@ grows with every hostname moved and every alias added.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent readiness review verdict is `PASS`.
+- [x] The latest readiness review verdict is `PASS` (root review; see Final Validation).
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

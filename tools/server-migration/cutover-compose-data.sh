@@ -34,11 +34,14 @@ after step 3, the script prints the rollback commands.
 With --maintenance-service, the app's read-only maintenance mode (Lenzora spec 056) wraps
 the cutover. The flag lives in Postgres, bound to that cluster's system identifier:
   1. preflight also runs `status` on both servers, so a missing CLI stops before any change
-  2a. NEW: `enable` (read_only now). Until the restore, NEW serves its pre-seed read-only and
-      refuses writes with 503, instead of accepting writes the restore would discard.
+  2a. NEW: `enable --now` (plain `enable` on an image that rejects --now). Until the
+      restore, NEW serves its pre-seed read-only and refuses writes with 503, instead of
+      accepting writes the restore would discard.
   2b. OLD: `drain --wait`: refuse writes, let queued work finish, then read_only. A drain
       lasts at least 5.5 minutes. It times out with exit 4 and OLD stays draining; the
-      script then prints the `disable` commands for both servers.
+      script then prints the `disable` commands for both servers. Then `status --json`
+      must report read_only with work.idle true, polled for up to --maintenance-timeout
+      (the job queue is not copied, so nothing stops while a job is queued or running).
   then steps 2-7 as above. The restore replaces NEW's database, and OLD's flag is bound to
   OLD's cluster, so NEW comes up read_write with no extra step; step 8 checks that.
   OLD keeps read_only for the rollback window; the rollback commands include `disable`.
@@ -97,7 +100,7 @@ USAGE
 OLD="" NEW="" HOP="" PROJECT="" DB_SERVICE="" DB_CONTAINER="" MODE=recreate HEALTH_URL=""
 STATUS=200 HEADER="" REVISION="" RESOLVE_IP="" AUTH_ENV="" WORK="" STOP_TIMEOUT=30
 MAINT_SERVICE="" MAINT_CMD="pnpm --silent maintenance:" MAINT_REASON="server migration"
-MAINT_TIMEOUT=15 MAINT_NEW=1
+MAINT_TIMEOUT=15 MAINT_NEW=1 MAINT_POLL=${MAINT_POLL:-10}
 SERVICES=() KEEP=() VOLUMES=() TABLES=()
 while [ $# -gt 0 ]; do
   common_flag "$1" && { shift; continue; }
@@ -229,6 +232,42 @@ printf '%s\\n' \"\$out\"
 printf '%s' \"\$out\" | tr -d ' \\n' | grep -q '\"mode\":\"$2\"' || { echo 'maintenance mode is not $2' >&2; exit 1; }"
 }
 
+# Instant freeze. `enable` drains first since Lenzora 9fb1193d6, which would wait at
+# least 5.5 minutes on an empty target; `enable --now` is the instant form. An image
+# from before that change rejects --now with exit 2, and its plain `enable` is instant.
+maint_enable_now() { # target
+  remote_bash "$1" "set -e
+id=\$($DOCKER ps -q --filter label=com.docker.compose.project=$(shq "$PROJECT") --filter label=com.docker.compose.service=$(shq "$MAINT_SERVICE") | head -1)
+[ -n \"\$id\" ] || { echo 'no running $MAINT_SERVICE container in $PROJECT' >&2; exit 1; }
+rc=0
+$DOCKER exec \"\$id\" ${MAINT_CMD}enable --now --reason $(shq "$MAINT_REASON") || rc=\$?
+if [ \"\$rc\" = 2 ]; then
+  echo 'enable --now was rejected (exit 2): an image from before enable drained; using plain enable' >&2
+  $DOCKER exec \"\$id\" ${MAINT_CMD}enable --reason $(shq "$MAINT_REASON")
+elif [ \"\$rc\" != 0 ]; then
+  exit \"\$rc\"
+fi"
+}
+
+# Poll `status --json` until the mode is read_only and work.idle is true, for at most
+# --maintenance-timeout minutes. Any other mode fails at once.
+maint_require_frozen_idle() { # target
+  remote_bash "$1" "set -e
+id=\$($DOCKER ps -q --filter label=com.docker.compose.project=$(shq "$PROJECT") --filter label=com.docker.compose.service=$(shq "$MAINT_SERVICE") | head -1)
+[ -n \"\$id\" ] || { echo 'no running $MAINT_SERVICE container in $PROJECT' >&2; exit 1; }
+deadline=\$((\$(date +%s) + $((MAINT_TIMEOUT * 60))))
+while :; do
+  out=\$($DOCKER exec \"\$id\" ${MAINT_CMD}status --json)
+  flat=\$(printf '%s' \"\$out\" | tr -d ' \\n')
+  case \$flat in *'\"mode\":\"read_only\"'*) ;; *) printf '%s\\n' \"\$out\"; echo 'maintenance mode is not read_only' >&2; exit 1 ;; esac
+  case \$flat in *'\"idle\":true'*) printf '%s\\n' \"\$out\"; echo 'read_only and idle'; exit 0 ;; esac
+  if [ \"\$(date +%s)\" -ge \"\$deadline\" ]; then
+    printf '%s\\n' \"\$out\"; echo 'background work still not idle after ${MAINT_TIMEOUT}m' >&2; exit 4
+  fi
+  sleep $MAINT_POLL
+done"
+}
+
 maint_disable_text() { # target
   printf '  ssh %s %s\n' "$(shq "$1")" "$(shq "$DOCKER exec \$($DOCKER ps -q --filter label=com.docker.compose.project=$PROJECT --filter label=com.docker.compose.service=$MAINT_SERVICE | head -1) ${MAINT_CMD}disable")"
 }
@@ -270,12 +309,15 @@ if [ -n "$MAINT_SERVICE" ]; then
 
   MAINT_ON=1
   if [ "$MAINT_NEW" = 1 ]; then
-    log "2a/8 NEW -> read_only (serves its pre-seed read-only until the restore)"
-    maint_exec "$NEW" enable --reason "$MAINT_REASON"
+    log "2a/8 NEW -> read_only now (serves its pre-seed read-only until the restore)"
+    maint_enable_now "$NEW"
   fi
   log "2b/8 drain OLD -> read_only (at least 5.5 minutes, budget ${MAINT_TIMEOUT}m)"
   maint_exec "$OLD" drain --reason "$MAINT_REASON" --wait --timeout "$MAINT_TIMEOUT"
-  maint_require_mode "$OLD" read_only
+  # drain --wait returns at once when OLD was already read_only (an earlier instant
+  # enable) even though jobs may still run, and the job queue is not copied. So stop
+  # nothing until OLD reports read_only AND idle work.
+  maint_require_frozen_idle "$OLD"
 fi
 
 log "2/8 stop $SELECTION on NEW (database keeps running)"

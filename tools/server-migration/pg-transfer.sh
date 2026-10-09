@@ -116,6 +116,27 @@ count_rows() { # target container table
   remote_bash "$1" "$DOCKER exec $(shq "$2") sh -c $(shq "psql $PSQL_ENV -Atc 'select count(*) from $3'")"
 }
 
+# The check runs last, after the data has moved, so a dropped ssh connection (exit 255,
+# seen on the 2026-10-08 R5-out leg) must not fail a finished cutover: try 3 times.
+COUNT_RETRY_DELAY=${COUNT_RETRY_DELAY:-5}
+count_rows_retry() { # target container table
+  local attempt=1 delay=$COUNT_RETRY_DELAY out
+  while :; do
+    if out=$(count_rows "$@"); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    if [ "$attempt" -ge 3 ]; then
+      warn "row count of $3 on $1 failed $attempt times"
+      return 1
+    fi
+    warn "row count of $3 on $1 failed (attempt $attempt/3); retrying in ${delay}s"
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 3))
+  done
+}
+
 if [ "$DO_CHECK" = 1 ] && [ "${#TABLES[@]}" -gt 0 ]; then
   mismatch=0
   for t in "${TABLES[@]}"; do
@@ -124,8 +145,8 @@ if [ "$DO_CHECK" = 1 ] && [ "${#TABLES[@]}" -gt 0 ]; then
       count_rows "$NEW" "$NEW_CONTAINER" "$t"
       continue
     fi
-    old_n=$(count_rows "$OLD" "$CONTAINER" "$t")
-    new_n=$(count_rows "$NEW" "$NEW_CONTAINER" "$t")
+    old_n=$(count_rows_retry "$OLD" "$CONTAINER" "$t") || die "could not count $t on $OLD"
+    new_n=$(count_rows_retry "$NEW" "$NEW_CONTAINER" "$t") || die "could not count $t on $NEW"
     if [ "$old_n" = "$new_n" ]; then
       log "rows $t: $old_n = $new_n"
     else

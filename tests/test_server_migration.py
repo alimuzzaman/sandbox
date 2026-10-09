@@ -51,8 +51,13 @@ FAKE_SB_BODY = textwrap.dedent("""\
         esac ;;
       "host retire-delivery") echo '{"ok": true}' ;;
       "job-status "*)
+        if [ -n "${FAKE_LIFECYCLE_FILE:-}" ] && [ -s "$FAKE_LIFECYCLE_FILE" ]; then
+          FAKE_LIFECYCLE=$(head -n 1 "$FAKE_LIFECYCLE_FILE")
+          tail -n +2 "$FAKE_LIFECYCLE_FILE" > "$FAKE_LIFECYCLE_FILE.next"
+          mv "$FAKE_LIFECYCLE_FILE.next" "$FAKE_LIFECYCLE_FILE"
+        fi
         echo "{\\"lifecycle\\": \\"${FAKE_LIFECYCLE:-succeeded}\\", \\"request_id\\": \\"deploy-dev-abc123\\", \\"job_id\\": \\"$2\\"}" ;;
-      "job-output "*) echo "fake job output" ;;
+      "job-output "*) echo "${FAKE_JOB_OUTPUT:-fake job output}" ;;
       "secrets run")
         shift 2
         while [ "$1" != "--" ]; do shift; done; shift
@@ -186,6 +191,32 @@ class PgTransferTests(MigrationScriptTestCase):
         self.assertIn("dropdb", result.stdout)
         self.assertIn("createdb", result.stdout)
         self.assertNotIn("--clean", result.stdout)
+
+    def flaky_count_ssh(self, failures):
+        counter = self.tmp / "count-calls"
+        counter.write_text("0")
+        ssh = self.bin / "ssh"
+        ssh.write_text(RECORDER.format(name="ssh", body=textwrap.dedent(f"""\
+            n=$(cat {shlex.quote(str(counter))}); echo $((n + 1)) > {shlex.quote(str(counter))}
+            [ "$n" -ge {failures} ] || exit 255
+            echo 7""")))
+
+    def test_row_count_retries_a_dropped_connection(self):
+        self.flaky_count_ssh(2)
+        result = self.run_script("pg-transfer.sh", "--check-only", *self.ARGS, "--check-table", "users",
+                                 env={"COUNT_RETRY_DELAY": "0"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("attempt 2/3", result.stderr)
+        self.assertIn("rows users: 7 = 7", result.stderr)
+        self.assertEqual(len(self.calls("ssh")), 4)
+
+    def test_row_count_gives_up_after_three_attempts(self):
+        self.flaky_count_ssh(99)
+        result = self.run_script("pg-transfer.sh", "--check-only", *self.ARGS, "--check-table", "users",
+                                 env={"COUNT_RETRY_DELAY": "0"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not count users", result.stderr)
+        self.assertEqual(len(self.calls("ssh")), 3)
 
     def test_bad_table_name_rejected(self):
         for bad in ("x;drop", '"x;drop"', '"Snapshot', 'Snapshot"', '"a" or 1', "1abc", '""', "a..b", "a."):
@@ -347,9 +378,9 @@ class CutoverTests(MigrationScriptTestCase):
         out = result.stdout
         steps = [
             out.index("maintenance:status\n"),                               # CLI present
-            out.index("maintenance:enable --reason 'server migration'"),      # NEW read_only
+            out.index("maintenance:enable --now --reason 'server migration'"),  # NEW read_only
             out.index("maintenance:drain --reason 'server migration' --wait --timeout 15"),
-            out.index("grep -q '\"mode\":\"read_only\"'"),                   # OLD confirmed
+            out.index("*'\"idle\":true'*"),                                    # OLD read_only + idle
             out.index("/stopped.txt.now"),                                    # then stop NEW
             out.index("stopped-old.txt.now"),
             out.index("pg_dump"),
@@ -357,7 +388,7 @@ class CutoverTests(MigrationScriptTestCase):
             out.index("grep -q '\"mode\":\"read_write\"'"),                  # NEW writable
         ]
         self.assertEqual(steps, sorted(steps))
-        enable = [l for l in out.splitlines() if "maintenance:enable" in l]
+        enable = [l for l in out.splitlines() if "maintenance:enable --now" in l]
         self.assertEqual(len(enable), 1)
         before_enable = out[:out.index("maintenance:enable")]
         self.assertIn(f"{NEW} -- set -e", before_enable[before_enable.rindex("+ ssh"):])
@@ -366,6 +397,97 @@ class CutoverTests(MigrationScriptTestCase):
         self.assertIn("com.docker.compose.service=lenzora-monitor-worker", out)
         self.assertIn("maintenance:disable", out[out.index("Rollback"):])
         self.assertNoRemoteCalls()
+
+    def run_maintenance_cutover(self, statuses, now_rc="0", extra=()):
+        """Run the maintenance steps for real under bash against a fake docker.
+
+        statuses: successive `status --json` bodies (the last one repeats). The run is
+        ended at pg_dump; ssh evaluates only the maintenance and stop scripts."""
+        state = self.tmp / "statuses"
+        state.write_text("\n".join(statuses) + "\n")
+        docker = self.bin / "fakedocker"
+        docker.write_text(RECORDER.format(name="docker", body=textwrap.dedent(f"""\
+            case "$1" in
+              ps) echo c1; exit 0 ;;
+              inspect) case "$3" in *service*) echo web ;; *) echo /proj-web-1 ;; esac; exit 0 ;;
+              stop) exit 0 ;;
+            esac
+            verb=$5
+            case "$verb" in
+              maintenance:enable) [ "${{6:-}}" != --now ] || exit {now_rc} ;;
+              maintenance:status)
+                if [ "${{6:-}}" = --json ]; then
+                  head -n 1 {shlex.quote(str(state))}
+                  [ "$(wc -l < {shlex.quote(str(state))})" -le 1 ] ||
+                    {{ tail -n +2 {shlex.quote(str(state))} > {shlex.quote(str(state))}.n; mv {shlex.quote(str(state))}.n {shlex.quote(str(state))}; }}
+                fi ;;
+            esac
+            exit 0""")))
+        docker.chmod(0o755)
+        remote = self.tmp / "remote"
+        remote.mkdir(exist_ok=True)
+        ssh = self.bin / "ssh"
+        ssh.write_text(RECORDER.format(name="ssh", body=textwrap.dedent(f"""\
+            case "${{@: -1}}" in
+              *pg_dump*) exit 1 ;;
+              *maintenance:*|*stopped*.txt.now*) cd {shlex.quote(str(remote))} && eval "${{@: -1}}" ;;
+            esac""")))
+        return self.run_script("cutover-compose-data.sh", "--confirm", "--yes", *self.ARGS, *self.MAINT, *extra,
+                               env={"MIGRATION_DOCKER": str(docker), "MAINT_POLL": "0"})
+
+    def docker_calls(self, verb):
+        return [c for c in self.calls("docker") if len(c) > 5 and c[5] == verb]
+
+    def stop_calls(self):
+        return [c for c in self.calls("docker") if c[1] == "stop"]
+
+    READ_ONLY_BUSY = '{"mode": "read_only", "work": {"ready": 1, "running": 2, "idle": false}}'
+    READ_ONLY_IDLE = '{"mode": "read_only", "work": {"ready": 0, "running": 0, "idle": true}}'
+
+    def test_old_image_without_enable_now_falls_back_to_plain_enable(self):
+        result = self.run_maintenance_cutover([self.READ_ONLY_IDLE], now_rc="2")
+        enables = self.docker_calls("maintenance:enable")
+        self.assertEqual([c[6] for c in enables], ["--now", "--reason"], result.stderr)
+        self.assertIn("using plain enable", result.stderr)
+        self.assertEqual(len(self.stop_calls()), 2, result.stderr)
+
+    def test_enable_now_failure_other_than_usage_stops_the_cutover(self):
+        result = self.run_maintenance_cutover([self.READ_ONLY_IDLE], now_rc="5")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.docker_calls("maintenance:enable")), 1)
+        self.assertEqual(self.stop_calls(), [])
+        self.assertIn("To leave maintenance mode", result.stderr)
+
+    def test_containers_stop_only_after_old_reports_idle(self):
+        result = self.run_maintenance_cutover([self.READ_ONLY_BUSY, self.READ_ONLY_BUSY, self.READ_ONLY_IDLE])
+        self.assertEqual(len([c for c in self.docker_calls("maintenance:status") if c[6:] == ["--json"]]), 3,
+                         result.stderr)
+        self.assertEqual(len(self.stop_calls()), 2, result.stderr)
+        log = self.calls()
+        last_status = max(i for i, c in enumerate(log) if c[0] == "docker" and c[5:7] == ["maintenance:status", "--json"])
+        first_stop = min(i for i, c in enumerate(log) if c[0] == "docker" and c[1] == "stop")
+        self.assertLess(last_status, first_stop)
+
+    def test_old_not_read_only_stops_nothing(self):
+        result = self.run_maintenance_cutover(['{"mode": "draining", "work": {"idle": true}}'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("maintenance mode is not read_only", result.stderr)
+        self.assertEqual(self.stop_calls(), [])
+
+    def test_idle_budget_runs_out_without_stopping(self):
+        fake_date = self.bin / "date"
+        counter = self.tmp / "clock"
+        counter.write_text("1000")
+        fake_date.write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env bash
+            if [ "$1" = +%s ]; then n=$(cat {shlex.quote(str(counter))}); echo $((n + 400)) > {shlex.quote(str(counter))}; echo "$n"; exit 0; fi
+            exec /bin/date "$@"
+            """))
+        fake_date.chmod(0o755)
+        result = self.run_maintenance_cutover([self.READ_ONLY_BUSY], extra=("--maintenance-timeout", "6"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("background work still not idle after 6m", result.stderr)
+        self.assertEqual(self.stop_calls(), [])
 
     def test_maintenance_old_only_leaves_new_alone(self):
         result = self.run_script("cutover-compose-data.sh", "--dry-run", *self.ARGS, *self.MAINT,
@@ -496,6 +618,41 @@ class DeployProjectTests(MigrationScriptTestCase):
         self.assertIn("retire-failed.sh", result.stderr)
         self.assertIn("--original-request-id deploy-dev-abc123", result.stderr)
         self.assertNotIn("retire-delivery", [c[2] for c in self.calls("sb") if len(c) > 2])
+
+    UNPROVEN = "error: unproven_staged_revision: existing runtime identity/topology is not fully proven"
+
+    def test_unproven_staged_revision_is_retired_once_and_retried(self):
+        seq = self.tmp / "lifecycles"
+        seq.write_text("failed\nsucceeded\n")
+        result = self.deploy("--confirm", env={"FAKE_LIFECYCLE_FILE": str(seq), "FAKE_JOB_OUTPUT": self.UNPROVEN})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("retiring delivery deploy-dev-abc123 once and retrying", result.stderr)
+        sb = [c[1:] for c in self.calls("sb")]
+        retire = [c for c in sb if c[:2] == ["host", "retire-delivery"]]
+        self.assertEqual(len(retire), 1)
+        self.assertEqual(retire[0][retire[0].index("--original-request-id") + 1], "deploy-dev-abc123")
+        starts = [i for i, c in enumerate(sb) if c[0] == "job-start"]
+        self.assertEqual(len(starts), 2)
+        self.assertLess(starts[0], sb.index(retire[0]))
+        self.assertLess(sb.index(retire[0]), starts[1])
+
+    def test_unproven_staged_revision_retries_only_once(self):
+        result = self.deploy("--confirm", env={"FAKE_LIFECYCLE": "failed", "FAKE_JOB_OUTPUT": self.UNPROVEN})
+        self.assertEqual(result.returncode, 1)
+        sb = [c[1:] for c in self.calls("sb")]
+        self.assertEqual(len([c for c in sb if c[:2] == ["host", "retire-delivery"]]), 1)
+        self.assertEqual(len([c for c in sb if c[0] == "job-start"]), 2)
+        self.assertIn("retire-failed.sh", result.stderr)
+
+    def test_no_auto_retire_and_other_failures_do_not_retire(self):
+        for extra, output in ((("--no-auto-retire",), self.UNPROVEN), ((), "error: compose build failed")):
+            with self.subTest(extra=extra, output=output):
+                self.log.write_text("")
+                result = self.deploy("--confirm", *extra, env={"FAKE_LIFECYCLE": "failed", "FAKE_JOB_OUTPUT": output})
+                self.assertEqual(result.returncode, 1)
+                sb = [c[1:] for c in self.calls("sb")]
+                self.assertEqual([c for c in sb if c[:2] == ["host", "retire-delivery"]], [])
+                self.assertEqual(len([c for c in sb if c[0] == "job-start"]), 1)
 
     def test_poll_budget_is_bounded(self):
         result = self.deploy("--confirm", env={"FAKE_LIFECYCLE": "running"})

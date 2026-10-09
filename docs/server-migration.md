@@ -12,7 +12,7 @@ prints its commands with `--dry-run`, and refuses any destructive step without
 |---|---|---|
 | `backup-to-drive.sh` | 1 | Recovery set, or git bundle + gpg + rclone + verification |
 | `prepare-host.sh` | 2 | sudoers, docker group, swap, ufw check, `sb remote add/provision` |
-| `deploy-project.sh` | 3, 4 | plan, apply, durable job, bounded polling, retire hint |
+| `deploy-project.sh` | 3, 4 | plan, apply, durable job, bounded polling, one retire-and-retry for `unproven_staged_revision`, retire hint |
 | `retire-failed.sh` | 4 | `sb host retire-delivery` for a failed delivery |
 | `stage-volume.sh` | 5a | Pre-stages a volume tar on the new server (source may be live) |
 | `copy-volume.sh` | 5 | Final volume copy: fetch (source must be stopped), then extract |
@@ -293,17 +293,21 @@ file exists in the volume at the recorded size. The Lenzora dev round trip on
 2026-10-08 did this for its snapshot, comparison and resource storage.
 
 **Redeploying to a server that was the old side.** After a cutover, the server that
-was OLD still holds the ledger of its last deploy, and that runtime was stopped by the
-cutover, not by Sandbox. The next `sb host apply` there refuses with
-`unproven_staged_revision`. Retire that last delivery first, then deploy:
+was OLD still records the revision of its last deploy, but the cutover stopped that
+runtime, not Sandbox. Apply cannot prove what is running there, so the first deploy job
+fails with `unproven_staged_revision` (all 10 legs of the 2026-10-08 Lenzora dev round
+trips). `deploy-project.sh` handles this: when a job fails with exactly that error, it
+retires the failed delivery once with `retire-failed.sh`, logs that it did, and delivers
+again. The retire marks the unproven revision, so the second apply does a full recreate.
+A second failure is reported with the usual retire hint and is not retried.
+`--no-auto-retire` turns this off. By hand, the equivalent is:
 
 ```sh
-./sb host retire-delivery --project-dir <dir> --environment <env> --remote <old> \
-  --original-request-id <request id of the last deploy there> --confirm
+tools/server-migration/retire-failed.sh --project-dir <dir> --environment <env> \
+  --remote <target> --original-request-id <request id of the failed job> --confirm
 ```
 
-The request id is in `sb job-status <job> --json` for that deploy. This came up on the
-second leg of the 2026-10-08 Lenzora dev round trip (scaleway, then back to xcloud).
+then deploy again.
 
 For Lenzora dev the result was 307 tables with matching spot counts, `/api/health` 200
 with `x-lenzora-revision`, basic auth 401 from a non-bypass IP, the bypass path 200, and
@@ -311,6 +315,10 @@ all 18 containers healthy.
 
 The pieces also run on their own: `pg-transfer.sh --dump-only | --restore-only |
 --check-only` and `copy-volume.sh --fetch-only | --extract-only`.
+
+The row-count check runs last, after the data has moved, so each count is tried 3
+times (5 s, then 15 s apart) before the check fails. On the R5-out leg an ssh connection
+to the old server dropped during the count (exit 255) although the data was complete.
 
 ### Read-only maintenance mode (`--maintenance-service`)
 
@@ -329,13 +337,21 @@ service (`--maintenance-command`, default `pnpm --silent maintenance:`, is the p
 verb is appended to). Before step 2 it:
 
 1. runs `status` on both servers, so a missing CLI stops the cutover before any change;
-2. puts NEW into `read_only` with `enable`. DNS already points at NEW, and NEW still has
-   its pre-seed; read-only means it serves those reads and refuses writes with 503 and
-   `Retry-After`, instead of accepting writes the restore would silently discard.
-   `--maintenance-old-only` skips this;
+2. puts NEW into `read_only` at once with `enable --now`. DNS already points at NEW, and
+   NEW still has its pre-seed; read-only means it serves those reads and refuses writes
+   with 503 and `Retry-After`, instead of accepting writes the restore would silently
+   discard. Plain `enable` drains first since Lenzora 9fb1193d6, which would wait at
+   least 5.5 minutes on an empty target. An image from before that change rejects
+   `--now` with exit 2; the script then runs plain `enable`, which is instant there.
+   `--maintenance-old-only` skips this step;
 3. runs `drain --wait --timeout <min>` on OLD: writes are refused at once, queued work
    finishes, then the mode becomes `read_only`. A drain lasts at least 5.5 minutes, so
-   the timeout must be at least 6. Then `status --json` must report `read_only`.
+   the timeout must be at least 6;
+4. polls `status --json` on OLD, for up to the same timeout, until it reports
+   `read_only` and `work.idle: true`. `drain --wait` returns at once when OLD was
+   already `read_only` (an earlier instant enable) even while jobs still run, and the
+   job queue is not copied, so a job queued or running when OLD stops would be stranded
+   or killed. Any other mode fails at once; a timeout exits with nothing stopped.
 
 Steps 2 to 8 then run as above. The flag is stored in Postgres and bound to the
 cluster's system identifier, so the restored copy of OLD's flag reads as `read_write` on
@@ -412,7 +428,7 @@ failed deploy needs no manual rollback, only `retire-failed.sh`.
 | `remote_registration_busy` | Any host apply, to any remote, holds `registry.lock` | `lsof` the lock, wait for the holder; never kill it |
 | `recovery_context_required; prepare with: ...` | apply must run inside a durable job | Run the printed `sb job-start` with a raised `--timeout` (`deploy-project.sh` does this) |
 | `required_evidence_missing`, `operation_busy` | A failed delivery is still recorded | `retire-failed.sh --job-id <job> --confirm` |
-| `unproven_staged_revision` | Failed attempt not retired, or retire refused (or Sandbox older than the fix for staged == recorded) | Run `retire-failed.sh`; if retire refuses, investigate with `./sb delivery inspect` (new project name for probes) |
+| `unproven_staged_revision` | Failed attempt not retired, or retire refused (or Sandbox older than the fix for staged == recorded). Always on the first deploy to a server a cutover stopped | `deploy-project.sh` retires once and retries; otherwise run `retire-failed.sh`. If retire refuses, investigate with `./sb delivery inspect` (new project name for probes) |
 | "did not become fully ready before deadline", `unverified` | A compose service has no healthcheck | Add a healthcheck to every service |
 | "TLS handshake failed" during edge verification | macOS cached a new name at the old wildcard IP | Don't resolve before deploy, or pre-create the record |
 | 403 error 1010 from the control host | Control record is proxied | Make it DNS-only |

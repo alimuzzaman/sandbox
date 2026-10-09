@@ -12,6 +12,9 @@ recovery_context_required it prints a `sb job-start ... -- sb host apply ...`
 command; this script runs that command (with --timeout raised to --job-timeout),
 keeps the Mac awake with caffeinate, and polls the job with a bounded loop.
 On failure it prints the retire-failed.sh command that clears the failed delivery.
+One failure is handled automatically: unproven_staged_revision, which the first deploy
+to a server stopped by cutover-compose-data.sh always hits. The script retires that
+delivery once with retire-failed.sh, logs it, and delivers again.
 
 Required:
   --project-dir DIR      clean checkout (a worktree) of the branch the environment allows
@@ -26,6 +29,9 @@ Options:
                          (waiting out remote_registration_busy) and retry apply once
   --busy-timeout SECONDS how long --fix-runtime waits for a registry lock holder (default 1800)
   --no-caffeinate        do not start caffeinate (macOS)
+  --no-auto-retire       do not retire-and-retry once when the job fails with
+                         unproven_staged_revision (by default it does, and logs it:
+                         the first deploy to a server a cutover stopped always hits it)
   --plan-only            stop after `sb host plan`
   --dry-run              print the commands, run nothing
   --confirm              required to run apply
@@ -38,7 +44,7 @@ EOF
 }
 
 PROJECT_DIR="" ENVIRONMENT="" REMOTE="" JOB_TIMEOUT=900 POLL_TIMEOUT="" POLL_INTERVAL=30
-FIX_RUNTIME=0 BUSY_TIMEOUT=1800 CAFFEINATE=1 PLAN_ONLY=0
+FIX_RUNTIME=0 BUSY_TIMEOUT=1800 CAFFEINATE=1 PLAN_ONLY=0 AUTO_RETIRE=1
 while [ $# -gt 0 ]; do
   common_flag "$1" && { shift; continue; }
   case $1 in
@@ -52,6 +58,7 @@ while [ $# -gt 0 ]; do
     --busy-timeout) require_value "$1" "${2:-}"; BUSY_TIMEOUT=$2; shift 2 ;;
     --fix-runtime) FIX_RUNTIME=1; shift ;;
     --no-caffeinate) CAFFEINATE=0; shift ;;
+    --no-auto-retire) AUTO_RETIRE=0; shift ;;
     --plan-only) PLAN_ONLY=1; shift ;;
     *) usage_error "unknown argument: $1" ;;
   esac
@@ -121,35 +128,51 @@ remote_up_once() {
   return "$status"
 }
 
-status=0
-apply_once || status=$?
-if [ "$status" != 0 ] && printf '%s' "$APPLY_OUT" | grep -q remote_runtime_revision_mismatch; then
-  if [ "$FIX_RUNTIME" = 0 ]; then
-    die "remote_runtime_revision_mismatch: run \`$SB remote up $REMOTE --confirm\` (positional name, not --remote) or re-run with --fix-runtime"
+CAFF_PID=""
+start_caffeinate() {
+  [ -z "$CAFF_PID" ] || return 0
+  if [ "$CAFFEINATE" = 1 ] && command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -i -t "$POLL_TIMEOUT" &
+    CAFF_PID=$!
+    trap '[ -z "$CAFF_PID" ] || kill "$CAFF_PID" 2>/dev/null || true' EXIT
   fi
-  wait_until "$BUSY_TIMEOUT" 60 "sb remote up $REMOTE" remote_up_once \
-    || die "sb remote up $REMOTE did not succeed within ${BUSY_TIMEOUT}s"
-  status=0
+}
+
+# One delivery: apply, and when apply asks for a durable job, start it and poll it.
+# Returns 0 succeeded, 1 failed (FAILED_OUTPUT/REQUEST_ID/JOB_ID/LIFECYCLE set),
+# 3 still running when the poll budget ran out. Dies on anything else.
+FAILED_OUTPUT="" REQUEST_ID="" JOB_ID="" LIFECYCLE=""
+deliver() {
+  local status=0 prepare_line job_json status_json="" health deadline stall_hint=""
+  FAILED_OUTPUT="" REQUEST_ID="" JOB_ID="" LIFECYCLE=""
   apply_once || status=$?
-fi
-if [ "$status" = 0 ]; then
-  log "host apply finished directly (no durable job was needed)"
-  exit 0
-fi
-case $APPLY_OUT in
-  *recovery_context_required*) ;;
-  *required_evidence_missing* | *operation_busy*)
-    printf '%s\n' "A previous failed delivery is still recorded for this target." >&2
-    retire_hint; exit 1 ;;
-  *) die "host apply failed (output above)" ;;
-esac
+  if [ "$status" != 0 ] && printf '%s' "$APPLY_OUT" | grep -q remote_runtime_revision_mismatch; then
+    if [ "$FIX_RUNTIME" = 0 ]; then
+      die "remote_runtime_revision_mismatch: run \`$SB remote up $REMOTE --confirm\` (positional name, not --remote) or re-run with --fix-runtime"
+    fi
+    wait_until "$BUSY_TIMEOUT" 60 "sb remote up $REMOTE" remote_up_once \
+      || die "sb remote up $REMOTE did not succeed within ${BUSY_TIMEOUT}s"
+    status=0
+    apply_once || status=$?
+  fi
+  if [ "$status" = 0 ]; then
+    log "host apply finished directly (no durable job was needed)"
+    return 0
+  fi
+  case $APPLY_OUT in
+    *recovery_context_required*) ;;
+    *required_evidence_missing* | *operation_busy*)
+      printf '%s\n' "A previous failed delivery is still recorded for this target." >&2
+      retire_hint >&2; exit 1 ;;
+    *) die "host apply failed (output above)" ;;
+  esac
 
-prepare_line=$(printf '%s\n' "$APPLY_OUT" | sed -n 's/.*recovery_context_required; prepare with: //p' | head -n 1)
-[ -n "$prepare_line" ] || die "apply said recovery_context_required but printed no job-start command"
+  prepare_line=$(printf '%s\n' "$APPLY_OUT" | sed -n 's/.*recovery_context_required; prepare with: //p' | head -n 1)
+  [ -n "$prepare_line" ] || die "apply said recovery_context_required but printed no job-start command"
 
-# Split the printed command with shlex (never eval), raise --timeout, add --json.
-JOB_ARGV=()
-while IFS= read -r -d '' word; do JOB_ARGV+=("$word"); done < <("$PYTHON" -c '
+  # Split the printed command with shlex (never eval), raise --timeout, add --json.
+  JOB_ARGV=()
+  while IFS= read -r -d '' word; do JOB_ARGV+=("$word"); done < <("$PYTHON" -c '
 import shlex, sys
 argv = shlex.split(sys.argv[1])
 timeout = sys.argv[2]
@@ -166,48 +189,59 @@ else:
 head.insert(2, "--json")
 sys.stdout.write("\0".join(head + argv[sep:]) + "\0")
 ' "$prepare_line" "$JOB_TIMEOUT")
-[ "${#JOB_ARGV[@]}" -gt 0 ] || die "could not parse the job-start command"
+  [ "${#JOB_ARGV[@]}" -gt 0 ] || die "could not parse the job-start command"
 
-CAFF_PID=""
-if [ "$CAFFEINATE" = 1 ] && command -v caffeinate >/dev/null 2>&1; then
-  caffeinate -i -t "$POLL_TIMEOUT" &
-  CAFF_PID=$!
-  trap '[ -z "$CAFF_PID" ] || kill "$CAFF_PID" 2>/dev/null || true' EXIT
+  start_caffeinate
+  log "+ $(quote_argv "${JOB_ARGV[@]}")"
+  job_json=$("${JOB_ARGV[@]}") || die "sb job-start was refused: $job_json"
+  JOB_ID=$(printf '%s' "$job_json" | tail -n 1 | json_field job_id)
+  [ -n "$JOB_ID" ] || die "no job_id in job-start output: $job_json"
+  log "job $JOB_ID accepted; polling every ${POLL_INTERVAL}s for up to ${POLL_TIMEOUT}s"
+
+  deadline=$((SECONDS + POLL_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    status_json=$("$SB" job-status "$JOB_ID" --json 2>/dev/null || true)
+    LIFECYCLE=$(printf '%s' "$status_json" | json_field lifecycle)
+    health=$(printf '%s' "$status_json" | json_field health)
+    log "job $JOB_ID: ${LIFECYCLE:-unknown} (${health:-?})"
+    if [ "$health" = suspected_stalled ] && [ -z "$stall_hint" ]; then
+      stall_hint=1
+      log "suspected_stalled is normal during a long silent image build or readiness wait; check the remote's ~/sandbox/runtime/hosts/<project>/<env>/apply.log and docker ps before acting. Do not cancel: a cancel can land after compose_recreate."
+    fi
+    case $LIFECYCLE in succeeded | failed | timed_out | cancelled | interrupted) break ;; esac
+    sleep "$POLL_INTERVAL"
+  done
+
+  case $LIFECYCLE in
+    succeeded)
+      log "deploy of $ENVIRONMENT to $REMOTE succeeded (job $JOB_ID)"
+      return 0 ;;
+    failed | timed_out | cancelled | interrupted)
+      FAILED_OUTPUT=$("$SB" job-output "$JOB_ID" --lines 200 2>&1 || true)
+      printf '%s\n' "$FAILED_OUTPUT" >&2
+      REQUEST_ID=$(printf '%s' "$status_json" | json_field request_id)
+      printf 'job %s ended %s.\n' "$JOB_ID" "$LIFECYCLE" >&2
+      return 1 ;;
+    *)
+      printf 'job %s still %s after %ss; it keeps running. Poll: %s job-status %s\n' \
+        "$JOB_ID" "${LIFECYCLE:-unknown}" "$POLL_TIMEOUT" "$SB" "$JOB_ID" >&2
+      return 3 ;;
+  esac
+}
+
+rc=0
+deliver || rc=$?
+# After a data cutover the target still records this revision, but the cutover (not
+# Sandbox) stopped that runtime, so apply cannot prove it and refuses to replay Compose.
+# Retiring that delivery is the documented recovery; do it once, then deliver again.
+if [ "$rc" = 1 ] && [ "$AUTO_RETIRE" = 1 ] && [ -n "$REQUEST_ID" ] &&
+   printf '%s' "$FAILED_OUTPUT" | grep -q unproven_staged_revision; then
+  log "unproven_staged_revision: retiring delivery $REQUEST_ID once and retrying (expected on the first deploy to a server a cutover stopped; --no-auto-retire turns this off)"
+  "$MIGRATION_LIB_DIR/retire-failed.sh" --project-dir "$PROJECT_DIR" --environment "$ENVIRONMENT" \
+    --remote "$REMOTE" --original-request-id "$REQUEST_ID" --confirm --yes \
+    || { retire_hint "$REQUEST_ID" >&2; die "retire of $REQUEST_ID failed; nothing was retried"; }
+  rc=0
+  deliver || rc=$?
 fi
-
-log "+ $(quote_argv "${JOB_ARGV[@]}")"
-job_json=$("${JOB_ARGV[@]}") || die "sb job-start was refused: $job_json"
-JOB_ID=$(printf '%s' "$job_json" | tail -n 1 | json_field job_id)
-[ -n "$JOB_ID" ] || die "no job_id in job-start output: $job_json"
-log "job $JOB_ID accepted; polling every ${POLL_INTERVAL}s for up to ${POLL_TIMEOUT}s"
-
-deadline=$((SECONDS + POLL_TIMEOUT))
-lifecycle="" status_json=""
-while [ "$SECONDS" -lt "$deadline" ]; do
-  status_json=$("$SB" job-status "$JOB_ID" --json 2>/dev/null || true)
-  lifecycle=$(printf '%s' "$status_json" | json_field lifecycle)
-  health=$(printf '%s' "$status_json" | json_field health)
-  log "job $JOB_ID: ${lifecycle:-unknown} (${health:-?})"
-  if [ "$health" = suspected_stalled ] && [ -z "${stall_hint:-}" ]; then
-    stall_hint=1
-    log "suspected_stalled is normal during a long silent image build or readiness wait; check the remote's ~/sandbox/runtime/hosts/<project>/<env>/apply.log and docker ps before acting. Do not cancel: a cancel can land after compose_recreate."
-  fi
-  case $lifecycle in succeeded | failed | timed_out | cancelled | interrupted) break ;; esac
-  sleep "$POLL_INTERVAL"
-done
-
-case $lifecycle in
-  succeeded)
-    log "deploy of $ENVIRONMENT to $REMOTE succeeded (job $JOB_ID)"
-    exit 0 ;;
-  failed | timed_out | cancelled | interrupted)
-    "$SB" job-output "$JOB_ID" --lines 200 >&2 || true
-    request_id=$(printf '%s' "$status_json" | json_field request_id)
-    printf 'job %s ended %s.\n' "$JOB_ID" "$lifecycle" >&2
-    retire_hint "$request_id" >&2
-    exit 1 ;;
-  *)
-    printf 'job %s still %s after %ss; it keeps running. Poll: %s job-status %s\n' \
-      "$JOB_ID" "${lifecycle:-unknown}" "$POLL_TIMEOUT" "$SB" "$JOB_ID" >&2
-    exit 3 ;;
-esac
+[ "$rc" != 1 ] || retire_hint "$REQUEST_ID" >&2
+exit "$rc"

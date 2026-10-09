@@ -26,7 +26,7 @@
 
 The program reads one JSON request on stdin and writes one JSON line on
 stdout. All writes happen under an exclusive flock on `state.lock`; `list`
-and `inventory` take a shared lock or none.
+and `inventory` take a shared lock.
 
 | op | input | output |
 |---|---|---|
@@ -34,7 +34,7 @@ and `inventory` take a shared lock or none.
 | `assign` | `{cidr, subnet_prefix, holder}` | `{assigned: bool, range_id}` or error code |
 | `allocate` | `{owner_kind, owner_id, workspace_id, networks:[name]}` | `{granted:[{allocation_id, network, subnet}]}` or `{exhausted:true, table:[...]}`; all-or-nothing |
 | `release-owner` | `{owner_id}` or `{workspace_id}` | `{released: n}` |
-| `list` | — | `{ranges, allocations}` |
+| `list` | — | `{ranges, allocations, capacity_proof}` |
 
 ## Admission payload (protocol 2)
 

@@ -25,7 +25,7 @@
 - **Decision**: State lives in remote `$SANDBOX_HOME/runtime/network-ranges/state.json`
   (0600, directory 0700). It is changed only by one fixed Python program,
   sent over `ssh_run` under `fcntl.flock` on `state.lock`. The operations are
-  `inventory`, `assign`, `allocate`, `release`, `release-owner` and `list`.
+  `inventory`, `assign`, `allocate`, `release-owner` and `list`.
   `list` is read-only: it creates no directory and takes only a shared lock.
 - **Rationale**: This is the same proven pattern as 061 pins. It works on old
   runtimes for listing, and with a flock two concurrent allocations for the
@@ -71,7 +71,10 @@
 
 ## R5. Freeing allocations
 
-- **Decision**: Three paths free allocations, each with `release-owner`:
+- **Decision**: Allocations are unique per `(workspace_id, network)` and
+  `allocate` is idempotent for that pair, so jobs, previews and repeated runs
+  in one workspace stack reuse its subnets (see data-model owner-kind
+  mapping). Three paths free allocations, each with `release-owner`:
   - `workspace release` frees the workspace's own and its jobs' allocations;
   - `workspace reap` frees the allocations of reaped workspaces;
   - retention expiry (the existing 7-day TTL) frees them on the reap path.
@@ -128,4 +131,25 @@
   remote is refused. A local run happens only with an explicit `--local`
   selector, and when the declared remote was not ready it prints the
   declared remote, the failing row and its reason.
+- **Current code (checked 2026-10-10)**: `TargetService.resolve`
+  (`sandbox/application/target_service.py`) already refuses `unknown_remote`,
+  `ambiguous_remote` and `remote_not_provisioned`, and `exec`
+  (`sandbox/commands/runtime.py`) refuses instead of running local Compose.
+  No path is removed: this feature adds tests that pin that behaviour on every
+  submission path, enriches the refusals (FR-020) and adds `remote_selection`.
+  If an implementation step finds a path that does fall back, it stops and
+  records parity evidence and approval under principle VI before changing it.
 - **Rationale**: Silent fallback mislabeled evidence (feedback cebec97a).
+
+## R10. Range support marker and 061 status
+
+- **Decision**: `remote service migrate` at this feature's revision writes the
+  runtime capability `network_ranges` into the installed runtime record. The
+  store checks it before any program call and returns
+  `range_runtime_unsupported` naming the migrate when it is absent (FR-002).
+  Feature 061 has shipped (`remote_runtime.verdict.admitted`,
+  `CONTROL_PROTOCOL_SPOKEN = 1`), so the runtime-compatibility row uses its
+  verdict; the "exact revision" branch of FR-017 no longer applies.
+- **Rationale**: The program is sent inline, so it always "supports" ranges;
+  only an installed marker says the runtime was migrated to a revision whose
+  admission and Compose override use them.

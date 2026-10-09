@@ -15,8 +15,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   never assigns. Capacity admission now words a remote without daemon pools as
   `missing_pool_evidence` naming the range remedy, and its evaluator can count
   unallocated range capacity and refuse range exhaustion with a bounded
-  allocation table and release commands. Confirmed assignment waits for the
-  protocol bump that wires range admission.
+  allocation table and release commands. Control protocol 2 wires them in:
+  admission counts range capacity read-only, the runtime allocates one
+  subnet per created network before a stack's first `up` (built-in and
+  generic Compose) and passes a subnet override, and instance teardown,
+  `workspace reap` and retention expiry free the allocations.
 - Remote runtime coexistence (spec 061). Each runtime declares a control
   protocol range; `remote service status` reports `control_protocol` and a
   `compatibility` verdict, and remote consumers (workspace preflight, hosted

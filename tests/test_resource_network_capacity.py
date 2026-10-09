@@ -644,3 +644,76 @@ class RangeCapacityRound5Tests(unittest.TestCase):
                 result = evaluate_network_capacity(candidate, range_evidence=ranged)
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["code"], "docker_network_capacity_unavailable")
+
+class RangeAdmissionTests(unittest.TestCase):
+    """Spec 063 R4 revision: admission counts range capacity, read-only."""
+
+    def setUp(self):
+        from tests.test_remote_network_program import HOLDER, NEW, _LocalRemote, _write_tool
+        from sandbox.remote_network import store as range_store
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        self.home, bin_dir = root / "home", root / "bin"
+        self.home.mkdir()
+        bin_dir.mkdir()
+        inspect = json.dumps([{"IPAM": {"Config": [{"Subnet": "172.17.0.0/16"}]}}])
+        _write_tool(bin_dir / "docker", 'case "$2" in ls) echo net1;; inspect) cat <<\'EOF\'\n'
+                    + inspect + "\nEOF\n;; esac\n")
+        _write_tool(bin_dir / "ip", "cat <<'EOF'\n" + json.dumps([{"dst": "default"}]) + "\nEOF\n")
+        self.local = _LocalRemote(self.home, bin_dir)
+        self.store = range_store.RangeStore({"name": "vps"}, self.local, installed_protocol=NEW)
+        self.holder = HOLDER
+        self.commands = []
+
+    def ssh(self, pools):
+        def run(entry, command, timeout=30):
+            self.commands.append(command)
+            if command.startswith("sudo -n "):
+                return SimpleNamespace(returncode=0, stdout=json.dumps(pools) + "\n", stderr="")
+            return self.local(entry, command, timeout=timeout)
+        return run
+
+    def admit(self, pools, required=1):
+        with patch.object(_remote, "ssh_run", side_effect=self.ssh(pools)):
+            return _remote.remote_network_capacity_admission(
+                {"ssh": "host"}, required_subnets=required, remote_name="vps")
+
+    def test_a_range_admits_a_remote_without_daemon_pools(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=self.holder)
+        result = self.admit(NO_POOLS, required=2)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["capacity"]["range_usable_subnets"], 4)
+        self.assertEqual(result.get("granted"), [])
+        self.assertNotIn("10.200", json.dumps(result))
+        self.assertEqual(len(self.commands), 2)
+
+    def test_without_a_range_the_missing_pool_refusal_is_unchanged(self):
+        result = self.admit(NO_POOLS)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["evidence"]["reason"], "missing_pool_evidence")
+        self.assertFalse((self.home / "runtime" / "network-ranges").exists())
+
+    def test_exhausted_range_refuses_with_the_allocation_table(self):
+        from sandbox.remote_network import runtime as range_runtime
+        self.store.assign("10.200.0.0/24", 25, confirm=True, holder=self.holder)
+        self.store.allocate(owner_kind="instance", owner_id="instance:a",
+                            workspace_id="site-a", networks=["sandbox-a_default",
+                                                             "sandbox-a_backend"])
+        result = self.admit(NO_POOLS)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], range_runtime.EXHAUSTED)
+        self.assertEqual([row["owner_id"] for row in result["allocation_table"]],
+                         ["instance:a", "instance:a"])
+        self.assertEqual(result["release_commands"], ["./sb workspace release site-a --remote vps"])
+        self.assertNotIn("10.200", json.dumps(result))
+
+    def test_an_unreachable_range_store_keeps_the_pool_decision(self):
+        def run(entry, command, timeout=30):
+            if command.startswith("sudo -n "):
+                return SimpleNamespace(returncode=0, stdout=json.dumps(NO_POOLS) + "\n", stderr="")
+            raise OSError("ssh: token=secret")
+        with patch.object(_remote, "ssh_run", side_effect=run):
+            result = _remote.remote_network_capacity_admission({"ssh": "host"}, remote_name="vps")
+        self.assertEqual(result["evidence"]["reason"], "missing_pool_evidence")
+        self.assertNotIn("secret", json.dumps(result))

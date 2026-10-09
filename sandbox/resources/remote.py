@@ -2673,6 +2673,17 @@ def reconcile_after_removal(removed_paths, workspace_ids):
             result["leases_removed"] += 1
         except OSError:
             pass
+    # Spec 063: reap removes stacks without `compose down`, so free the
+    # reclaimed workspaces' development-range subnets here.
+    if (RUNTIME / "network-ranges" / "state.json").is_file():
+        try:
+            from sandbox.remote_network.runtime import release_workspaces
+
+            result["range_allocations_released"] = release_workspaces(
+                [name for name in names if LEASE_NAME.fullmatch(name)], HOME)
+        except Exception:
+            result["status"] = "partial"
+            result.setdefault("reason", "range_release_unavailable")
     return result
 
 

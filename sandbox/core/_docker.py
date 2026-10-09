@@ -664,7 +664,8 @@ def compose(*args: str, instance: str,
     # networks before `up` and pass the subnet override last; a
     # volume-removing `down` frees them. Inert when the host has no ranges.
     from sandbox.remote_network import runtime as range_runtime
-    ranges = range_runtime.default_runtime(compose_config=_compose_config)
+    ranges = range_runtime.default_runtime(compose_config=_compose_config,
+                                           workspace_of=_range_workspace)
     if ranges is not None and args[:1] == ("up",):
         ranges.prepare(instance)
     result = run(
@@ -687,6 +688,12 @@ def compose(*args: str, instance: str,
 
 def _compose_base(instance: str) -> list[str]:
     return ["docker", "compose", "-p", project_name(instance), "-f", str(compose_file(instance))]
+
+
+def _range_workspace(instance: str) -> str | None:
+    """The workspace (deployment-root name) an instance's stack belongs to."""
+    root = (registry_find_instance(instance) or {}).get("root")
+    return Path(root).name if isinstance(root, str) and root else None
 
 
 def _compose_config(instance: str) -> dict:

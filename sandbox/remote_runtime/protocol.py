@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-CONTROL_PROTOCOL_SPOKEN = 1
+CONTROL_PROTOCOL_SPOKEN = 2
 CONTROL_PROTOCOL_OLDEST_SERVED = 1
 
 UNIT_ENVIRONMENT_NAME = "SANDBOX_REMOTE_MCP_CONTROL_PROTOCOL"

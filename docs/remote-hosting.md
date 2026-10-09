@@ -208,7 +208,7 @@ A remote whose Docker daemon configures no address pools is refused as
 `missing_pool_evidence` (missing evidence, not exhausted capacity), and the
 refusal names the range remedy `./sb remote network-range propose <remote>`.
 
-#### Development ranges (spec 063, in progress)
+#### Development ranges (spec 063)
 
 A development range is an operator-assigned IPv4 range on one remote from
 which Sandbox will carve one fixed subnet per created network, so capacity is
@@ -233,15 +233,35 @@ allocations live on the remote under `$SANDBOX_HOME/runtime/network-ranges/`
   recorded.
 - A confirmed `assign` needs an installed runtime whose control protocol
   serves ranges; otherwise it refuses `range_runtime_unsupported` with the
-  `remote service migrate <remote> --confirm` remedy. The current checkout
-  still declares protocol 1, so confirmed assignment refuses everywhere until
-  the protocol bump that ships range admission (spec 063 T013a).
+  `remote service migrate <remote> --confirm` remedy: ranges need control
+  protocol 2, so a runtime installed before it must be migrated first.
 - `remote provision` adds a best-effort `network_range` entry to its result: a
   proposal with the exact assign command when the remote has no range, never
   an assignment, and never a provision failure.
-- Only `list` prints subnets. Run admission and the per-run Compose override
-  that will consume ranges are not wired yet; until then capacity admission
-  uses daemon pools exactly as above.
+- Only `list` prints subnets.
+- Admission is count-only. When the pool probe finds no configured pool or
+  exhausted pools, it reads the range's counts (a read-only `stats` op that
+  creates nothing) and admits when unallocated range capacity covers the run.
+  Otherwise it refuses `docker_network_subnet_exhausted` with the allocation
+  table (at most 32 rows: owner, workspace, age; never a subnet) and one
+  `./sb workspace release <workspace> --remote <remote>` per workspace. Every
+  other pool refusal stands unchanged.
+- Allocation happens on the remote, in the runtime, just before a stack's
+  first `up`: Sandbox reads the effective `docker compose config`, allocates
+  one subnet per network the stack creates (by its project-scoped Docker
+  name, all-or-nothing, under the store's flock), writes a `0600` override
+  under `runtime/network-ranges/overrides/` and passes it last in every later
+  Compose call for that instance. External networks and networks the project
+  pins with its own IPAM are left alone (`outside_range`). Exhaustion at this
+  point refuses before any network exists. A network-create collision with a
+  network Sandbox did not observe refuses `range_network_collision`, never
+  retried. Built-in stacks and generic Compose instances are both covered.
+- Allocations belong to the instance (`instance:<name>`) and are attributed
+  to its deployment root's workspace. Tearing the instance down with its
+  volumes (`destroy`, data reset, uninstall) frees them, and `workspace reap`
+  / retention expiry free every allocation of the workspaces they reclaim. A
+  stack killed any other way keeps its subnets, attributed and counted, until
+  one of those runs. A host with no range state runs none of this.
 
 The Docker-pool transaction also treats a client-side timeout as an unknown
 outcome. The safe error omits the generated transaction command (including its

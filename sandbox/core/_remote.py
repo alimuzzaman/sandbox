@@ -3485,6 +3485,21 @@ def remote_network_capacity_admission(
     decision = evaluate_network_capacity(
         payload, required_subnets=required_subnets, remote_name=remote_name,
     )
+    # Spec 063 (research R4 revision): range capacity can only change a
+    # missing-pool or pool-exhausted outcome, so only those consult the
+    # remote range store, count-only. Allocation happens in the runtime.
+    if decision.get("code") == "docker_network_subnet_exhausted" or \
+            (decision.get("evidence") or {}).get("reason") == "missing_pool_evidence":
+        from sandbox.remote_network.ranges import RangeError
+        from sandbox.remote_network.store import RangeStore
+        try:
+            ranged = RangeStore(remote, ssh_run).stats()
+        except RangeError:
+            return decision
+        return evaluate_network_capacity(
+            payload, required_subnets=required_subnets, remote_name=remote_name,
+            range_evidence=ranged,
+        )
     return decision
 
 

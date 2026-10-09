@@ -112,6 +112,46 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertTrue(any("--file" in call[0] and "sandbox.override.yaml" in " ".join(call[0]) for call in process.calls))
             self.assertEqual(http.urls, [("http://127.0.0.1:49152/healthz", 2)] * 2)
 
+    def test_development_ranges_wrap_ensure_and_destroy(self):
+        class Ranges:
+            def __init__(self):
+                self.events = []
+
+            def prepare(self, instance):
+                self.events.append(("prepare", instance))
+
+            def compose_args(self, instance):
+                return ["-f", f"/ranges/{instance}.yml"]
+
+            def release(self, instance):
+                self.events.append(("release", instance))
+                return 1
+
+        from sandbox.remote_network.ranges import RangeError
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, _ = self.make_adapter(root)
+            ranges = Ranges()
+            with patch("sandbox.remote_network.runtime.default_runtime", return_value=ranges):
+                ensured = adapter.invoke(OperationRequest(str(root), "ensure"))
+                instance = ensured.data["instance"]
+                up = next(call[0] for call in process.calls if "up" in call[0])
+                self.assertEqual(up[up.index("-f") + 1], f"/ranges/{instance}.yml")
+                self.assertLess(up.index("-f"), up.index("up"))
+                adapter.invoke(OperationRequest(str(root), "destroy"))
+                self.assertEqual(ranges.events, [("prepare", instance), ("release", instance)])
+
+                adapter, process, _, _ = self.make_adapter(root)
+                base = process.run
+                process.run = lambda argv, **kw: (
+                    ProcessResult(tuple(argv), 1, "", "Error response from daemon: Pool overlaps "
+                                  "with other one on this address space")
+                    if "up" in argv else base(argv, **kw))
+                with self.assertRaises(RangeError) as caught:
+                    adapter.invoke(OperationRequest(str(root), "ensure"))
+                self.assertEqual(caught.exception.code, "range_network_collision")
+
     def test_status_matches_observed_compose_rows_arrays_and_empty_stop(self):
         cases = [
             ("", True, "stopped"), ("[]", True, "stopped"),

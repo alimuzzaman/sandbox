@@ -4,7 +4,9 @@ Spec 063 research R4 (revised): admission before deploy stays count-only; the
 host that runs the stack allocates before its first ``up``. The range program
 runs locally against this host's ``$SANDBOX_HOME`` (the same program the
 controller drives over SSH), allocations are owned by the instance
-(``instance:<name>``), and a volume-removing ``down`` releases them, which
+(owner kind ``instance``, ``instance:<name>``) and attributed to the
+workspace the instance's root belongs to, so the exhaustion table names a
+``workspace release`` target. A volume-removing ``down`` releases them, which
 also covers workspace release, reap and retention since all destroy their
 instances. With no range state on this host nothing runs.
 """
@@ -22,6 +24,7 @@ from sandbox.remote_network.store import TIMEOUT_SECONDS, RangeStore
 
 EXHAUSTED = "docker_network_subnet_exhausted"
 _INSTANCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,118}")
+_WORKSPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 def state_file(home: Path) -> Path:
@@ -48,11 +51,13 @@ class _LocalRunner:
 
 class RangeRuntime:
     def __init__(self, home: Path, *, store: RangeStore, overrides: Path,
-                 compose_config: Callable[[str], dict]):
+                 compose_config: Callable[[str], dict],
+                 workspace_of: Callable[[str], str | None] = lambda _instance: None):
         self.home = Path(home)
         self.store = store
         self.overrides = Path(overrides)
         self.compose_config = compose_config
+        self.workspace_of = workspace_of
 
     def active(self) -> bool:
         return state_file(self.home).is_file()
@@ -82,7 +87,10 @@ class RangeRuntime:
             path.unlink(missing_ok=True)
             return {"covered": [], "outside_range": outside, "granted": []}
         names = override.docker_names(config, created)
-        result = self.store.allocate(owner_kind="workspace", owner_id=owner, workspace_id=owner,
+        workspace = self.workspace_of(instance)
+        if not isinstance(workspace, str) or not _WORKSPACE.fullmatch(workspace):
+            workspace = owner
+        result = self.store.allocate(owner_kind="instance", owner_id=owner, workspace_id=workspace,
                                      networks=[names[key] for key in created])
         if result["no_range"]:
             path.unlink(missing_ok=True)
@@ -115,7 +123,26 @@ class RangeRuntime:
         return released
 
 
-def default_runtime(*, compose_config: Callable[[str], dict]) -> RangeRuntime | None:
+def release_workspaces(names, home: Path | None = None) -> int:
+    """Free every allocation attributed to reclaimed workspaces (research R5).
+
+    Reap removes deployment roots and their containers directly, without a
+    ``compose down``, so the instance hook never runs there. Instance
+    allocations carry the deployment-root name as ``workspace_id``.
+    """
+    if home is None:
+        from sandbox.core._paths import _sandbox_base
+        home = _sandbox_base()
+    if not state_file(home).is_file():
+        return 0
+    store = RangeStore({"name": "local"}, _LocalRunner(Path(home)))
+    return sum(store.release_owner(workspace_id=name) for name in sorted(set(names))
+               if isinstance(name, str) and _WORKSPACE.fullmatch(name))
+
+
+def default_runtime(*, compose_config: Callable[[str], dict],
+                    workspace_of: Callable[[str], str | None] = lambda _instance: None,
+                    ) -> RangeRuntime | None:
     """This host's range runtime, or ``None`` when it holds no range state."""
     from sandbox.core._paths import _sandbox_base
     from sandbox.remote_runtime.protocol import local_protocol
@@ -126,4 +153,4 @@ def default_runtime(*, compose_config: Callable[[str], dict]) -> RangeRuntime | 
     store = RangeStore({"name": "local"}, _LocalRunner(home), installed_protocol=local_protocol())
     return RangeRuntime(home, store=store,
                         overrides=home / "runtime" / "network-ranges" / "overrides",
-                        compose_config=compose_config)
+                        compose_config=compose_config, workspace_of=workspace_of)

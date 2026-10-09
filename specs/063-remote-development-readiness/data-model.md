@@ -21,9 +21,9 @@ prefix is a no-op; a different prefix for an assigned CIDR is refused
 | `allocation_id` | `a-` + 16 hex | opaque; refusals and evidence may show it with `owner_id`, `owner_kind` and `workspace_id` (all opaque), never the subnet |
 | `range_id` | ref | must exist |
 | `subnet` | CIDR | unique across all allocations; shown only in `network-range list` |
-| `owner_kind` | `workspace` \| `job` | |
+| `owner_kind` | `workspace` \| `job` \| `instance` | `instance` is what the runtime records (R4 revision) |
 | `owner_id` | opaque id | job or workspace id (existing opaque forms) |
-| `workspace_id` | opaque id | owning workspace (equals owner for kind workspace) |
+| `workspace_id` | opaque id | owning workspace (equals owner for kind workspace; the deployment-root name for kind instance) |
 | `network` | name | Compose network name it was granted for, bounded 64 chars |
 | `allocated_at` | int epoch | |
 
@@ -42,9 +42,13 @@ Owner kind mapping (FR-004):
   cell runs on its own labelled instance, which is its own workspace, so its
   networks are `workspace`-owned and freed with that workspace.
 
-In the runtime the owning workspace is the instance that runs the stack:
-`owner_id` = `workspace_id` = `instance:<instance name>` (research R4
-revision), and networks are identified by their project-scoped Docker name.
+In the runtime the owner is the instance that runs the stack (research R4
+revision): `owner_kind` = `instance`, `owner_id` = `instance:<instance name>`,
+and `workspace_id` = the name of the deployment root the instance belongs to
+(the `workspace release` name). Two labelled instances of one root share the
+workspace but release independently. Networks are identified by their
+project-scoped Docker name. An instance whose root cannot be resolved records
+its owner id as the workspace and gets no release command.
 
 Lifecycle: `allocated` → (removed) on `release-owner` when the instance's
 stack is torn down with its volumes (`compose down -v`), which workspace

@@ -25,7 +25,7 @@ _SAFE_REASON = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 # Spec 063: development-range evidence from the admission program.
 _ALLOCATION_ID = re.compile(r"^a-[0-9a-f]{16}$")
 _OWNER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_OWNER_KINDS = frozenset({"workspace", "job"})
+_OWNER_KINDS = frozenset({"workspace", "job", "instance"})
 MAX_ALLOCATION_TABLE = 32
 MISSING_POOL_GUIDANCE = (
     "no Docker address-pool evidence and no Sandbox development range "
@@ -117,6 +117,9 @@ def _release_commands(rows: list[dict], remote_name: str | None) -> list[str]:
     remote = _safe_remote(remote_name) or "REMOTE_NAME"
     seen: list[str] = []
     for row in rows:
+        # An instance whose workspace was not resolved has no release command.
+        if row["workspace_id"].startswith("instance:"):
+            continue
         if row["workspace_id"] not in seen:
             seen.append(row["workspace_id"])
     return [f"./sb workspace release {workspace} --remote {remote}" for workspace in seen]
@@ -194,8 +197,10 @@ def evaluate_network_capacity(
 
     Spec 063 FR-008: usable capacity is configured daemon-pool capacity plus
     unallocated range capacity; Docker's built-in default pools never count.
-    One run's networks come from one source: a complete range grant admits,
-    otherwise the pools must cover the run on their own. Every pool-side
+    One run's networks come from one source: a complete range grant, or
+    unallocated range capacity covering the run (count-only admission, research
+    R4 revision; the runtime allocates before ``up``), admits; otherwise the
+    pools must cover the run on their own. Every pool-side
     fail-closed rule still applies, except that an absent pool configuration
     is not a failure when a range exists.
     """
@@ -235,7 +240,7 @@ def evaluate_network_capacity(
         "pools": pool_capacity["pools"],
         "range_usable_subnets": ranged["usable"],
     }
-    if ranged["granted"] or (pools and pools["ok"]):
+    if ranged["granted"] or ranged["usable"] >= required_subnets or (pools and pools["ok"]):
         summary = dict(pools["evidence"]) if pools else {
             "status": "complete", "inventory": "development_range"}
         summary["range"] = "development_range"

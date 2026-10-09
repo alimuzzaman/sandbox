@@ -175,6 +175,14 @@ if _op == "list":
            "capacity_proof": _state.get("capacity_proof"),
            "truncated": len(_shown) < len(_allocs)})
 
+if _op == "stats":
+    # Count-only admission evidence: never creates state, never shows a subnet.
+    if not _os.path.isdir(_root):
+        _emit({"range": {"capacity": 0, "allocated": 0, "usable": 0}, "table": []})
+    _fd = _lock(False)
+    _state = _load()
+    _emit({"range": _range_stats(_state), "table": _table(_state["allocations"])})
+
 if _op == "assign":
     try:
         _dev = parse_range(_request.get("cidr"), _request.get("subnet_prefix"))
@@ -203,9 +211,10 @@ if _op == "allocate":
     _owner, _ws = _request.get("owner_id"), _request.get("workspace_id")
     _names = _request.get("networks")
     _pool = _request.get("pool_capacity")
-    if (_kind not in ("workspace", "job") or not isinstance(_owner, str) or not _ID.fullmatch(_owner)
-            or not isinstance(_ws, str) or not _ID.fullmatch(_ws)
+    if (_kind not in ("workspace", "job", "instance") or not isinstance(_owner, str)
+            or not _ID.fullmatch(_owner) or not isinstance(_ws, str) or not _ID.fullmatch(_ws)
             or (_kind == "workspace" and _owner != _ws)
+            or (_kind == "instance") != _owner.startswith("instance:")
             or not isinstance(_names, list) or not 0 < len(_names) <= MAX_NETWORKS_PER_REQUEST
             or not all(isinstance(n, str) and _NET.fullmatch(n) for n in _names)
             or len(set(_names)) != len(_names)

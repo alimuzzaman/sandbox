@@ -59,6 +59,16 @@ def _missing_network_failure(stdout: object, stderr: object) -> bool:
     return bool(_MISSING_NETWORK.search(evidence))
 
 
+def _raise_range_collision(stderr: object) -> None:
+    """A granted subnet hit a network Sandbox did not observe: typed, no retry."""
+    from sandbox.remote_network.override import classify_create_failure
+    from sandbox.remote_network.ranges import RangeError
+
+    refusal = classify_create_failure(stderr if isinstance(stderr, str) else "")
+    if refusal is not None:
+        raise RangeError(refusal["code"], refusal["message"], retryable=False)
+
+
 def _valid_port(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
 
@@ -253,6 +263,22 @@ class ComposeAdapter:
             )
         path.write_text(content)
         return path
+
+    def _ranges(self, descriptor: dict[str, Any], project_args: list[str]):
+        """This host's development-range runtime, or ``None`` without ranges."""
+        from sandbox.remote_network import runtime as range_runtime
+        base = list(project_args)
+
+        def compose_config(_instance: str) -> dict:
+            result = self.dependencies.process.run(
+                ["docker", "compose", *base, "config", "--format", "json"],
+                cwd=descriptor["root"], timeout=30)
+            if result.returncode != 0:
+                raise RuntimeError("Compose config failed before range allocation")
+            return json.loads(result.stdout)
+
+        return range_runtime.default_runtime(compose_config=compose_config,
+                                             workspace_of=lambda _instance: Path(descriptor["root"]).name)
 
     def _compose_args(self, descriptor: dict[str, Any], runtime_id: str, *args: str) -> list[str]:
         overlay = self._overlay(descriptor, runtime_id, int(self._record_port(descriptor, runtime_id)))
@@ -473,6 +499,13 @@ class ComposeAdapter:
         overlay = self._overlay(descriptor, runtime_id, http_port)
         project_args = ["--project-name", f"sandbox-{runtime_id}", "--project-directory", descriptor["root"], "--file", descriptor["compose_file"], "--file", str(overlay)]
         service = descriptor["service"]
+        ranges = self._ranges(descriptor, project_args)
+        if ranges is not None:
+            # Spec 063: allocate before the stack's networks exist, then pass
+            # the subnet override last on every call for this instance.
+            if op in {"ensure", "apply"}:
+                ranges.prepare(runtime_id)
+            project_args += ranges.compose_args(runtime_id)
 
         if op in {"resume", "suspend"} and record is None:
             raise ValueError(f"Compose {op} requires a provisioned instance")
@@ -492,6 +525,7 @@ class ComposeAdapter:
                 up.append("--force-recreate")
             started = self.dependencies.process.run([*up, service], cwd=descriptor["root"], timeout=self.timeout)
             if started.returncode != 0:
+                _raise_range_collision(started.stderr)
                 raise RuntimeError(started.stderr or "Compose failed to start")
             url = f"http://127.0.0.1:{http_port}"
             startup_timeout = descriptor.get("startup_timeout_seconds")
@@ -640,6 +674,8 @@ class ComposeAdapter:
                         "recovery": {"command": recovery},
                     },
                 )
+            if op == "apply":
+                _raise_range_collision(result.stderr)
             detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part.strip())
             raise RuntimeError(detail or f"Compose {op} failed")
         if op == "resume":
@@ -662,6 +698,8 @@ class ComposeAdapter:
         lifecycle_state = "asleep" if op in {"stop", "suspend"} and descriptor["instanceLifecycle"]["mode"] == "idle_stop" else "stopped" if op in {"stop", "suspend", "destroy"} else "ready"
         data = dict(record or {}, instance=runtime_id, root=descriptor["root"], label=request.label, kind="compose", adapter=self.adapter_id, service=service, http_port=http_port, url=f"http://127.0.0.1:{http_port}", status="stopped" if op in {"stop", "suspend", "destroy"} else "ready", lifecycleState=lifecycle_state, instanceLifecycle=descriptor["instanceLifecycle"], output=result.stdout[-10000:])
         if op == "destroy":
+            if ranges is not None:
+                ranges.release(runtime_id)
             self.registry.registry_remove(descriptor["root"], label=request.label)
             # Registry removal is the source-of-truth mutation; remove the
             # corresponding aggregate-proxy route immediately afterward. The

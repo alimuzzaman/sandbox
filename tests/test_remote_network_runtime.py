@@ -112,6 +112,52 @@ class RangeRuntimeTests(unittest.TestCase):
         self.assertEqual((evidence["covered"], evidence["outside_range"]), ([], ["edge"]))
         self.assertEqual(self.runtime.compose_args("a"), [])
 
+    def test_instances_are_attributed_to_their_workspace_and_released_alone(self):
+        from sandbox.resources.network_capacity import evaluate_network_capacity
+        self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)  # capacity 2
+        runtime = range_runtime.RangeRuntime(
+            self.home, store=self.store, overrides=self.overrides,
+            compose_config=lambda instance: self.configs[instance],
+            workspace_of=lambda instance: "site-main")
+        self.configs["a"] = config("sandbox-a", "default")
+        self.configs["a-qa"] = config("sandbox-a-qa", "default")
+        runtime.prepare("a")
+        runtime.prepare("a-qa")
+        table = self.store.stats()["table"]
+        self.assertEqual({(r["owner_kind"], r["owner_id"], r["workspace_id"]) for r in table},
+                         {("instance", "instance:a", "site-main"),
+                          ("instance", "instance:a-qa", "site-main")})
+        refused = evaluate_network_capacity(
+            {"ok": False, "status": "unavailable", "code": "docker_address_pools_unavailable"},
+            remote_name="vps", range_evidence=self.store.stats())
+        self.assertEqual(refused["release_commands"], ["./sb workspace release site-main --remote vps"])
+        self.assertEqual(runtime.release("a-qa"), 1)
+        self.assertEqual([r["owner_id"] for r in self.store.stats()["table"]], ["instance:a"])
+
+    def test_reaped_workspaces_free_their_instances_allocations(self):
+        self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
+        runtime = range_runtime.RangeRuntime(
+            self.home, store=self.store, overrides=self.overrides,
+            compose_config=lambda instance: self.configs[instance],
+            workspace_of=lambda instance: "site-" + instance)
+        self.configs["a"] = config("sandbox-a", "default")
+        self.configs["b"] = config("sandbox-b", "default")
+        runtime.prepare("a")
+        runtime.prepare("b")
+        from unittest.mock import patch
+        with patch.object(range_runtime, "_LocalRunner", return_value=self.runner):
+            self.assertEqual(range_runtime.release_workspaces(["site-a", "../x"], self.home), 1)
+        self.assertEqual([r["workspace_id"] for r in self.store.stats()["table"]], ["site-b"])
+
+    def test_reap_program_frees_ranges_for_removed_workspaces(self):
+        from sandbox.resources.remote import _REMOTE_PROGRAM
+        self.assertIn("release_workspaces(", _REMOTE_PROGRAM)
+        self.assertIn('"network-ranges" / "state.json"', _REMOTE_PROGRAM)
+
+    def test_release_workspaces_is_inert_without_ranges(self):
+        self.runner.fail = True
+        self.assertEqual(range_runtime.release_workspaces(["site-a"], self.home), 0)
+
     def test_instance_names_that_cannot_be_owner_ids_are_refused(self):
         self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
         with self.assertRaises(RangeError):

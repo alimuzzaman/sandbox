@@ -89,12 +89,20 @@
   - A race between admission and allocation therefore refuses at allocation
     with `docker_network_subnet_exhausted` and the table, before any network
     is created. It never yields a half-allocated stack.
-  - The owner is the instance (`instance:<name>`, kind `workspace`), and
-    the hooks live in `compose()` itself: prepare before `up`, the override
+  - The owner is the instance (kind `instance`, `instance:<name>`),
+    attributed to its deployment root's workspace name so the exhaustion
+    table's release commands name a real `workspace release` target. Owning
+    by workspace instead would let one labelled instance's teardown free its
+    sibling's subnets. The hooks live in `compose()` itself (and in the
+    generic Compose adapter's `ensure`/`apply`/`destroy`): prepare before `up`, the override
     on every call, release after a successful `down -v`/`--volumes`. Every
     destroy path (instance destroy, data reset, uninstall, plugin-check
     teardown) goes through that call. With no range state file on the host
     the hooks spawn nothing (`sandbox/remote_network/runtime.py`).
+  - Admission reads the range's counts with a read-only `stats` program op,
+    and only when the pool outcome is missing evidence or exhaustion, the two
+    outcomes range capacity can change. Unallocated range capacity covering
+    the run admits.
 - **Alternatives considered**: Allocating at admission with a placeholder
   network list. Rejected: names are only known after staging, and a
   placeholder grant would leak when the stack used other names.

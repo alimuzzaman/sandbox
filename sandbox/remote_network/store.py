@@ -179,6 +179,12 @@ class RangeStore:
                 "range": value.get("range") if isinstance(value.get("range"), dict) else {},
                 "table": table[:program.MAX_TABLE]}
 
+    def stats(self) -> dict:
+        """Read-only range capacity and allocation table for admission (no subnets)."""
+        value = self._call({"op": "stats"})
+        table = value.get("table") if isinstance(value.get("table"), list) else []
+        return {"granted": [], "range": value.get("range"), "table": table[:program.MAX_TABLE]}
+
     def release_owner(self, *, owner_id: str | None = None,
                       workspace_id: str | None = None) -> int:
         request = {"op": "release-owner"}

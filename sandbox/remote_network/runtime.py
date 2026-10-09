@@ -123,6 +123,19 @@ class RangeRuntime:
         return released
 
 
+def describe(error: RangeError) -> str:
+    """One operator-facing refusal: code, message, and for exhaustion the
+    owners holding subnets with a release command each (never a subnet)."""
+    lines = [f"{error.code}: {error}"]
+    seen = []
+    for row in error.data.get("allocation_table") or []:
+        workspace = row.get("workspace_id") if isinstance(row, dict) else None
+        if isinstance(workspace, str) and _WORKSPACE.fullmatch(workspace) and workspace not in seen:
+            seen.append(workspace)
+            lines.append(f"  held by workspace {workspace}: ./sb workspace release {workspace}")
+    return "\n".join(lines)
+
+
 def release_workspaces(names, home: Path | None = None) -> int:
     """Free every allocation attributed to reclaimed workspaces (research R5).
 

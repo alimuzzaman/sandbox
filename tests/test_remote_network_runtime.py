@@ -95,6 +95,16 @@ class RangeRuntimeTests(unittest.TestCase):
         self.assertNotIn("10.200", json.dumps(caught.exception.data))
         self.assertFalse((self.overrides / "b.yml").exists())
 
+    def test_exhaustion_is_described_without_subnets(self):
+        error = RangeError(range_runtime.EXHAUSTED, "no free subnet", allocation_table=[
+            {"owner_id": "instance:a", "workspace_id": "site-a"},
+            {"owner_id": "instance:b", "workspace_id": "site-a"},
+            {"owner_id": "instance:c", "workspace_id": "$(id)"}])
+        text = range_runtime.describe(error)
+        self.assertEqual(text.splitlines(), [
+            "docker_network_subnet_exhausted: no free subnet",
+            "  held by workspace site-a: ./sb workspace release site-a"])
+
     def test_release_frees_the_instance_and_removes_its_override(self):
         self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
         self.configs["a"] = config("sandbox-a", "default", "backend")
@@ -187,10 +197,11 @@ class ComposeHookTests(unittest.TestCase):
         with patch.object(_docker, "run", side_effect=lambda cmd, **kw: argv.append(cmd)), \
                 patch("sandbox.remote_network.runtime.default_runtime", return_value=fake):
             _docker.compose("up", "-d", instance="x")
+            _docker.compose("run", "--rm", "wpcli", "wp", instance="x")
             _docker.compose("ps", instance="x")
             _docker.compose("down", instance="x")
             _docker.compose("down", "-v", instance="x")
-        self.assertEqual(fake.events, [("prepare", "x"), ("release", "x")])
+        self.assertEqual(fake.events, [("prepare", "x"), ("prepare", "x"), ("release", "x")])
         for cmd in argv:
             files = [cmd[i + 1] for i, item in enumerate(cmd) if item == "-f"]
             self.assertEqual(files[-1], "/o/x.yml")

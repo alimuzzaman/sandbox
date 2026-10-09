@@ -661,13 +661,17 @@ def compose(*args: str, instance: str,
     if stdout is not None:
         run_kwargs["stdout"] = stdout
     # Spec 063: on a host with development ranges, allocate the stack's
-    # networks before `up` and pass the subnet override last; a
+    # networks before any subcommand that can create them (`up`, `create`,
+    # and the `run --rm wpcli` fallback) and pass the subnet override last; a
     # volume-removing `down` frees them. Inert when the host has no ranges.
     from sandbox.remote_network import runtime as range_runtime
     ranges = range_runtime.default_runtime(compose_config=_compose_config,
                                            workspace_of=_range_workspace)
-    if ranges is not None and args[:1] == ("up",):
-        ranges.prepare(instance)
+    if ranges is not None and args[:1] in (("up",), ("create",), ("run",)):
+        try:
+            ranges.prepare(instance)
+        except range_runtime.RangeError as exc:
+            die(range_runtime.describe(exc))
     result = run(
         [*_compose_base(instance),
          *(ranges.compose_args(instance) if ranges is not None else []),

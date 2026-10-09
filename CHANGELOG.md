@@ -15,6 +15,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a validated project-relative path.
 
 ### Changed
+- `sb` resolves its repo-local `.cli-venv` interpreter against the script's own
+  directory instead of the caller's working directory, and also tries
+  `python3.14`. Running `/path/to/sb` from another directory, including as a
+  `job-start --local` command, no longer fails with "sandbox needs Python >=
+  3.12" when only an old system `python3` is on PATH.
 - Feature 050 v2 image staging now reports the failed image role and a closed,
   redacted pull-failure class through terminal results and status replay without
   retaining Docker output; v1 staging remains unchanged.

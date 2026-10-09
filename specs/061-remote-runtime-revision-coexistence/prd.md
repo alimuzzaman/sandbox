@@ -8,9 +8,9 @@
 
 **Input**: "Let several local Sandbox checkouts at different revisions operate one remote without each one's runtime migrate breaking the others: a declared compatibility rule instead of exact-revision match, a migrate plan that names the controllers it would break, and mismatch output that gives the exact command"
 
-**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); refined by Claude Opus 5.5 on 2026-10-09 against an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user, with every cited code fact re-read on `origin/latest` `1325a8b`. Evidence: the feedback backlog, `docs/remote-hosting.md`, `docs/remote-job-runtime.md`, `TODO.md`, the Lenzora deploy wrapper, and the 2026-10-08 roadmap.
+**Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); refined by Claude Opus 5.5 on 2026-10-09 against an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user, with every cited code fact re-read on `origin/latest` `1325a8b`; refined again on 2026-10-09 against the second-round review (verdict `REOPEN`) and Fable decisions D5 and D6, with cited code re-read on `origin/latest` `36e9597`. Evidence: the feedback backlog, `docs/remote-hosting.md`, `docs/remote-job-runtime.md`, `TODO.md`, the Lenzora deploy wrapper, and the 2026-10-08 roadmap.
 
-**Final Validation**: `PENDING` — fresh independent readiness review after the 2026-10-09 revision
+**Final Validation**: `PENDING` — fresh independent readiness review after the 2026-10-09 round-2 revision
 
 **Validated On**: N/A
 
@@ -70,10 +70,10 @@ required computing revisions across all thirteen worktrees by hand until
 `remote service status` started reporting `runtime_revision_state` (feedback
 `2a88da50`, resolved).
 
-Separately, the local registration lock is registry-wide: a hosted apply holds
-it for its whole build-and-deliver phase, so registering or re-registering a
-different remote during that apply waits for the lock's 30-second budget and
-then fails with `remote_registration_busy`.
+Separately, the local registration lock is one lock for the whole registry: a
+hosted apply holds it for its whole build-and-deliver phase, so registering or
+re-registering any other remote during that apply waits for the lock's
+30-second budget and then fails with `remote_registration_busy`.
 
 The exact-match rule was chosen for safety: a controller and a runtime that
 disagree about the control protocol can mis-stage a source tree or misread a
@@ -109,9 +109,9 @@ worktrees and with the number of remotes that production wrappers depend on.
   installed revision consumes that single compatibility verdict; no second rule
   exists beside it.
 - Exact-revision matching remains available as strict mode, selected per
-  invocation by a declared flag or environment setting. A strict caller
-  registers a pin with the remote so other callers can see it; the pin is
-  visibility, and the exact check is the guarantee.
+  invocation by a declared flag or environment setting. Every strict
+  invocation registers or renews a pin with the remote so other callers can
+  see it; the pin is visibility, and the exact check is the guarantee.
 - `remote service migrate` plan and dry run list every registered strict pin
   that the target revision would break, plus one line naming the protocol range
   of compatible-mode controllers that stop being served; the confirmed apply
@@ -120,8 +120,9 @@ worktrees and with the number of remotes that production wrappers depend on.
 - Every mismatch refusal across CLI and MCP names: installed revision and
   protocol, local revision and protocol, the compatibility verdict and reason,
   and each remedy as a complete command that runs as written.
-- Registering, re-registering or inspecting one remote is not blocked by a
-  hosted apply on another remote.
+- The registration lock is per remote. A hosted apply holds only its own
+  remote's lock, so registering, re-registering or inspecting any other remote
+  is not blocked by it.
 
 ## Non-Goals
 
@@ -133,8 +134,12 @@ worktrees and with the number of remotes that production wrappers depend on.
   bridge; this feature covers the Sandbox controller to Sandbox runtime
   protocol only.
 - Relaxing checks that bind a remote-written artifact to the runtime that
-  wrote it (deployment receipts, delivery traces, cleanup-routine records,
-  WP-CLI request signatures). Those stay exact-revision.
+  wrote it (deployment receipts, delivery traces). Those stay exact-revision.
+- Remote WP-CLI request signatures and cleanup-routine enable stay
+  exact-revision in version one: the remote verifies each request against its
+  live runtime at dispatch, so relaxing them is a remote-side protocol change
+  (follow-up "protocol-verdict remote dispatch"). Their mismatch refusal uses
+  the shared refusal shape and remedy.
 - Automatic migrate on mismatch. A migrate stays a confirmed operation.
 - Per-target hosting locks and state partitioning (feature 060).
 - Downgrade policy. Whether a remote may be migrated to an older revision stays
@@ -145,6 +150,9 @@ worktrees and with the number of remotes that production wrappers depend on.
 - **Follow-up "compatible-mode controller registration"**: registering every
   compatible-mode controller with the remote so a migrate plan can name each one
   individually. Version one registers strict pins only.
+- **Follow-up "protocol-verdict remote dispatch"**: the remote judges remote
+  WP-CLI requests and cleanup-routine enable by the protocol verdict instead of
+  exact revision.
 - **Follow-up "capability-level degradation"**: refusing a single command whose
   capability the runtime lacks while the controller is otherwise compatible.
   Version one decides on protocol version alone.
@@ -194,15 +202,30 @@ worktrees and with the number of remotes that production wrappers depend on.
   identity, and the strict caller's next preflight reports who broke the pin
   and when, not just a mismatch.
 
-### Scenario 5 — Strict pin registration and release
+### Scenario 5 — Strict pin registration, renewal and lapse
 
-- **Starting state**: A deploy wrapper wants exact-revision behavior.
-- **User action**: It runs with strict mode selected, registers a pin for its
-  remote with an expiry and a purpose string, deploys, and later releases it.
-- **Expected outcome**: The pin is visible in `remote service status` and in
-  migrate plans while it exists; an expired pin is reported as expired, not
-  honored. Release by the holder is immediate; release by another controller
-  requires the same explicit acknowledgment as migrating over it.
+- **Starting state**: Lenzora's deploy wrapper runs its Sandbox commands with
+  `SANDBOX_STRICT_RUNTIME=1` set; the wrapper's own logic is unchanged.
+- **User action**: The wrapper runs several remote commands over one deploy
+  and never releases the pin.
+- **Expected outcome**: The first strict invocation registers the holder's
+  pin, with purpose derived from the command and checkout path and a one-hour
+  expiry; each later strict invocation renews it. The pin is visible in
+  `remote service status` and in migrate plans while unexpired, and lapses one
+  hour after the last strict invocation; an expired pin is reported as
+  expired, not honored. An explicit `remote pin release` by the holder removes
+  it at once; release by another controller requires the same explicit
+  acknowledgment as migrating over it.
+
+### Scenario 5a — Remote WP-CLI stays exact in version one (negative)
+
+- **Starting state**: A compatible, non-strict controller at a revision
+  different from the installed runtime.
+- **User action**: Run remote WP-CLI, then `remote service status`, against
+  that remote.
+- **Expected outcome**: Remote WP-CLI is refused `runtime_revision_mismatch`
+  with the complete migrate remedy in the shared refusal shape; hosting status
+  on the same remote succeeds.
 
 ### Scenario 6 — Strict pin cannot be registered or verified (negative)
 
@@ -247,7 +270,9 @@ worktrees and with the number of remotes that production wrappers depend on.
   migrate policy for downgrades is otherwise unchanged. After an indeterminate
   rollback, pins are not marked broken, because the installed revision is not
   known; every caller gets an `unknown` verdict and a refusal until status is
-  determinate.
+  determinate. That refusal names `sb remote service status <remote>` and
+  `sb remote service diagnostics <remote>`, filled in with the remote's real
+  name, as the commands that establish the state before a migrate is retried.
 
 ### Scenario 10 — Registration is not blocked by another remote's apply (negative today)
 
@@ -255,9 +280,10 @@ worktrees and with the number of remotes that production wrappers depend on.
   minutes into its build.
 - **User action**: Another session runs `sb remote up xcloud-london --confirm`,
   `sb remote list`, or `sb remote service status xcloud-london`.
-- **Expected outcome**: Each completes within its normal bounds. Only an
-  operation on the same remote's registration waits, that wait is bounded, and
-  a timeout reports the holder.
+- **Expected outcome**: Each completes within its normal bounds; none waits
+  on the apply, which holds only `scaleway-sandbox`'s registration lock. Only
+  a registration change to `scaleway-sandbox` itself waits; that wait is
+  bounded at 30 seconds, and a timeout reports the holder.
 
 ### Scenario 11 — Every remedy runs as written (negative)
 
@@ -286,27 +312,34 @@ worktrees and with the number of remotes that production wrappers depend on.
 
 ## Proposed Product Behavior
 
-- Each Sandbox checkout declares a control-protocol version. Compatibility
-  between a controller and an installed runtime is a function of those
-  declarations only; the runtime revision is evidence, not the rule. The rule
-  is monotone and explicit: a controller whose required protocol the runtime
-  serves is `compatible`; one that requires a newer protocol is
-  `protocol_newer`; one older than the runtime's minimum supported protocol is
-  `protocol_too_old`; a runtime that does not declare a protocol yields
+- Each Sandbox checkout declares two control-protocol numbers: the version it
+  speaks, and the oldest version it still serves when installed as a runtime.
+  Compatibility between a controller and an installed runtime is a function of
+  those declarations only; the runtime revision is evidence, not the rule. The rule
+  is monotone and explicit: a controller whose spoken version lies between the
+  runtime's oldest served version and its spoken version is `compatible`; one
+  newer than the runtime's spoken version is `protocol_newer`; one older than
+  the runtime's oldest served version is `protocol_too_old`; a runtime that does not declare a protocol yields
   exact-match only; an indeterminate status yields `unknown`.
-- One verdict, two kinds of check. Any check that compares a controller's
-  revision with the installed runtime revision consumes the single protocol
-  verdict: workspace preflight, hosted apply, recovery materialization and
-  create, remote resources commands, host memory, server capture, Postgres
-  recovery, and the cleanup-broker install. Any check that binds a
-  remote-written artifact to the runtime that wrote it stays exact: deployment
-  receipts, delivery traces, cleanup-routine records, and WP-CLI request
-  signatures.
+- One verdict, with two exact exceptions. Any controller-side check that
+  compares a controller's revision with the installed runtime revision
+  consumes the single protocol verdict: workspace preflight, hosted apply,
+  recovery materialization and create, remote resources commands, host memory,
+  server capture, Postgres recovery, and the cleanup-broker install. Checks
+  that bind a remote-written artifact to the runtime that wrote it stay exact:
+  deployment receipts and delivery traces. Remote WP-CLI request signatures
+  and cleanup-routine enable, which the remote checks against its live runtime
+  at dispatch, stay exact in version one and refuse in the shared shape.
 - Strict mode is selected per invocation by a declared flag
   (`--strict-runtime`) or environment setting (`SANDBOX_STRICT_RUNTIME=1`). In
-  strict mode the controller requires the exact installed revision, as today,
-  and registers a pin (identity, checkout path, revision, purpose, expiry).
-  The pin is visible to every other controller, listed by migrate plans, and
+  strict mode the controller requires the exact installed revision, as today.
+  In strict mode every invocation registers the holder's pin (identity,
+  checkout path, revision, purpose, expiry) or renews it, with purpose derived
+  from the command and checkout path and a default expiry of one hour (maximum
+  four, renewable). Release is optional (`remote pin release`); an unreleased
+  pin lapses at expiry. For MCP, strict mode is the `SANDBOX_STRICT_RUNTIME=1`
+  setting on the server process and applies to every remote tool call; no
+  per-call selection in version one. The pin is visible to every other controller, listed by migrate plans, and
   protected by an explicit acknowledgment on confirmed migrate and on release by
   a non-holder. A strict caller whose pin cannot be registered or verified fails
   closed with `strict_pin_unverifiable`.
@@ -315,11 +348,13 @@ worktrees and with the number of remotes that production wrappers depend on.
 - Migrate plans list unexpired pins individually and state, in one line, the
   protocol range of compatible-mode controllers the target revision stops
   serving. The confirmed apply evaluates pins at the moment it acts.
-- Mismatch refusals share one shape across CLI and MCP: installed and local
-  revision and protocol, verdict, reason, and remedies as complete commands for
-  the named remote.
-- Registering or inspecting one remote is never blocked by a hosted apply on a
-  different remote.
+- Mismatch refusals share one shape across CLI and MCP, including refusals
+  the remote raises and the controller relays: installed and local revision
+  and protocol, verdict, reason, and remedies as complete commands for the
+  named remote.
+- The registration lock is per remote. A hosted apply holds only its own
+  remote's lock; registering or inspecting any other remote is never blocked
+  by it.
 
 ## Constraints and Dependencies
 
@@ -327,11 +362,11 @@ worktrees and with the number of remotes that production wrappers depend on.
   runtime which declares a protocol and understands pins; until then the
   controller falls back to the exact-match rule for that remote (Scenario 12),
   and a strict caller fails closed (Scenario 6).
-- Lenzora's deploy wrapper (Lenzora repository `scripts/deploy-sandbox.sh`,
-  pinned to one clean Sandbox checkout commit) is the first strict-mode
-  consumer. It keeps its exact guarantee by selecting strict mode through the
-  declared flag or environment setting; no change to the wrapper's own logic is
-  required.
+- Lenzora's deploy wrapper (pinned to one clean Sandbox checkout commit) is
+  the first strict-mode consumer. It keeps its exact guarantee by selecting
+  strict mode through the declared flag or environment setting; pin
+  registration and renewal happen inside each strict invocation, so no change
+  to the wrapper's own logic is required.
 - Feature 060 (per-target hosting operations) changes hosting locks; the
   registration-lock scoping here concerns the local remote registration lock
   and must be coordinated so the two features do not each redefine the other's
@@ -351,15 +386,17 @@ worktrees and with the number of remotes that production wrappers depend on.
 |----------|--------|-----------|--------------|
 | Runtimes per remote | Exactly one installed runtime; no side-by-side | Two control services on one host double resources and split ownership of state; compatibility solves the real problem at lower cost | Fable decision (delegated by user), 2026-10-09 |
 | Compatibility rule | Declared control-protocol version alone in version one; revision is evidence only; capability-level degradation is a follow-up | Revision equality refuses unrelated Python changes; a protocol version refuses only real incompatibility and keeps the first version small | Fable decision (delegated by user), 2026-10-09 |
-| Which checks relax | Controller-revision-versus-installed checks consume the one protocol verdict; checks binding a remote-written artifact (receipt, trace, cleanup record, WP-CLI signature) to its writer stay exact | Artifact binding protects integrity of records, not session compatibility | Fable decision (delegated by user), 2026-10-09 |
+| Which checks relax | Controller-revision-versus-installed checks consume the one protocol verdict; checks binding a remote-written artifact (deployment receipt, delivery trace) to its writer stay exact | Artifact binding protects integrity of records, not session compatibility | Fable decision (delegated by user), 2026-10-09 |
+| Remote WP-CLI signatures and cleanup-routine enable | Stay exact-revision in version one; the refusal uses the shared shape and complete migrate remedy; follow-up "protocol-verdict remote dispatch" | The remote verifies these against its live runtime at dispatch, so relaxing them is a remote-side protocol change | Fable decision (delegated by user), 2026-10-09 |
 | Strict mode selection | Declared flag `--strict-runtime` or `SANDBOX_STRICT_RUNTIME=1`; no wrapper code change required; the pin is additive visibility, not the guarantee | Lenzora keeps its exact guarantee under a compatible default without depending on pin registration | Fable decision (delegated by user), 2026-10-09 |
+| Strict pin lifecycle and MCP | Every strict invocation registers or renews the holder's pin, purpose derived from command and checkout path, default expiry one hour (maximum four, renewable); release optional (`remote pin release`), an unreleased pin lapses at expiry; MCP strict mode is `SANDBOX_STRICT_RUNTIME=1` on the server process for every remote tool call, no per-call selection in version one | Keeps the wrapper unchanged and bounds stale pins without a release step | Fable decision (delegated by user), 2026-10-09 |
 | Unverifiable strict pin | Fail closed with `strict_pin_unverifiable` and a remedy | A strict caller must never be silently served under compatible rules | Fable decision (delegated by user), 2026-10-09 |
 | Migrate over a pin | Plan lists it; confirmed apply refuses without an explicit acknowledgment; the broken pin records who broke it | Breaking a production pin must be a deliberate, attributable act | Fable decision (delegated by user), 2026-10-09 |
 | Registration scope | Version one registers strict pins only; migrate plan adds one generic line for compatible-mode controllers below the served protocol | Keeps first contact free of remote writes and the feature small; individual registration is a follow-up | Fable decision (delegated by user), 2026-10-09 |
 | Runtime history | Moved to follow-up "remote runtime history"; roadmap size "small" stands | Not needed to stop migrates breaking sessions | Fable decision (delegated by user), 2026-10-09 |
 | Undeclared runtimes | Exact-match only until migrated | No inference about a runtime that cannot describe itself | Fable decision (delegated by user), 2026-10-09 |
 | Remedy commands | Every emitted remedy is a complete command verified to run as written | A hint the CLI rejects has already cost a session | Fable decision (delegated by user), 2026-10-09 |
-| Registration lock scope | Per remote, held only for registration mutations | An apply on one remote must not block registering another | Fable decision (delegated by user), 2026-10-09 |
+| Registration lock scope | Per remote. Registration changes hold their remote's lock; a hosted apply holds only its own remote's lock, so its target cannot be re-pointed mid-apply; operations on other remotes never wait on it | An apply on one remote must not block registering another | Fable decision (delegated by user), 2026-10-09 |
 
 ## Open Questions
 
@@ -373,8 +410,12 @@ worktrees and with the number of remotes that production wrappers depend on.
 - For a fixed set of controller states (same protocol, newer protocol, older
   than minimum, undeclared runtime, indeterminate status, strict at a
   different revision), every controller-side check named in Proposed Product
-  Behavior returns the same expected verdict for each state, and every
-  artifact-binding check still refuses a revision difference.
+  Behavior returns the same expected verdict for each state; every
+  artifact-binding check, remote WP-CLI and cleanup-routine enable still
+  refuse a revision difference.
+- A strict invocation with no prior pin registers one expiring in one hour; a
+  later strict invocation renews it; with no further strict invocation it
+  lapses at expiry and no longer blocks a migrate.
 - With a strict pin registered, a migrate plan from another checkout lists
   that pin under "would break" with holder, checkout path and revision, and
   states the compatible-mode protocol range it stops serving. The plan, the dry
@@ -386,8 +427,8 @@ worktrees and with the number of remotes that production wrappers depend on.
 - A strict-mode caller against an undeclared or unreachable runtime fails
   closed with `strict_pin_unverifiable` in every case; none proceeds under the
   compatible verdict.
-- Every mismatch refusal emitted by CLI or MCP contains installed revision,
-  local revision, both protocols, a verdict, and at least one remedy; every
+- Every mismatch refusal emitted by CLI or MCP, including refusals relayed
+  from the remote, contains installed revision, local revision, both protocols, a verdict, and at least one remedy; every
   remedy is accepted by the CLI as written and contains no placeholder.
 - While a hosted apply runs on remote A for fifteen minutes,
   `remote list`, `remote up B --confirm`, and `remote service status B` each
@@ -401,10 +442,10 @@ worktrees and with the number of remotes that production wrappers depend on.
 
 - **Risk**: A compatibility rule that is too loose admits a controller that
   mis-stages a source tree. Mitigation: the protocol version is bumped on every
-  change to a transport payload or receipt shape, enforced by a repository
-  check, and the rule is monotone; artifact-binding checks stay exact.
+  change to a transport payload or receipt shape, and the rule is monotone; artifact-binding checks stay exact.
 - **Risk**: Pins that are never released accumulate and block migrates.
-  Mitigation: mandatory expiry and visible holder identity; an expired pin is
+  Mitigation: one-hour default expiry (four at most), renewed only by further
+  strict invocations, and visible holder identity; an expired pin is
   reported, not honored.
 - **Risk**: Lenzora runs without strict mode selected and is served by a
   compatible but different runtime. Mitigation: strict mode is a declared

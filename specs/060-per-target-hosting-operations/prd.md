@@ -10,7 +10,7 @@
 
 **Drafting Configuration**: Claude Fable 5.1 root drafting under delegated product authority (user, 2026-10-08); Haiku 5.5 read-only agents for ledger and PRD inventory. Revised 2026-10-09 by a Claude Opus 5.5 root applying an independent Opus readiness review (verdict `REOPEN`) and Fable decisions delegated by the user; revised again 2026-10-09 by a Claude Opus 5.5 root applying the second-round Opus review (verdict `REOPEN`) and round-2 Fable decisions.
 
-**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (read-only, 2026-10-09). Round 1 found that lease expiry could admit a successor while the predecessor's remote phase still ran; fixed. Round 2 found that cessation alone still admitted the successor past an unresolved recovery fence; fixed (cessation is necessary, never sufficient; ordinary admission and every applicable 054/062 fence must clear; Scenario 7b; acceptance) with the non-blocking "zero further forward effects" wording; round 3 pending
+**Final Validation**: `REOPEN` — independent GPT-6.1-Sol review (reasoning effort high, read-only, 2026-10-09). Round 1: lease expiry could admit a successor while the predecessor's remote phase still ran; fixed. Round 2: cessation alone admitted past an unresolved recovery fence; fixed (Scenario 7b). Round 3: hold expiry still promised unconditional admission; fixed (expiry removes only the hold blocker; Scenario 9 and its timed acceptance apply to idle, unfenced targets, fenced targets follow 7a/7b), with the non-blocking alignment of "finishes" and "no further forward effects"; round 4 pending
 
 **Validated On**: 2026-10-09
 
@@ -175,7 +175,8 @@ more sites move to the shared xCloud server.
   applies Lenzora development with a bounded wait.
 - **Expected outcome**: The second apply reports that it is waiting, names the
   holder (operation, request, controller, start time) while it waits, and
-  starts when the first finishes. If the bound expires, it ends with a typed
+  starts when the first ends and ordinary admission permits it (the first
+  succeeded, or ended with no unresolved recovery fence). If the bound expires, it ends with a typed
   busy result that names the holder; nothing was changed and the refusal is
   retained.
 
@@ -222,8 +223,8 @@ more sites move to the shared xCloud server.
 - **Starting state**: A session's lease on a target expired while it was
   disconnected, and another session has since been admitted on that target.
 - **User action**: The original session reconnects and tries to continue.
-- **Expected outcome**: The returning session performs no further effects on
-  the target and records its own operation as `effect_unknown` with the
+- **Expected outcome**: The returning session performs no further forward
+  effects on the target (rollback under a reacquired lease remains permitted) and records its own operation as `effect_unknown` with the
   reason, so delivery inspect shows what it may have done before losing the
   lease.
 
@@ -271,8 +272,14 @@ more sites move to the shared xCloud server.
 - **Starting state**: A session holds a target and then dies without
   releasing it.
 - **User action**: Another session applies the target with a bounded wait.
-- **Expected outcome**: The hold ends at its expiry and the waiting apply is
-  admitted then; expiry is the only way an abandoned hold is detected. A
+- **Expected outcome**: The hold ends at its expiry, which removes only the
+  hold as a blocker; expiry is the only way an abandoned hold is detected. On
+  an idle, unfenced target the waiting apply is admitted then. If an operation
+  run under the hold dispatched a remote phase, the waiting apply is admitted
+  only once the conditions of Scenarios 7a and 7b hold (the phase has ceased,
+  ordinary admission checks pass, and every applicable recovery fence is
+  cleared); until then it keeps waiting within its bound or refuses naming the
+  predecessor's operation. A
   request for a hold longer than the maximum is refused with the maximum
   named.
 
@@ -351,8 +358,9 @@ more sites move to the shared xCloud server.
   transfer, a delivery wait, or a verification wait, and never longer than 60
   seconds.
 - A lease whose holder disappears expires. A holder that returns after its
-  lease expired performs no further effects and records `effect_unknown` for
-  its own operation.
+  lease expired performs no further forward effects (rollback under a
+  reacquired lease remains permitted) and records `effect_unknown` for its
+  own operation.
 - Lease expiry alone never clears the predecessor's uncertainty fence. If the
   expired holder had dispatched a remote phase, no successor from any
   controller is admitted to effects on that target until the phase is proven
@@ -450,7 +458,7 @@ more sites move to the shared xCloud server.
 | Coordination authority | Lease, hold, and per-target operation state authoritative on the remote runtime service; controllers keep a cache plus their own retained outcomes | The real contention (feedback `f72c4279`) is several controllers on one target, which controller-local state cannot serialize | Fable decision (delegated by user), 2026-10-09 |
 | Upgrade conversion | Converts the controller's retained state for the remote to per-target layout and establishes remote-side lease authority; older controllers get the spec 061 `protocol_too_old` verdict | State is controller-local today; compatibility verdicts belong to 061 | Fable decision (delegated by user), 2026-10-09 |
 | Explicit holds | Same primitive as a running operation's lease, claimed on purpose with purpose string; default 1 h, max 4 h, renewable by holder within four hours of claim; expiry is the only dead-holder detection; non-holder release needs `--break-hold` with a reason, recorded with breaker identity | Agents coordinating over chat and controller-local hold files are the symptom; one remote-wide lease with a CLI is the fix | Fable decision (delegated by user), 2026-10-09 |
-| Expired lease, returning holder | No further effects; own operation recorded `effect_unknown` | A fenced-out holder must not race the new owner | Fable decision (delegated by user), 2026-10-09 |
+| Expired lease, returning holder | No further forward effects (rollback under a reacquired lease permitted); own operation recorded `effect_unknown` | A fenced-out holder must not race the new owner | Fable decision (delegated by user), 2026-10-09 |
 | Hold maximum | Four hours bounds total life from claim to expiry across renewals; renewals past that are refused; longer work re-claims | Unlimited renewal would recreate the abandoned-holder problem the maximum exists to stop | Fable decision (delegated by user), 2026-10-09 |
 | Reclaim vs hosting work | Reclaim yields to the remote-wide lease and host edge/pool transaction locks only; per-target operations and holds never block it | Hosted target resources are already excluded from every reclaim tier, and a hold can last four hours while the shared steps last at most 60 s | Fable decision (delegated by user), 2026-10-09 |
 | Hold ownership | A hold belongs to the claiming session, identified by the secret-free hold identity issued at claim; renew, release and operations under the hold present it by flag or environment setting; any other session, including one on the same controller, is not the holder | One controller runs many agent sessions, so a controller cannot stand for a holder | Fable decision (delegated by user), 2026-10-09 |
@@ -478,7 +486,8 @@ more sites move to the shared xCloud server.
 - Two applies for the same target from two different controllers never
   overlap: the second waits or refuses, naming the first.
 - A same-target apply with a bounded wait reports the holder within two seconds
-  and starts within five seconds of the holder finishing; with no wait it
+  and starts within five seconds of the holder ending with ordinary admission
+  permitting it (succeeded, or no unresolved recovery fence); with no wait it
   returns a typed busy refusal within two seconds.
 - Every busy or cap refusal appears in delivery inspect for its target as a
   retained pre-admission outcome with the holder's operation identity; zero
@@ -492,8 +501,10 @@ more sites move to the shared xCloud server.
 - The per-remote listing returns within five seconds and shows every target's
   operation or hold, holder, start time, hold expiry, and waiting queue.
 - A hold is visible from a second controller within five seconds of being
-  claimed; an expired hold admits the next waiting operation within five
-  seconds of expiry; a hold request above four hours is refused; a non-holder
+  claimed; on an idle, unfenced target an expired hold admits the next
+  waiting operation within five seconds of expiry, and on a fenced target the
+  waiting operation stays refused or waiting until the fence clears (then
+  admitted within five seconds); a hold request above four hours is refused; a non-holder
   release without `--break-hold` is refused, and with it is recorded with the
   breaker's identity and reason.
 - A renewal that would set expiry later than four hours after the original
@@ -566,7 +577,7 @@ more sites move to the shared xCloud server.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest readiness review verdict is `PASS` (independent Sol round 3 pending; see Final Validation).
+- [ ] The latest readiness review verdict is `PASS` (independent Sol round 4 pending; see Final Validation).
 
 **Readiness**: `NOT READY`
 

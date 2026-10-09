@@ -99,6 +99,8 @@ to named follow-ups, to be refined after their parent ships:
 | 061 | Capability-level degradation | Per-command compatibility checks instead of one protocol-version verdict. |
 | 062 | Apply log identity and failure steps | Request-scoped apply logs and the phase or step where an apply failed. |
 | 062 | Remote operation receipts | A per-operation receipt retained on the remote for source deliveries; comes after 061. |
+| 062 | Source-apply Compose rollback | Rolling Compose back to the previous revision when a source apply fails after the Compose step; image activation already does this. |
+| 061 | Protocol-verdict remote dispatch | Moving remote WP-CLI signatures and cleanup-routine enable from the exact-revision check to the shared compatibility verdict. |
 
 ## PRD-stage specs considered and where they land
 

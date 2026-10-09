@@ -1,0 +1,131 @@
+# Research: Remote Development Execution Readiness
+
+## R1. How a network gets a subnet without daemon pools
+
+- **Decision**: For every network the instance's effective Compose config
+  creates (non-external), Sandbox writes a generated override that sets
+  `networks.<name>.ipam.config: [{subnet: <allocated>}]`, and passes it last
+  in the `-f` chain. The effective config comes from
+  `docker compose config --format json`, run on the remote. The built-in
+  WordPress template (`render_compose`) gets the same override for its
+  default network.
+- **Rationale**: Docker accepts a user-defined bridge network with an
+  explicit subnet without any `default-address-pools` configuration, and
+  without a daemon restart. An override leaves the project's own Compose
+  files unchanged.
+- **Alternatives considered**:
+  - Pre-creating networks with `docker network create --subnet` and marking
+    them external in Compose. Rejected: it changes project semantics, and
+    teardown would have to remove them separately.
+  - Editing `daemon.json`. Rejected: that is the restart path this feature
+    exists to avoid.
+
+## R2. Where range state lives and how allocation stays atomic
+
+- **Decision**: State lives in remote `$SANDBOX_HOME/runtime/network-ranges/state.json`
+  (0600, directory 0700). It is changed only by one fixed Python program,
+  sent over `ssh_run` under `fcntl.flock` on `state.lock`. The operations are
+  `inventory`, `assign`, `allocate`, `release`, `release-owner` and `list`.
+  `list` is read-only: it creates no directory and takes only a shared lock.
+- **Rationale**: This is the same proven pattern as 061 pins. It works on old
+  runtimes for listing, and with a flock two concurrent allocations for the
+  last subnet serialize (SC-006).
+- **Alternatives considered**: a control-service (MCP) endpoint. Rejected
+  because it would exist only on new runtimes, and assignment must be able to
+  report "runtime predates ranges" precisely (FR-002). The program probes for
+  the runtime's `range_support` marker and returns a typed limitation when it
+  is absent.
+
+## R3. Overlap classes for assignment and proposal
+
+- **Decision**: `inventory` returns these candidate conflict sets:
+  - the subnets of every observed Docker network (`docker network inspect`);
+  - IPv4 host routes (`ip -j route`);
+  - Docker's built-in default pools (`172.17.0.0/16`, `172.18.0.0/16` through
+    `172.31.0.0/16`, and `192.168.0.0/16` in /20 blocks, as documented
+    defaults);
+  - `100.64.0.0/10` (Tailscale CGNAT).
+
+  Any unreadable source makes the inventory partial, and a partial inventory
+  refuses as `unknown`. A proposal takes the first free /20 inside
+  `10.200.0.0/14`, with a default subnet size of /26 (64 subnets per range).
+- **Rationale**: These are exactly the classes FR-002 names. `10.200.0.0/14`
+  is rarely used by clouds or VPNs and sits outside the Docker defaults and
+  CGNAT. A /26 is ample for one Compose network.
+- **Alternatives considered**: letting Docker pick. Rejected, because that is
+  the default-pool behavior that cannot be proven.
+
+## R4. Admission and allocation as one step
+
+- **Decision**: `remote_network_capacity_admission` sends a single program.
+  It probes pools as today and, when ranges exist, allocates `required`
+  subnets for the owner under the same flock. It returns the pool evidence
+  plus `range: {capacity, allocated, granted: [opaque ids]}`. The evaluator
+  sums usable pool capacity and unallocated range capacity. If the total is
+  short, the program allocates nothing and the refusal is
+  `docker_network_subnet_exhausted`, carrying the allocation table: opaque
+  owner id, owner kind, workspace and age, with no subnets.
+- **Rationale**: This closes the race between the gate and the reservation,
+  and it keeps today's fail-closed rules. Pool evidence and range evidence
+  are evaluated together; built-in default pools never count.
+
+## R5. Freeing allocations
+
+- **Decision**: Three paths free allocations, each with `release-owner`:
+  - `workspace release` frees the workspace's own and its jobs' allocations;
+  - `workspace reap` frees the allocations of reaped workspaces;
+  - retention expiry (the existing 7-day TTL) frees them on the reap path.
+
+  A killed job's allocation stays attributed and counted until one of those
+  runs (FR-006).
+- **Rationale**: The workspace lifecycle already owns retention; no new timer
+  is needed.
+
+## R6. Readiness rows and their sources
+
+| Row | Source | not_ready when | unknown when |
+|---|---|---|---|
+| registration | `TargetService.resolve` | `unknown_remote`, `ambiguous_remote`, `remote_not_provisioned` | never |
+| reachability | bounded `ssh_run true` (10 s) | SSH refuses or authentication fails | timeout |
+| runtime compatibility | 061 `admitted(status)` | verdict not ok | status unavailable |
+| capacity | read-only `inventory` plus pool probe, without allocating | neither pool nor range evidence (`missing_pool_evidence`), or zero usable | partial evidence |
+| ownership repair | read-only check that the repair helper exists and is executable; `not_applicable` when there is no instance | helper missing | probe timeout |
+| handoff | recorded ensure-to-exec round trip at the installed revision | never | none recorded |
+
+- **Decision**: All rows run concurrently under one 60-second deadline, and
+  unfinished rows become `unknown`. The proof file records the installed
+  runtime revision, the time and the rows. A submission reuses the proof
+  within 300 s only when the revision still matches.
+- **Rationale**: The rows reuse existing probes, so there is no new remote
+  surface. A proof bound to the revision honors FR-018.
+
+## R7. Protocol bump
+
+- **Decision**: The new range fields in the admission payload change the
+  keys of `remote_jobs`. Bump `CONTROL_PROTOCOL_SPOKEN` to 2 and keep
+  `CONTROL_PROTOCOL_OLDEST_SERVED` at 1. The new runtime still serves
+  protocol-1 controllers, which send no range keys. Re-record
+  `control_shapes.json`.
+- **Rationale**: The 061 FR-006 guard requires the bump, and keeping the
+  oldest served version at 1 preserves coexistence.
+
+## R8. Daemon-pool plan digest
+
+- **Decision**: The plan includes:
+  - the sorted hosted targets from the hosting inventory (`project/environment`);
+  - the count of other running containers;
+  - `plan_digest = sha256(json(targets, count))[:16]`.
+
+  `--confirm` now takes `--plan-digest D`. Apply recomputes the plan and
+  refuses `docker_pool_plan_changed` when the digest differs, with zero
+  restarts.
+- **Rationale**: This binds confirmation to exactly what will restart
+  (FR-011).
+
+## R9. Local fallback
+
+- **Decision**: Submission paths no longer fall back to a local run when the
+  remote is refused. A local run happens only with an explicit `--local`
+  selector, and when the declared remote was not ready it prints the
+  declared remote, the failing row and its reason.
+- **Rationale**: Silent fallback mislabeled evidence (feedback cebec97a).

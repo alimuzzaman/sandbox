@@ -238,6 +238,12 @@
   `remote_selection` (FR-021): its producers are in the control protocol 3
   fingerprint, and adding the key needs a protocol bump. Refusals, readiness
   results and MCP results report it.
+- **Coverage limits (merge gate, 2026-10-10)**: the `--local` on local async
+  e2e/CI coordinators is checked by inspecting the argv source, not by
+  replaying a coordinator; the `sb e2e`/`sb ci run` JSON selection fields are
+  tested through `run_selection` and `_selection`, not end to end; e2e-only
+  and CI-only MCP catalog startup is checked by an import inspection, not by
+  starting a server.
 
 ## R10. Range support marker and 061 status
 

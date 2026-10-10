@@ -790,5 +790,23 @@ class RoundFourTests(unittest.TestCase):
                              {"ok": True, "parent_job_id": "p", "remote_selection": "local"})
 
 
+    def test_mcp_local_preflight_refusals_survive_unchanged(self):
+        refusal = {"ok": False, "error": "wordpress.cli unavailable"}
+        for local in (True, False):
+            module = NoLocalFallbackTests._wp_tool(self)
+            module._require_project_capability = lambda *_a, **_k: dict(refusal)
+            local_target = SimpleNamespace(kind="local", remote_name=None,
+                                           sources={"remote_selection": "local"})
+            with self.subTest(local=local), \
+                    patch("sandbox.application.context.durable_job_dependencies",
+                          return_value={"target_service": SimpleNamespace(
+                              resolve=lambda _request: local_target)}), \
+                    patch.object(notice, "local_notice", side_effect=AssertionError("notice")), \
+                    patch.object(module, "_resolve_test_mode", return_value="unit"), \
+                    patch.object(module.subprocess, "run", side_effect=AssertionError("ran")):
+                self.assertEqual(module.run_tests(project_dir=str(self.root), local=local),
+                                 refusal)
+
+
 if __name__ == "__main__":
     unittest.main()

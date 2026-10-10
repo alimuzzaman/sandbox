@@ -60,6 +60,23 @@ not close the external or human gates listed below.
 
 ## P0 — reliability, safety, and current operator blockers
 
+- [ ] **Remote disk pressure must not take down hosted production.**
+  Incident 2026-10-10 (feedback `6bba550f`): xcloud-london's root filesystem
+  hit 100% from about 21 `deploy-src/<branch>-workspace-<hash>` dirs (61 GB),
+  and production lenzora Postgres went into a PANIC/restart loop on ENOSPC.
+  Gaps to close:
+  - the reap plan labels retained terminal jobs `active_job`
+    (`sandbox/resources/remote.py` `retained_job`); report them separately as
+    `retained_terminal`, with the `job-cleanup <id> --remote --confirm` remedy;
+  - no free-disk admission gate before a remote submission (the 063 readiness
+    capacity row covers Docker subnets only); refuse below a host reserve that
+    protects hosted targets;
+  - no disk-pressure alert and no scheduled retention of terminal remote
+    workspaces (`job-retention --storage-pressure` only runs host-side and by
+    hand);
+  - `job-list --remote` fails with ENOSPC in `write_env_for_compose`
+    (`core/_docker.py`); listing must not need a writable compose env.
+
 - [ ] **Prove fail-closed disposable CI workspace terminal cleanup.**
   The local candidate binds controller materialization authority to the accepted
   job, refuses residual process-group/owned-cgroup, container, bind-source or

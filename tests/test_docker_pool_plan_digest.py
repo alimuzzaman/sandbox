@@ -476,6 +476,27 @@ class HandlerDigestTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(pool.call_args.kwargs["hosted"], [])
 
+    def test_human_plan_output_lists_targets_count_digest_and_alternative(self):
+        from sandbox.commands import remote as command
+        args = SimpleNamespace(name="vps", confirm=False, recover_interrupted=False,
+                               expected_running=None, expected_removed=0,
+                               recovery_since=None, plan_digest=None)
+        planned = {"ok": True, "status": "planned", "requires_confirm": True,
+                   "hosted_targets": ["blog/staging", "shop/production"],
+                   "other_running_containers": 4, "plan_digest": "a1b2c3d4e5f60718",
+                   "no_restart_alternative": "./sb remote network-range propose vps --json"}
+        out = io.StringIO()
+        with patch.object(command.sr, "get_remote", return_value={"ssh": "ops@registered-target"}), \
+                patch.object(command, "hosting_state_keys", return_value=["vps/shop/production"]), \
+                patch.object(command.sr, "remote_docker_pool", return_value=planned), \
+                patch("sys.stdout", out):
+            command._cmd_docker_pool(args, False)
+        text = out.getvalue()
+        self.assertIn("blog/staging, shop/production", text)
+        self.assertIn("4 other running container(s)", text)
+        self.assertIn("./sb remote docker-pool vps --confirm --plan-digest a1b2c3d4e5f60718", text)
+        self.assertIn("no-restart alternative: ./sb remote network-range propose vps", text)
+
     def test_recover_interrupted_confirm_needs_no_digest(self):
         payload, pool, code = self._call(confirm=True, recover_interrupted=True,
                                          expected_running=2)

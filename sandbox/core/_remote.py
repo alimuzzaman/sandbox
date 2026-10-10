@@ -3935,9 +3935,6 @@ try:
     try:
         failure_stage = "validate_config"
         run(["dockerd", "--validate", "--config-file", temporary], timeout=30)
-        current_bytes = CONFIG.read_bytes() if CONFIG.exists() else b""
-        if hashlib.sha256(current_bytes).hexdigest() != initial_digest:
-            raise RuntimeError("daemon configuration changed concurrently")
         # Re-observe just before activation: a container started since the
         # first check changes what the restart affects (FR-011). Docker has no
         # start fence, so a start inside the activate/restart gap is the
@@ -3948,10 +3945,14 @@ try:
         if latest_digest != PLAN_DIGEST:
             raise PlanChanged(latest_digest, latest_other)
         before = before | latest
+        # The config comparison stays immediately before replacement.
+        current_bytes = CONFIG.read_bytes() if CONFIG.exists() else b""
+        if hashlib.sha256(current_bytes).hexdigest() != initial_digest:
+            raise RuntimeError("daemon configuration changed concurrently")
         failure_stage = "activate_config"
         os.replace(temporary, CONFIG)
-        sync_parent(CONFIG)
         config_replaced = True
+        sync_parent(CONFIG)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

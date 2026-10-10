@@ -17,23 +17,55 @@ from tests.subprocess_support import synthetic_environment
 
 
 _DOCKER = '''#!/usr/bin/env python3
-import json, sys
-import os
+import datetime, json, os, sys
 args = sys.argv[1:]
 here = os.path.dirname(os.path.abspath(__file__))
+root = os.path.dirname(here)
+flag = lambda name: os.path.exists(os.path.join(here, name))
+
+def bump(name):
+    path = os.path.join(here, name)
+    count = int(open(path).read()) + 1 if os.path.exists(path) else 1
+    open(path, "w").write(str(count))
+    return count
+
+BASE = ["c-hosted", "c-other", "c-plain"]
+started_path = os.path.join(root, "started")
 if args[:2] == ["ps", "-q"]:
-    calls = os.path.join(here, "ps-calls")
-    count = int(open(calls).read()) + 1 if os.path.exists(calls) else 1
-    open(calls, "w").write(str(count))
-    extra = "\\nc-new" if count > 1 and os.path.exists(os.path.join(here, "grow")) else ""
-    print("c-hosted\\nc-other\\nc-plain" + extra)
+    count = bump("ps-calls")
+    if count > 1 and flag("fail_recheck_ps"):
+        raise SystemExit(1)
+    if os.path.exists(os.path.join(root, "restarts")):
+        # After a daemon restart only explicitly started containers run.
+        started = open(started_path).read().split() if os.path.exists(started_path) else []
+        print("\\n".join(started))
+        raise SystemExit(0)
+    extra = []
+    if count > 1 and flag("grow"):
+        extra.append("c-new")
+    if count > 1 and flag("late_hosted"):
+        extra.append("c-late")
+    print("\\n".join(BASE + extra))
+elif args[:2] == ["ps", "-aq"]:
+    print("\\n".join(BASE))
 elif args[:2] == ["network", "ls"]:
     print("network-one")
 elif args[:2] == ["network", "inspect"]:
     print(json.dumps([{"Id": "a" * 64, "Options": {}}]))
+elif args and args[0] == "start":
+    open(started_path, "a").write(args[1] + "\\n")
+elif args and args[0] == "inspect" and "--format" not in args:
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    print(json.dumps([{"Id": cid, "State": {"StartedAt": now}} for cid in args[1:]]))
 elif args and args[0] == "inspect":
+    count = bump("inspect-calls")
+    if count > 1 and flag("fail_recheck_inspect"):
+        raise SystemExit(1)
+    if count > 1 and flag("edit_config"):
+        open(open(os.path.join(here, "edit_config")).read(), "w").write('{"edited": true}')
     rows = {"c-hosted": "always\\tsandbox-host-shop-production",
-            "c-other": "no\\tsomething-else", "c-plain": "no", "c-new": "no\\tlate"}
+            "c-other": "no\\tsomething-else", "c-plain": "no", "c-new": "no\\tlate",
+            "c-late": "always\\tsandbox-host-shop-production"}
     for container in args[3:]:
         print(rows[container])
 raise SystemExit(0)
@@ -49,11 +81,12 @@ class ProgramDigestTests(unittest.TestCase):
     HOSTED = [["shop/production", "sandbox-host-shop-production"]]
 
     def _run(self, root: Path, *, confirm: bool, plan_digest: str | None,
-             pools_current: bool = False, grow: bool = False, hosted=None):
+             pools_current: bool = False, grow: bool = False, hosted=None,
+             flags=(), edit=None, absent_config=False, old_backup=False, **program):
         binary = root / "bin"
         binary.mkdir()
-        if grow:
-            (binary / "grow").write_text("")
+        for name in (*flags, *(("grow",) if grow else ())):
+            (binary / name).write_text("")
         _write(binary / "docker", _DOCKER)
         _write(binary / "ip", "#!/usr/bin/env python3\nprint('[]')\n")
         _write(binary / "dockerd", "#!/usr/bin/env python3\nraise SystemExit(0)\n")
@@ -65,10 +98,19 @@ class ProgramDigestTests(unittest.TestCase):
         original = {"log-driver": "json-file"}
         if pools_current:
             original["default-address-pools"] = list(_remote.REMOTE_DOCKER_ADDRESS_POOLS)
-        config.write_text(json.dumps(original))
+        if absent_config:
+            original = None
+        else:
+            config.write_text(json.dumps(original))
+        if old_backup:
+            (root / "daemon.json.bak-20200101T000000000000Z").write_text("{}")
+        if "edit_config" in flags:
+            (binary / "edit_config").write_text(str(config))
         source = _remote._remote_docker_pool_program(
             confirm=confirm, hosted=self.HOSTED if hosted is None else hosted,
-            plan_digest=plan_digest)
+            plan_digest=plan_digest, **program)
+        if edit:
+            source = edit(source)
         source = source.replace(
             'pathlib.Path("/etc/docker/daemon.json")', f"pathlib.Path({str(config)!r})"
         ).replace(
@@ -84,6 +126,88 @@ class ProgramDigestTests(unittest.TestCase):
         self.assertFalse(restarts.exists())
         self.assertEqual(json.loads(config.read_text()), original)
         self.assertEqual(list(config.parent.glob("daemon.json.bak-*")), [])
+
+    DIGEST = _remote.docker_pool_plan_digest(["shop/production"], 2)
+
+    def test_config_change_during_recheck_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, config, _, restarts = self._run(
+                Path(temporary), confirm=True, plan_digest=self.DIGEST, flags=("edit_config",))
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["code"], "docker_pool_apply_failed")
+            self.assertEqual(json.loads(config.read_text()), {"edited": True})
+            self.assertFalse(restarts.exists())
+
+    def test_plan_changed_cleans_candidate_and_preserves_existing_backups(self):
+        # An absent daemon.json chowns the candidate to root, which a non-root
+        # test run cannot do; that branch shares the same PlanChanged handler.
+        for absent in (False,):
+            with self.subTest(absent_config=absent), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                result, config, _, restarts = self._run(
+                    root, confirm=True, plan_digest=self.DIGEST, grow=True,
+                    absent_config=absent, old_backup=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["code"], "docker_pool_plan_changed")
+                self.assertFalse(restarts.exists())
+                self.assertEqual(config.exists(), not absent)
+                self.assertEqual(sorted(path.name for path in root.glob("daemon.json*")),
+                                 (["daemon.json"] if not absent else [])
+                                 + ["daemon.json.bak-20200101T000000000000Z"])
+
+    def test_recheck_ps_or_inspect_failure_never_restarts(self):
+        for name in ("fail_recheck_ps", "fail_recheck_inspect"):
+            with self.subTest(flag=name), tempfile.TemporaryDirectory() as temporary:
+                result, config, original, restarts = self._run(
+                    Path(temporary), confirm=True, plan_digest=self.DIGEST, flags=(name,))
+                self.assertEqual(result.returncode, 3, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["code"], "docker_pool_apply_failed")
+                self.assertIn("recheck_plan", payload["message"])
+                # A failing `docker ps` also blocks the rollback's running-set
+                # proof, so only the inspect failure can report success.
+                self.assertEqual(payload["rollback_succeeded"], name == "fail_recheck_inspect")
+                self.assertFalse(restarts.exists())
+                self.assertEqual(json.loads(config.read_text()), original)
+
+    def test_late_hosted_container_recovers_after_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result, _, _, restarts = self._run(
+                root, confirm=True, plan_digest=self.DIGEST, flags=("late_hosted",))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["status"], "complete")
+            self.assertIn("restart docker", restarts.read_text())
+            self.assertIn("c-late", (root / "started").read_text().split())
+
+    def test_activation_fsync_failure_rolls_back(self):
+        def failing_sync(source):
+            marker = "        config_replaced = True\n        sync_parent(CONFIG)\n"
+            self.assertEqual(source.count(marker), 1)
+            return source.replace(marker, "        config_replaced = True\n"
+                                          "        raise OSError('sync failed')\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            result, config, original, restarts = self._run(
+                Path(temporary), confirm=True, plan_digest=self.DIGEST, edit=failing_sync)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["code"], "docker_pool_apply_failed")
+            self.assertTrue(payload["rollback_succeeded"])
+            self.assertEqual(json.loads(config.read_text()), original)
+            self.assertFalse(restarts.exists())
+
+    def test_interrupted_recovery_runs_without_digest(self):
+        since = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with tempfile.TemporaryDirectory() as temporary:
+            result, _, _, restarts = self._run(
+                Path(temporary), confirm=True, plan_digest=None, recover_interrupted=True,
+                expected_running=3, recovery_since=since)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "recovery_complete")
+            self.assertNotIn("plan_digest", payload)
+            self.assertFalse(restarts.exists())
 
     def test_plan_counts_other_running_containers_and_digests_targets(self):
         with tempfile.TemporaryDirectory() as temporary:

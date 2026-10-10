@@ -597,6 +597,38 @@ class ComposeHookTests(unittest.TestCase):
         self.assertEqual(launched.call_count, 1)
         self.assertEqual(held, [True, False])
 
+    def test_detached_supervisor_abandoned_before_handle_releases_range_lock(self):
+        import subprocess
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from sandbox.commands import jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(jobs, "wp_dir", return_value=root), \
+                    patch.object(jobs, "_is_herd_instance", return_value=False), \
+                    patch.object(jobs, "project_name", return_value="sandbox-unit"), \
+                    patch.object(jobs, "compose_file", return_value=root / "unit.yml"), \
+                    patch.object(jobs, "_BOOTSTRAP_TICKS", 5), \
+                    patch("sandbox.remote_network.runtime.default_runtime", return_value=None), \
+                    patch.object(jobs.subprocess, "Popen",
+                                 return_value=SimpleNamespace(pid=1)) as launched:
+                jobs.launch_job("unit", ["option", "get", "siteurl"])
+            script = launched.call_args.args[0][2]
+            ranges = range_runtime.RangeRuntime(root, store=None, overrides=root / "o",
+                                                compose_config=dict)
+            status, handle = root / "job.status", root / "job.pid"
+            marker = root / "compose-ran"
+            # The launcher "dies" here: it never publishes the handle.
+            with ranges.lifecycle("unit") as descriptor:
+                supervisor = subprocess.Popen(
+                    ["sh", "-c", script, "c", "c", str(status), str(handle),
+                     str(root / "job.tmp"), "touch", str(marker)], pass_fds=(descriptor,))
+            self.assertEqual(supervisor.wait(timeout=30), 125)
+            self.assertEqual(status.read_text(), "125")
+            self.assertFalse(marker.exists())
+            with range_runtime._try_exclusive(root / "o" / "unit.lock") as idle:
+                self.assertTrue(idle)
+
     def test_introspect_runs_under_the_lock(self):
         import subprocess
         from types import SimpleNamespace
@@ -612,7 +644,8 @@ class ComposeHookTests(unittest.TestCase):
 
         def run(argv, **kwargs):
             self.assertEqual(held, [True])
-            self.assertIn("/o/x.yml", argv)
+            files = [argv[i + 1] for i, item in enumerate(argv) if item == "-f"]
+            self.assertEqual(files[-1], "/o/x.yml")
             return subprocess.CompletedProcess(argv, 0, '{"count": 1}', "")
 
         with tempfile.TemporaryDirectory() as tmp:

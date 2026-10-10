@@ -431,6 +431,11 @@ def _reconcile_job(instance: str, jid: str, paths: tuple[Path, Path, Path] | Non
     return "running"
 
 
+# The detached supervisor waits at most this many 10 ms ticks (about 30 s)
+# for its launcher to publish the job handle before giving up unstarted.
+_BOOTSTRAP_TICKS = 3000
+
+
 def launch_job(instance: str, wp_args: list[str]) -> str:
     """Start `wp <wp_args>` detached; return a 16-hex job id. State lands in
     runtime/wp-<instance>/.sb-jobs/job_<id>.{pid,log,status}."""
@@ -492,7 +497,17 @@ status_file=$2
 handle_file=$3
 temporary_handle=$4
 shift 4
-while [ ! -s "$handle_file" ]; do sleep 0.01; done
+# A launcher that dies before publishing the handle must not leave this
+# supervisor (and the range lock it inherits) waiting forever.
+ticks=0
+while [ ! -s "$handle_file" ]; do
+  if [ "$ticks" -ge @BOOTSTRAP_TICKS@ ]; then
+    printf '125' > "$status_file"
+    exit 125
+  fi
+  ticks=$((ticks + 1))
+  sleep 0.01
+done
 container_absent() {
   observation=$(docker inspect --type container "$container_name" 2>&1)
   code=$?
@@ -528,7 +543,7 @@ else
   if cleanup_and_record "$code"; then exit "$code"; fi
   exit 125
 fi
-""".strip()
+""".strip().replace("@BOOTSTRAP_TICKS@", str(int(_BOOTSTRAP_TICKS)))
         run_args = ["run", "-d", "--name", name,
                     "--entrypoint", "sh", "wpcli", "-c", wrapper]
         # Spec 063: allocate before the detached run can create networks. The

@@ -529,12 +529,15 @@ else
   exit 125
 fi
 """.strip()
+        run_args = ["run", "-d", "--name", name,
+                    "--entrypoint", "sh", "wpcli", "-c", wrapper]
         compose_argv = [
             "docker", "compose", "-p", project_name(instance),
             "-f", str(compose_file(instance)),
+            # Spec 063: allocate before the detached run can create networks.
+            *range_compose_args(instance, run_args),
             "--project-directory", str(ROOT),
-            "run", "-d", "--name", name,
-            "--entrypoint", "sh", "wpcli", "-c", wrapper,
+            *run_args,
         ]
         try:
             _write_new_artifact(log_file, "")

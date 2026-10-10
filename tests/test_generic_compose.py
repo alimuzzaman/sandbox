@@ -1,4 +1,5 @@
 import os
+import contextlib
 import json
 import stat
 import tempfile
@@ -117,6 +118,12 @@ class TestGenericComposeAdapter(unittest.TestCase):
             def __init__(self):
                 self.events = []
 
+            @contextlib.contextmanager
+            def lifecycle(self, instance, *, exclusive=False):
+                self.events.append(("lock", instance, exclusive))
+                yield
+                self.events.append(("unlock", instance))
+
             def prepare(self, instance):
                 self.events.append(("prepare", instance))
 
@@ -140,7 +147,10 @@ class TestGenericComposeAdapter(unittest.TestCase):
                 self.assertEqual(up[up.index("-f") + 1], f"/ranges/{instance}.yml")
                 self.assertLess(up.index("-f"), up.index("up"))
                 adapter.invoke(OperationRequest(str(root), "destroy"))
-                self.assertEqual(ranges.events, [("prepare", instance), ("release", instance)])
+                # destroy holds the lock exclusively through its release.
+                self.assertEqual(ranges.events, [
+                    ("lock", instance, False), ("prepare", instance), ("unlock", instance),
+                    ("lock", instance, True), ("release", instance), ("unlock", instance)])
 
                 adapter, process, _, _ = self.make_adapter(root)
                 base = process.run

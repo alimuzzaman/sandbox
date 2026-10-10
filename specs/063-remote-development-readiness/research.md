@@ -118,9 +118,14 @@
   - retention expiry (the existing 7-day TTL) frees them on the reap path.
 
   A killed job's allocation stays attributed and counted until one of those
-  runs (FR-006). In the runtime each of the three destroys the workspace's
-  instances, and the release itself is the `compose down -v` hook of the
-  R4 revision, so no separate call is needed in the workspace service.
+  runs (FR-006). Revised after the merge-gate review: `workspace release`
+  only marks the lease and destroys nothing, and reap removes containers
+  without `compose down`, leaving the stack networks. So the runtime frees in
+  two places: the `compose down -v` hook of the R4 revision for instance
+  teardown, and reap's `reconcile_after_removal`, which removes each
+  reclaimed workspace's granted networks and releases the workspace only once
+  they are gone. The operator remedy is `workspace release` followed by
+  `workspace reap --confirm`.
 - **Rationale**: The workspace lifecycle already owns retention; no new timer
   is needed.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -667,27 +668,88 @@ def compose(*args: str, instance: str,
     from sandbox.remote_network import runtime as range_runtime
     ranges = range_runtime.default_runtime(compose_config=_compose_config,
                                            workspace_of=_range_workspace)
-    if ranges is not None and args[:1] in (("up",), ("create",), ("run",)):
-        try:
-            ranges.prepare(instance)
-        except range_runtime.RangeError as exc:
-            die(range_runtime.describe(exc))
-    result = run(
-        [*_compose_base(instance),
-         *(ranges.compose_args(instance) if ranges is not None else []),
-         # Resolve the compose file's relative paths (./config, ./runtime)
-         # against the sandbox ROOT, not the compose file's own dir
-         # (runtime/compose/). Without this, `./config/x` would resolve to
-         # runtime/compose/config/x. Load-bearing for the nginx/litespeed
-         # server config mounts.
-         "--project-directory", str(ROOT),
-        *args],
-        **run_kwargs,
-    )
-    if ranges is not None and args[:1] == ("down",) and ("-v" in args or "--volumes" in args) \
-            and (check or getattr(result, "returncode", 0) == 0):
-        ranges.release(instance)
+    if ranges is None:
+        return run([*_compose_base(instance), "--project-directory", str(ROOT), *args],
+                   **run_kwargs)
+    removes = args[:1] == ("down",) and ("-v" in args or "--volumes" in args)
+    creates = args[:1] in _RANGE_CREATES
+    # Only creators and a volume-removing down take the lock, so a long
+    # `logs -f` or `exec` never holds up a teardown.
+    with (ranges.lifecycle(instance, exclusive=removes) if creates or removes
+          else contextlib.nullcontext()):
+        if creates:
+            refusal = _prepare_ranges(ranges, instance)
+            if refusal is not None:
+                # check=False callers (apply, `up`) treat this like a failed
+                # Compose run, so their rollback and typed reporting apply.
+                if check:
+                    die(refusal)
+                return subprocess.CompletedProcess(list(args), 1, stdout="", stderr=refusal)
+        result = run(
+            [*_compose_base(instance), *ranges.compose_args(instance),
+             # Resolve the compose file's relative paths (./config, ./runtime)
+             # against the sandbox ROOT, not the compose file's own dir
+             # (runtime/compose/). Without this, `./config/x` would resolve to
+             # runtime/compose/config/x. Load-bearing for the nginx/litespeed
+             # server config mounts.
+             "--project-directory", str(ROOT),
+             *args],
+            **run_kwargs,
+        )
+        if removes and (check or getattr(result, "returncode", 0) == 0):
+            ranges.release(instance)
+        elif creates and getattr(result, "returncode", 0) not in (0, None):
+            result = _typed_collision(result)
     return result
+
+
+def _typed_collision(result):
+    """Docker's overlap error on a granted subnet becomes the typed refusal."""
+    from sandbox.remote_network.override import classify_create_failure
+    stderr = getattr(result, "stderr", None)
+    refusal = classify_create_failure(stderr) if isinstance(stderr, str) else None
+    if refusal is None:
+        return result
+    return subprocess.CompletedProcess(getattr(result, "args", []), result.returncode,
+                                       stdout=getattr(result, "stdout", ""),
+                                       stderr=f"{refusal['code']}: {refusal['message']}")
+
+
+_RANGE_CREATES = (("up",), ("create",), ("run",))
+
+
+def _prepare_ranges(ranges, instance: str) -> str | None:
+    """Allocate before a network-creating command; a refusal line or None."""
+    from sandbox.remote_network import runtime as range_runtime
+    try:
+        ranges.prepare(instance)
+    except range_runtime.RangeError as exc:
+        return range_runtime.describe(exc)
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        return f"range_prepare_failed: could not read the stack's networks ({type(exc).__name__})"
+    return None
+
+
+def range_compose_args(instance: str, args) -> list[str]:
+    """Range override arguments for a Compose call run outside ``compose()``.
+
+    Detached job launches, piped ``wp eval-file`` and the MCP server build
+    their own argv; they prepare here when the command can create networks
+    and pass the result after their ``-f``. The lifecycle lock covers only the
+    preparation, since the caller runs the command itself. Raises
+    ``RuntimeError`` with the refusal line; ``[]`` on a host without ranges.
+    """
+    from sandbox.remote_network import runtime as range_runtime
+    ranges = range_runtime.default_runtime(compose_config=_compose_config,
+                                           workspace_of=_range_workspace)
+    if ranges is None:
+        return []
+    with ranges.lifecycle(instance):
+        if tuple(args)[:1] in _RANGE_CREATES:
+            refusal = _prepare_ranges(ranges, instance)
+            if refusal is not None:
+                raise RuntimeError(refusal)
+        return ranges.compose_args(instance)
 
 
 def _compose_base(instance: str) -> list[str]:

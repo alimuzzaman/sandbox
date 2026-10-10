@@ -1,8 +1,11 @@
 """Runtime-side range allocation around Compose up/down (spec 063 T010, T013, T015)."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import stat
+import threading
 import sys
 import tempfile
 import unittest
@@ -103,7 +106,8 @@ class RangeRuntimeTests(unittest.TestCase):
         text = range_runtime.describe(error)
         self.assertEqual(text.splitlines(), [
             "docker_network_subnet_exhausted: no free subnet",
-            "  held by workspace site-a: ./sb workspace release site-a"])
+            "  held by workspace site-a: ./sb workspace release site-a"
+            " && ./sb workspace reap --confirm"])
 
     def test_release_frees_the_instance_and_removes_its_override(self):
         self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
@@ -140,7 +144,7 @@ class RangeRuntimeTests(unittest.TestCase):
         refused = evaluate_network_capacity(
             {"ok": False, "status": "unavailable", "code": "docker_address_pools_unavailable"},
             remote_name="vps", range_evidence=self.store.stats())
-        self.assertEqual(refused["release_commands"], ["./sb workspace release site-main --remote vps"])
+        self.assertEqual(refused["release_commands"], ["./sb workspace release site-main --remote vps && ./sb workspace reap --remote vps --confirm"])
         self.assertEqual(runtime.release("a-qa"), 1)
         self.assertEqual([r["owner_id"] for r in self.store.stats()["table"]], ["instance:a"])
 
@@ -156,13 +160,56 @@ class RangeRuntimeTests(unittest.TestCase):
         runtime.prepare("b")
         from unittest.mock import patch
         with patch.object(range_runtime, "_LocalRunner", return_value=self.runner):
-            self.assertEqual(range_runtime.release_workspaces(["site-a", "../x"], self.home), 1)
+            self.assertEqual(range_runtime.release_workspaces(["site-a", "../x"], self.home,
+                                                                remove_network=lambda _n: True), 1)
         self.assertEqual([r["workspace_id"] for r in self.store.stats()["table"]], ["site-b"])
 
     def test_reap_program_frees_ranges_for_removed_workspaces(self):
         from sandbox.resources.remote import _REMOTE_PROGRAM
         self.assertIn("release_workspaces(", _REMOTE_PROGRAM)
         self.assertIn('"network-ranges" / "state.json"', _REMOTE_PROGRAM)
+
+    def test_reap_removes_networks_before_releasing_and_keeps_survivors(self):
+        self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
+        runtime = range_runtime.RangeRuntime(
+            self.home, store=self.store, overrides=self.overrides,
+            compose_config=lambda instance: self.configs[instance],
+            workspace_of=lambda instance: "site-" + instance)
+        self.configs["a"] = config("sandbox-a", "default")
+        self.configs["b"] = config("sandbox-b", "default")
+        runtime.prepare("a")
+        runtime.prepare("b")
+        removed = []
+
+        def remove(network):
+            removed.append(network)
+            return network != "sandbox-b_default"  # b's network is still in use
+        from unittest.mock import patch
+        with patch.object(range_runtime, "_LocalRunner", return_value=self.runner):
+            self.assertEqual(range_runtime.release_workspaces(
+                ["site-a", "site-b"], self.home, remove_network=remove), 1)
+        self.assertEqual(removed, ["sandbox-a_default", "sandbox-b_default"])
+        self.assertEqual([r["workspace_id"] for r in self.store.stats()["table"]], ["site-b"])
+
+    def test_volume_down_lock_excludes_a_concurrent_up(self):
+        entered = threading.Event()
+        with self.runtime.lifecycle("a", exclusive=True):
+            worker = threading.Thread(target=lambda: self._enter_shared(entered))
+            worker.start()
+            self.assertFalse(entered.wait(0.3))
+        self.assertTrue(entered.wait(5))
+        worker.join(5)
+
+    def _enter_shared(self, entered):
+        with self.runtime.lifecycle("a"):
+            entered.set()
+
+    def test_prepare_leaves_no_temporary_files(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
+        self.configs["a"] = config("sandbox-a", "default")
+        self.runtime.prepare("a")
+        self.runtime.prepare("a")
+        self.assertEqual(sorted(p.name for p in self.overrides.iterdir()), ["a.yml"])
 
     def test_release_workspaces_is_inert_without_ranges(self):
         self.runner.fail = True
@@ -174,40 +221,120 @@ class RangeRuntimeTests(unittest.TestCase):
             self.runtime.prepare("../escape")
 
 
+class _FakeRanges:
+    def __init__(self, refusal=None):
+        self.events, self.refusal = [], refusal
+
+    @contextlib.contextmanager
+    def lifecycle(self, instance, *, exclusive=False):
+        self.events.append(("lock", instance, exclusive))
+        yield
+
+    def prepare(self, instance):
+        self.events.append(("prepare", instance))
+        if self.refusal is not None:
+            raise self.refusal
+
+    def compose_args(self, instance):
+        return ["-f", "/o/" + instance + ".yml"]
+
+    def release(self, instance):
+        self.events.append(("release", instance))
+        return 1
+
+
 class ComposeHookTests(unittest.TestCase):
-    def test_compose_passes_the_override_last_and_frees_on_volume_down(self):
+    def _compose(self, fake, *calls, result=None):
         from unittest.mock import patch
         from sandbox.core import _docker
+        argv, results = [], []
 
-        class Fake:
-            def __init__(self):
-                self.events = []
-
-            def prepare(self, instance):
-                self.events.append(("prepare", instance))
-
-            def compose_args(self, instance):
-                return ["-f", "/o/" + instance + ".yml"]
-
-            def release(self, instance):
-                self.events.append(("release", instance))
-                return 1
-
-        fake, argv = Fake(), []
-        with patch.object(_docker, "run", side_effect=lambda cmd, **kw: argv.append(cmd)), \
+        def run(cmd, **kw):
+            argv.append(cmd)
+            return result
+        with patch.object(_docker, "run", side_effect=run), \
                 patch("sandbox.remote_network.runtime.default_runtime", return_value=fake):
-            _docker.compose("up", "-d", instance="x")
-            _docker.compose("run", "--rm", "wpcli", "wp", instance="x")
-            _docker.compose("ps", instance="x")
-            _docker.compose("kill", instance="x")
-            _docker.compose("stop", instance="x")
-            _docker.compose("down", instance="x")
-            _docker.compose("down", "-v", instance="x")
+            for args, kw in calls:
+                results.append(_docker.compose(*args, instance="x", **kw))
+        return argv, results
+
+    def test_compose_passes_the_override_last_and_frees_on_volume_down(self):
+        fake = _FakeRanges()
+        argv, _ = self._compose(fake, *[(args, {}) for args in (
+            ("up", "-d"), ("create",), ("run", "--rm", "wpcli", "wp"), ("ps",), ("kill",),
+            ("stop",), ("down",), ("down", "-v"), ("down", "--volumes"))])
         # A killed or stopped stack keeps its subnets attributed (FR-006).
-        self.assertEqual(fake.events, [("prepare", "x"), ("prepare", "x"), ("release", "x")])
+        self.assertEqual([e for e in fake.events if e[0] != "lock"],
+                         [("prepare", "x")] * 3 + [("release", "x")] * 2)
+        # Only a volume-removing down holds the lifecycle lock exclusively.
+        self.assertEqual([e[2] for e in fake.events if e[0] == "lock"],
+                         [False] * 3 + [True] * 2)
         for cmd in argv:
             files = [cmd[i + 1] for i, item in enumerate(cmd) if item == "-f"]
             self.assertEqual(files[-1], "/o/x.yml")
+
+    def test_failed_volume_down_keeps_allocations(self):
+        import subprocess
+        fake = _FakeRanges()
+        self._compose(fake, (("down", "-v"), {"check": False}),
+                      result=subprocess.CompletedProcess([], 1, "", "boom"))
+        self.assertNotIn(("release", "x"), fake.events)
+
+    def test_refusal_without_check_is_a_failed_result_not_an_exit(self):
+        # Apply calls compose(check=False) and rolls back on a non-zero result.
+        fake = _FakeRanges(RangeError(range_runtime.EXHAUSTED, "no free subnet", allocation_table=[
+            {"owner_id": "instance:a", "workspace_id": "site-a"}]))
+        argv, results = self._compose(fake, (("up", "-d"), {"check": False}))
+        self.assertEqual(argv, [])
+        self.assertEqual(results[0].returncode, 1)
+        self.assertTrue(results[0].stderr.startswith("docker_network_subnet_exhausted: "))
+
+    def test_refusal_with_check_exits(self):
+        fake = _FakeRanges(RangeError(range_runtime.EXHAUSTED, "no free subnet"))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self._compose(fake, (("up", "-d"), {}))
+
+    def test_unreadable_compose_config_refuses_typed(self):
+        import subprocess
+        fake = _FakeRanges(subprocess.CalledProcessError(1, ["docker"]))
+        _, results = self._compose(fake, (("up", "-d"), {"check": False}))
+        self.assertTrue(results[0].stderr.startswith("range_prepare_failed: "))
+
+    def test_collision_on_a_granted_subnet_is_typed(self):
+        import subprocess
+        fake = _FakeRanges()
+        _, results = self._compose(fake, (("up", "-d"), {"check": False, "capture": True}),
+                                   result=subprocess.CompletedProcess(
+                                       [], 1, "", "Error response from daemon: Pool overlaps with "
+                                       "other one on this address space"))
+        self.assertTrue(results[0].stderr.startswith("range_network_collision: "))
+        self.assertNotIn("Pool overlaps", results[0].stderr)
+
+    def test_builtin_up_reports_range_refusals_by_code(self):
+        from sandbox.commands.lifecycle import _range_refusal
+        self.assertEqual(_range_refusal("range_network_collision: a granted subnet collides")[0],
+                         "range_network_collision")
+        self.assertEqual(_range_refusal("docker_network_subnet_exhausted: none\n  held by")[0],
+                         "docker_network_subnet_exhausted")
+        # Without ranges compose() never rewrites Docker's text, so raw overlap is not typed.
+        self.assertIsNone(_range_refusal("Pool overlaps with other one on this address space"))
+
+    def test_outside_callers_prepare_and_get_the_override(self):
+        from unittest.mock import patch
+        from sandbox.core import _docker
+        fake = _FakeRanges()
+        with patch("sandbox.remote_network.runtime.default_runtime", return_value=fake):
+            self.assertEqual(_docker.range_compose_args("x", ["run", "--rm", "wpcli"]),
+                             ["-f", "/o/x.yml"])
+            self.assertEqual(_docker.range_compose_args("x", ["exec", "wp"]), ["-f", "/o/x.yml"])
+        self.assertEqual([e[0] for e in fake.events], ["lock", "prepare", "lock"])
+        fake = _FakeRanges(RangeError(range_runtime.EXHAUSTED, "no free subnet"))
+        with patch("sandbox.remote_network.runtime.default_runtime", return_value=fake), \
+                self.assertRaises(RuntimeError) as caught:
+            _docker.range_compose_args("x", ["run", "--rm", "wpcli"])
+        self.assertTrue(str(caught.exception).startswith("docker_network_subnet_exhausted: "))
+        with patch("sandbox.remote_network.runtime.default_runtime", return_value=None):
+            self.assertEqual(_docker.range_compose_args("x", ["run"]), [])
 
 
 if __name__ == "__main__":

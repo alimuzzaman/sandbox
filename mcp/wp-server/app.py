@@ -377,9 +377,16 @@ def _compose(*args: str, instance: str,
     # --project-directory pins relative volume paths (./runtime/wp-<inst>) to the
     # sandbox root; without it docker resolves them against the compose file's
     # own dir (runtime/compose/) and the WP bind-mount silently misses.
+    # Spec 063: on a host with development ranges, allocate before a command
+    # that can create the stack's networks and pass the subnet override.
+    try:
+        from sandbox.core._docker import range_compose_args
+        range_args = range_compose_args(instance, args)
+    except RuntimeError as exc:
+        return {"ok": False, "error": str(exc)}
     cmd = ["docker", "compose",
            "-p", _project_name(instance),
-           "-f", str(cf),
+           "-f", str(cf), *range_args,
            "--project-directory", str(SANDBOX_ROOT), *args]
     try:
         res = subprocess.run(

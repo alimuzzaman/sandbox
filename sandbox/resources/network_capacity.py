@@ -122,7 +122,10 @@ def _release_commands(rows: list[dict], remote_name: str | None) -> list[str]:
             continue
         if row["workspace_id"] not in seen:
             seen.append(row["workspace_id"])
-    return [f"./sb workspace release {workspace} --remote {remote}" for workspace in seen]
+    # Release marks the lease; the reap tears the stacks down and frees the
+    # subnets (spec 063 R5), so the remedy is the pair.
+    return [f"./sb workspace release {workspace} --remote {remote} && "
+            f"./sb workspace reap --remote {remote} --confirm" for workspace in seen]
 
 
 def _blocked(

@@ -293,6 +293,16 @@ def _compose_up(
             getattr(result, "stdout", ""), getattr(result, "stderr", ""),
         ) if isinstance(value, str) and value
     )
+    range_refusal = _range_refusal(output)
+    if range_refusal is not None:
+        code, message = range_refusal
+        if json_output:
+            print(json.dumps({
+                "ok": False, "mutated": False, "command": "up", "instance": instance,
+                "error": {"code": code, "message": message},
+            }, sort_keys=True))
+            raise SystemExit(returncode)
+        die(f"{code}: {message}", code=returncode)
     if _ADDRESS_POOL_EXHAUSTED.search(output) and not _pool_retry:
         removed = _reclaim_empty_sandbox_networks()
         if removed:
@@ -373,6 +383,20 @@ def _compose_up(
         raise SystemExit(returncode)
     die(f"docker compose up failed with exit code {returncode}{suffix}",
         code=returncode)
+
+
+def _range_refusal(output: str) -> tuple[str, str] | None:
+    """Spec 063: a range refusal or subnet collision as (code, message).
+
+    ``compose()`` reports these itself, already subnet-free, and only on a
+    host with ranges (a collision is Docker's overlap error on a granted
+    subnet), so they are matched by their leading code.
+    """
+    for code in ("docker_network_subnet_exhausted", "range_network_collision",
+                 "range_prepare_failed", "range_request_invalid"):
+        if output.startswith(code + ": "):
+            return code, output.removeprefix(code + ": ").strip()
+    return None
 
 def _emit_generic_up_failure(
     instance: str,

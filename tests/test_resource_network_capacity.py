@@ -548,7 +548,7 @@ class RangeCapacityTests(unittest.TestCase):
         rows = result["allocation_table"]
         self.assertLessEqual(len(rows), 32)
         self.assertEqual(set(rows[0]), {"owner_id", "owner_kind", "workspace_id", "age_seconds"})
-        self.assertEqual(result["release_commands"][0], "./sb workspace release w0 --remote vps")
+        self.assertEqual(result["release_commands"][0], "./sb workspace release w0 --remote vps && ./sb workspace reap --remote vps --confirm")
         self.assertLessEqual(len(result["release_commands"]), 32)
         rendered = json.dumps(result)
         self.assertNotIn("10.200", rendered)
@@ -615,7 +615,7 @@ class RangeCapacityHardeningTests(unittest.TestCase):
         self.assertNotIn("ghp_", rendered)
         self.assertNotIn("sk-", rendered)
         self.assertEqual([row["owner_id"] for row in result["allocation_table"]], ["w3"])
-        self.assertEqual(result["release_commands"], ["./sb workspace release w3 --remote vps"])
+        self.assertEqual(result["release_commands"], ["./sb workspace release w3 --remote vps && ./sb workspace reap --remote vps --confirm"])
 
     def test_partial_and_duplicate_range_grants_refuse(self):
         other = "a-" + "2" * 16
@@ -705,7 +705,7 @@ class RangeAdmissionTests(unittest.TestCase):
         self.assertEqual(result["code"], range_runtime.EXHAUSTED)
         self.assertEqual([row["owner_id"] for row in result["allocation_table"]],
                          ["instance:a", "instance:a"])
-        self.assertEqual(result["release_commands"], ["./sb workspace release site-a --remote vps"])
+        self.assertEqual(result["release_commands"], ["./sb workspace release site-a --remote vps && ./sb workspace reap --remote vps --confirm"])
         self.assertNotIn("10.200", json.dumps(result))
 
     def test_an_unreachable_range_store_keeps_the_pool_decision(self):
@@ -717,3 +717,34 @@ class RangeAdmissionTests(unittest.TestCase):
             result = _remote.remote_network_capacity_admission({"ssh": "host"}, remote_name="vps")
         self.assertEqual(result["evidence"]["reason"], "missing_pool_evidence")
         self.assertNotIn("secret", json.dumps(result))
+
+
+class RangeAdmissionPayloadTests(unittest.TestCase):
+    def test_public_refusal_keeps_the_table_and_release_commands(self):
+        from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+        decision = {
+            "code": "docker_network_subnet_exhausted",
+            "allocation_table": [
+                {"owner_kind": "instance", "owner_id": "instance:a", "workspace_id": "site-a",
+                 "age_seconds": 5, "subnet": "10.200.0.0/26"},
+                {"owner_kind": "bogus", "owner_id": "x", "workspace_id": "y", "age_seconds": 1},
+                {"owner_kind": "workspace", "owner_id": "$(id)", "workspace_id": "w", "age_seconds": 1},
+            ],
+            "release_commands": [
+                "./sb workspace release site-a --remote vps && ./sb workspace reap --remote vps --confirm",
+                "./sb workspace release site-a --remote vps; rm -rf /",
+            ],
+        }
+        payload = RemoteJobAdmissionError(decision).to_payload(remote="vps", operation="exec")
+        self.assertEqual(payload["code"], "docker_network_subnet_exhausted")
+        self.assertEqual(payload["allocation_table"], [
+            {"owner_kind": "instance", "owner_id": "instance:a", "workspace_id": "site-a",
+             "age_seconds": 5}])
+        self.assertEqual(payload["recovery"]["release_commands"], [decision["release_commands"][0]])
+        self.assertNotIn("10.200", json.dumps(payload))
+
+    def test_pool_refusal_has_no_range_fields(self):
+        from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+        payload = RemoteJobAdmissionError({"code": "docker_network_capacity_unavailable"}).to_payload()
+        self.assertNotIn("allocation_table", payload)
+        self.assertNotIn("release_commands", payload["recovery"])

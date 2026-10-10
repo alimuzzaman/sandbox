@@ -6,15 +6,18 @@ runs locally against this host's ``$SANDBOX_HOME`` (the same program the
 controller drives over SSH), allocations are owned by the instance
 (owner kind ``instance``, ``instance:<name>``) and attributed to the
 workspace the instance's root belongs to, so the exhaustion table names a
-``workspace release`` target. A volume-removing ``down`` releases them, which
-also covers workspace release, reap and retention since all destroy their
-instances. With no range state on this host nothing runs.
+``workspace release`` target. A volume-removing ``down`` releases them; reap
+(which ``workspace release`` makes eligible) removes the stack networks and
+releases by workspace. With no range state on this host nothing runs.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -66,6 +69,24 @@ class RangeRuntime:
         owner_id(instance)
         return self.overrides / f"{instance}.yml"
 
+    @contextmanager
+    def lifecycle(self, instance: str, *, exclusive: bool = False):
+        """Serialize one instance's prepare -> Compose -> release.
+
+        Commands that create networks hold the lock shared for their whole run,
+        so concurrent ``up``/``run`` calls proceed together; a volume-removing
+        ``down`` holds it exclusively across Docker teardown and the release,
+        so no ``up`` can reuse a grant that is about to be freed.
+        """
+        path = self.override_path(instance).with_suffix(".lock")
+        self.overrides.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(descriptor)
+
     def compose_args(self, instance: str) -> list[str]:
         path = self.override_path(instance)
         return ["-f", str(path)] if path.is_file() else []
@@ -103,12 +124,18 @@ class RangeRuntime:
         planned = override.plan(config, {key: by_name.get(names[key], {}).get("subnet")
                                          for key in created if names[key] in by_name})
         self.overrides.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(".tmp")
-        descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(planned["text"])
-        os.chmod(temp, 0o600)
-        os.replace(temp, path)
+        # A private temp name per writer: concurrent prepares of one instance
+        # (shared lifecycle lock) each publish a complete file atomically.
+        descriptor, temp = tempfile.mkstemp(dir=self.overrides, prefix=f".{instance}.",
+                                            suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(planned["text"])
+            os.chmod(temp, 0o600)
+            os.replace(temp, path)
+        except BaseException:
+            Path(temp).unlink(missing_ok=True)
+            raise
         return {"covered": planned["covered"], "outside_range": planned["outside_range"],
                 "granted": [by_name[names[key]]["allocation_id"] for key in created]}
 
@@ -125,23 +152,44 @@ class RangeRuntime:
 
 def describe(error: RangeError) -> str:
     """One operator-facing refusal: code, message, and for exhaustion the
-    owners holding subnets with a release command each (never a subnet)."""
+    owners holding subnets with a release command each (never a subnet).
+
+    Release only marks the workspace's lease; the reap that follows tears its
+    stacks down and frees the subnets.
+    """
     lines = [f"{error.code}: {error}"]
     seen = []
     for row in error.data.get("allocation_table") or []:
         workspace = row.get("workspace_id") if isinstance(row, dict) else None
         if isinstance(workspace, str) and _WORKSPACE.fullmatch(workspace) and workspace not in seen:
             seen.append(workspace)
-            lines.append(f"  held by workspace {workspace}: ./sb workspace release {workspace}")
+            lines.append(f"  held by workspace {workspace}: ./sb workspace release {workspace}"
+                         " && ./sb workspace reap --confirm")
     return "\n".join(lines)
 
 
-def release_workspaces(names, home: Path | None = None) -> int:
+def _remove_network(name: str) -> bool:
+    """Remove one stack network; true once Docker no longer has it."""
+    try:
+        result = subprocess.run(["docker", "network", "rm", name], capture_output=True,
+                                text=True, timeout=TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 or bool(
+        re.search(r"no such network|not found", result.stderr or "", re.IGNORECASE))
+
+
+def release_workspaces(names, home: Path | None = None, *,
+                       remove_network: Callable[[str], bool] = _remove_network) -> int:
     """Free every allocation attributed to reclaimed workspaces (research R5).
 
     Reap removes deployment roots and their containers directly, without a
-    ``compose down``, so the instance hook never runs there. Instance
-    allocations carry the deployment-root name as ``workspace_id``.
+    ``compose down``, so the instance hook never runs there and the stack
+    networks are left behind. Each granted network is removed first; a
+    workspace is released only when all of its networks are gone, since a
+    surviving network still occupies its subnet and the allocator would skip
+    it as foreign. Instance allocations carry the deployment-root name as
+    ``workspace_id``.
     """
     if home is None:
         from sandbox.core._paths import _sandbox_base
@@ -149,8 +197,16 @@ def release_workspaces(names, home: Path | None = None) -> int:
     if not state_file(home).is_file():
         return 0
     store = RangeStore({"name": "local"}, _LocalRunner(Path(home)))
-    return sum(store.release_owner(workspace_id=name) for name in sorted(set(names))
-               if isinstance(name, str) and _WORKSPACE.fullmatch(name))
+    wanted = {name for name in names if isinstance(name, str) and _WORKSPACE.fullmatch(name)}
+    networks: dict[str, set[str]] = {name: set() for name in wanted}
+    for row in store.list()["allocations"]:
+        if row.get("workspace_id") in wanted and isinstance(row.get("network"), str):
+            networks[row["workspace_id"]].add(row["network"])
+    released = 0
+    for name in sorted(wanted):
+        if all([remove_network(network) for network in sorted(networks[name])]):
+            released += store.release_owner(workspace_id=name)
+    return released
 
 
 def default_runtime(*, compose_config: Callable[[str], dict],

@@ -216,12 +216,16 @@ def cmd_introspect(cfg, args) -> None:
         php = INTROSPECT_PHP[t]
         # Pipe PHP source into wp eval-file - (stdin). We need to bypass our
         # `run` helper's stdout printing because we want to capture clean JSON.
+        run_args = ["run", "--rm", "-T", "wpcli", "eval-file", "-"]
+        try:
+            range_args = range_compose_args(inst, run_args)
+        except RuntimeError as exc:
+            die(str(exc))
         proc = subprocess.run(
             ["docker", "compose",
              "-p", project_name(inst),
-             "-f", str(compose_file(inst)),
-             "run", "--rm", "-T",
-             "wpcli", "eval-file", "-"],
+             "-f", str(compose_file(inst)), *range_args,
+             *run_args],
             input=php, text=True, capture_output=True, cwd=str(ROOT),
         )
         if proc.returncode != 0:

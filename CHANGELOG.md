@@ -18,8 +18,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   allocation table and release commands. Control protocol 2 wires them in:
   admission counts range capacity read-only, the runtime allocates one
   subnet per created network before a stack's first `up` (built-in and
-  generic Compose) and passes a subnet override, and instance teardown,
-  `workspace reap` and retention expiry free the allocations.
+  generic Compose, detached jobs, introspect, the MCP wp-cli fallback) and
+  passes a subnet override, and instance teardown, `workspace reap` and
+  retention expiry free the allocations (reap removes the networks first).
+  Prepare, Compose and release are serialized per instance; an allocation
+  refusal during `apply` rolls back; exhaustion and collisions surface as
+  typed codes, and the public admission refusal carries the allocation table
+  and release-then-reap commands.
 - Remote runtime coexistence (spec 061). Each runtime declares a control
   protocol range; `remote service status` reports `control_protocol` and a
   `compatibility` verdict, and remote consumers (workspace preflight, hosted

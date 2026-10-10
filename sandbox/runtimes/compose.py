@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -443,6 +444,13 @@ class ComposeAdapter:
                 result.project_kind, dict(result.data, creation_receipt=receipt))
 
     def _invoke_impl(self, request: OperationRequest, *, descriptor: dict[str, Any] | None = None) -> OperationResult:
+        # Holds an instance's development-range lifecycle lock, when taken,
+        # until the operation returns (spec 063).
+        with contextlib.ExitStack() as range_lock:
+            return self._invoke_ranged(request, descriptor=descriptor, range_lock=range_lock)
+
+    def _invoke_ranged(self, request: OperationRequest, *, descriptor: dict[str, Any] | None,
+                       range_lock: contextlib.ExitStack) -> OperationResult:
         # Covered creation consumes the descriptor whose intent was validated.
         # Reloading here could execute changed configuration under the old receipt.
         if descriptor is None:
@@ -503,6 +511,9 @@ class ComposeAdapter:
         if ranges is not None:
             # Spec 063: allocate before the stack's networks exist, then pass
             # the subnet override last on every call for this instance.
+            if op in {"ensure", "apply", "destroy"}:
+                # Shared for the creators, exclusive for destroy through its release.
+                range_lock.enter_context(ranges.lifecycle(runtime_id, exclusive=op == "destroy"))
             if op in {"ensure", "apply"}:
                 ranges.prepare(runtime_id)
             project_args += ranges.compose_args(runtime_id)

@@ -212,8 +212,14 @@ class RemoteJobAdmissionError(RemoteJobTransportError):
         self._decision = decision if isinstance(decision, dict) else {}
         super().__init__(self._ERROR)
 
-    def to_payload(self) -> dict:
-        """Return the stable, redacted admission envelope."""
+    def to_payload(self, *, remote: str | None = None,
+                   operation: str | None = None) -> dict:
+        """Return the stable, redacted admission envelope.
+
+        Accepts the transport-error context so the CLI edge can render either
+        error alike; the target comes only from the validated decision.
+        """
+        del remote, operation
         decision = self._decision
         code = decision.get("code")
         if not isinstance(code, str) or code not in _NETWORK_CAPACITY_CODES:
@@ -228,7 +234,13 @@ class RemoteJobAdmissionError(RemoteJobTransportError):
         # interpolate or forward an arbitrary remote/command value.
         if target["remote"] is not None:
             recovery["guidance"] = self._GUIDANCE
-        return {
+        # Spec 063: a range-exhausted refusal names who holds the subnets and
+        # how to free them; both are re-validated here, never subnets.
+        table = _admission_allocation_table(decision.get("allocation_table"))
+        commands = _admission_release_commands(decision.get("release_commands"))
+        if commands:
+            recovery["release_commands"] = commands
+        payload = {
             "ok": False,
             "status": "blocked",
             "code": code,
@@ -246,6 +258,44 @@ class RemoteJobAdmissionError(RemoteJobTransportError):
                 "network_allocation_started": False,
             },
         }
+        if table:
+            payload["allocation_table"] = table
+        return payload
+
+
+_RANGE_OWNER_KINDS = frozenset({"workspace", "job", "instance"})
+_RANGE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
+_RANGE_RELEASE_COMMAND = re.compile(
+    r"\./sb workspace release (?P<ws>[A-Za-z0-9][A-Za-z0-9_.-]{0,127}) --remote (?P<r>[a-z0-9][a-z0-9_-]{0,63}|REMOTE_NAME)"
+    r" && \./sb workspace reap --remote (?P=r) --confirm")
+_MAX_RANGE_ROWS = 20
+
+
+def _admission_allocation_table(value: object) -> list[dict]:
+    """Whitelist allocation rows: owner and workspace identity and age only."""
+    rows = []
+    for row in value if isinstance(value, list) else ():
+        if len(rows) >= _MAX_RANGE_ROWS:
+            break
+        if not isinstance(row, dict):
+            continue
+        kind, owner, workspace = row.get("owner_kind"), row.get("owner_id"), row.get("workspace_id")
+        age = _admission_int(row.get("age_seconds"))
+        if kind in _RANGE_OWNER_KINDS and isinstance(owner, str) and _RANGE_IDENTIFIER.match(owner) \
+                and isinstance(workspace, str) and _RANGE_IDENTIFIER.match(workspace):
+            rows.append({"owner_kind": kind, "owner_id": owner, "workspace_id": workspace,
+                         "age_seconds": age})
+    return rows
+
+
+def _admission_release_commands(value: object) -> list[str]:
+    commands = []
+    for command in value if isinstance(value, list) else ():
+        if len(commands) >= _MAX_RANGE_ROWS:
+            break
+        if isinstance(command, str) and _RANGE_RELEASE_COMMAND.fullmatch(command):
+            commands.append(command)
+    return commands
 
 
 _MAX_REMOTE_JSON_BYTES = 1_048_576

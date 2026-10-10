@@ -255,13 +255,22 @@ allocations live on the remote under `$SANDBOX_HOME/runtime/network-ranges/`
   pins with its own IPAM are left alone (`outside_range`). Exhaustion at this
   point refuses before any network exists. A network-create collision with a
   network Sandbox did not observe refuses `range_network_collision`, never
-  retried. Built-in stacks and generic Compose instances are both covered.
+  retried. Built-in stacks, generic Compose instances, detached wp-cli jobs,
+  `introspect` and the MCP server's wp-cli fallback are all covered. A failed
+  allocation during `apply` is a failed reconcile, so apply rolls back.
+- Each instance's prepare, Compose run and release are serialized by a lock
+  under the overrides directory: network-creating commands share it, a
+  volume-removing `down` holds it exclusively through its release.
 - Allocations belong to the instance (`instance:<name>`) and are attributed
   to its deployment root's workspace. Tearing the instance down with its
-  volumes (`destroy`, data reset, uninstall) frees them, and `workspace reap`
-  / retention expiry free every allocation of the workspaces they reclaim. A
-  stack killed any other way keeps its subnets, attributed and counted, until
-  one of those runs. A host with no range state runs none of this.
+  volumes (`destroy`, data reset, uninstall) frees them. `workspace release`
+  only marks the lease; the `workspace reap --confirm` that follows (or
+  retention expiry) removes the reclaimed stacks' networks and then frees
+  their allocations, keeping any whose network is still in use. That pair is
+  the remedy the exhaustion refusal prints, in `release_commands` and in the
+  public admission refusal's `allocation_table`. A stack killed any other
+  way keeps its subnets, attributed and counted, until one of those runs. A
+  host with no range state runs none of this.
 
 The Docker-pool transaction also treats a client-side timeout as an unknown
 outcome. The safe error omits the generated transaction command (including its

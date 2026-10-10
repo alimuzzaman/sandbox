@@ -20,7 +20,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   resource jobs return the `blocked` envelope with its `remedy`, and human
   output prints the remedy; this includes `ensure --remote` and the async
   MCP `run_e2e`/`ci_run` launches, and an unknown or unprovisioned remote
-  (`remote_not_ready_registration`). `sb doctor` covers the project's declared remote, registered or not.
+  (`remote_not_ready_registration`), also when MCP `run_tests` selects the
+  project's remote automatically. `sb doctor` covers the project's declared remote, registered or not.
 - Development ranges on a remote (spec 063, first slice). `sb remote
   network-range propose|assign|list` proposes, plans or (with `--confirm`)
   records an operator range checked against Docker networks, host routes,

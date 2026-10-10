@@ -162,7 +162,9 @@ slow proposal never hides a completed `not_ready`. Ownership repair is
 project's workspace (looked up by project, not by a predicted name). An
 unknown or unprovisioned remote is refused as `remote_not_ready_registration`
 on every submission path, including when target resolution fails before the
-gate runs. The gate reuses the caller's resolved target, so an
+gate runs and MCP `run_tests` automatic selection (other resolution failures
+there keep the local PHPUnit path). A bare `sb exec` with no local instance
+stops at instance routing before it resolves a target; pass `--remote`. The gate reuses the caller's resolved target, so an
 explicit `--config-file` survives it. Handoff is recorded only when the ensure
 and the exec passed gates at the same revision and generation. `ensure
 --remote` returns the same `blocked` envelope inside its usual error object,

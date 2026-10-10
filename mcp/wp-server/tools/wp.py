@@ -241,8 +241,14 @@ def run_tests(project_dir: str, phpunit_args: str = "",
                               required_capability="job.exec"))
             if auto_target.kind == "remote":
                 selected_remote, workspace = auto_target.remote_name, auto_target.workspace_label
-        except Exception:
-            pass
+        except Exception as exc:
+            # A declared remote that is unknown or unprovisioned refuses here;
+            # any other resolution failure keeps the historical local path.
+            from sandbox.readiness.errors import registration_refusal
+            refusal = registration_refusal(exc)
+            if refusal is not None:
+                return {**refusal.to_payload(), "passed": False, "summary": None,
+                        "output": "", "mode": resolved_mode}
     if not local and (selected_remote or workspace is not None):
         # Keep remote tests inside the shared detached runtime. The command
         # executes from the deployed project root, so `.` names the exact tree

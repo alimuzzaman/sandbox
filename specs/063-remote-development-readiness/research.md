@@ -171,7 +171,13 @@
   - A target resolution that fails on registration (`unknown_remote`,
     `remote_not_provisioned`) happens before any transport exists; every
     submission handler maps it to the same `remote_not_ready_registration`
-    refusal (`sandbox.readiness.errors.registration_refusal`).
+    refusal (`sandbox.readiness.errors.registration_refusal`). MCP
+    `run_tests` maps it during automatic selection too; any other automatic
+    resolution failure keeps its historical local PHPUnit path.
+  - A bare `sb exec --project-dir` (no `--remote`, `--local` or `--detach`)
+    with no local instance stops at the CLI's instance routing before its
+    handler resolves a target, as it did before 063; `--remote NAME` reaches
+    the refusal.
   - The gate takes the caller's resolved target (or the job submission), so
     an explicit `--config-file` selection is never resolved away.
   - A handoff is recorded only when the ensure's gate and the exec's gate

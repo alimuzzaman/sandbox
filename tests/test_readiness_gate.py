@@ -743,5 +743,240 @@ class RoundFourTests(unittest.TestCase):
         self.assertTrue(check.record_exec("vps", "project-identity", home=home, proof=proof))
 
 
+def _listing(remote, target_path, ssh_run):
+    """The real inventory helper over a fake transport."""
+    from unittest.mock import patch
+
+    from sandbox.core import _remote
+    with patch.object(_remote, "ssh_run", ssh_run):
+        return _remote.list_remote_instances(remote, target_path=target_path)
+
+
+class RoundFiveTests(unittest.TestCase):
+    """MCP run_tests keeps the registration refusal on automatic selection."""
+
+    def _wp_tool(self):
+        import importlib.util
+        import types
+        from unittest.mock import patch
+        httpx = types.ModuleType("httpx")
+        deps = types.ModuleType("dependencies")
+        deps.ToolDependencies = object
+        with patch.dict(sys.modules, {"httpx": httpx, "dependencies": deps}):
+            path = ROOT / "mcp" / "wp-server" / "tools" / "wp.py"
+            spec = importlib.util.spec_from_file_location("_readiness_wp", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        return module
+
+    def test_mcp_run_tests_registration_refusal_without_selector(self):
+        from unittest.mock import patch
+
+        from sandbox.application.target_service import TargetResolutionError
+        module = self._wp_tool()
+        local_calls = []
+
+        def local(*_a, **_k):
+            local_calls.append(_a)
+            return {"ok": False, "error": "local path reached"}
+        module._require_project_capability = local
+        module._project_instance = local
+        cases = (("unknown_remote", None), ("remote_not_provisioned", None),
+                 ("unknown_remote", "ghost"))
+        for code, remote in cases:
+            def refuse(_request, code=code):
+                raise TargetResolutionError(code, "declared remote", remote_name="ghost")
+            service = SimpleNamespace(resolve=refuse)
+            with self.subTest(code=code, remote=remote), \
+                    patch("sandbox.application.context.durable_job_dependencies",
+                          return_value={"target_service": service}), \
+                    patch.object(module, "_resolve_test_mode", return_value="unit"), \
+                    patch.object(module.subprocess, "run", side_effect=AssertionError("ran")):
+                result = module.run_tests(project_dir="/work/p", remote=remote)
+                self.assertEqual((result["status"], result["code"], result["passed"]),
+                                 ("blocked", "remote_not_ready_registration", False))
+                self.assertEqual(result["side_effects"]["bytes_transferred"], 0)
+                self.assertEqual(result["mode"], "unit")
+        self.assertEqual(local_calls, [])
+
+        # Any other resolution failure keeps the historical local PHPUnit path.
+        def other(_request):
+            raise TargetResolutionError("invalid_project", "not a sandbox project")
+        with patch("sandbox.application.context.durable_job_dependencies",
+                   return_value={"target_service": SimpleNamespace(resolve=other)}), \
+                patch.object(module, "_resolve_test_mode", return_value="unit"):
+            result = module.run_tests(project_dir="/work/p")
+        self.assertEqual(result, {"ok": False, "error": "local path reached"})
+        self.assertEqual(len(local_calls), 1)
+
+
+    def test_cmd_exec_handoff_uses_successful_submission_proof(self):
+        from unittest.mock import patch
+
+        from sandbox.commands import jobs_runtime, runtime
+        from sandbox.jobs import models
+        from sandbox.readiness import check as readiness_check
+        from sandbox.transports import remote_jobs
+        target = SimpleNamespace(kind="remote", remote_name="vps", project_root="/work/p",
+                                 workspace_label="default", runtime_policy={},
+                                 sources={"identity": "project-identity"})
+        service = SimpleNamespace(resolve=lambda _request: target)
+        policy = SimpleNamespace(deadline_seconds=60, execution_profile=None,
+                                 deadline_source="default", deadline_reminder=None,
+                                 stall_seconds=None, cancel_grace_seconds=None,
+                                 cancel_on_stall=False, cleanup_policy=None, provenance={})
+        proof = {"generation": "g1", "revision": REVISION}
+
+        class Transport:
+            def __init__(self, **_kwargs):
+                self.readiness_proof = None
+
+            def submit(self, _submission):
+                self.readiness_proof = proof
+                return {"job_id": "job-1"}
+
+        def exit_(*_a, **_k):
+            raise SystemExit(1)
+        ok = lambda *_a, **_k: "job-1"  # noqa: E731
+        cases = {"success": (ok, lambda *_a, **_k: None, False, 1),
+                 "failure": (ok, exit_, False, 0),
+                 "malformed": (exit_, lambda *_a, **_k: None, False, 0),
+                 "detached": (ok, lambda *_a, **_k: None, True, 0)}
+        for name, (validate, follow, detach, expected) in cases.items():
+            recorded = []
+            args = SimpleNamespace(project_dir="/work/p", command=["--", "true"],
+                                   repair_workspace_ownership=False, request_id=None,
+                                   in_instance=False, local=False, remote=None,
+                                   workspace=None, detach=detach, json=True,
+                                   output_profile=None)
+            with self.subTest(case=name), \
+                    patch("sandbox.application.context.durable_job_dependencies",
+                          return_value={"target_service": service}), \
+                    patch.object(runtime, "_require_matching_remote_instance"), \
+                    patch.object(jobs_runtime, "_resolved_execution_policy", return_value=policy), \
+                    patch.object(jobs_runtime, "_resolved_output_profile", return_value="default"), \
+                    patch.object(jobs_runtime, "_resolved_project_identity",
+                                 return_value="project-identity"), \
+                    patch.object(jobs_runtime, "_source_identity",
+                                 return_value=SourceIdentity("caller")), \
+                    patch.object(models, "JobSubmission", lambda *_a, **_k: SimpleNamespace()), \
+                    patch.object(remote_jobs, "RemoteJobTransport", Transport), \
+                    patch.object(runtime, "_validate_remote_exec_acceptance", validate), \
+                    patch.object(runtime, "_follow_remote_exec", follow), \
+                    patch.object(readiness_check, "record_exec",
+                                 lambda *a, **k: recorded.append((a, k))), \
+                    patch("builtins.print"):
+                try:
+                    runtime.cmd_exec({}, args)
+                except SystemExit:
+                    pass
+                self.assertEqual(len(recorded), expected)
+                if expected:
+                    self.assertEqual(recorded[0][0], ("vps", "project-identity"))
+                    self.assertIs(recorded[0][1]["proof"], proof)
+
+    def test_ownership_probe_uses_project_filtered_remote_registry(self):
+        from unittest.mock import patch
+
+        from sandbox.core import _remote
+        target = SimpleNamespace(project_root="/work/project", workspace_label="qa")
+        commands = []
+
+        def ssh(listing):
+            def run(_remote, command, timeout=None):
+                commands.append(command)
+                if command.startswith("test -d"):
+                    return subprocess.CompletedProcess([], 0, "", "")
+                return listing
+            return run
+        inventories = {
+            "truncated": (subprocess.CompletedProcess([], 0, json.dumps({"instances": [
+                {"name": "a-very-long-project-na-3", "token": "secret"}]}), ""), True),
+            "empty": (subprocess.CompletedProcess(
+                [], 0, json.dumps({"instances": []}), ""), False),
+        }
+        for name, (listing, expected) in inventories.items():
+            commands.clear()
+            with self.subTest(case=name), \
+                    patch.object(_remote, "remote_sb_path", return_value="/r/sb"):
+                present = check.project_instance_present(
+                    {"name": "vps"}, target, ssh_run=ssh(listing),
+                    workspace_path=lambda *_a: "/r/ws/qa",
+                    list_instances=lambda remote, target_path=None, listing=listing:
+                        _listing(remote, target_path, ssh(listing)))
+                self.assertIs(present, expected)
+                self.assertIn("instances --project-dir /r/ws/qa --json", commands[-1])
+
+        # A listing failure raises, and the ownership row falls through to its
+        # `test -x sb` check rather than claiming no instance.
+        failed = subprocess.CompletedProcess([], 2, "", "boom")
+        with patch.object(_remote, "remote_sb_path", return_value="/r/sb"), \
+                self.assertRaises(RuntimeError):
+            check.project_instance_present(
+                {"name": "vps"}, target, ssh_run=ssh(failed),
+                workspace_path=lambda *_a: "/r/ws/qa",
+                list_instances=lambda remote, target_path=None:
+                    _listing(remote, target_path, ssh(failed)))
+
+    def test_install_paths_invalidate_readiness_proofs(self):
+        # Migrate, provision and `remote up` record the new service with
+        # put_remote(..., mcp_service=...); each must invalidate right after.
+        tree = ast.parse((ROOT / "sandbox" / "commands" / "remote.py").read_text())
+        checked = 0
+        blocks = [getattr(node, field) for node in ast.walk(tree)
+                  for field in ("body", "orelse", "finalbody")
+                  if isinstance(getattr(node, field, None), list)]
+        for body in blocks:
+            for index, statement in enumerate(body):
+                call = getattr(statement, "value", None)
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "put_remote"
+                        and any(k.arg == "mcp_service" for k in call.keywords)):
+                    continue
+                checked += 1
+                following = ast.unparse(body[index + 1]) if index + 1 < len(body) else ""
+                with self.subTest(line=statement.lineno):
+                    self.assertIn("_invalidate_readiness(name)", following)
+        self.assertGreaterEqual(checked, 5)
+
+    def test_submission_cli_dispatch_preserves_registration_refusal(self):
+        # The real `./sb` dispatcher, a fresh SANDBOX_HOME, and a project that
+        # declares a remote nobody registered: every submission refuses with
+        # the registration envelope and transfers nothing.
+        from tests.subprocess_support import run_test_process
+        scratch = Path(tempfile.mkdtemp())
+        home, project = scratch / "home", scratch / "proj"
+        (project / ".github" / "workflows").mkdir(parents=True)
+        home.mkdir()
+        (project / "sandbox.config.json").write_text(json.dumps(
+            {"name": "proj", "runtime": {"default": "remote", "remote": "ghost"}}))
+        (project / "playwright.config.ts").write_text("export default {};\n")
+        workflow = project / ".github" / "workflows" / "ci.yml"
+        workflow.write_text("name: ci\non: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n"
+                            "    steps:\n      - run: \"true\"\n")
+        pd = ["--project-dir", str(project)]
+        env = {"SANDBOX_HOME": str(home), "SANDBOX_PROJECT_ROOTS": str(scratch.resolve())}
+        commands = {
+            "test": ["test", *pd, "--json"],
+            "e2e": ["e2e", *pd, "--json"],
+            "ci": ["ci", "run", str(workflow), *pd, "--json"],
+            "exec": ["exec", *pd, "--remote", "ghost", "--json", "--", "true"],
+            "job-start": ["job-start", *pd, "--json", "--", "true"],
+            "ensure": ["ensure", *pd, "--remote", "ghost", "--json"],
+        }
+        for name, argv in commands.items():
+            with self.subTest(command=name):
+                result = run_test_process([str(ROOT / "sb"), *argv], capture_output=True,
+                                          text=True, env=env,
+                                          timeout=120, cwd=str(ROOT))
+                self.assertNotEqual(result.returncode, 0)
+                payload = json.loads(result.stdout.strip().splitlines()[-1])
+                self.assertEqual((payload["status"], payload["code"], payload["remedy"]),
+                                 ("blocked", "remote_not_ready_registration", "./sb remote list"))
+                self.assertEqual(payload["side_effects"]["bytes_transferred"], 0)
+        human = run_test_process([str(ROOT / "sb"), "test", *pd], capture_output=True, text=True,
+                                 env=env, timeout=120, cwd=str(ROOT))
+        self.assertIn("Remedy: ./sb remote list", human.stderr)
+
 if __name__ == "__main__":
     unittest.main()

@@ -265,8 +265,11 @@ allocations live on the remote under `$SANDBOX_HOME/runtime/network-ranges/`
   to its deployment root's workspace. Tearing the instance down with its
   volumes (`destroy`, data reset, uninstall) frees them. `workspace release`
   only marks the lease; the `workspace reap --confirm` that follows (or
-  retention expiry) removes the reclaimed stacks' networks and then frees
-  their allocations, keeping any whose network is still in use. That pair is
+  retention expiry) sweeps every instance no longer registered on the host:
+  it removes that instance's networks, then frees its allocations. An
+  instance allocated in the last ten minutes or with a Compose call in flight
+  is skipped. One whose network is still in use is kept, the reap reports
+  `partial` (`range_networks_in_use`), and the next reap retries it. That pair is
   the remedy the exhaustion refusal prints, in `release_commands` and in the
   public admission refusal's `allocation_table`. A stack killed any other
   way keeps its subnets, attributed and counted, until one of those runs. A

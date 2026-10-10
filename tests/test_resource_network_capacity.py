@@ -688,6 +688,15 @@ class RangeAdmissionTests(unittest.TestCase):
         self.assertNotIn("10.200", json.dumps(result))
         self.assertEqual(len(self.commands), 2)
 
+    def test_ranges_are_not_consulted_for_other_pool_outcomes(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=self.holder)
+        self.commands.clear()
+        conflict = {"ok": True, "status": "partial", "reason": "network_allocation_conflict",
+                    "collision_count": 1}
+        result = self.admit(conflict)
+        self.assertEqual(result["code"], "network_allocation_conflict")
+        self.assertTrue(all(command.startswith("sudo -n ") for command in self.commands))
+
     def test_without_a_range_the_missing_pool_refusal_is_unchanged(self):
         result = self.admit(NO_POOLS)
         self.assertFalse(result["ok"])

@@ -185,6 +185,28 @@ class RangeStore:
         table = value.get("table") if isinstance(value.get("table"), list) else []
         return {"granted": [], "range": value.get("range"), "table": table[:program.MAX_TABLE]}
 
+    def instance_owners(self, after: str | None = None) -> dict:
+        """One page of instance owners with their networks, after ``after``."""
+        request = {"op": "instance-owners"}
+        if after is not None:
+            request["after"] = after
+        value = self._call(request)
+        owners = value.get("owners")
+        if not isinstance(owners, list) or len(owners) > program.MAX_LISTED:
+            raise RangeError(STORE_UNAVAILABLE, "range owner listing is invalid")
+        page = []
+        for row in owners:
+            owner = row.get("owner_id") if isinstance(row, dict) else None
+            networks = row.get("networks") if isinstance(row, dict) else None
+            if not isinstance(owner, str) or not owner.startswith("instance:") \
+                    or not isinstance(networks, list) \
+                    or not all(isinstance(name, str) and name for name in networks):
+                raise RangeError(STORE_UNAVAILABLE, "range owner listing is invalid")
+            age = row.get("age_seconds")
+            page.append({"owner_id": owner, "networks": networks,
+                         "age_seconds": age if type(age) is int and age >= 0 else 0})
+        return {"owners": page, "truncated": value.get("truncated") is True}
+
     def release_owner(self, *, owner_id: str | None = None,
                       workspace_id: str | None = None) -> int:
         request = {"op": "release-owner"}

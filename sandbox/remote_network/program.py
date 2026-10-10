@@ -183,6 +183,26 @@ if _op == "stats":
     _state = _load()
     _emit({"range": _range_stats(_state), "table": _table(_state["allocations"])})
 
+if _op == "instance-owners":
+    # Reap's sweep: instance owners after an optional cursor, each with every
+    # network it holds, a page at a time so no owner's networks are cut off.
+    _after = _request.get("after")
+    if _after is not None and (not isinstance(_after, str) or not _ID.fullmatch(_after)):
+        _refuse("range_request_invalid", "cursor must be an owner id")
+    if not _os.path.isdir(_root):
+        _emit({"owners": [], "truncated": False})
+    _fd = _lock(False)
+    _state = _load()
+    _owners, _newest = {}, {}
+    for _a in _state["allocations"]:
+        if _a["owner_kind"] == "instance" and (_after is None or _a["owner_id"] > _after):
+            _owners.setdefault(_a["owner_id"], set()).add(_a["network"])
+            _newest[_a["owner_id"]] = max(_newest.get(_a["owner_id"], 0), _a["allocated_at"])
+    _page = sorted(_owners)[:MAX_LISTED]
+    _emit({"owners": [{"owner_id": _o, "networks": sorted(_owners[_o]),
+                       "age_seconds": max(0, _now - _newest[_o])} for _o in _page],
+           "truncated": len(_owners) > len(_page)})
+
 if _op == "assign":
     try:
         _dev = parse_range(_request.get("cidr"), _request.get("subnet_prefix"))

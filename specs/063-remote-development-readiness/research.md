@@ -122,9 +122,11 @@
   only marks the lease and destroys nothing, and reap removes containers
   without `compose down`, leaving the stack networks. So the runtime frees in
   two places: the `compose down -v` hook of the R4 revision for instance
-  teardown, and reap's `reconcile_after_removal`, which removes each
-  reclaimed workspace's granted networks and releases the workspace only once
-  they are gone. The operator remedy is `workspace release` followed by
+  teardown, and reap's `reconcile_after_removal`, which on every run sweeps
+  instance owners missing from the registry (paged, never truncated), removes
+  their networks and releases each only once they are gone. A kept owner is
+  reported `partial` and retried by the next reap; owners younger than ten
+  minutes or with a held lifecycle lock are skipped. The operator remedy is `workspace release` followed by
   `workspace reap --confirm`.
 - **Rationale**: The workspace lifecycle already owns retention; no new timer
   is needed.

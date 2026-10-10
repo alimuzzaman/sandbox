@@ -148,33 +148,68 @@ class RangeRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.release("a-qa"), 1)
         self.assertEqual([r["owner_id"] for r in self.store.stats()["table"]], ["instance:a"])
 
-    def test_reaped_workspaces_free_their_instances_allocations(self):
-        self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
-        runtime = range_runtime.RangeRuntime(
-            self.home, store=self.store, overrides=self.overrides,
+    def _sweep(self, live, **kw):
+        from unittest.mock import patch
+        kw.setdefault("remove_network", lambda _n: True)
+        kw.setdefault("grace_seconds", 0)
+        with patch.object(range_runtime, "_LocalRunner", return_value=self.runner):
+            return range_runtime.release_removed_instances(live, self.home, **kw)
+
+    def _home_runtime(self):
+        return range_runtime.RangeRuntime(
+            self.home, store=self.store, overrides=range_runtime._overrides_dir(self.home),
             compose_config=lambda instance: self.configs[instance],
             workspace_of=lambda instance: "site-" + instance)
+
+    def test_reap_frees_instances_that_are_no_longer_registered(self):
+        self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
+        runtime = self._home_runtime()
         self.configs["a"] = config("sandbox-a", "default")
         self.configs["b"] = config("sandbox-b", "default")
         runtime.prepare("a")
         runtime.prepare("b")
-        from unittest.mock import patch
-        with patch.object(range_runtime, "_LocalRunner", return_value=self.runner):
-            self.assertEqual(range_runtime.release_workspaces(["site-a", "../x"], self.home,
-                                                                remove_network=lambda _n: True), 1)
-        self.assertEqual([r["workspace_id"] for r in self.store.stats()["table"]], ["site-b"])
+        self.assertEqual(self._sweep({"b"}), {"released": 1, "retained": []})
+        self.assertEqual([r["owner_id"] for r in self.store.stats()["table"]], ["instance:b"])
+        self.assertFalse(runtime.override_path("a").exists())
 
-    def test_reap_program_frees_ranges_for_removed_workspaces(self):
+    def test_reap_program_sweeps_ranges_on_every_reconcile(self):
         from sandbox.resources.remote import _REMOTE_PROGRAM
-        self.assertIn("release_workspaces(", _REMOTE_PROGRAM)
-        self.assertIn('"network-ranges" / "state.json"', _REMOTE_PROGRAM)
+        self.assertIn("release_removed_instances(", _REMOTE_PROGRAM)
+        self.assertIn("return _sweep_ranges(result)", _REMOTE_PROGRAM.split(
+            "def reconcile_after_removal")[1].split("names = ")[1].split("try:")[0])
 
-    def test_reap_removes_networks_before_releasing_and_keeps_survivors(self):
+    def test_reconcile_reports_retained_owners_as_partial(self):
+        import ast
+        from unittest.mock import patch
+        from sandbox.resources.remote import _REMOTE_PROGRAM
+        tree = ast.parse(_REMOTE_PROGRAM.replace("__REQUEST__", "'{}'"))
+        sweep = next(node for node in tree.body
+                     if isinstance(node, ast.FunctionDef) and node.name == "_sweep_ranges")
+        namespace = {"RUNTIME": self.home / "runtime", "HOME": self.home}
+        exec(compile(ast.Module([sweep], []), "remote", "exec"), namespace)
+        range_runtime.state_file(self.home).parent.mkdir(parents=True, exist_ok=True)
+        range_runtime.state_file(self.home).touch()
+
+        class Registry:
+            def __init__(self, _path):
+                pass
+
+            def read_only_all(self):
+                return {"/d/site-b": {"instance": "b"}}
+        seen = []
+        with patch("sandbox.project_registry.JsonRegistryRepository", Registry), \
+                patch.object(range_runtime, "release_removed_instances",
+                             side_effect=lambda live, home: seen.append(live)
+                             or {"released": 1, "retained": ["a"]}):
+            result = namespace["_sweep_ranges"]({"status": "complete"})
+        self.assertEqual(seen, [{"b"}])
+        self.assertEqual(result, {"status": "partial", "reason": "range_networks_in_use",
+                                  "range_allocations_released": 1,
+                                  "range_allocations_retained": 1})
+
+    def test_reap_removes_networks_first_and_retries_survivors(self):
         self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
-        runtime = range_runtime.RangeRuntime(
-            self.home, store=self.store, overrides=self.overrides,
-            compose_config=lambda instance: self.configs[instance],
-            workspace_of=lambda instance: "site-" + instance)
+        runtime = self._home_runtime()
         self.configs["a"] = config("sandbox-a", "default")
         self.configs["b"] = config("sandbox-b", "default")
         runtime.prepare("a")
@@ -184,12 +219,37 @@ class RangeRuntimeTests(unittest.TestCase):
         def remove(network):
             removed.append(network)
             return network != "sandbox-b_default"  # b's network is still in use
-        from unittest.mock import patch
-        with patch.object(range_runtime, "_LocalRunner", return_value=self.runner):
-            self.assertEqual(range_runtime.release_workspaces(
-                ["site-a", "site-b"], self.home, remove_network=remove), 1)
+        self.assertEqual(self._sweep(set(), remove_network=remove),
+                         {"released": 1, "retained": ["b"]})
         self.assertEqual(removed, ["sandbox-a_default", "sandbox-b_default"])
-        self.assertEqual([r["workspace_id"] for r in self.store.stats()["table"]], ["site-b"])
+        self.assertEqual([r["owner_id"] for r in self.store.stats()["table"]], ["instance:b"])
+        # The next reap retries the retained owner once its network is free.
+        self.assertEqual(self._sweep(set()), {"released": 1, "retained": []})
+        self.assertEqual(self.store.stats()["table"], [])
+
+    def test_reap_pages_owners_so_none_is_released_unseen(self):
+        from unittest.mock import patch
+        from sandbox.remote_network import program
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
+        runtime = self._home_runtime()
+        for name in ("a", "b", "c"):
+            self.configs[name] = config(f"sandbox-{name}", "default")
+            runtime.prepare(name)
+        removed = []
+        with patch.object(program, "MAX_LISTED", 1):
+            result = self._sweep({"a"}, remove_network=lambda n: removed.append(n) or True)
+        self.assertEqual(result, {"released": 2, "retained": []})
+        self.assertEqual(removed, ["sandbox-b_default", "sandbox-c_default"])
+
+    def test_reap_skips_recent_and_in_flight_owners(self):
+        self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
+        runtime = self._home_runtime()
+        self.configs["a"] = config("sandbox-a", "default")
+        runtime.prepare("a")
+        self.assertEqual(self._sweep(set(), grace_seconds=600), {"released": 0, "retained": []})
+        with runtime.lifecycle("a"):
+            self.assertEqual(self._sweep(set()), {"released": 0, "retained": []})
+        self.assertEqual(self._sweep(set()), {"released": 1, "retained": []})
 
     def test_volume_down_lock_excludes_a_concurrent_up(self):
         entered = threading.Event()
@@ -211,9 +271,10 @@ class RangeRuntimeTests(unittest.TestCase):
         self.runtime.prepare("a")
         self.assertEqual(sorted(p.name for p in self.overrides.iterdir()), ["a.yml"])
 
-    def test_release_workspaces_is_inert_without_ranges(self):
+    def test_reap_sweep_is_inert_without_ranges(self):
         self.runner.fail = True
-        self.assertEqual(range_runtime.release_workspaces(["site-a"], self.home), 0)
+        self.assertEqual(range_runtime.release_removed_instances(set(), self.home),
+                         {"released": 0, "retained": []})
 
     def test_instance_names_that_cannot_be_owner_ids_are_refused(self):
         self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
@@ -299,6 +360,22 @@ class ComposeHookTests(unittest.TestCase):
         fake = _FakeRanges(subprocess.CalledProcessError(1, ["docker"]))
         _, results = self._compose(fake, (("up", "-d"), {"check": False}))
         self.assertTrue(results[0].stderr.startswith("range_prepare_failed: "))
+
+    def test_failing_compose_config_never_exits_past_the_callers_rollback(self):
+        import subprocess
+        from unittest.mock import patch
+        from sandbox.core import _docker, _ui
+        failed = subprocess.CompletedProcess([], 1, "", "bad compose file")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            range_runtime.state_file(home).parent.mkdir(parents=True)
+            range_runtime.state_file(home).write_text("{}")
+            ranges = range_runtime.RangeRuntime(home, store=None, overrides=home / "o",
+                                                compose_config=_docker._compose_config)
+            with patch.object(_ui.subprocess, "run", return_value=failed):
+                # `run(check=True)` would sys.exit() here, past apply's rollback.
+                refusal = _docker._prepare_ranges(ranges, "x")
+        self.assertTrue(refusal.startswith("range_prepare_failed: "))
 
     def test_collision_on_a_granted_subnet_is_typed(self):
         import subprocess

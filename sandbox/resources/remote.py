@@ -2635,7 +2635,7 @@ def reconcile_after_removal(removed_paths, workspace_ids):
     }
     names = {Path(item).name for item in removed_paths if item}
     if not names:
-        return result
+        return _sweep_ranges(result)
     try:
         from sandbox.project_registry import JsonRegistryRepository
 
@@ -2673,17 +2673,31 @@ def reconcile_after_removal(removed_paths, workspace_ids):
             result["leases_removed"] += 1
         except OSError:
             pass
-    # Spec 063: reap removes stacks without `compose down`, so free the
-    # reclaimed workspaces' development-range subnets here.
-    if (RUNTIME / "network-ranges" / "state.json").is_file():
-        try:
-            from sandbox.remote_network.runtime import release_workspaces
+    return _sweep_ranges(result)
 
-            result["range_allocations_released"] = release_workspaces(
-                [name for name in names if LEASE_NAME.fullmatch(name)], HOME)
-        except Exception:
-            result["status"] = "partial"
-            result.setdefault("reason", "range_release_unavailable")
+
+def _sweep_ranges(result):
+    # Spec 063: reap removes stacks without `compose down`, so free the
+    # development-range subnets of every instance no longer registered. It runs
+    # on every reap, so an owner kept because its network survived is retried.
+    if not (RUNTIME / "network-ranges" / "state.json").is_file():
+        return result
+    try:
+        from sandbox.project_registry import JsonRegistryRepository
+        from sandbox.remote_network.runtime import release_removed_instances
+
+        live = {record.get("instance") for record in
+                JsonRegistryRepository(RUNTIME / "registry.json").read_only_all().values()}
+        swept = release_removed_instances(live, HOME)
+    except Exception:
+        result["status"] = "partial"
+        result.setdefault("reason", "range_release_unavailable")
+        return result
+    result["range_allocations_released"] = swept["released"]
+    if swept["retained"]:
+        result["range_allocations_retained"] = len(swept["retained"])
+        result["status"] = "partial"
+        result.setdefault("reason", "range_networks_in_use")
     return result
 
 

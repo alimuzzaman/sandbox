@@ -7,8 +7,8 @@ controller drives over SSH), allocations are owned by the instance
 (owner kind ``instance``, ``instance:<name>``) and attributed to the
 workspace the instance's root belongs to, so the exhaustion table names a
 ``workspace release`` target. A volume-removing ``down`` releases them; reap
-(which ``workspace release`` makes eligible) removes the stack networks and
-releases by workspace. With no range state on this host nothing runs.
+(which ``workspace release`` makes eligible) sweeps every instance no longer
+registered, removing its networks before releasing it. With no range state on this host nothing runs.
 """
 from __future__ import annotations
 
@@ -179,34 +179,74 @@ def _remove_network(name: str) -> bool:
         re.search(r"no such network|not found", result.stderr or "", re.IGNORECASE))
 
 
-def release_workspaces(names, home: Path | None = None, *,
-                       remove_network: Callable[[str], bool] = _remove_network) -> int:
-    """Free every allocation attributed to reclaimed workspaces (research R5).
+SWEEP_GRACE_SECONDS = 600
+
+
+def _overrides_dir(home: Path) -> Path:
+    return Path(home) / "runtime" / "network-ranges" / "overrides"
+
+
+@contextmanager
+def _try_exclusive(path: Path):
+    """Yield whether the instance lifecycle lock was free (taken if so)."""
+    if not _INSTANCE.fullmatch(path.stem):
+        yield False
+        return
+    if not path.is_file():
+        yield True
+        return
+    descriptor = os.open(path, os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(descriptor)
+
+
+def release_removed_instances(live, home: Path | None = None, *,
+                              remove_network: Callable[[str], bool] = _remove_network,
+                              grace_seconds: int = SWEEP_GRACE_SECONDS) -> dict:
+    """Free the allocations of instances that no longer exist (research R5).
 
     Reap removes deployment roots and their containers directly, without a
     ``compose down``, so the instance hook never runs there and the stack
-    networks are left behind. Each granted network is removed first; a
-    workspace is released only when all of its networks are gone, since a
-    surviving network still occupies its subnet and the allocator would skip
-    it as foreign. Instance allocations carry the deployment-root name as
-    ``workspace_id``.
+    networks are left behind. Every instance owner not in ``live`` (the
+    instance names still registered on this host) has its networks removed
+    first and is released only once all are gone: a surviving network still
+    occupies its subnet. A retained owner is still unregistered on the next
+    reap, so the sweep retries it; owners are paged, never truncated.
     """
     if home is None:
         from sandbox.core._paths import _sandbox_base
         home = _sandbox_base()
+    result = {"released": 0, "retained": []}
     if not state_file(home).is_file():
-        return 0
+        return result
     store = RangeStore({"name": "local"}, _LocalRunner(Path(home)))
-    wanted = {name for name in names if isinstance(name, str) and _WORKSPACE.fullmatch(name)}
-    networks: dict[str, set[str]] = {name: set() for name in wanted}
-    for row in store.list()["allocations"]:
-        if row.get("workspace_id") in wanted and isinstance(row.get("network"), str):
-            networks[row["workspace_id"]].add(row["network"])
-    released = 0
-    for name in sorted(wanted):
-        if all([remove_network(network) for network in sorted(networks[name])]):
-            released += store.release_owner(workspace_id=name)
-    return released
+    overrides = _overrides_dir(Path(home))
+    after = None
+    while True:
+        page = store.instance_owners(after)
+        for owner in page["owners"]:
+            name = owner["owner_id"].removeprefix("instance:")
+            # A just-allocated owner may precede its registry record.
+            if name in live or owner["age_seconds"] < grace_seconds:
+                continue
+            with _try_exclusive(overrides / f"{name}.lock") as idle:
+                if not idle:
+                    continue  # a Compose call for it is in flight
+                if all([remove_network(network) for network in owner["networks"]]):
+                    result["released"] += store.release_owner(owner_id=owner["owner_id"])
+                    (overrides / f"{name}.yml").unlink(missing_ok=True)
+                else:
+                    result["retained"].append(name)
+        if not page["truncated"] or not page["owners"]:
+            return result
+        after = page["owners"][-1]["owner_id"]
 
 
 def default_runtime(*, compose_config: Callable[[str], dict],
@@ -221,5 +261,5 @@ def default_runtime(*, compose_config: Callable[[str], dict],
         return None
     store = RangeStore({"name": "local"}, _LocalRunner(home), installed_protocol=local_protocol())
     return RangeRuntime(home, store=store,
-                        overrides=home / "runtime" / "network-ranges" / "overrides",
+                        overrides=_overrides_dir(home),
                         compose_config=compose_config, workspace_of=workspace_of)

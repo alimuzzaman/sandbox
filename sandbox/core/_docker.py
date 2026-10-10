@@ -764,8 +764,12 @@ def _range_workspace(instance: str) -> str | None:
 
 def _compose_config(instance: str) -> dict:
     """The stack's effective Compose config, without any range override."""
+    # check=False: `run` exits the process on failure, which would skip the
+    # caller's rollback; a failure here is a handled preparation refusal.
     result = run([*_compose_base(instance), "--project-directory", str(ROOT),
-                  "config", "--format", "json"], check=True, capture=True, timeout=60)
+                  "config", "--format", "json"], check=False, capture=True, timeout=60)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, "docker compose config")
     return json.loads(result.stdout)
 
 

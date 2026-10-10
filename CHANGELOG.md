@@ -21,7 +21,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   subnet per created network before a stack's first `up` (built-in and
   generic Compose, detached jobs, introspect, the MCP wp-cli fallback) and
   passes a subnet override, and instance teardown, `workspace reap` and
-  retention expiry free the allocations (reap removes the networks first).
+  retention expiry free the allocations (every reap sweeps unregistered
+  instances, removing their networks first and retrying any still in use).
   Prepare, Compose and release are serialized per instance; an allocation
   refusal during `apply` rolls back; exhaustion and collisions surface as
   typed codes, and the public admission refusal carries the allocation table

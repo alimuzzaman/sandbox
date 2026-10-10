@@ -46,7 +46,9 @@ def require_ready(project_dir: str, remote: str, submission=None, *,
 
 def _submission_target(submission):
     from types import SimpleNamespace
+    from sandbox.application.target_service import last_selection
+    selection = last_selection(submission.project_root, submission.remote_name)
     return SimpleNamespace(
         kind="remote", remote_name=submission.remote_name, remote=None,
         project_root=submission.project_root, workspace_label=submission.workspace_label,
-        sources={"identity": submission.project_identity, "remote_selection": None})
+        sources={"identity": submission.project_identity, "remote_selection": selection})

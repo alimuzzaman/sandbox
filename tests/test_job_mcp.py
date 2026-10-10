@@ -202,7 +202,8 @@ class JobMcpTests(unittest.TestCase):
             status = jobs.job_status("a" * 32, remote="vps")
             output = jobs.job_output("a" * 32, remote="vps", cursor="opaque", max_bytes=4096)
 
-        self.assertEqual(accepted, started)
+        # Spec 063 FR-021: the result adds how the remote was selected.
+        self.assertEqual(accepted, {**started, "remote_selection": None})
         self.assertEqual(status, {"ok": True, "job_id": "a" * 32, "lifecycle": "running"})
         self.assertTrue(output["bounded"])
         self.assertEqual(calls[0][1].deadline_seconds, 120)
@@ -281,7 +282,8 @@ class JobMcpTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True, "passed": None, "summary": "remote test job accepted",
                                   "output": "", "mode": "unit", "job_id": "b" * 32,
-                                  "lifecycle": "accepted", "workspace": "php", "remote": "vps"})
+                                  "lifecycle": "accepted", "workspace": "php", "remote": "vps",
+                                  "remote_selection": None})
         self.assertEqual(submissions[0].project_identity, "project:remote")
         self.assertEqual(
             submissions[0].source.identity,

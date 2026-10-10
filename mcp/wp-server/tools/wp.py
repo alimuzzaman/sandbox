@@ -236,6 +236,7 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         return {"ok": False, "passed": False, "summary": None,
                 "output": "", "mode": None, "error": str(exc)}
     selected_remote = remote
+    auto_target = None
     if not local and selected_remote is None and workspace is None:
         # A configured project-level remote is the default; an unconfigured or
         # non-Sandbox project keeps the historical local PHPUnit path.
@@ -247,6 +248,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
                               required_capability="job.exec"))
             if auto_target.kind == "remote":
                 selected_remote, workspace = auto_target.remote_name, auto_target.workspace_label
+            else:
+                auto_target = None
         except Exception as exc:
             # A remote that cannot be selected (unknown, unprovisioned,
             # ambiguous, or lacking the capability) refuses here; a local run
@@ -271,11 +274,12 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         from sandbox.transports.remote_jobs import RemoteJobAdmissionError
         from sandbox.config.runtime import normalize_runtime_policy, resolve_execution_policy
         try:
-            dependencies = durable_job_dependencies()
-            target = dependencies["target_service"].resolve(TargetRequest(
-                project_dir=project_dir, config_file=config_file,
-                remote=selected_remote, workspace=workspace,
-                required_capability="job.exec"))
+            # The automatic selection is reused, so it keeps its provenance
+            # (profile or single-configured) rather than reading as explicit.
+            target = auto_target or durable_job_dependencies()["target_service"].resolve(
+                TargetRequest(project_dir=project_dir, config_file=config_file,
+                              remote=selected_remote, workspace=workspace,
+                              required_capability="job.exec"))
             if target.kind != "remote":
                 raise ValueError("remote test target did not resolve to a remote")
             runtime = normalize_runtime_policy(getattr(target, "runtime_policy", None))
@@ -323,7 +327,9 @@ def run_tests(project_dir: str, phpunit_args: str = "",
                     "error": f"remote durable test acceptance failed: {exc}"}
         return {"ok": True, "passed": None, "summary": "remote test job accepted", "output": "",
                 "mode": resolved_mode, "job_id": accepted["job_id"], "lifecycle": "accepted",
-                "workspace": target.workspace_label, "remote": target.remote_name}
+                "workspace": target.workspace_label, "remote": target.remote_name,
+                "remote_selection": (getattr(target, "sources", None) or {}).get(
+                    "remote_selection")}
     capability_error = (_require_project_capability(
         project_dir, label, "wordpress.cli", config_file,
     ) if config_file is not None else _require_project_capability(
@@ -370,7 +376,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         # An explicit local run states the declared remote it bypassed when
         # that remote is not ready (spec 063 FR-022).
         from sandbox.readiness.notice import local_notice
-        result.update(local_notice(project_dir) or {"remote_selection": "local"})
+        result.update(local_notice(project_dir, config_file=config_file)
+                      or {"remote_selection": "local"})
     return result
 
 

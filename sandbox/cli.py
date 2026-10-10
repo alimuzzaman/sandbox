@@ -129,12 +129,12 @@ def _local_selection_notice(args) -> None:
         return
     if os.environ.get("SANDBOX_DURABLE_JOB_ID"):
         return
-    project_dir = getattr(args, "project_dir", None)
-    if not project_dir:
-        return
+    # The handlers fall back to the working directory, and so does the notice.
+    project_dir = getattr(args, "project_dir", None) or os.getcwd()
     from sandbox.readiness import notice
     try:
-        found = notice.local_notice(project_dir)
+        found = notice.local_notice(project_dir,
+                                    config_file=getattr(args, "config_file", None))
     except Exception:
         return
     if found:

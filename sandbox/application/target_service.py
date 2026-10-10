@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 from pathlib import Path
 from typing import Callable, Protocol
@@ -13,6 +14,22 @@ from sandbox.jobs.models import ResolvedTarget, TargetRequest
 
 class TargetServiceProtocol(Protocol):
     def resolve(self, request): ...
+
+
+# The last remote this context resolved, as (project_root, remote_name,
+# remote_selection). The readiness gate receives a JobSubmission, which has no
+# selection field (its keys are part of control protocol 3), and reads the
+# selection back from here (spec 063 FR-021). Threads start with no value.
+_LAST_SELECTION: contextvars.ContextVar = contextvars.ContextVar(
+    "sandbox_last_remote_selection", default=None)
+
+
+def last_selection(project_root: str, remote_name: str) -> str | None:
+    """How this context last selected ``remote_name`` for ``project_root``."""
+    value = _LAST_SELECTION.get()
+    if value is not None and value[0] == project_root and value[1] == remote_name:
+        return value[2]
+    return None
 
 
 SELECTION_HINT = ("set runtime.remote in sandbox.config.json to a registered remote, "
@@ -122,6 +139,8 @@ class TargetService:
                         "unsupported_capability",
                         f"remote {remote_name!r} does not advertise {request.required_capability!r}",
                     )
+        if kind == "remote":
+            _LAST_SELECTION.set((project_root, remote_name, selection_source or source))
         workspace = request.workspace or runtime["workspace"]
         digest = hashlib.sha256(project_root.encode()).hexdigest()[:12]
         namespace = (f"remote:{remote_name}:{digest}" if kind == "remote"
@@ -146,11 +165,12 @@ class TargetService:
             remote=remote, runtime_policy=runtime,
         )
 
-    def declared_remote(self, project_dir: str) -> str | None:
+    def declared_remote(self, project_dir: str, *, config_file: str | None = None) -> str | None:
         """The remote name the project's runtime policy names, registered or
         not; None when the project names none or cannot be loaded."""
         try:
-            config = self._config_loader(project_dir)
+            config = self._config_loader(project_dir, config_file=config_file) \
+                if config_file is not None else self._config_loader(project_dir)
             runtime = normalize_runtime_policy((config or {}).get("runtime"))
         except Exception:
             return None

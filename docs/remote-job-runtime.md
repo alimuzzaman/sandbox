@@ -171,17 +171,20 @@ names what to fix: for `unknown_remote` the refused `name`, its
 in `sandbox.config.json`), the `registered` names and a `hint`; for
 `ambiguous_remote` the eligible `candidates`; for `remote_not_provisioned`
 the `./sb remote provision NAME` remedy. Names are bounded to 50 and must be
-name-shaped. The envelope and the readiness result carry `remote_selection`
-(`explicit`, `profile`, `single-configured`, or null when no remote could be
-chosen). Nothing falls back to a local run: MCP `run_tests` with no selector
+name-shaped, and human output prints the same facts. The envelope, the
+readiness result and successful MCP `run_tests`/`job_start` remote results
+carry `remote_selection` (`explicit`, `profile`, `single-configured`, or null
+when no remote could be chosen); a refusal raised by the gate keeps the
+selection of the caller's own resolution. Nothing falls back to a local run: MCP `run_tests` with no selector
 refuses every resolution failure except a project Sandbox cannot load, which
 keeps the historical local PHPUnit path. A local run needs `--local` (MCP
 `local=True`); when the project declares a remote whose registration fails
 or whose stored proof has a `not_ready` row, the CLI prints `remote_selection:
 local; the declared remote 'NAME' is not ready: ASPECT (REASON)` on stderr,
 and MCP `run_tests`/`job_start` add `{remote_selection: "local",
-declared_remote, failing_aspect, reason}` to the result. The notice reads the
-stored proof and never probes; it is skipped inside durable jobs, where a
+declared_remote, failing_aspect, reason}` to the result. The notice follows the
+command's project (the working directory when `--project-dir` is omitted) and
+its `--config-file`, reads the stored proof and never probes; it is skipped inside durable jobs, where a
 remote runtime runs its own co-located `--local` children. The CLI's
 successful `test`/`job-start` JSON does not gain `remote_selection`: those
 producers' keys are part of control protocol 3 (`sandbox/remote_runtime/shapes.py`). A bare `sb exec` with no local instance

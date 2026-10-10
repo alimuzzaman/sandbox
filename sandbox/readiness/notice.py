@@ -6,7 +6,8 @@ and never probes the remote.
 from __future__ import annotations
 
 
-def local_notice(project_dir: str, *, service=None, home=None) -> dict | None:
+def local_notice(project_dir: str, *, service=None, home=None,
+                 config_file: str | None = None) -> dict | None:
     """``{remote_selection: local, declared_remote, failing_aspect, reason}``,
     or None when the project declares no remote or nothing recorded refuses it."""
     from sandbox.jobs.models import TargetRequest
@@ -15,14 +16,16 @@ def local_notice(project_dir: str, *, service=None, home=None) -> dict | None:
         if service is None:
             from sandbox.application.context import durable_job_dependencies
             service = durable_job_dependencies()["target_service"]
-        declared = service.declared_remote(project_dir)
+        declared = service.declared_remote(project_dir, config_file=config_file) \
+            if config_file is not None else service.declared_remote(project_dir)
     except Exception:
         return None
     if not isinstance(declared, str) or not declared:
         return None
     try:
         target = service.resolve(TargetRequest(
-            project_dir=project_dir, remote=declared, required_capability="job.exec"))
+            project_dir=project_dir, config_file=config_file, remote=declared,
+            required_capability="job.exec"))
     except Exception as exc:
         code = getattr(exc, "code", None)
         if not isinstance(code, str) or code == "invalid_project":

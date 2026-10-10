@@ -320,5 +320,179 @@ class LocalAfterNotReadyNoticeTests(unittest.TestCase):
             self.assertEqual(module.job_start(["true"], "/work/p"), accepted)
 
 
+class RoundOneTests(unittest.TestCase):
+    """Sol merge-gate round 1 for US3."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+
+    def test_human_refusal_names_the_selection_facts(self):
+        from sandbox import cli
+        registered = {"a": {"name": "a", "provisioned": True},
+                      "b": {"name": "b", "provisioned": True}}
+        cases = (
+            (_service(self.root, registered=registered), {}, ("candidates: a, b", HINT)),
+            (_service(self.root, {"default": "remote", "remote": "ghost"}), {},
+             ("remote 'ghost' (from runtime.remote in sandbox.config.json)",
+              "registered: old, vps", HINT)),
+        )
+        for service, request, expected in cases:
+            exc = _refusal(service, project_dir=str(self.root), **request)
+            err = io.StringIO()
+            with self.subTest(code=exc.code), contextlib.redirect_stderr(err), \
+                    self.assertRaises(SystemExit):
+                cli._dispatch_remote_admission_error(registration_refusal(exc),
+                                                     SimpleNamespace(json=False))
+            for text in expected:
+                self.assertIn(text, err.getvalue())
+
+    def test_gate_keeps_the_selection_of_the_callers_resolution(self):
+        import threading
+        from sandbox.readiness import gate
+        service = _service(self.root, {"default": "remote", "remote": "vps"})
+        target = service.resolve(TargetRequest(project_dir=str(self.root)))
+        submission = SimpleNamespace(project_root=target.project_root, remote_name="vps",
+                                     workspace_label="default", project_identity="id")
+        self.assertEqual(gate._submission_target(submission).sources["remote_selection"],
+                         "profile")
+        other = SimpleNamespace(project_root="/elsewhere", remote_name="vps",
+                                workspace_label="default", project_identity="id")
+        self.assertIsNone(gate._submission_target(other).sources["remote_selection"])
+        seen = []
+        thread = threading.Thread(target=lambda: seen.append(
+            gate._submission_target(submission).sources["remote_selection"]))
+        thread.start()
+        thread.join()
+        self.assertEqual(seen, [None])
+
+    def test_gate_refusal_reports_the_selection(self):
+        from sandbox.readiness import gate
+        from sandbox.readiness.errors import RemoteNotReadyError
+        service = _service(self.root, {"default": "remote", "remote": "vps"})
+        target = service.resolve(TargetRequest(project_dir=str(self.root)))
+        submission = SimpleNamespace(project_root=target.project_root, remote_name="vps",
+                                     workspace_label="default", project_identity="id")
+        refused = SimpleNamespace(returncode=255)
+        with self.assertRaises(RemoteNotReadyError) as caught:
+            gate.require_ready(str(self.root), "vps", submission, probes=_probes(
+                tempfile.mkdtemp(), ssh_run=lambda *_a, **_k: refused))
+        payload = caught.exception.to_payload()
+        self.assertEqual((payload["code"], payload["remote_selection"]),
+                         ("remote_not_ready_reachability", "profile"))
+
+    def test_readiness_unprovisioned_registration_row_through_the_resolver(self):
+        service = _service(self.root, {"default": "remote", "remote": "old"})
+        result = check.run(str(self.root), None, probes=_probes(
+            tempfile.mkdtemp(), resolve=lambda project, remote: service.resolve(
+                TargetRequest(project_dir=project, remote=remote,
+                              required_capability="job.exec"))))
+        first, *rest = result["rows"]
+        self.assertEqual((first["state"], first["reason"], first["name"], first["name_source"],
+                          first["remedy"]),
+                         ("not_ready", "remote_not_provisioned", "old", "declaration",
+                          "./sb remote provision old"))
+        self.assertEqual((result["remote"], result["remote_selection"]), ("old", "profile"))
+        self.assertEqual({row["state"] for row in rest}, {"not_applicable"})
+
+    def test_cli_notice_uses_cwd_and_config_file_and_skips_durable_jobs(self):
+        from sandbox import cli
+        calls = []
+
+        def record(project_dir, **kwargs):
+            calls.append((project_dir, kwargs))
+        with patch.object(notice, "local_notice", side_effect=record), \
+                patch.object(cli.os, "getcwd", return_value="/work/cwd"), \
+                patch.dict(cli.os.environ, {}, clear=False):
+            cli.os.environ.pop("SANDBOX_DURABLE_JOB_ID", None)
+            cli._local_selection_notice(SimpleNamespace(cmd="test", local=True, project_dir=None,
+                                                        config_file="alt.json"))
+            cli.os.environ["SANDBOX_DURABLE_JOB_ID"] = "job-1"
+            cli._local_selection_notice(SimpleNamespace(cmd="test", local=True,
+                                                        project_dir="/work/p"))
+        self.assertEqual(calls, [("/work/cwd", {"config_file": "alt.json"})])
+
+    def test_notice_reads_the_selected_descriptor(self):
+        seen = []
+
+        def declared(project_dir, *, config_file=None):
+            seen.append(config_file)
+            return None
+        service = SimpleNamespace(declared_remote=declared, resolve=None)
+        self.assertIsNone(notice.local_notice("/work/p", service=service, config_file="alt.json"))
+        self.assertEqual(seen, ["alt.json"])
+
+    def test_mcp_run_tests_refuses_other_resolution_failures(self):
+        module = NoLocalFallbackTests._wp_tool(self)
+        module._require_project_capability = lambda *_a, **_k: {"ok": False, "error": "local"}
+
+        def refuse(_request):
+            raise TargetResolutionError("invalid_workspace", "bad workspace")
+        with patch("sandbox.application.context.durable_job_dependencies",
+                   return_value={"target_service": SimpleNamespace(resolve=refuse)}), \
+                patch.object(module, "_resolve_test_mode", return_value="unit"):
+            result = module.run_tests(project_dir="/work/p")
+        self.assertEqual((result["ok"], result["code"]), (False, "invalid_workspace"))
+
+    def test_mcp_remote_successes_report_the_selection(self):
+        module = NoLocalFallbackTests._wp_tool(self)
+        target = SimpleNamespace(kind="remote", remote_name="vps", workspace_label="default",
+                                 project_root=str(self.root), runtime_policy={},
+                                 sources={"remote_selection": "single-configured",
+                                          "identity": "id"})
+        resolves = []
+
+        def resolve(request):
+            resolves.append(request)
+            return target
+        transport = SimpleNamespace(submit=lambda _submission: {"job_id": "job-1"})
+        with patch("sandbox.application.context.durable_job_dependencies",
+                   return_value={"target_service": SimpleNamespace(resolve=resolve)}), \
+                patch.object(module, "_resolve_test_mode", return_value="unit"), \
+                patch.object(module, "_remote_job_transport", return_value=transport), \
+                patch("sandbox.commands.jobs_runtime._source_identity", return_value=None), \
+                patch("sandbox.commands.jobs_runtime._resolved_project_identity",
+                      return_value="id"), \
+                patch("sandbox.jobs.models.JobSubmission", side_effect=lambda *a, **k: a):
+            result = module.run_tests(project_dir=str(self.root))
+        self.assertEqual((result["ok"], result["remote_selection"], len(resolves)),
+                         (True, "single-configured", 1))
+
+
+    def test_mcp_remote_job_start_reports_the_selection(self):
+        import importlib.util
+        import types
+
+        import sandbox.commands.jobs_runtime  # noqa: F401
+        deps = types.ModuleType("dependencies")
+        deps.ToolDependencies = object
+        with patch.dict(sys.modules, {"dependencies": deps}):
+            path = ROOT / "mcp" / "wp-server" / "tools" / "jobs.py"
+            spec = importlib.util.spec_from_file_location("_selection_jobs_remote", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        target = SimpleNamespace(kind="remote", remote_name="vps", workspace_label="default",
+                                 project_root=str(self.root), runtime_policy={},
+                                 sources={"remote_selection": "explicit", "identity": "id"})
+        module._target_service = SimpleNamespace(resolve=lambda _request: target)
+        policy = SimpleNamespace(deadline_seconds=60, execution_profile=None,
+                                 deadline_source=None, deadline_reminder=None,
+                                 stall_seconds=None, cancel_grace_seconds=None,
+                                 cancel_on_stall=None, cleanup_policy=None, provenance={})
+
+        class Transport:
+            def __init__(self, **_kwargs):
+                pass
+
+            def submit(self, _submission):
+                return {"ok": True, "job_id": "job-1"}
+        with patch.object(module, "_mcp_execution_policy", return_value=(policy, None)), \
+                patch.object(module, "JobSubmission", side_effect=lambda *a, **k: a), \
+                patch.object(module, "_resolved_project_identity", return_value="id"), \
+                patch.object(module, "_source_identity", return_value=None), \
+                patch("sandbox.transports.remote_jobs.RemoteJobTransport", Transport):
+            result = module.job_start(["true"], str(self.root), remote="vps")
+        self.assertEqual(result, {"ok": True, "job_id": "job-1", "remote_selection": "explicit"})
+
+
 if __name__ == "__main__":
     unittest.main()

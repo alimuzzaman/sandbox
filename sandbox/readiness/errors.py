@@ -36,14 +36,15 @@ class RemoteNotReadyError(RemoteJobAdmissionError):
         detail = {"aspect": aspect, "reason": reason, "bytes_transferred": 0}
         if remedy is not None:
             detail["remedy"] = remedy
+        message = f"remote is not ready: {aspect} ({reason})"
         if aspect == "registration":
             from sandbox.readiness.rows import selection_fields
-            detail.update(selection_fields(row))
+            fields = selection_fields(row)
+            detail.update(fields)
+            message += _selection_sentence(fields)
         self._decision = {}
         # Skip the admission constructor: there is no capacity decision here.
-        RemoteJobTransportError.__init__(
-            self, f"remote is not ready: {aspect} ({reason})",
-            retryable=False, detail=detail)
+        RemoteJobTransportError.__init__(self, message, retryable=False, detail=detail)
 
     def to_payload(self, *, remote: str | None = None,
                    operation: str | None = None) -> dict:
@@ -57,6 +58,24 @@ class RemoteNotReadyError(RemoteJobAdmissionError):
             payload["remedy"] = self.detail["remedy"]
         payload["remote_selection"] = self.remote_selection
         return payload
+
+
+_SOURCES = {"caller": "--remote", "declaration": "runtime.remote in sandbox.config.json"}
+
+
+def _selection_sentence(fields: dict) -> str:
+    """The selection facts in words, so human output carries them (FR-020)."""
+    parts = []
+    if "name" in fields:
+        source = _SOURCES.get(fields.get("name_source"))
+        parts.append(f"remote {fields['name']!r}" + (f" (from {source})" if source else ""))
+    if "registered" in fields:
+        parts.append("registered: " + (", ".join(fields["registered"]) or "none"))
+    if "candidates" in fields:
+        parts.append("candidates: " + ", ".join(fields["candidates"]))
+    if "hint" in fields:
+        parts.append(fields["hint"])
+    return ("; " + "; ".join(parts)) if parts else ""
 
 
 def human_refusal(payload: dict) -> str | None:

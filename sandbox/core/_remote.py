@@ -3550,6 +3550,25 @@ def plan_digest(targets, other):
     encoded = json.dumps([sorted(targets), other], separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
+class PlanChanged(Exception):
+    def __init__(self, digest, other):
+        super().__init__("plan changed")
+        self.digest, self.other = digest, other
+
+def observe(ids):
+    """Restart policies and the count of running containers outside HOSTED."""
+    policies, other = [], 0
+    if ids:
+        inspected = run(["docker", "inspect", "--format", INSPECT_FORMAT, *sorted(ids)],
+                        timeout=60).stdout.splitlines()
+        projects = {{project for _, project in HOSTED}}
+        for line in inspected:
+            policy, _, project = line.partition("\t")
+            policies.append(policy.strip() or "no")
+            if project.strip() not in projects:
+                other += 1
+    return policies, other, plan_digest([target for target, _ in HOSTED], other)
+
 def run(argv, timeout=60, check=True):
     result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
     if check and result.returncode != 0:
@@ -3842,19 +3861,7 @@ before = running_ids()
 network_count = len(list(filter(None, run(
     ["docker", "network", "ls", "--filter", "type=custom", "-q"], timeout=30
 ).stdout.splitlines())))
-restart_policies = []
-hosted_projects = {{project for _, project in HOSTED}}
-other_running = 0
-if before:
-    inspected = run([
-        "docker", "inspect", "--format", INSPECT_FORMAT, *sorted(before)
-    ], timeout=60).stdout.splitlines()
-    for line in inspected:
-        policy, _, project = line.partition("\t")
-        restart_policies.append(policy.strip() or "no")
-        if project.strip() not in hosted_projects:
-            other_running += 1
-current_plan_digest = plan_digest([target for target, _ in HOSTED], other_running)
+restart_policies, other_running, current_plan_digest = observe(before)
 had_config = CONFIG.exists()
 initial_bytes = CONFIG.read_bytes() if had_config else b""
 initial_digest = hashlib.sha256(initial_bytes).hexdigest()
@@ -3931,6 +3938,16 @@ try:
         current_bytes = CONFIG.read_bytes() if CONFIG.exists() else b""
         if hashlib.sha256(current_bytes).hexdigest() != initial_digest:
             raise RuntimeError("daemon configuration changed concurrently")
+        # Re-observe just before activation: a container started since the
+        # first check changes what the restart affects (FR-011). Docker has no
+        # start fence, so a start inside the activate/restart gap is the
+        # documented residual window; recovery still covers the latest set.
+        failure_stage = "recheck_plan"
+        latest = running_ids()
+        _, latest_other, latest_digest = observe(latest)
+        if latest_digest != PLAN_DIGEST:
+            raise PlanChanged(latest_digest, latest_other)
+        before = before | latest
         failure_stage = "activate_config"
         os.replace(temporary, CONFIG)
         sync_parent(CONFIG)
@@ -3948,6 +3965,15 @@ try:
     missing_after_recovery = recover(before)
     if missing_after_recovery:
         raise RuntimeError("previously running containers did not recover")
+except PlanChanged as changed:
+    if had_config and backup.exists():
+        backup.unlink()
+    print(json.dumps({{"ok": False, "code": "docker_pool_plan_changed",
+                      "status": "failed",
+                      "message": "Hosted targets or running containers changed since the plan",
+                      "plan_digest": changed.digest,
+                      "other_running_containers": changed.other}}))
+    raise SystemExit(2)
 except Exception:
     rollback_missing = len(before)
     rollback_succeeded = not config_replaced
@@ -4226,9 +4252,15 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         value = payload.get(field)
         if value is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
             raise RuntimeError("remote Docker pool operation returned an invalid digest")
-    value = payload.get("plan_digest")
-    if value is not None and (not isinstance(value, str) or not _PLAN_DIGEST_RE.fullmatch(value)):
+    # Present digest evidence is never null: a plan without it cannot be confirmed.
+    if "plan_digest" in payload and (
+            not isinstance(payload["plan_digest"], str)
+            or not _PLAN_DIGEST_RE.fullmatch(payload["plan_digest"])):
         raise RuntimeError("remote Docker pool operation returned an invalid plan digest")
+    if "other_running_containers" in payload and (
+            isinstance(payload["other_running_containers"], bool)
+            or not isinstance(payload["other_running_containers"], int)):
+        raise RuntimeError("remote Docker pool operation returned invalid counts")
     if "plan_digest" in payload:
         payload["hosted_targets"] = [target for target, _ in hosted]
         payload["no_restart_alternative"] = (

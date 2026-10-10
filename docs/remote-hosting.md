@@ -225,9 +225,13 @@ container on the remote, hosted sites included. Assigning a development range
 
 Applying requires `--confirm --plan-digest <plan_digest>`; `--confirm` alone is
 refused `docker_pool_plan_digest_required` before the remote is contacted. The
-remote recounts under the pool lock and refuses `docker_pool_plan_changed`
-(exit 2, zero restarts, `daemon.json` untouched) when the digest no longer
-matches, returning the new digest so the operator can re-read the plan. An
+remote recounts under the pool lock, and again just before it activates the
+new `daemon.json`, and refuses `docker_pool_plan_changed` (exit 2, zero
+restarts, `daemon.json` and its backups untouched) when the digest no longer
+matches, returning the new digest so the operator can re-read the plan.
+Docker offers no fence on container starts, so a container started in the
+moment between that last recount and the restart is not refused; recovery
+restarts every container seen running at either recount. An
 unreadable hosting inventory fails the plan and the apply closed.
 `--recover-interrupted` restores a recorded transaction rather than a new plan
 and stays digest-free.

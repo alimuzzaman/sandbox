@@ -186,13 +186,15 @@ class ProgramTests(unittest.TestCase):
 
     def test_expiry_with_running_phase_fences_until_cessation(self):
         self.enable()
-        first = self.admit(ttl=1)
-        lease = first["lease"]
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         self.addCleanup(child.kill)
-        self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"], fencing_token=1,
-                  event="start", phase_id="compose", pid=child.pid)
-        time.sleep(1.2)
+        # Expiry is in whole seconds: a 2 s lease leaves the phase start at
+        # least one full second, where a 1 s lease could lapse before it.
+        lease = self.admit(ttl=2)["lease"]
+        started = self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"],
+                            fencing_token=1, event="start", phase_id="compose", pid=child.pid)
+        self.assertTrue(started["recorded"], started)
+        time.sleep(2.2)
         refused = self.admit(holder=who(controller=CONTROLLER_B))
         self.assertEqual(refused["refused"], "predecessor_phase_running")
         self.assertEqual(refused["holder"]["controller_id"], CONTROLLER_A)
@@ -209,10 +211,12 @@ class ProgramTests(unittest.TestCase):
 
     def test_phase_end_from_expired_holder_clears_the_cessation_fence(self):
         self.enable()
-        lease = self.admit(ttl=1)["lease"]
-        self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"], fencing_token=1,
-                  event="start", phase_id="build")  # no probe: assumed running
-        time.sleep(1.2)
+        lease = self.admit(ttl=2)["lease"]
+        started = self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"],
+                            fencing_token=1, event="start",
+                            phase_id="build")  # no probe: assumed running
+        self.assertTrue(started["recorded"], started)
+        time.sleep(2.2)
         self.assertEqual(self.admit()["refused"], "predecessor_phase_running")
         ended = self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"],
                           fencing_token=1, event="end", phase_id="build")

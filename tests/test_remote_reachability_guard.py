@@ -53,7 +53,10 @@ class RemoteEnsureReachabilityGuardTests(unittest.TestCase):
             "ok": False,
             "error": {"code": "remote_unreachable", "message": "use --local"},
         }
+        # The readiness gate (spec 063) passes here, so this exercises the
+        # reachability guard that still runs before deploy; it never probes SSH.
         with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.readiness.gate.require_ready", return_value=None), \
              patch.object(lifecycle, "_remote_ensure_reachability", return_value=refusal), \
              patch("sandbox.core._remote.deploy_exact_working_tree") as deploy, \
              patch("sandbox.core._remote.prepare_remote_workspace") as workspace:

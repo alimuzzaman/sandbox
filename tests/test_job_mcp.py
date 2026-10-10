@@ -112,9 +112,12 @@ class JobMcpTests(unittest.TestCase):
                         code, "target is unavailable")))):
                 result = jobs.job_matrix(["tool", "safe"], ["one"], "/project", remote="vps")
 
-            self.assertEqual(result, {
-                "ok": False, "code": code, "error": "target is unavailable",
-            })
+            # Spec 063 US2: registration failures become the readiness
+            # refusal before policy validation; the resolution code is its reason.
+            self.assertEqual((result["ok"], result["status"], result["code"],
+                              result["detail"]["reason"]),
+                             (False, "blocked", "remote_not_ready_registration", code))
+            self.assertEqual(result["side_effects"]["bytes_transferred"], 0)
 
     def test_job_list_forwards_project_workspace_and_pages_filtered_results(self):
         from tools import jobs

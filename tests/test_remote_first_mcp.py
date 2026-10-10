@@ -60,7 +60,12 @@ class RemoteFirstMcpTests(unittest.TestCase):
             code = "unknown_remote"
 
         module._target_service = SimpleNamespace(resolve=lambda _request: (_ for _ in ()).throw(UnknownTarget("missing")))
-        self.assertEqual(module.job_start(["npm", "test"], "/project")["code"], "unknown_remote")
+        # Spec 063 US2: a registration failure is the readiness refusal; the
+        # resolution code survives as its reason.
+        result = module.job_start(["npm", "test"], "/project")
+        self.assertEqual((result["code"], result["status"], result["detail"]["reason"]),
+                         ("remote_not_ready_registration", "blocked", "unknown_remote"))
+        self.assertEqual(result["side_effects"]["bytes_transferred"], 0)
 
     def test_remote_status_and_output_preserve_cursor_and_bounded_options(self):
         module = _load_jobs_tool()

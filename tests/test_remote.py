@@ -2525,6 +2525,11 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                         command.index("./sb mcp-install"))
         self.assertLess(command.index("./sb mcp-install"), command.index("kill \"$legacy_pid\""))
         self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 300)
+        # Spec 060: the migrated runtime is marked as serving hosting coordination.
+        from sandbox.hosting.coordination import program as coordination_program
+        enable = coordination_program.remote_command({"action": "enable"}).rsplit(" ", 1)[1]
+        self.assertIn(enable, command)  # the request payload; the gate re-quotes the program
+        self.assertLess(command.index("./sb mcp-install"), command.index(enable))
 
     @patch("sandbox.core._remote.ssh_run")
     def test_migration_refuses_to_replace_an_unproven_existing_unit(self, mock_ssh_run):

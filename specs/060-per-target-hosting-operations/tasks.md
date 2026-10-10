@@ -13,8 +13,8 @@
 
 - [x] T003 [P] Program tests run for real against a temp remote home: admit/renew/release, FIFO queue with deadlines, fencing token monotonic, expiry with phase → `fenced_pending_cessation`, hold claim/renew/release/break, build slots, shared lease 60 s, list bounds, read-only list creates nothing, modes 0700/0600, capability marker absent → typed refusal in `tests/test_hosting_coordination_program.py`
 - [x] T004 Implement `sandbox/hosting/coordination/program.py`
-- [ ] T005 [P] Client tests: 15 s bound, invalid output rejected, SSH failure/timeout/missing marker → `lease_authority_unavailable` with migrate/repin remedy, no secret in errors in `tests/test_hosting_coordination_client.py`
-- [ ] T006 Implement `sandbox/hosting/coordination/client.py`; mark `hosting_coordination` capability in `remote service migrate`
+- [x] T005 [P] Client tests: 15 s bound, invalid output rejected, SSH failure/timeout/missing marker → `lease_authority_unavailable` with migrate/repin remedy, no secret in errors in `tests/test_hosting_coordination_client.py`
+- [x] T006 Implement `sandbox/hosting/coordination/client.py`; mark `hosting_coordination` capability in `remote service migrate`
 - [ ] T007 [P] Per-target state tests: per-file read/write, corrupt file affects only its target, `iter_target_states` skips with per-target error, parity of record contents with today's `hosts.json` on 051/054 fixtures in `tests/test_hosting_state_partition.py`
 - [ ] T008 Implement `sandbox/hosting/state_partition/layout.py` and accessors in `sandbox/core/_hosting.py`; move callers off `load_host_state`/`save_host_state`; narrow `RecoveryRepository.state_lock` to conversion/legacy use
 - [ ] T009 Add program payloads to `SHAPE_SOURCES`, bump `CONTROL_PROTOCOL_SPOKEN` (coordinate number with 063 T006), re-record `control_shapes.json`

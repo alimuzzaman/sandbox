@@ -308,6 +308,8 @@ target.update(imported_parent.values())
             ROOT / "sandbox" / "jobs",
             ROOT / "sandbox" / "transports",
             ROOT / "sandbox" / "ci",
+            ROOT / "sandbox" / "hosting" / "coordination",
+            ROOT / "sandbox" / "hosting" / "state_partition",
         ):
             if not package.exists():
                 continue

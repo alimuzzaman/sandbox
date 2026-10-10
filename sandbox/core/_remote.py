@@ -61,6 +61,7 @@ from sandbox.core._config import _local_yaml, _write_local_yaml
 from sandbox.core._paths import RUNTIME_DIR
 from sandbox.services.redaction import redact_structure, redact_text
 from sandbox.services.runtime_revision import runtime_revision, runtime_revision_sources
+from sandbox.hosting.coordination import program as coordination_program
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _REMOTE_SERVICE_PROBE_STATES = frozenset({"complete", "partial", "unavailable"})
@@ -4795,6 +4796,9 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "( cd \"$runtime\" && \"$runtime/.cli-venv/bin/python\" -c "
         + shlex.quote("from sandbox.core._config import ensure_tools_venv; ensure_tools_venv()")
         + " </dev/null ); "
+        # Spec 060: this runtime serves hosting coordination; mark it so
+        # controllers stop refusing lease_authority_unavailable.
+        + coordination_program.remote_command({"action": "enable"}) + " </dev/null >/dev/null; "
     )
     normalize_program = r'''import os,stat,sys
 home=sys.argv[1]; owner=os.geteuid(); current=''

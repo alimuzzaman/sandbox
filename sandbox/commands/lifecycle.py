@@ -1136,7 +1136,8 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
             require_ready(target.project_root, target.remote_name)
         except RemoteNotReadyError as exc:
             # Refused before any source byte leaves this machine.
-            return {"ok": False, "error": {"code": exc.code, "message": str(exc)},
+            return {"ok": False, "status": "blocked", "code": exc.code,
+                    "error": {"code": exc.code, "message": str(exc)},
                     "detail": exc.detail, "remedy": exc.detail.get("remedy"),
                     "side_effects": {"staging_started": False, "bytes_transferred": 0},
                     "target": {"remote": target.remote_name}}

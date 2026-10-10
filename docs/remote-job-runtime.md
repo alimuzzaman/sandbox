@@ -156,6 +156,12 @@ prints the remedy. `ensure --remote` checks readiness before its own
 reachability guard. `unknown` and `not_applicable` never refuse; capacity
 admission still runs during the deploy. A probe still running at the 60 s
 deadline runs on a daemon thread and never delays the answer or the exit.
+A capacity verdict is published before its optional range proposal, so a
+slow proposal never hides a completed `not_ready`. Ownership repair is
+`not_applicable` when the project has no workspace on the remote. `ensure
+--remote` returns the same `blocked` envelope inside its usual error object,
+and the async `run_e2e`/`ci_run` launches wait long enough (120 s) to return
+it.
 
 A passing check is stored per remote and project under
 `$SANDBOX_HOME/runtime/readiness/<remote>/` (0600) and reused for 300 s while

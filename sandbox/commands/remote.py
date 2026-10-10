@@ -656,8 +656,10 @@ def _cmd_network_range(args, as_json: bool) -> None:
             payload = {"ok": True, "name": name, "status": result["status"],
                        "data": result, "error": None}
             if confirmed:
-                _record_network_ranges(name, store.list())
+                # Invalidate first: the assignment applied even if the
+                # follow-up inventory read fails.
                 _invalidate_readiness(name)
+                _record_network_ranges(name, store.list())
         else:
             store = range_store.RangeStore(entry)
             listed = store.list()

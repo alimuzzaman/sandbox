@@ -160,9 +160,10 @@
   - A range release on the remote host cannot reach controller proofs. That
     is safe: a release only frees capacity, a `not_ready` proof is never
     reused, and capacity admission still runs at deploy.
-  - The ownership-repair row checks that the remote `sb` exists and is
-    executable for every registered remote; it does not look up an instance,
-    so it reports `ready` or `not_ready` rather than `not_applicable`.
+  - The ownership-repair row treats the project's remote workspace
+    directory as its instance: with no workspace there it is
+    `not_applicable/no_instance`; otherwise it checks that the remote `sb`
+    exists and is executable, in the same SSH probe.
 
 ## R7. Protocol bump
 

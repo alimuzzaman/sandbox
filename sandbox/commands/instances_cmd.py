@@ -587,6 +587,10 @@ def cmd_ensure(cfg, args) -> None:
                     error.get("message") if isinstance(error, dict)
                     else str(error or "remote ensure failed")
                 )
+                remedy = remote_result.get("remedy")
+                if remote_result.get("status") == "blocked" and isinstance(remedy, str) \
+                        and remedy.startswith("./sb "):
+                    message = f"{message}. Nothing was transferred. Remedy: {remedy}"
                 die(redact_text(message))
             print(f"remote workspace {getattr(args, 'workspace', None) or getattr(args, 'label', 'default')}: ready")
         if remote_result is not None:

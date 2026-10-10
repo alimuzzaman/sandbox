@@ -5,6 +5,9 @@ import subprocess
 from app import SANDBOX_ROOT, _require_project_capability, _safe_json, mcp
 
 
+ASYNC_LAUNCH_SECONDS = 120
+
+
 @mcp.tool()
 def ci_plan(workflow: str) -> dict:
     """Parse + classify a GitHub Actions workflow file WITHOUT executing
@@ -137,14 +140,17 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     if async_:
         cmd.append("--async")
         try:
+            # The launch first passes the remote readiness gate (60 s
+            # deadline); leave room for its typed refusal to come back.
             res = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=60, cwd=str(SANDBOX_ROOT))
+                                 timeout=ASYNC_LAUNCH_SECONDS, cwd=str(SANDBOX_ROOT))
         except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "ci_run --async launch timed out after 60s"}
+            return {"ok": False,
+                    "error": f"ci_run --async launch timed out after {ASYNC_LAUNCH_SECONDS}s"}
         lines = (res.stdout or "").strip().splitlines()
         launched = _safe_json(lines[-1]) if lines else None
         if isinstance(launched, dict) and (
-                "job_id" in launched or
+                "job_id" in launched or launched.get("status") == "blocked" or
                 ("parent_job_id" in launched and "children" in launched)):
             return launched
         return {"ok": False, "code": res.returncode,

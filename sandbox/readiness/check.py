@@ -45,6 +45,9 @@ class Probes:
     propose: Callable          # registration -> {"proposed", "assign_command", ...}
     clock: Callable = time.time
     home: Path | None = None
+    # (registration, target) -> the project's remote workspace path; None
+    # skips the no-instance check.
+    workspace_path: Callable | None = None
 
 
 def default_probes() -> Probes:
@@ -66,6 +69,8 @@ def default_probes() -> Probes:
         sb_path=_remote.remote_sb_path,
         propose=lambda remote: RangeStore(remote, _remote.ssh_run).propose(),
         home=_sandbox_base(),
+        workspace_path=lambda remote, target: _remote.remote_workspace_path(
+            remote, target.project_root, target.workspace_label),
     )
 
 
@@ -186,7 +191,7 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None) -
     identity = (getattr(target, "sources", None) or {}).get("identity") or target.project_root
     # Read before probing: an invalidation during the probes rotates it.
     token = generation(probes.home, remote)
-    evaluated = _evaluate(registration, remote, probes)
+    evaluated = _evaluate(registration, remote, probes, _workspace(registration, target, probes))
     revision = evaluated.pop("_revision", None)
     proposed = evaluated.pop("_proposed", None)
     handoff_record = _read(readiness_dir(probes.home, remote) / "handoff.json")
@@ -203,8 +208,24 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None) -
     return result
 
 
-def _evaluate(registration: dict, name: str, probes: Probes) -> dict:
+def _workspace(registration: dict, target, probes: Probes) -> str | None:
+    if probes.workspace_path is None or not getattr(target, "workspace_label", None):
+        return None
+    try:
+        return probes.workspace_path(registration, target)
+    except Exception:
+        return None
+
+
+def _evaluate(registration: dict, name: str, probes: Probes,
+              workspace: str | None = None) -> dict:
     """Reachability, compatibility, capacity and repair rows under the deadline."""
+    found: dict = {}
+    lock = threading.Lock()
+
+    def publish(value: dict) -> None:
+        with lock:
+            found.update(value)
 
     def compatibility():
         value, revision = rows.runtime_compatibility(probes.service_status, registration, name)
@@ -212,10 +233,11 @@ def _evaluate(registration: dict, name: str, probes: Probes) -> dict:
 
     def capacity():
         value = rows.capacity(probes.capacity_decision, registration, name)
-        found = {"capacity": value}
+        # The verdict stands on its own; a slow proposal never hides it.
+        publish({"capacity": value})
         if value.get("reason") == "missing_pool_evidence":
-            found["_proposed"] = _proposal(registration, probes)
-        return found
+            return {"_proposed": _proposal(registration, probes)}
+        return {}
 
     tasks = {
         "reachability": lambda: {"reachability": rows.reachability(
@@ -223,18 +245,16 @@ def _evaluate(registration: dict, name: str, probes: Probes) -> dict:
         "runtime_compatibility": compatibility,
         "capacity": capacity,
         "ownership_repair": lambda: {"ownership_repair": rows.ownership_repair(
-            probes.ssh_run, registration, name, probes.sb_path(registration))},
+            probes.ssh_run, registration, name, probes.sb_path(registration),
+            workspace=workspace)},
     }
-    found: dict = {}
-    lock = threading.Lock()
 
     def worker(task):
         try:
             value = task()
         except Exception:
             return
-        with lock:
-            found.update(value)
+        publish(value)
 
     # Daemon threads: a probe still running at the deadline neither delays the
     # answer nor keeps the CLI process alive at interpreter exit.

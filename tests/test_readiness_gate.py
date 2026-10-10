@@ -314,5 +314,158 @@ class HandoffIsolationTests(unittest.TestCase):
         self.assertFalse((check.readiness_dir(home, "vps") / "handoff.json").exists())
 
 
+class RoundTwoTests(unittest.TestCase):
+    """Merge-gate round 2: slow proposals, no-instance ownership, ensure's
+    envelope, async MCP launches and assignment invalidation."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+
+    def test_completed_capacity_refusal_survives_slow_proposal(self):
+        import threading
+        from unittest.mock import patch
+        release = threading.Event()
+        missing = lambda _r, *, remote_name: {  # noqa: E731
+            "ok": False, "evidence": {"reason": "missing_pool_evidence"}}
+
+        def slow_proposal(_remote):
+            release.wait(5)
+            return None
+        try:
+            with patch.object(check, "DEADLINE_SECONDS", 0.3), \
+                    self.assertRaises(RemoteNotReadyError) as caught:
+                gate.require_ready("/work/project", "vps", probes=_probes(
+                    self.home, capacity_decision=missing, propose=slow_proposal))
+        finally:
+            release.set()
+        self.assertEqual(caught.exception.code, "remote_not_ready_capacity")
+
+    def test_ownership_is_not_applicable_without_a_project_workspace(self):
+        from sandbox.readiness import rows
+        seen = []
+
+        def ssh(_remote, command, timeout=None):
+            seen.append(command)
+            return subprocess.CompletedProcess([], 3 if "test -d" in command else 0, "", "")
+        target = _target()
+        target.workspace_label = "default"
+        result = check.run("/work/project", "vps", probes=_probes(
+            self.home, ssh_run=ssh, resolve=lambda _p, _r: target,
+            workspace_path=lambda _remote, _target: "/home/u/ws-project"))
+        found = {item["aspect"]: item for item in result["rows"]}
+        self.assertEqual((found["ownership_repair"]["state"], found["ownership_repair"]["reason"]),
+                         ("not_applicable", "no_instance"))
+        self.assertTrue(any("/home/u/ws-project" in command for command in seen))
+        present = rows.ownership_repair(
+            lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""), {}, "vps", "/x/sb",
+            workspace="/home/u/ws")
+        self.assertEqual(present["state"], "ready")
+        missing_helper = rows.ownership_repair(
+            lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", ""), {}, "vps", "/x/sb",
+            workspace="/home/u/ws")
+        self.assertEqual(missing_helper["reason"], "repair_helper_missing")
+
+    def test_ensure_returns_the_blocked_envelope_and_prints_the_remedy(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from sandbox.commands import instances_cmd, lifecycle
+        target = SimpleNamespace(kind="remote", remote_name="vps", project_root="/work/p",
+                                 remote={"name": "vps"}, workspace_label="default",
+                                 sources={})
+
+        def refuse(_root, _remote):
+            raise RemoteNotReadyError(_ROW, remote="vps")
+        service = SimpleNamespace(resolve=lambda _request: target)
+        with patch("sandbox.application.context.durable_job_dependencies",
+                   return_value={"target_service": service}), \
+                patch("sandbox.readiness.gate.require_ready", refuse), \
+                patch.object(lifecycle, "_remote_ensure_reachability",
+                             side_effect=AssertionError("gate runs first")):
+            result = self._ensure_result(lifecycle, target)
+        self.assertEqual((result["ok"], result["status"], result["code"]),
+                         (False, "blocked", "remote_not_ready_capacity"))
+        self.assertEqual(result["error"]["code"], "remote_not_ready_capacity")
+        self.assertEqual(result["side_effects"]["bytes_transferred"], 0)
+
+        err = io.StringIO()
+        args = SimpleNamespace(local=False, json=False, workspace=None, label="default")
+        with patch.object(lifecycle, "_remote_lifecycle", return_value=result), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            instances_cmd.cmd_ensure({}, args)
+        self.assertIn("Remedy: ./sb remote network-range propose vps", err.getvalue())
+
+    def _ensure_result(self, lifecycle, target):
+        """Drive _remote_lifecycle's ensure branch with resolution patched out."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        args = SimpleNamespace(project_dir="/work/p", remote="vps", local=False,
+                               workspace=None, label=None, json=True)
+        with patch.object(lifecycle, "_target_is_remote", return_value=True):
+            return lifecycle._remote_lifecycle({}, args, "ensure")
+
+    def test_async_mcp_launches_return_a_fast_refusal(self):
+        import importlib.util
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        envelope = RemoteNotReadyError(_ROW, remote="vps").to_payload()
+        completed = subprocess.CompletedProcess([], 1, json.dumps(envelope) + "\n", "")
+        # The tool modules import the MCP app; a stub keeps this off the MCP venv.
+        app = SimpleNamespace(
+            SANDBOX_ROOT=ROOT, _require_project_capability=lambda *_a, **_k: None,
+            _safe_json=lambda line: json.loads(line),
+            mcp=SimpleNamespace(tool=lambda *_a, **_k: (lambda function: function)))
+        calls = {
+            "ci": lambda m: m.ci_run(project_dir="/work/p", workflow="ci.yml",
+                                     async_=True, remote="vps"),
+            "e2e": lambda m: m.run_e2e(project_dir="/work/p", async_=True, remote="vps"),
+        }
+        for name, call in calls.items():
+            with self.subTest(tool=name), patch.dict(sys.modules, {"app": app}):
+                path = ROOT / "mcp" / "wp-server" / "tools" / f"{name}.py"
+                spec = importlib.util.spec_from_file_location(f"_readiness_{name}", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self.assertGreater(module.ASYNC_LAUNCH_SECONDS, check.DEADLINE_SECONDS)
+                with patch.object(module.subprocess, "run", return_value=completed):
+                    result = call(module)
+                self.assertEqual((result["status"], result["code"], result["remedy"]),
+                                 ("blocked", "remote_not_ready_capacity",
+                                  "./sb remote network-range propose vps"))
+
+    def test_assign_invalidates_when_followup_inventory_fails(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from sandbox.commands import remote as remote_cmd
+        from sandbox.remote_network import store as range_store
+        from sandbox.remote_network.ranges import RangeError
+
+        class Store:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def assign(self, *_a, **_k):
+                return {"status": "assigned"}
+
+            def list(self):
+                raise RangeError("range_inventory_unknown", "inventory failed")
+        invalidated = []
+        args = SimpleNamespace(name="assign", ssh_url="vps", cidr="10.80.0.0/16",
+                               subnet_prefix=24, confirm=True)
+        with patch.object(remote_cmd.sr, "get_remote", return_value={"name": "vps"}), \
+                patch.object(range_store, "RangeStore", Store), \
+                patch.object(remote_cmd, "_installed_protocol", return_value=3), \
+                patch.object(remote_cmd, "_invalidate_readiness", invalidated.append), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            remote_cmd._cmd_network_range(args, True)
+        self.assertEqual(invalidated, ["vps"])
+
+
 if __name__ == "__main__":
     unittest.main()

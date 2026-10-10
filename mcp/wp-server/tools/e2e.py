@@ -5,6 +5,9 @@ import subprocess
 from app import SANDBOX_ROOT, _require_project_capability, _safe_json, mcp
 
 
+ASYNC_LAUNCH_SECONDS = 120
+
+
 @mcp.tool()
 def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
            grep: str | None = None, keep_on_fail: bool = False,
@@ -68,10 +71,13 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
     if async_:
         cmd.append("--async")
         try:
+            # The launch first passes the remote readiness gate (60 s
+            # deadline); leave room for its typed refusal to come back.
             res = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=60, cwd=str(SANDBOX_ROOT))
+                                 timeout=ASYNC_LAUNCH_SECONDS, cwd=str(SANDBOX_ROOT))
         except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "run_e2e --async launch timed out after 60s"}
+            return {"ok": False,
+                    "error": f"run_e2e --async launch timed out after {ASYNC_LAUNCH_SECONDS}s"}
         lines = (res.stdout or "").strip().splitlines()
         launched = _safe_json(lines[-1]) if lines else None
         if isinstance(launched, dict) and ("job_id" in launched

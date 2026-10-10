@@ -26,8 +26,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Remote selection refusals (spec 063 US3). `unknown_remote` names the
   refused remote, whether the caller or `runtime.remote` chose it, and the
   registered remotes; `ambiguous_remote` (now a `remote_not_ready_registration`
-  refusal) lists the candidates; refusals and readiness results report
-  `remote_selection`. MCP `run_tests` no longer falls back to a local run on an
+  refusal) lists the candidates; refusals, readiness results and MCP
+  submission results report `remote_selection`. MCP `run_tests` no longer falls back to a local run on an
   ambiguous remote or a remote without `job.exec`; pass `local=True`. An
   explicit local run while the declared remote is not ready states the remote,
   the failing row and its reason (CLI stderr, MCP `run_tests`/`job_start`

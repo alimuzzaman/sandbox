@@ -172,8 +172,8 @@ in `sandbox.config.json`), the `registered` names and a `hint`; for
 `ambiguous_remote` the eligible `candidates`; for `remote_not_provisioned`
 the `./sb remote provision NAME` remedy. Names are bounded to 50 and must be
 name-shaped, and human output prints the same facts. The envelope, the
-readiness result and successful MCP `run_tests`/`job_start` remote results
-carry `remote_selection` (`explicit`, `profile`, `single-configured`, or null
+readiness result and successful MCP `run_tests`, `job_start`, `job_matrix`,
+`run_e2e` and `ci_run` results carry `remote_selection` (`explicit`, `profile`, `single-configured`, or null
 when no remote could be chosen); a refusal raised by the gate keeps the
 selection of the caller's own resolution. Nothing falls back to a local run: MCP `run_tests` with no selector
 refuses every resolution failure except a project Sandbox cannot load, which

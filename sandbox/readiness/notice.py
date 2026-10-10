@@ -61,3 +61,28 @@ def _notice(declared: str, aspect, reason) -> dict:
 def human_notice(found: dict) -> str:
     return (f"remote_selection: local; the declared remote {found['declared_remote']!r} "
             f"is not ready: {found['failing_aspect']} ({found['reason']})")
+
+
+def with_selection(result, project_dir: str, *, local: bool = False,
+                   remote: str | None = None, config_file: str | None = None,
+                   service=None):
+    """``result`` plus how its target was selected (spec 063 FR-021), for MCP
+    tools whose result comes from a CLI child. A local run carries the local
+    notice; otherwise the same inputs are resolved again (configuration only,
+    no remote I/O). A non-dict result or a blocked refusal is left alone."""
+    if not isinstance(result, dict) or result.get("status") == "blocked":
+        return result
+    if local:
+        return {**result, **(local_notice(project_dir, service=service, config_file=config_file)
+                             or {"remote_selection": "local"})}
+    from sandbox.jobs.models import TargetRequest
+    try:
+        if service is None:
+            from sandbox.application.context import durable_job_dependencies
+            service = durable_job_dependencies()["target_service"]
+        target = service.resolve(TargetRequest(project_dir=project_dir,
+                                               config_file=config_file, remote=remote))
+        selection = (getattr(target, "sources", None) or {}).get("remote_selection")
+    except Exception:
+        selection = None
+    return {**result, "remote_selection": selection}

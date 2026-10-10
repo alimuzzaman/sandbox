@@ -400,13 +400,14 @@ class RoundOneTests(unittest.TestCase):
 
         def record(project_dir, **kwargs):
             calls.append((project_dir, kwargs))
+        # A synthetic environment: the parent's is never copied.
+        environ = {}
+        fake_os = SimpleNamespace(environ=environ, getcwd=lambda: "/work/cwd")
         with patch.object(notice, "local_notice", side_effect=record), \
-                patch.object(cli.os, "getcwd", return_value="/work/cwd"), \
-                patch.dict(cli.os.environ, {}, clear=False):
-            cli.os.environ.pop("SANDBOX_DURABLE_JOB_ID", None)
+                patch.object(cli, "os", fake_os):
             cli._local_selection_notice(SimpleNamespace(cmd="test", local=True, project_dir=None,
                                                         config_file="alt.json"))
-            cli.os.environ["SANDBOX_DURABLE_JOB_ID"] = "job-1"
+            environ["SANDBOX_DURABLE_JOB_ID"] = "job-1"
             cli._local_selection_notice(SimpleNamespace(cmd="test", local=True,
                                                         project_dir="/work/p"))
         self.assertEqual(calls, [("/work/cwd", {"config_file": "alt.json"})])
@@ -492,6 +493,155 @@ class RoundOneTests(unittest.TestCase):
                 patch("sandbox.transports.remote_jobs.RemoteJobTransport", Transport):
             result = module.job_start(["true"], str(self.root), remote="vps")
         self.assertEqual(result, {"ok": True, "job_id": "job-1", "remote_selection": "explicit"})
+
+
+class RoundTwoTests(unittest.TestCase):
+    """Sol merge-gate round 2 for US3."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+
+    def _tool(self, name):
+        import importlib.util
+        import types
+        app = types.ModuleType("app")
+        app.SANDBOX_ROOT = ROOT
+        app._require_project_capability = lambda *_a, **_k: None
+        app._safe_json = lambda line: json.loads(line)
+        app.mcp = SimpleNamespace(tool=lambda *_a, **_k: (lambda function: function))
+        with patch.dict(sys.modules, {"app": app}):
+            path = ROOT / "mcp" / "wp-server" / "tools" / f"{name}.py"
+            spec = importlib.util.spec_from_file_location(f"_selection_{name}", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        return module
+
+    def test_mcp_e2e_and_ci_successes_report_remote_selection(self):
+        service = _service(self.root, {"default": "remote", "remote": "vps"})
+        deps = {"target_service": service}
+        cases = (
+            ("e2e", lambda m: m.run_e2e(str(self.root)), {"ok": True, "workers": []}),
+            ("e2e", lambda m: m.run_e2e(str(self.root), async_=True), {"ok": True, "job_id": "j"}),
+            ("ci", lambda m: m.ci_run(str(self.root), "ci.yml"),
+             {"ok": True, "parent_job_id": "p", "children": []}),
+        )
+        for name, call, report in cases:
+            module = self._tool(name)
+            completed = SimpleNamespace(returncode=0, stdout=json.dumps(report), stderr="")
+            with self.subTest(name=name, report=report), \
+                    patch.object(module.subprocess, "run", return_value=completed), \
+                    patch("sandbox.application.context.durable_job_dependencies",
+                          return_value=deps):
+                self.assertEqual(call(module), {**report, "remote_selection": "profile"})
+        blocked = {"ok": False, "status": "blocked", "code": "remote_not_ready_capacity"}
+        module = self._tool("e2e")
+        completed = SimpleNamespace(returncode=1, stdout=json.dumps(blocked), stderr="")
+        with patch.object(module.subprocess, "run", return_value=completed):
+            self.assertEqual(module.run_e2e(str(self.root)), blocked)
+
+    def test_with_selection_local_and_unresolvable(self):
+        local = notice.with_selection({"ok": True}, "/work/p", local=True,
+                                      service=SimpleNamespace(declared_remote=lambda _p: None))
+        self.assertEqual(local, {"ok": True, "remote_selection": "local"})
+
+        def refuse(_request):
+            raise TargetResolutionError("ambiguous_remote", "x")
+        self.assertEqual(notice.with_selection({"ok": True}, "/work/p",
+                                               service=SimpleNamespace(resolve=refuse)),
+                         {"ok": True, "remote_selection": None})
+
+    def test_mcp_matrix_success_reports_remote_selection(self):
+        import importlib.util
+        import types
+
+        import sandbox.commands.jobs_runtime  # noqa: F401
+        deps = types.ModuleType("dependencies")
+        deps.ToolDependencies = object
+        with patch.dict(sys.modules, {"dependencies": deps}):
+            path = ROOT / "mcp" / "wp-server" / "tools" / "jobs.py"
+            spec = importlib.util.spec_from_file_location("_selection_jobs_matrix", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        target = SimpleNamespace(kind="remote", remote_name="vps", workspace_label="a",
+                                 project_root=str(self.root), runtime_policy={},
+                                 sources={"remote_selection": "single-configured"})
+        module._target_service = SimpleNamespace(resolve=lambda _request: target)
+        policy = SimpleNamespace(deadline_seconds=60, execution_profile=None,
+                                 deadline_source=None, deadline_reminder=None,
+                                 stall_seconds=None, cancel_grace_seconds=None,
+                                 cancel_on_stall=None, cleanup_policy=None, provenance={})
+
+        class Transport:
+            def __init__(self, **_kwargs):
+                pass
+
+            def submit_many(self, _submissions):
+                return {"ok": True, "parent_job_id": "p"}
+        with patch.object(module, "_mcp_execution_policy", return_value=(policy, None)), \
+                patch.object(module, "JobSubmission", side_effect=lambda *a, **k: a), \
+                patch.object(module, "_resolved_project_identity", return_value="id"), \
+                patch.object(module, "_source_identity", return_value=None), \
+                patch("sandbox.transports.remote_jobs.RemoteJobTransport", Transport):
+            result = module.job_matrix(["true"], ["a", "b"], str(self.root), remote="vps")
+        self.assertEqual(result, {"ok": True, "parent_job_id": "p",
+                                  "remote_selection": "single-configured"})
+
+    def test_gate_selection_after_interleaved_resolutions(self):
+        import contextvars
+        from sandbox.readiness import gate
+        two = {"vps": REGISTERED["vps"],
+               "edge": {"name": "edge", "provisioned": True, "capabilities": ["job.exec"]}}
+        profile = _service(self.root, {"default": "remote", "remote": "vps"}, registered=two)
+
+        def submission(remote):
+            return SimpleNamespace(project_root=str(self.root.resolve()), remote_name=remote,
+                                   workspace_label="default", project_identity="id")
+
+        def selection(remote):
+            return gate._submission_target(submission(remote)).sources["remote_selection"]
+
+        def scenario():
+            profile.resolve(TargetRequest(project_dir=str(self.root)))
+            self.assertEqual(selection("vps"), "profile")
+            # A different remote replaces it; the earlier remote no longer matches.
+            profile.resolve(TargetRequest(project_dir=str(self.root), remote="edge"))
+            self.assertEqual((selection("edge"), selection("vps")), ("explicit", None))
+            # Re-selecting the same remote another way records the new way.
+            profile.resolve(TargetRequest(project_dir=str(self.root), remote="vps"))
+            self.assertEqual(selection("vps"), "explicit")
+            # A local or failed resolution leaves the last remote selection.
+            profile.resolve(TargetRequest(project_dir=str(self.root), local=True))
+            with self.assertRaises(TargetResolutionError):
+                profile.resolve(TargetRequest(project_dir=str(self.root), remote="ghost"))
+            self.assertEqual(selection("vps"), "explicit")
+        contextvars.copy_context().run(scenario)
+
+    def test_run_tests_auto_target_keeps_descriptor_and_workspace(self):
+        module = NoLocalFallbackTests._wp_tool(self)
+        target = SimpleNamespace(kind="remote", remote_name="vps", workspace_label="php",
+                                 project_root=str(self.root), runtime_policy={"workspace": "php"},
+                                 sources={"remote_selection": "profile", "identity": "id"})
+        requests, submitted = [], []
+        (self.root / "sandbox.config.yml").write_text("runtime: {}\n")
+
+        def resolve(request):
+            requests.append(request)
+            return target
+        transport = SimpleNamespace(
+            submit=lambda submission: submitted.append(submission) or {"job_id": "j"})
+        with patch("sandbox.application.context.durable_job_dependencies",
+                   return_value={"target_service": SimpleNamespace(resolve=resolve)}), \
+                patch.object(module, "_resolve_test_mode", return_value="unit"), \
+                patch.object(module, "_remote_job_transport", return_value=transport), \
+                patch("sandbox.commands.jobs_runtime._source_identity", return_value=None), \
+                patch("sandbox.commands.jobs_runtime._resolved_project_identity",
+                      return_value="id"), \
+                patch("sandbox.jobs.models.JobSubmission", side_effect=lambda *a, **k: a):
+            result = module.run_tests(project_dir=str(self.root), config_file="sandbox.config.yml")
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual([request.config_file for request in requests], ["sandbox.config.yml"])
+        self.assertEqual((result["workspace"], result["remote_selection"]), ("php", "profile"))
+        self.assertEqual(submitted[0][4], "php")
 
 
 if __name__ == "__main__":

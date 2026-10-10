@@ -201,9 +201,13 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             from sandbox.readiness.gate import require_ready
-            return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path, readiness=require_ready).submit_many(submissions)
+            if isinstance(accepted, dict) and accepted.get("ok") is not False:
+                accepted = {**accepted, "remote_selection": (
+                    getattr(first, "sources", None) or {}).get("remote_selection")}
+            return accepted
         return _job_service.submit_matrix(submissions)
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()

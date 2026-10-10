@@ -621,7 +621,7 @@ same separate evidence.
 ./sb workspace retire --remote scaleway-sandbox --legacy-workspace-id <ws_id> [...] --json
 ./sb workspace retire --remote scaleway-sandbox --plan-id <wr_plan-id> --confirm --json
 ./sb remote docker-pool scaleway-sandbox --json             # read-only plan
-./sb remote docker-pool scaleway-sandbox --confirm --json   # backup, validate, restart, verify
+./sb remote docker-pool scaleway-sandbox --confirm --plan-digest <plan_digest> --json   # backup, validate, restart, verify
 ./sb remote docker-pool scaleway-sandbox --recover-interrupted --expected-running 72 --json # evidence-bound recovery plan
 # Plans include measured total/allocated/usable subnet fields; partial IPAM is null, never guessed.
 ./sb remote domains scaleway-sandbox --json                 # secret-free instance/host route inventory

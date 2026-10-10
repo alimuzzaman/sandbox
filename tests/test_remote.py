@@ -3327,7 +3327,8 @@ json.load(open(path))
         config = root / "daemon.json"
         config.write_text('{"log-driver":"json-file"}\n')
         config.chmod(0o600)
-        source = sr._remote_docker_pool_program(confirm=True)
+        source = sr._remote_docker_pool_program(
+            confirm=True, plan_digest=sr.docker_pool_plan_digest([], 1))
         source = source.replace(
             'pathlib.Path("/etc/docker/daemon.json")', f'pathlib.Path({str(config)!r})')
         source = source.replace(
@@ -3364,6 +3365,7 @@ json.load(open(path))
             "subnet_capacity_allocated": 0, "subnet_capacity_status": "complete",
             "restart_required": True,
             "route_overlap_count": 0, "apply_safe": True,
+            "other_running_containers": 74, "plan_digest": "f" * 16,
         }))
         result = sr.remote_docker_pool(
             {"ssh": "registered-target"}, confirm=False)
@@ -3384,7 +3386,7 @@ json.load(open(path))
             }),
         )
         result = sr.remote_docker_pool(
-            {"ssh": "registered-target"}, confirm=True)
+            {"ssh": "registered-target"}, confirm=True, plan_digest="a" * 16)
         self.assertFalse(result["ok"])
         self.assertTrue(result["rollback_attempted"])
         self.assertEqual(result["message"], "Docker pool update failed")
@@ -3396,7 +3398,8 @@ json.load(open(path))
             ["ssh", "remote", "-c", encoded], 300,
         )
         with self.assertRaisesRegex(RuntimeError, "outcome is unknown") as caught:
-            sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True)
+            sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True,
+                                  plan_digest="a" * 16)
         self.assertNotIn(encoded, str(caught.exception))
 
     @patch("sandbox.core._remote.ssh_run")
@@ -3413,7 +3416,8 @@ json.load(open(path))
             "ok": True, "status": "complete",
         }))
         with self.assertRaisesRegex(RuntimeError, "incomplete evidence"):
-            sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True)
+            sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True,
+                                  plan_digest="a" * 16)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_recovery_plan_requires_exact_bounded_evidence(self, mock_ssh_run):

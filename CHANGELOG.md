@@ -8,6 +8,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Docker-pool plan digest (spec 063 US4). `sb remote docker-pool` plans list
+  the remote's hosted targets, the other running containers a daemon restart
+  would also restart, a 16-hex `plan_digest` and the no-restart range
+  alternative. `--confirm` now requires `--plan-digest D`
+  (`docker_pool_plan_digest_required` otherwise), and an apply whose targets
+  or container count changed since the plan is refused
+  `docker_pool_plan_changed` with zero restarts. `--recover-interrupted` is
+  unchanged and digest-free.
 - Remote readiness (spec 063 US2). `sb remote readiness [NAME]` and the MCP
   tool `remote_readiness` report six rows (registration, reachability,
   runtime compatibility, capacity, ownership repair, handoff) under a 60 s

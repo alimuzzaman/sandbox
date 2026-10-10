@@ -46,8 +46,8 @@
 
 ## Phase 6: US4 Daemon-pool change stays a visible maintenance step (P3)
 
-- [ ] T024 [P] [US4] Tests: plan lists hosted targets, other running containers and `plan_digest`; apply with a stale digest refuses `docker_pool_plan_changed` with zero restarts in `tests/test_docker_pool_plan_digest.py`; update `tests/test_remote_docker_pool_capacity.py` for the required digest, and `--recover-interrupted` stays digest-free (it restores a recorded plan, not a new one)
-- [ ] T025 [US4] Add hosted inventory, container count and digest to the pool plan; `--plan-digest` required with `--confirm` in `sandbox/core/_remote.py`, `sandbox/commands/remote.py`, `sandbox/cli.py`
+- [x] T024 [P] [US4] Tests: plan lists hosted targets, other running containers and `plan_digest`; apply with a stale digest refuses `docker_pool_plan_changed` with zero restarts in `tests/test_docker_pool_plan_digest.py`; update `tests/test_remote_docker_pool_capacity.py` for the required digest, and `--recover-interrupted` stays digest-free (it restores a recorded plan, not a new one)
+- [x] T025 [US4] Add hosted inventory, container count and digest to the pool plan; `--plan-digest` required with `--confirm` in `sandbox/core/_remote.py`, `sandbox/commands/remote.py`, `sandbox/cli.py`
 
 ## Phase 7: Polish
 

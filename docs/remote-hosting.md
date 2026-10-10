@@ -208,6 +208,30 @@ A remote whose Docker daemon configures no address pools is refused as
 `missing_pool_evidence` (missing evidence, not exhausted capacity), and the
 refusal names the range remedy `./sb remote network-range propose <remote>`.
 
+#### Docker-pool plan and digest (spec 063)
+
+Configuring the daemon address pools restarts Docker, and with it every running
+container on the remote, hosted sites included. Assigning a development range
+(below) needs no restart and is the preferred fix. `./sb remote docker-pool
+<remote> --json` only plans (status `planned`, exit 0). The plan lists:
+
+- `hosted_targets`: every `project/environment` the controller's hosting
+  inventory (`hosts.json`) records on that remote, sorted;
+- `other_running_containers`: running containers outside those hosted Compose
+  projects, which the restart also stops and restarts;
+- `plan_digest`: 16 hex characters, the first 16 of
+  `sha256(json([sorted targets, other count]))`;
+- `no_restart_alternative`: the `network-range propose`/`assign` route.
+
+Applying requires `--confirm --plan-digest <plan_digest>`; `--confirm` alone is
+refused `docker_pool_plan_digest_required` before the remote is contacted. The
+remote recounts under the pool lock and refuses `docker_pool_plan_changed`
+(exit 2, zero restarts, `daemon.json` untouched) when the digest no longer
+matches, returning the new digest so the operator can re-read the plan. An
+unreadable hosting inventory fails the plan and the apply closed.
+`--recover-interrupted` restores a recorded transaction rather than a new plan
+and stays digest-free.
+
 #### Development ranges (spec 063)
 
 A development range is an operator-assigned IPv4 range on one remote from

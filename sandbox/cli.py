@@ -921,6 +921,10 @@ Per-project (each plugin carries its own sandbox.config.json):
              "commands); also allow protected remote service or Docker-pool mutations")
     remote_p.add_argument("--recover-interrupted", action="store_true",
         help="for `remote docker-pool`: plan/recover only containers proven to have stopped during the latest interrupted transaction")
+    remote_p.add_argument("--plan-digest", dest="plan_digest", default=None,
+        help="for `remote docker-pool --confirm`: the plan_digest the plan reported; the "
+             "apply is refused (docker_pool_plan_changed) if hosted targets or running "
+             "containers changed since")
     remote_p.add_argument("--expected-running", type=int, default=None,
         help="required interrupted-recovery assertion: exact pre-transaction running-container count")
     remote_p.add_argument("--expected-removed", type=int, default=0,

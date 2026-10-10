@@ -66,6 +66,8 @@ else:
             self.assertEqual(payload["subnet_capacity_total"], 4608)
             self.assertEqual(payload["subnet_capacity_allocated"], 1)
             self.assertEqual(payload["subnet_capacity"], 4607)
+            self.assertEqual(payload["other_running_containers"], 0)
+            self.assertEqual(payload["plan_digest"], _remote.docker_pool_plan_digest([], 0))
 
 
 if __name__ == "__main__":

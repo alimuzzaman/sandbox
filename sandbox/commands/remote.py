@@ -422,19 +422,54 @@ def _add_front_door_domains(data: dict, entry: dict) -> None:
                           "certificate_problems": report["certificate_problems"]}
 
 
+def _docker_pool_hosted(name: str) -> list[list[str]]:
+    """This remote's hosted targets as ``[project/environment, compose project]``."""
+    hosted = []
+    for key in hosting_state_keys():
+        remote, _, target = key.partition("/")
+        project, _, environment = target.partition("/")
+        if remote == name and project and environment:
+            hosted.append([target, f"sandbox-host-{project}-{environment}"])
+    return sorted(hosted)
+
+
 def _cmd_docker_pool(args, as_json: bool) -> None:
     name = _require_name(args)
+    confirm = _arg_true(args, "confirm")
+    recover_interrupted = _arg_true(args, "recover_interrupted")
+    plan_digest = getattr(args, "plan_digest", None)
+    if confirm and not recover_interrupted and not plan_digest:
+        # Spec 063 FR-011: an apply is bound to the plan it confirms.
+        message = ("--confirm needs --plan-digest D from `./sb remote docker-pool "
+                   + name + " --json`; the plan lists what the restart affects")
+        if as_json:
+            print(json.dumps({"ok": False, "name": name, "status": "failed", "data": {},
+                              "error": {"code": "docker_pool_plan_digest_required",
+                                        "message": message}}, sort_keys=True))
+            raise SystemExit(1)
+        die("docker_pool_plan_digest_required: " + message)
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}'")
     try:
+        hosted = _docker_pool_hosted(name)
+    except Exception:  # noqa: BLE001 - unreadable inventory fails closed
+        hosted = None
+    try:
+        if hosted is None and not recover_interrupted:
+            raise RuntimeError("hosting inventory is unreadable")
         data = sr.remote_docker_pool(
-            entry, confirm=_arg_true(args, "confirm"),
-            recover_interrupted=_arg_true(args, "recover_interrupted"),
+            entry, confirm=confirm, recover_interrupted=recover_interrupted,
             expected_running=getattr(args, "expected_running", None),
             expected_removed=getattr(args, "expected_removed", 0),
-            recovery_since=getattr(args, "recovery_since", None))
-    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+            recovery_since=getattr(args, "recovery_since", None),
+            hosted=hosted or [], plan_digest=plan_digest,
+            remote_name=name)
+    except ValueError as exc:
+        code = str(exc) if str(exc) == "docker_pool_plan_digest_required" else "docker_pool_unavailable"
+        data = {"ok": False, "code": code,
+                "message": sr.redact_ssh_connection(str(exc), entry)}
+    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
         data = {"ok": False, "code": "docker_pool_unavailable",
                 "message": sr.redact_ssh_connection(str(exc), entry)}
     payload = {
@@ -453,7 +488,16 @@ def _cmd_docker_pool(args, as_json: bool) -> None:
             raise SystemExit(1)
         return
     if payload["ok"]:
-        if data.get("requires_confirm"):
+        if data.get("requires_confirm") and data.get("plan_digest"):
+            targets = ", ".join(data.get("hosted_targets") or []) or "none"
+            print(f"'{name}' Docker pool update is planned; a restart affects hosted targets: "
+                  f"{targets} and {data.get('other_running_containers')} other running "
+                  "container(s)")
+            print(f"  apply: ./sb remote docker-pool {name} --confirm "
+                  f"--plan-digest {data['plan_digest']}")
+            if data.get("no_restart_alternative"):
+                print(f"  no-restart alternative: {data['no_restart_alternative']}")
+        elif data.get("requires_confirm"):
             print(f"'{name}' Docker pool update is planned; re-run with --confirm")
         else:
             ok(f"'{name}' Docker address pools: {data.get('status')}")

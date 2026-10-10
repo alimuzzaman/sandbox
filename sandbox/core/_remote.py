@@ -3508,12 +3508,31 @@ def remote_network_capacity_admission(
 remote_network_capacity = remote_network_capacity_admission
 
 
+_PLAN_DIGEST_RE = re.compile(r"[0-9a-f]{16}")
+# One inspect line per running container: restart policy, then compose project.
+_POOL_INSPECT_FORMAT = ('{{.HostConfig.RestartPolicy.Name}}\t'
+                        '{{index .Config.Labels "com.docker.compose.project"}}')
+
+
+def docker_pool_plan_digest(hosted_targets, other_running_containers: int) -> str:
+    """Spec 063 R8: digest of what a pool restart would restart."""
+    encoded = json.dumps([sorted(hosted_targets), other_running_containers],
+                         separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()[:16]
+
+
 def _remote_docker_pool_program(*, confirm: bool, recover_interrupted: bool = False,
                                 expected_running: int | None = None,
                                 expected_removed: int = 0,
-                                recovery_since: str | None = None) -> str:
-    """Build the fixed, non-interactive host-pool transaction."""
+                                recovery_since: str | None = None,
+                                hosted=(), plan_digest: str | None = None) -> str:
+    """Build the fixed, non-interactive host-pool transaction.
+
+    ``hosted`` is ``[[project/environment, compose project], ...]`` from the
+    controller's hosting inventory; ``plan_digest`` binds an apply to the plan.
+    """
     desired = json.dumps(list(REMOTE_DOCKER_ADDRESS_POOLS), sort_keys=True)
+    hosted_json = json.dumps(sorted([str(target), str(project)] for target, project in hosted))
     return f'''import datetime, fcntl, hashlib, ipaddress, json, os, pathlib, shutil, subprocess, sys, tempfile, time
 CONFIG = pathlib.Path("/etc/docker/daemon.json")
 LOCK = pathlib.Path("/run/lock/sandbox-docker-pool.lock")
@@ -3523,6 +3542,13 @@ RECOVER_INTERRUPTED = {recover_interrupted!r}
 EXPECTED_RUNNING = {expected_running!r}
 EXPECTED_REMOVED = {expected_removed!r}
 RECOVERY_SINCE = {recovery_since!r}
+HOSTED = json.loads({hosted_json!r})
+PLAN_DIGEST = {plan_digest!r}
+INSPECT_FORMAT = {_POOL_INSPECT_FORMAT!r}
+
+def plan_digest(targets, other):
+    encoded = json.dumps([sorted(targets), other], separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
 def run(argv, timeout=60, check=True):
     result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
@@ -3817,11 +3843,18 @@ network_count = len(list(filter(None, run(
     ["docker", "network", "ls", "--filter", "type=custom", "-q"], timeout=30
 ).stdout.splitlines())))
 restart_policies = []
+hosted_projects = {{project for _, project in HOSTED}}
+other_running = 0
 if before:
     inspected = run([
-        "docker", "inspect", "--format", "{{{{.HostConfig.RestartPolicy.Name}}}}", *sorted(before)
+        "docker", "inspect", "--format", INSPECT_FORMAT, *sorted(before)
     ], timeout=60).stdout.splitlines()
-    restart_policies = [value.strip() or "no" for value in inspected]
+    for line in inspected:
+        policy, _, project = line.partition("\t")
+        restart_policies.append(policy.strip() or "no")
+        if project.strip() not in hosted_projects:
+            other_running += 1
+current_plan_digest = plan_digest([target for target, _ in HOSTED], other_running)
 had_config = CONFIG.exists()
 initial_bytes = CONFIG.read_bytes() if had_config else b""
 initial_digest = hashlib.sha256(initial_bytes).hexdigest()
@@ -3854,7 +3887,16 @@ base = {{
     "restart_required": current_pools != DESIRED,
     "route_overlap_count": route_overlap_count,
     "apply_safe": route_overlap_count == 0,
+    "other_running_containers": other_running,
+    "plan_digest": current_plan_digest,
 }}
+if APPLY and PLAN_DIGEST != current_plan_digest:
+    print(json.dumps({{"ok": False, "code": "docker_pool_plan_changed",
+                      "status": "failed",
+                      "message": "Hosted targets or running containers changed since the plan",
+                      "plan_digest": current_plan_digest,
+                      "other_running_containers": other_running}}))
+    raise SystemExit(2)
 if not APPLY or current_pools == DESIRED:
     print(json.dumps(base, sort_keys=True))
     raise SystemExit(0)
@@ -3968,15 +4010,28 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
                        expected_running: int | None = None,
                        expected_removed: int = 0,
                        recovery_since: str | None = None,
+                       hosted=(), plan_digest: str | None = None,
+                       remote_name: str | None = None,
                        timeout: int = 900) -> dict:
-    """Plan or apply the fixed Docker address-pool transaction on one remote."""
+    """Plan or apply the fixed Docker address-pool transaction on one remote.
+
+    A confirmed apply must carry the ``plan_digest`` its plan reported
+    (spec 063 FR-011); interrupted recovery restores a recorded plan and is
+    digest-free.
+    """
     import base64
+    if confirm and not recover_interrupted and (
+            not isinstance(plan_digest, str) or not _PLAN_DIGEST_RE.fullmatch(plan_digest)):
+        raise ValueError("docker_pool_plan_digest_required")
+    hosted = sorted([str(target), str(project)] for target, project in hosted)
     program = base64.b64encode(
         _remote_docker_pool_program(
             confirm=confirm, recover_interrupted=recover_interrupted,
             expected_running=expected_running,
             expected_removed=expected_removed,
-            recovery_since=recovery_since).encode()).decode()
+            recovery_since=recovery_since, hosted=hosted,
+            plan_digest=plan_digest if confirm and not recover_interrupted else None,
+        ).encode()).decode()
     command = (
         "sudo -n python3 -c " + shlex.quote(
             "import base64;exec(base64.b64decode(" + repr(program) + "))")
@@ -4009,7 +4064,7 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "rollback_succeeded", "route_overlap_count", "apply_safe",
         "recovery_candidate_count", "recovery_window_seconds",
         "recovery_expected_count", "recovery_evidence_count",
-        "recovery_removed_count",
+        "recovery_removed_count", "other_running_containers", "plan_digest",
     }
     if set(payload) - allowed:
         raise RuntimeError("remote Docker pool operation returned unexpected fields")
@@ -4027,6 +4082,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "docker_pool_recovery_evidence_missing": "Recent recovery evidence is unavailable",
         "docker_pool_recovery_evidence_mismatch": "Restart event evidence does not match baseline",
         "docker_pool_recovery_failed": "Interrupted transaction recovery was incomplete",
+        "docker_pool_plan_changed": ("Hosted targets or running containers changed since "
+                                     "the plan; re-run the plan and confirm its new digest"),
     }
     if payload["ok"] is False:
         if code not in known_errors:
@@ -4041,7 +4098,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
             "running_container_count", "restart_policy_none_count",
             "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
             "subnet_capacity_status", "requires_confirm", "restart_required",
-            "route_overlap_count", "apply_safe",
+            "route_overlap_count", "apply_safe", "other_running_containers",
+            "plan_digest",
         },
         "unchanged": {
             "ok", "status", "current_pools_configured", "current_pool_count",
@@ -4049,7 +4107,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
             "running_container_count", "restart_policy_none_count",
             "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
             "subnet_capacity_status", "requires_confirm", "restart_required",
-            "route_overlap_count", "apply_safe",
+            "route_overlap_count", "apply_safe", "other_running_containers",
+            "plan_digest",
         },
         "complete": {
             "ok", "status", "current_pools_configured", "current_pool_count",
@@ -4057,7 +4116,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
             "running_container_count", "restart_policy_none_count",
             "subnet_capacity", "subnet_capacity_total", "subnet_capacity_allocated",
             "subnet_capacity_status", "requires_confirm", "restart_required",
-            "route_overlap_count", "apply_safe", "restart_performed",
+            "route_overlap_count", "apply_safe", "other_running_containers",
+            "plan_digest", "restart_performed",
             "containers_restored", "containers_missing", "backup_created",
             "config_digest",
         },
@@ -4102,6 +4162,7 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
             "docker_pool_recovery_evidence_mismatch": 2,
             "docker_pool_recovery_failed": 3,
             "docker_pool_apply_failed": 3,
+            "docker_pool_plan_changed": 2,
         }[code]
         if result.returncode != expected_exit or status != "failed":
             raise RuntimeError("remote Docker pool error receipt is inconsistent")
@@ -4113,6 +4174,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         if code == "docker_pool_apply_failed":
             failure_required.update({"rollback_attempted", "rollback_succeeded",
                                      "containers_missing"})
+        if code == "docker_pool_plan_changed":
+            failure_required.update({"plan_digest", "other_running_containers"})
         if code == "docker_pool_recovery_failed":
             failure_required.update({"recovery_candidate_count", "recovery_window_seconds",
                                      "containers_restored", "containers_missing"})
@@ -4126,7 +4189,7 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
                   "containers_missing", "route_overlap_count",
                   "recovery_candidate_count", "recovery_window_seconds",
                   "recovery_expected_count", "recovery_evidence_count",
-                  "recovery_removed_count"):
+                  "recovery_removed_count", "other_running_containers"):
         value = payload.get(field)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise RuntimeError("remote Docker pool operation returned invalid counts")
@@ -4163,6 +4226,14 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         value = payload.get(field)
         if value is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
             raise RuntimeError("remote Docker pool operation returned an invalid digest")
+    value = payload.get("plan_digest")
+    if value is not None and (not isinstance(value, str) or not _PLAN_DIGEST_RE.fullmatch(value)):
+        raise RuntimeError("remote Docker pool operation returned an invalid plan digest")
+    if "plan_digest" in payload:
+        payload["hosted_targets"] = [target for target, _ in hosted]
+        payload["no_restart_alternative"] = (
+            f"./sb remote network-range propose {remote_name or 'REMOTE_NAME'} --json, "
+            "then run the network-range assign command it prints (no daemon restart)")
     return payload
 
 

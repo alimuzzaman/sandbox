@@ -620,7 +620,10 @@ same separate evidence.
 # Retire exact unattributed legacy records (metadata only; bytes on disk are kept):
 ./sb workspace retire --remote scaleway-sandbox --legacy-workspace-id <ws_id> [...] --json
 ./sb workspace retire --remote scaleway-sandbox --plan-id <wr_plan-id> --confirm --json
-./sb remote docker-pool scaleway-sandbox --json             # read-only plan
+./sb remote readiness scaleway-sandbox --json              # six readiness rows, each with a remedy (spec 063)
+./sb remote network-range propose scaleway-sandbox --json  # read-only: proposes a range and its assign command
+./sb remote network-range assign scaleway-sandbox --cidr 10.210.0.0/16 --confirm --json  # no daemon restart
+./sb remote docker-pool scaleway-sandbox --json             # read-only plan: hosted targets, other containers, plan_digest
 ./sb remote docker-pool scaleway-sandbox --confirm --plan-digest <plan_digest> --json   # backup, validate, restart, verify
 ./sb remote docker-pool scaleway-sandbox --recover-interrupted --expected-running 72 --json # evidence-bound recovery plan
 # Plans include measured total/allocated/usable subnet fields; partial IPAM is null, never guessed.

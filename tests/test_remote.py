@@ -2212,6 +2212,55 @@ class TestUploadRuntimeSource(unittest.TestCase):
                 remote_cmd._upload_runtime_source("host", source_revision=revision)
             self.assertEqual(list(home.glob(".sb-src-stage-*")), [])
 
+class TestInstallHandlersFailClosedOnReadinessInvalidation(unittest.TestCase):
+    """Spec 063 US2: an install that cannot withdraw readiness proofs stops
+    before its first remote write."""
+
+    def test_install_handlers_abort_before_remote_writes_when_readiness_invalidation_fails(self):
+        def unwritable(_name, home=None):
+            raise PermissionError(13, "Permission denied")
+        cases = {
+            "migrate": (lambda: remote_cmd._cmd_service(types.SimpleNamespace(
+                name="migrate", ssh_url="myvps", confirm=True, upload_timeout=300),
+                as_json=True)),
+            "provision": (lambda: remote_cmd._cmd_provision(types.SimpleNamespace(
+                name="myvps", control="https", control_host="sandbox.example.com",
+                confirm=True, upload_timeout=300, front_door=None), as_json=True)),
+            "up": (lambda: remote_cmd._cmd_up(types.SimpleNamespace(
+                name="myvps", confirm=True, upload_timeout=300), as_json=True)),
+        }
+        for name, call in cases.items():
+            with self.subTest(handler=name), tempfile.TemporaryDirectory() as d, \
+                    _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote(
+                    "myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                    control_transport="https", control_host="sandbox.example.com",
+                    control_url="https://sandbox.example.com", mcp_port=9174,
+                    bearer_token="a" * 64)
+                error = StringIO()
+                with patch("sandbox.readiness.check.invalidate", unwritable), \
+                     patch.object(remote_cmd.sr, "remote_mcp_service_status",
+                                  return_value={"probe_state": "complete"}), \
+                     patch.object(remote_cmd, "_migrate_pin_gate", return_value=(False, [])), \
+                     patch.object(remote_cmd, "_front_door_provision_preflight"), \
+                     patch.object(remote_cmd, "_local_git_revision", return_value="f" * 40), \
+                     patch.object(remote_cmd, "_assert_clean_source_revision"), \
+                     patch.object(remote_cmd, "_read_exact_source_file", return_value=b"#!/bin/sh\n"), \
+                     patch.object(remote_cmd, "_new_provision_log") as journal, \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service") as migrate, \
+                     patch.object(remote_cmd.sr, "start_remote_mcp_server") as start, \
+                     patch.object(remote_cmd.sr, "configure_https_proxy") as proxy, \
+                     patch.object(sr, "ssh_run") as ssh, \
+                     redirect_stderr(error), redirect_stdout(StringIO()), \
+                     self.assertRaises(SystemExit):
+                    call()
+                self.assertIn("readiness_invalidation_failed", error.getvalue())
+                for helper in (journal, upload, migrate, start, proxy, ssh):
+                    helper.assert_not_called()
+                self.assertEqual(sr.get_remote("myvps").get("mcp_service"), None)
+
+
 class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
     def test_invalid_upload_timeout_refuses_before_journal_or_remote_upload(self):
         with tempfile.TemporaryDirectory() as d:

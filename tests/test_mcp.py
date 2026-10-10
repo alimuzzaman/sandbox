@@ -412,7 +412,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("delivery_trace_owner_status", "parent_request_id,producer,project_dir"),
             ("delivery_trace_owner_record", "expected_sequence,input,parent_request_id,producer,project_dir,publication_id"),
         )
-        self.assertEqual(len(actual), 148)
+        self.assertEqual(len(actual), 149)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         for name, _required, response in actual:
             if name.startswith("owned_storage_"):

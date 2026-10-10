@@ -123,6 +123,7 @@ def _poll_commands(job_id: str, remote: str | None) -> dict[str, str]:
 
 def start(args) -> dict:
     """Accept one idempotent detached host scan through the durable job API."""
+    from sandbox.readiness.errors import RemoteNotReadyError
     try:
         requested_budget = args.budget
         if requested_budget is None:
@@ -214,6 +215,13 @@ def start(args) -> dict:
         return accepted
     except ResourceError as exc:
         return result(False, "status", status="failed", error=exc)
+    except RemoteNotReadyError as exc:
+        # Refused before any transfer (spec 063): keep the row, reason and remedy.
+        refusal = exc.to_payload()
+        return result(False, "status", status="blocked",
+                      data={"refusal": {key: refusal[key] for key in (
+                          "code", "detail", "remedy", "side_effects") if key in refusal}},
+                      error=ResourceError(str(exc)[:240], exc.code, retryable=False))
     except Exception as exc:
         code = getattr(exc, "code", None)
         if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):

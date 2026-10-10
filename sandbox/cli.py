@@ -128,7 +128,11 @@ def _dispatch_remote_admission_error(exc: RemoteJobAdmissionError, args) -> None
         suffix = f" {guidance}" if isinstance(guidance, str) and guidance else ""
         target = payload.get("target")
         remote = target.get("remote") if isinstance(target, dict) else None
-        if isinstance(remote, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", remote):
+        remedy = payload.get("remedy")
+        if isinstance(remedy, str) and remedy.startswith("./sb "):
+            # A readiness refusal (spec 063) names its own remedy.
+            suffix += f" Remedy: {remedy}."
+        elif isinstance(remote, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", remote):
             suffix += f" Recovery: run ./sb remote docker-pool {remote} --json."
         print(
             f"error: {payload['error']} ({payload['code']})."

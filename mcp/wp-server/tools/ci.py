@@ -158,6 +158,8 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     report = _safe_json(lines[-1]) if lines else None
     if isinstance(report, dict) and report.get("skipped"):
         return report  # --if-event didn't match; nothing ran, not an error.
+    if isinstance(report, dict) and report.get("status") == "blocked":
+        return report  # typed refusal before transfer (spec 063)
     if isinstance(report, dict) and (
             "cells" in report or
             ("parent_job_id" in report and "children" in report)):

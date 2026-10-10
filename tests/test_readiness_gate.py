@@ -179,7 +179,10 @@ class SubmissionSiteTests(unittest.TestCase):
                         and node.name == "_remote_lifecycle")
         (gate_call,) = _calls_named(function, "require_ready")
         (deploy_call,) = _calls_named(function, "deploy_exact_working_tree")
+        (legacy_guard,) = _calls_named(function, "_remote_ensure_reachability")
         self.assertLess(gate_call.lineno, deploy_call.lineno)
+        # The gate answers an unreachable remote before the legacy guard does.
+        self.assertLess(gate_call.lineno, legacy_guard.lineno)
 
 
 class CliEnvelopeTests(unittest.TestCase):
@@ -198,6 +201,117 @@ class CliEnvelopeTests(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual((payload["ok"], payload["action"], payload["data"]),
                          (True, "readiness", data))
+
+
+
+_ROW = {"aspect": "capacity", "state": "not_ready", "reason": "missing_pool_evidence",
+        "remedy": "./sb remote network-range propose vps"}
+
+
+class RefusalEnvelopeTests(unittest.TestCase):
+    """The refusal is an admission refusal, so every caller that already
+    returns an admission envelope returns this one unchanged."""
+
+    def test_refusal_is_an_admission_refusal_with_its_remedy(self):
+        from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+        error = RemoteNotReadyError(_ROW, remote="vps")
+        self.assertIsInstance(error, RemoteJobAdmissionError)
+        payload = error.to_payload()
+        self.assertEqual((payload["code"], payload["status"], payload["remedy"]),
+                         ("remote_not_ready_capacity", "blocked",
+                          "./sb remote network-range propose vps"))
+        self.assertEqual(payload["detail"]["reason"], "missing_pool_evidence")
+        self.assertEqual(payload["side_effects"]["bytes_transferred"], 0)
+
+    def test_cli_edge_renders_json_and_human_remedy(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+
+        from sandbox import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli._dispatch_remote_admission_error(
+                RemoteNotReadyError(_ROW, remote="vps"), SimpleNamespace(json=True))
+        self.assertEqual(json.loads(out.getvalue())["code"], "remote_not_ready_capacity")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            cli._dispatch_remote_admission_error(
+                RemoteNotReadyError(_ROW, remote="vps"), SimpleNamespace(json=False))
+        self.assertIn("Remedy: ./sb remote network-range propose vps", err.getvalue())
+        self.assertNotIn("docker-pool", err.getvalue())
+
+    def test_test_command_human_failure_names_the_remedy(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+
+        from sandbox.commands import jobs_runtime
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            jobs_runtime._remote_job_transport_failure(
+                RemoteNotReadyError(_ROW, remote="vps"),
+                SimpleNamespace(remote="vps", json=False), "test")
+        self.assertIn("Nothing was transferred", err.getvalue())
+        self.assertIn("./sb remote network-range propose vps", err.getvalue())
+
+    def test_mcp_wrappers_pass_a_blocked_envelope_through(self):
+        for name in ("e2e.py", "ci.py"):
+            source = (ROOT / "mcp" / "wp-server" / "tools" / name).read_text()
+            with self.subTest(tool=name):
+                self.assertIn('.get("status") == "blocked"', source)
+
+
+class FenceAndDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+
+    def test_check_in_flight_across_an_invalidation_is_never_reused(self):
+        home = Path(self.home)
+        check.invalidate("vps", home)  # an earlier generation exists
+
+        def migrate_during_probe(_remote, _command, timeout=None):
+            check.invalidate("vps", home)  # a same-revision migrate lands now
+            return subprocess.CompletedProcess([], 0, "", "")
+        probes = _probes(self.home, ssh_run=migrate_during_probe)
+        check.run("/work/project", "vps", probes=probes)
+        self.assertIsNone(check.reusable("vps", "project-identity", probes=_probes(self.home)))
+        # A check that starts after the invalidation is reusable again.
+        check.run("/work/project", "vps", probes=_probes(self.home))
+        self.assertIsNotNone(check.reusable("vps", "project-identity",
+                                            probes=_probes(self.home)))
+
+    def test_process_exits_at_the_deadline_with_a_probe_still_running(self):
+        import time
+
+        from tests.subprocess_support import synthetic_environment
+        program = (
+            "import sys, threading; sys.path.insert(0, sys.argv[1]); "
+            "from sandbox.readiness import check; "
+            "from tests.test_readiness import _probes; "
+            "check.DEADLINE_SECONDS = 0.5; "
+            "hang = lambda *_a, **_k: threading.Event().wait(30); "
+            "result = check.run('/work/project', 'vps', probes=_probes(sys.argv[2], "
+            "capacity_decision=lambda _r, *, remote_name: hang())); "
+            "print([r['state'] for r in result['rows'] if r['aspect'] == 'capacity'][0])"
+        )
+        started = time.monotonic()
+        completed = subprocess.run(
+            [sys.executable, "-c", program, str(ROOT), self.home],
+            capture_output=True, text=True, timeout=25, cwd=str(ROOT),
+            env=synthetic_environment({"PYTHONPATH": str(ROOT)}))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "unknown")
+        self.assertLess(time.monotonic() - started, 15)
+
+
+class HandoffIsolationTests(unittest.TestCase):
+    def test_exec_for_another_project_records_nothing(self):
+        home = Path(tempfile.mkdtemp())
+        check.run("/work/project", "vps", probes=_probes(home))
+        check.record_ensure("vps", "other-project", home=home)
+        self.assertFalse(check.record_exec("vps", "project-identity", home=home))
+        self.assertFalse((check.readiness_dir(home, "vps") / "handoff.json").exists())
 
 
 if __name__ == "__main__":

@@ -1128,17 +1128,23 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         return None
     remote = target.remote or _remote.get_remote(target.remote_name)
     if action == "ensure":
-        refusal = _remote_ensure_reachability(target.remote_name, remote)
-        if refusal is not None:
-            return refusal
         from sandbox.readiness.gate import require_ready
         from sandbox.readiness.errors import RemoteNotReadyError
         try:
+            # Readiness first, so an unreachable remote refuses with the same
+            # remote_not_ready_reachability contract as every other path.
             require_ready(target.project_root, target.remote_name)
         except RemoteNotReadyError as exc:
             # Refused before any source byte leaves this machine.
             return {"ok": False, "error": {"code": exc.code, "message": str(exc)},
-                    "detail": exc.detail, "target": {"remote": target.remote_name}}
+                    "detail": exc.detail, "remedy": exc.detail.get("remedy"),
+                    "side_effects": {"staging_started": False, "bytes_transferred": 0},
+                    "target": {"remote": target.remote_name}}
+        # A reachability probe that timed out is `unknown` and does not refuse;
+        # the existing guard still answers that case.
+        refusal = _remote_ensure_reachability(target.remote_name, remote)
+        if refusal is not None:
+            return refusal
         deployed = _remote.deploy_exact_working_tree(
             remote, target.project_root, remote_name=target.remote_name,
         )

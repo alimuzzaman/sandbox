@@ -74,7 +74,8 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
             return {"ok": False, "error": "run_e2e --async launch timed out after 60s"}
         lines = (res.stdout or "").strip().splitlines()
         launched = _safe_json(lines[-1]) if lines else None
-        if isinstance(launched, dict) and "job_id" in launched:
+        if isinstance(launched, dict) and ("job_id" in launched
+                                           or launched.get("status") == "blocked"):
             return launched
         return {"ok": False, "code": res.returncode,
                 "error": (res.stderr or res.stdout or "async launch failed").strip()[:2000]}
@@ -85,7 +86,8 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
         return {"ok": False, "error": f"run_e2e timed out after {timeout + 120}s"}
     lines = (res.stdout or "").strip().splitlines()
     report = _safe_json(lines[-1]) if lines else None
-    if isinstance(report, dict) and "workers" in report:
+    if isinstance(report, dict) and ("workers" in report or report.get("status") == "blocked"):
+        # A blocked envelope is a typed refusal before transfer (spec 063).
         return report
     return {"ok": False, "code": res.returncode,
             "error": (res.stderr or res.stdout or "e2e failed").strip()[:2000]}

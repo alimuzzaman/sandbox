@@ -47,6 +47,10 @@ def _remote_job_transport_failure(exc, args, operation: str) -> None:
     if bool(getattr(args, "json", False)):
         _emit_json_line(payload)
         raise SystemExit(1)
+    from sandbox.readiness.errors import human_refusal
+    readiness_message = human_refusal(payload)
+    if readiness_message is not None:
+        _die(readiness_message)
     _die(
         f"{payload['error']} ({payload['code']}). "
         "No remote job receipt was established; inspect remote state before retrying."

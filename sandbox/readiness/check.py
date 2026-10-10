@@ -5,16 +5,20 @@ The rows run concurrently; any row unfinished at the 60 s deadline becomes
 ``$SANDBOX_HOME/runtime/readiness/<remote>/<project_sha16>.json`` (0600) and
 is reused for 300 s only when it has no ``not_ready`` row and the remote's
 recorded installed revision is unchanged. Installs (``service migrate``,
-``provision``, ``up``) and ``network-range assign`` delete the remote's proofs.
+``provision``, ``up``) and ``network-range assign`` delete the remote's proofs
+and rotate its ``generation`` token; a proof carries the token read before its
+probes ran, so a check still in flight across an invalidation publishes a proof
+that is never reused.
 """
 from __future__ import annotations
 
-import concurrent.futures
 import hashlib
 import json
 import os
 import re
+import secrets
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,12 +118,22 @@ def invalidate(remote: str, home: Path | None = None) -> int:
         directory = readiness_dir(home, remote)
     except ValueError:
         return 0
+    # Rotate first: a check that read the old token before this point can no
+    # longer publish a reusable proof, whatever it writes afterwards.
+    _write_private(directory / "generation.json", {"token": secrets.token_hex(16)})
     removed = 0
     for path in directory.glob("*.json"):
         if _PROJECT_KEY.fullmatch(path.stem):
             path.unlink(missing_ok=True)
             removed += 1
     return removed
+
+
+def generation(home: Path, remote: str) -> str | None:
+    """The remote's current invalidation token; None until first invalidated."""
+    value = _read(readiness_dir(home, remote) / "generation.json")
+    token = (value or {}).get("token")
+    return token if isinstance(token, str) else None
 
 
 def reusable(remote: str, identity: str, *, probes: Probes) -> dict | None:
@@ -134,6 +148,8 @@ def reusable(remote: str, identity: str, *, probes: Probes) -> dict | None:
     if revision is None or revision != recorded_revision(probes.remote_lookup(remote)):
         return None
     if not probes.clock() < proof.get("reusable_until", 0):
+        return None
+    if proof.get("generation") != generation(probes.home, remote):
         return None
     return proof
 
@@ -168,6 +184,8 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None) -
 
     registration = target.remote or probes.remote_lookup(remote) or {}
     identity = (getattr(target, "sources", None) or {}).get("identity") or target.project_root
+    # Read before probing: an invalidation during the probes rotates it.
+    token = generation(probes.home, remote)
     evaluated = _evaluate(registration, remote, probes)
     revision = evaluated.pop("_revision", None)
     proposed = evaluated.pop("_proposed", None)
@@ -181,7 +199,7 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None) -
     if proposed is not None:
         result["proposed_range"] = proposed
     _write_private(readiness_dir(probes.home, remote) / f"{project_key(identity)}.json",
-                   {**result, "project": identity})
+                   {**result, "project": identity, "generation": token})
     return result
 
 
@@ -208,18 +226,27 @@ def _evaluate(registration: dict, name: str, probes: Probes) -> dict:
             probes.ssh_run, registration, name, probes.sb_path(registration))},
     }
     found: dict = {}
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks))
-    try:
-        futures = {pool.submit(task): aspect for aspect, task in tasks.items()}
-        done, _ = concurrent.futures.wait(futures, timeout=DEADLINE_SECONDS)
-        for future in done:
-            try:
-                found.update(future.result())
-            except Exception:
-                pass
-    finally:
-        # Never wait for a probe past the deadline.
-        pool.shutdown(wait=False, cancel_futures=True)
+    lock = threading.Lock()
+
+    def worker(task):
+        try:
+            value = task()
+        except Exception:
+            return
+        with lock:
+            found.update(value)
+
+    # Daemon threads: a probe still running at the deadline neither delays the
+    # answer nor keeps the CLI process alive at interpreter exit.
+    threads = [threading.Thread(target=worker, args=(task,), daemon=True,
+                                name=f"readiness-{aspect}") for aspect, task in tasks.items()]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + DEADLINE_SECONDS
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    with lock:
+        found = dict(found)
     for aspect in tasks:
         if aspect not in found:
             found[aspect] = rows.row(aspect, "unknown", probe_state="timeout",

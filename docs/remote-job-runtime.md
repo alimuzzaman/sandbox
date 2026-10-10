@@ -149,14 +149,21 @@ Every remote submission (`test`, `run_tests`, `e2e`, `ci run`, `exec
 --remote`, `job-start`, `job-matrix`, detached resource jobs, `ensure
 --remote`) runs the same check before any source byte leaves the machine and
 refuses on the first `not_ready` row with `remote_not_ready_<aspect>`,
-`status: blocked` and `bytes_transferred: 0`. `unknown` and `not_applicable`
-never refuse; capacity admission still runs during the deploy.
+`status: blocked` and `bytes_transferred: 0`. The refusal is an admission
+refusal, so every CLI `--json` and MCP caller returns the same envelope
+(`code`, `detail.{aspect,reason}`, `remedy`, `side_effects`); human output
+prints the remedy. `ensure --remote` checks readiness before its own
+reachability guard. `unknown` and `not_applicable` never refuse; capacity
+admission still runs during the deploy. A probe still running at the 60 s
+deadline runs on a daemon thread and never delays the answer or the exit.
 
 A passing check is stored per remote and project under
 `$SANDBOX_HOME/runtime/readiness/<remote>/` (0600) and reused for 300 s while
 the runtime revision recorded for the remote is unchanged. A `not_ready`
 proof is never reused. `remote service migrate`, `remote provision`,
-`remote up` and a confirmed `network-range assign` delete the remote's proofs.
+`remote up` and a confirmed `network-range assign` delete the remote's proofs
+and rotate its generation token, so a check already in flight when they ran
+publishes a proof that is never reused.
 The `handoff` row turns `ready` once `ensure --remote` and then `exec
 --remote` both succeed at the installed revision. `sb doctor` lists the rows
 for the remote the focused project declares, registered or not.

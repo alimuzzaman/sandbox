@@ -241,6 +241,52 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertEqual(result.data["targets"], [str(root / "a"), str(root / "b")])
             self.assertIn(f"{root / 'b'}:/sandbox-ownership-repair/1", calls[-1][0])
 
+    def test_ownership_repair_prepares_ranges_before_run(self):
+        from sandbox.remote_network.ranges import RangeError
+
+        class Ranges:
+            def __init__(self, refusal=None):
+                self.events, self.refusal = [], refusal
+
+            @contextlib.contextmanager
+            def lifecycle(self, instance, *, exclusive=False):
+                self.events.append(("lock", exclusive))
+                try:
+                    yield
+                finally:
+                    self.events.append(("unlock",))
+
+            def prepare(self, instance):
+                self.events.append(("prepare",))
+                if self.refusal is not None:
+                    raise self.refusal
+
+            def compose_args(self, instance):
+                return ["-f", f"/ranges/{instance}.yml"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            adapter, calls = self._repair_adapter(
+                root, [{"type": "bind", "source": str(root), "target": "/work"}])
+            ranges = Ranges()
+            with patch("sandbox.remote_network.runtime.default_runtime", return_value=ranges):
+                self.assertTrue(adapter.invoke(OperationRequest(str(root), "ownership_repair")).ok)
+            self.assertEqual(ranges.events, [("lock", False), ("prepare",), ("unlock",)])
+            run = next(argv for argv, _ in calls if "run" in argv)
+            files = [run[i + 1] for i, item in enumerate(run) if item == "-f"]
+            self.assertTrue(files and files[-1].startswith("/ranges/"))
+            self.assertLess(run.index("-f"), run.index("run"))
+
+            # Exhaustion refuses before the repair container (and its networks) exists.
+            adapter, calls = self._repair_adapter(
+                root, [{"type": "bind", "source": str(root), "target": "/work"}])
+            ranges = Ranges(RangeError("docker_network_subnet_exhausted", "no free subnet"))
+            with patch("sandbox.remote_network.runtime.default_runtime", return_value=ranges), \
+                    self.assertRaises(RangeError):
+                adapter.invoke(OperationRequest(str(root), "ownership_repair"))
+            self.assertFalse(any("run" in argv for argv, _ in calls))
+            self.assertEqual(ranges.events[-1], ("unlock",))
+
     def test_ownership_repair_without_workspace_bind_is_a_successful_skip(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

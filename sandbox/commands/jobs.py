@@ -531,29 +531,31 @@ fi
 """.strip()
         run_args = ["run", "-d", "--name", name,
                     "--entrypoint", "sh", "wpcli", "-c", wrapper]
-        compose_argv = [
-            "docker", "compose", "-p", project_name(instance),
-            "-f", str(compose_file(instance)),
-            # Spec 063: allocate before the detached run can create networks.
-            *range_compose_args(instance, run_args),
-            "--project-directory", str(ROOT),
-            *run_args,
-        ]
-        try:
-            _write_new_artifact(log_file, "")
-            process = subprocess.Popen(
-                ["sh", "-c", supervisor, name, name, str(status_file),
-                 str(pid_file), temporary_handle, *compose_argv],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except Exception:
-            _remove_launch_artifacts(paths)
+        # Spec 063: allocate before the detached run can create networks. The
+        # supervisor inherits the range lock, so a volume-removing down waits
+        # until its Compose run has exited.
+        with range_compose_session(instance, run_args) as (range_args, range_fds):
+            compose_argv = [
+                "docker", "compose", "-p", project_name(instance),
+                "-f", str(compose_file(instance)), *range_args,
+                "--project-directory", str(ROOT),
+                *run_args,
+            ]
             try:
-                Path(temporary_handle).unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+                _write_new_artifact(log_file, "")
+                process = subprocess.Popen(
+                    ["sh", "-c", supervisor, name, name, str(status_file),
+                     str(pid_file), temporary_handle, *compose_argv],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True, pass_fds=range_fds,
+                )
+            except Exception:
+                _remove_launch_artifacts(paths)
+                try:
+                    Path(temporary_handle).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
         try:
             receipt_path = _write_cleanup_receipt(
                 instance, jid, "docker", process.pid,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import json
 import os
 import shlex
@@ -378,23 +379,25 @@ def _compose(*args: str, instance: str,
     # sandbox root; without it docker resolves them against the compose file's
     # own dir (runtime/compose/) and the WP bind-mount silently misses.
     # Spec 063: on a host with development ranges, allocate before a command
-    # that can create the stack's networks and pass the subnet override.
-    try:
-        from sandbox.core._docker import range_compose_args
-        range_args = range_compose_args(instance, args)
-    except RuntimeError as exc:
-        return {"ok": False, "error": str(exc)}
-    cmd = ["docker", "compose",
-           "-p", _project_name(instance),
-           "-f", str(cf), *range_args,
-           "--project-directory", str(SANDBOX_ROOT), *args]
-    try:
-        res = subprocess.run(
-            cmd, capture_output=capture, text=True,
-            timeout=timeout, cwd=str(SANDBOX_ROOT),
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"timeout after {timeout}s", "cmd": cmd}
+    # that can create the stack's networks, pass the subnet override, and hold
+    # the range lock until the command has exited.
+    from sandbox.core._docker import range_compose_session
+    with contextlib.ExitStack() as range_lock:
+        try:
+            range_args, _ = range_lock.enter_context(range_compose_session(instance, args))
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
+        cmd = ["docker", "compose",
+               "-p", _project_name(instance),
+               "-f", str(cf), *range_args,
+               "--project-directory", str(SANDBOX_ROOT), *args]
+        try:
+            res = subprocess.run(
+                cmd, capture_output=capture, text=True,
+                timeout=timeout, cwd=str(SANDBOX_ROOT),
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": f"timeout after {timeout}s", "cmd": cmd}
     return {
         "ok": res.returncode == 0,
         "code": res.returncode,

@@ -507,14 +507,18 @@ class ComposeAdapter:
         overlay = self._overlay(descriptor, runtime_id, http_port)
         project_args = ["--project-name", f"sandbox-{runtime_id}", "--project-directory", descriptor["root"], "--file", descriptor["compose_file"], "--file", str(overlay)]
         service = descriptor["service"]
+        if op == "ownership_repair" and record is None:
+            raise ValueError("Compose ownership repair requires a provisioned instance")
         ranges = self._ranges(descriptor, project_args)
         if ranges is not None:
             # Spec 063: allocate before the stack's networks exist, then pass
             # the subnet override last on every call for this instance.
-            if op in {"ensure", "apply", "destroy"}:
+            # Ownership repair's `compose run` creates the service's networks too.
+            creates = {"ensure", "apply", "ownership_repair"}
+            if op in creates | {"destroy"}:
                 # Shared for the creators, exclusive for destroy through its release.
                 range_lock.enter_context(ranges.lifecycle(runtime_id, exclusive=op == "destroy"))
-            if op in {"ensure", "apply"}:
+            if op in creates:
                 ranges.prepare(runtime_id)
             project_args += ranges.compose_args(runtime_id)
 
@@ -523,8 +527,6 @@ class ComposeAdapter:
         if op == "suspend" and descriptor["instanceLifecycle"]["mode"] != "idle_stop":
             raise ValueError("Compose suspend requires instanceLifecycle.mode idle_stop")
         if op == "ownership_repair":
-            if record is None:
-                raise ValueError("Compose ownership repair requires a provisioned instance")
             return self._ownership_repair(request, descriptor, project_args, service, runtime_id)
 
         if op == "ensure":

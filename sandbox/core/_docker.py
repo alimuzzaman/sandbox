@@ -730,26 +730,34 @@ def _prepare_ranges(ranges, instance: str) -> str | None:
     return None
 
 
-def range_compose_args(instance: str, args) -> list[str]:
+@contextlib.contextmanager
+def range_compose_session(instance: str, args):
     """Range override arguments for a Compose call run outside ``compose()``.
 
     Detached job launches, piped ``wp eval-file`` and the MCP server build
-    their own argv; they prepare here when the command can create networks
-    and pass the result after their ``-f``. The lifecycle lock covers only the
-    preparation, since the caller runs the command itself. Raises
-    ``RuntimeError`` with the refusal line; ``[]`` on a host without ranges.
+    their own argv and run it inside this context, passing the yielded
+    arguments after their ``-f``. For a command that can create networks the
+    allocation is prepared and the shared lifecycle lock is held until the
+    context exits, so a volume-removing ``down`` cannot free the grant while
+    the command runs. The yielded descriptors hold that lock: a caller that
+    hands the command to a detached process passes them (``pass_fds``) so the
+    lock lasts as long as that process. Raises ``RuntimeError`` with the
+    refusal line; yields ``([], ())`` on a host without ranges.
     """
     from sandbox.remote_network import runtime as range_runtime
     ranges = range_runtime.default_runtime(compose_config=_compose_config,
                                            workspace_of=_range_workspace)
     if ranges is None:
-        return []
-    with ranges.lifecycle(instance):
-        if tuple(args)[:1] in _RANGE_CREATES:
-            refusal = _prepare_ranges(ranges, instance)
-            if refusal is not None:
-                raise RuntimeError(refusal)
-        return ranges.compose_args(instance)
+        yield [], ()
+        return
+    if tuple(args)[:1] not in _RANGE_CREATES:
+        yield ranges.compose_args(instance), ()
+        return
+    with ranges.lifecycle(instance) as descriptor:
+        refusal = _prepare_ranges(ranges, instance)
+        if refusal is not None:
+            raise RuntimeError(refusal)
+        yield ranges.compose_args(instance), (() if descriptor is None else (descriptor,))
 
 
 def _compose_base(instance: str) -> list[str]:

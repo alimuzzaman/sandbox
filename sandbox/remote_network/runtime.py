@@ -76,14 +76,16 @@ class RangeRuntime:
         Commands that create networks hold the lock shared for their whole run,
         so concurrent ``up``/``run`` calls proceed together; a volume-removing
         ``down`` holds it exclusively across Docker teardown and the release,
-        so no ``up`` can reuse a grant that is about to be freed.
+        so no ``up`` can reuse a grant that is about to be freed. Yields the
+        lock's descriptor; a child that inherits it holds the lock until it
+        exits, even after this context closes.
         """
         path = self.override_path(instance).with_suffix(".lock")
         self.overrides.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-            yield
+            yield descriptor
         finally:
             os.close(descriptor)
 

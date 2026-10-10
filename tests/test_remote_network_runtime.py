@@ -411,7 +411,10 @@ class _FakeRanges:
     @contextlib.contextmanager
     def lifecycle(self, instance, *, exclusive=False):
         self.events.append(("lock", instance, exclusive))
-        yield
+        try:
+            yield 77
+        finally:
+            self.events.append(("unlock", instance))
 
     def prepare(self, instance):
         self.events.append(("prepare", instance))
@@ -447,7 +450,7 @@ class ComposeHookTests(unittest.TestCase):
             ("up", "-d"), ("create",), ("run", "--rm", "wpcli", "wp"), ("ps",), ("kill",),
             ("stop",), ("down",), ("down", "-v"), ("down", "--volumes"))])
         # A killed or stopped stack keeps its subnets attributed (FR-006).
-        self.assertEqual([e for e in fake.events if e[0] != "lock"],
+        self.assertEqual([e for e in fake.events if e[0] not in ("lock", "unlock")],
                          [("prepare", "x")] * 3 + [("release", "x")] * 2)
         # Only a volume-removing down holds the lifecycle lock exclusively.
         self.assertEqual([e[2] for e in fake.events if e[0] == "lock"],
@@ -518,22 +521,124 @@ class ComposeHookTests(unittest.TestCase):
         # Without ranges compose() never rewrites Docker's text, so raw overlap is not typed.
         self.assertIsNone(_range_refusal("Pool overlaps with other one on this address space"))
 
-    def test_outside_callers_prepare_and_get_the_override(self):
+    def test_outside_callers_hold_the_lock_through_their_command(self):
         from unittest.mock import patch
         from sandbox.core import _docker
         fake = _FakeRanges()
         with patch("sandbox.remote_network.runtime.default_runtime", return_value=fake):
-            self.assertEqual(_docker.range_compose_args("x", ["run", "--rm", "wpcli"]),
-                             ["-f", "/o/x.yml"])
-            self.assertEqual(_docker.range_compose_args("x", ["exec", "wp"]), ["-f", "/o/x.yml"])
-        self.assertEqual([e[0] for e in fake.events], ["lock", "prepare", "lock"])
+            with _docker.range_compose_session("x", ["run", "--rm", "wpcli"]) as (args, fds):
+                self.assertEqual((args, fds), (["-f", "/o/x.yml"], (77,)))
+                # Still held while the caller runs its command.
+                self.assertEqual([e[0] for e in fake.events], ["lock", "prepare"])
+            self.assertEqual(fake.events[-1], ("unlock", "x"))
+            with _docker.range_compose_session("x", ["exec", "wp"]) as (args, fds):
+                self.assertEqual((args, fds), (["-f", "/o/x.yml"], ()))
+        self.assertEqual([e[0] for e in fake.events], ["lock", "prepare", "unlock"])
         fake = _FakeRanges(RangeError(range_runtime.EXHAUSTED, "no free subnet"))
         with patch("sandbox.remote_network.runtime.default_runtime", return_value=fake), \
                 self.assertRaises(RuntimeError) as caught:
-            _docker.range_compose_args("x", ["run", "--rm", "wpcli"])
+            with _docker.range_compose_session("x", ["run", "--rm", "wpcli"]):
+                self.fail("a refused allocation must not run the command")
         self.assertTrue(str(caught.exception).startswith("docker_network_subnet_exhausted: "))
+        self.assertEqual(fake.events[-1], ("unlock", "x"))
         with patch("sandbox.remote_network.runtime.default_runtime", return_value=None):
-            self.assertEqual(_docker.range_compose_args("x", ["run"]), [])
+            with _docker.range_compose_session("x", ["run"]) as session:
+                self.assertEqual(session, ([], ()))
+
+    def test_inherited_lifecycle_lock_outlives_the_parent_context(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            ranges = range_runtime.RangeRuntime(home, store=None, overrides=home / "o",
+                                                compose_config=dict)
+            lock = home / "o" / "x.lock"
+            with ranges.lifecycle("x") as descriptor:
+                child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                         stdin=subprocess.PIPE, pass_fds=(descriptor,))
+            try:
+                # The parent has closed its copy; the detached child still holds it.
+                with range_runtime._try_exclusive(lock) as idle:
+                    self.assertFalse(idle)
+            finally:
+                child.communicate(b"", timeout=30)
+            with range_runtime._try_exclusive(lock) as idle:
+                self.assertTrue(idle)
+
+    def test_detached_job_launch_passes_the_lock_to_its_supervisor(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from sandbox.commands import jobs
+        held = []
+
+        @contextlib.contextmanager
+        def session(instance, args):
+            held.append(True)
+            yield ["-f", "/o/unit.yml"], (77,)
+            held.append(False)
+
+        def popen(argv, **kwargs):
+            # Launched while the range lock is held, and handed to the child.
+            self.assertEqual(held, [True])
+            self.assertEqual(kwargs["pass_fds"], (77,))
+            files = [argv[i + 1] for i, item in enumerate(argv) if item == "-f"]
+            self.assertEqual(files[-1], "/o/unit.yml")
+            return SimpleNamespace(pid=5252)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(jobs, "wp_dir", return_value=root), \
+                    patch.object(jobs, "_is_herd_instance", return_value=False), \
+                    patch.object(jobs, "project_name", return_value="sandbox-unit"), \
+                    patch.object(jobs, "compose_file", return_value=root / "unit.yml"), \
+                    patch.object(jobs, "range_compose_session", session), \
+                    patch.object(jobs.subprocess, "Popen", side_effect=popen) as launched:
+                jobs.launch_job("unit", ["option", "get", "siteurl"])
+        self.assertEqual(launched.call_count, 1)
+        self.assertEqual(held, [True, False])
+
+    def test_introspect_runs_under_the_lock(self):
+        import subprocess
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from sandbox.commands import debug
+        held = []
+
+        @contextlib.contextmanager
+        def session(instance, args):
+            held.append(True)
+            yield ["-f", "/o/x.yml"], (77,)
+            held.append(False)
+
+        def run(argv, **kwargs):
+            self.assertEqual(held, [True])
+            self.assertIn("/o/x.yml", argv)
+            return subprocess.CompletedProcess(argv, 0, '{"count": 1}', "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(debug, "range_compose_session", session), \
+                    patch.object(debug, "RUNTIME_DIR", root / "runtime"), \
+                    patch.object(debug, "ROOT", root), \
+                    patch.object(debug, "project_name", return_value="sandbox-x"), \
+                    patch.object(debug, "compose_file", return_value=root / "x.yml"), \
+                    patch.object(debug.subprocess, "run", side_effect=run), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                debug.cmd_introspect({}, SimpleNamespace(target="blocks", resolved_instance="x"))
+        self.assertEqual(held, [True, False])
+
+    def test_mcp_compose_runs_inside_the_range_session(self):
+        # The MCP server needs its own runtime to import; check its shape instead.
+        import ast
+        source = (Path(__file__).resolve().parent.parent / "mcp" / "wp-server" / "app.py").read_text()
+        function = next(node for node in ast.walk(ast.parse(source))
+                        if isinstance(node, ast.FunctionDef) and node.name == "_compose")
+        sessions = [node for node in ast.walk(function) if isinstance(node, ast.With)
+                    and any("range_compose_session" in ast.unparse(stmt) for stmt in node.body)]
+        self.assertEqual(len(sessions), 1)
+        runs = [node for stmt in sessions[0].body for node in ast.walk(stmt)
+                if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"]
+        self.assertEqual(len(runs), 1)
 
 
 if __name__ == "__main__":

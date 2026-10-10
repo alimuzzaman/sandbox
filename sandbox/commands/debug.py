@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -217,17 +218,19 @@ def cmd_introspect(cfg, args) -> None:
         # Pipe PHP source into wp eval-file - (stdin). We need to bypass our
         # `run` helper's stdout printing because we want to capture clean JSON.
         run_args = ["run", "--rm", "-T", "wpcli", "eval-file", "-"]
-        try:
-            range_args = range_compose_args(inst, run_args)
-        except RuntimeError as exc:
-            die(str(exc))
-        proc = subprocess.run(
-            ["docker", "compose",
-             "-p", project_name(inst),
-             "-f", str(compose_file(inst)), *range_args,
-             *run_args],
-            input=php, text=True, capture_output=True, cwd=str(ROOT),
-        )
+        # Spec 063: the range lock is held until this run has exited.
+        with contextlib.ExitStack() as range_lock:
+            try:
+                range_args, _ = range_lock.enter_context(range_compose_session(inst, run_args))
+            except RuntimeError as exc:
+                die(str(exc))
+            proc = subprocess.run(
+                ["docker", "compose",
+                 "-p", project_name(inst),
+                 "-f", str(compose_file(inst)), *range_args,
+                 *run_args],
+                input=php, text=True, capture_output=True, cwd=str(ROOT),
+            )
         if proc.returncode != 0:
             print(proc.stderr, file=sys.stderr)
             die(f"introspect {t} failed (exit {proc.returncode})")

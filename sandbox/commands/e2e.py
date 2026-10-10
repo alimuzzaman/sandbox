@@ -343,6 +343,8 @@ def cmd_e2e(cfg, args) -> None:
             allow_inferred_remote=False,
         ))
     except TargetResolutionError as exc:
+        from sandbox.readiness.errors import raise_registration_refusal
+        raise_registration_refusal(exc)
         die(f"{exc.code}: {exc}")
     if target.kind == "remote":
         timeout = getattr(args, "timeout", None)

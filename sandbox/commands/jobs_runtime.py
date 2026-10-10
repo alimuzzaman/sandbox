@@ -430,6 +430,8 @@ def cmd_job_start(_cfg, args) -> None:
             required_capability="job.exec" if getattr(args, "remote", None) else None,
         ))
     except TargetResolutionError as exc:
+        from sandbox.readiness.errors import raise_registration_refusal
+        raise_registration_refusal(exc)
         _die(f"{exc.code}: {exc}")
     policy = _resolved_execution_policy(target, args)
     source = SourceIdentity(
@@ -904,6 +906,8 @@ def cmd_declared_test_plan(_cfg, args) -> None:
             args.project_dir, local=args.local, remote=args.remote,
             required_capability="job.exec" if not args.local else None))
     except TargetResolutionError as exc:
+        from sandbox.readiness.errors import raise_registration_refusal
+        raise_registration_refusal(exc)
         _die(f"{exc.code}: {exc}")
     runtime = getattr(target, "runtime_policy", {}) or {}
     plans = runtime.get("testPlans", {})
@@ -1019,6 +1023,8 @@ def cmd_job_matrix(_cfg, args) -> None:
         target = dependencies["target_service"].resolve(TargetRequest(args.project_dir, local=args.local,
             remote=args.remote, required_capability="job.exec" if args.remote else None))
     except TargetResolutionError as exc:
+        from sandbox.readiness.errors import raise_registration_refusal
+        raise_registration_refusal(exc)
         _die(f"{exc.code}: {exc}")
     source = _source_identity(target.project_root)
     project_identity = _resolved_project_identity(target)

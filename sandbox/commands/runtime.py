@@ -477,6 +477,8 @@ def cmd_exec(cfg, args) -> None:
                 required_capability="job.exec",
             ))
         except TargetResolutionError as exc:
+            from sandbox.readiness.errors import raise_registration_refusal
+            raise_registration_refusal(exc)
             die(f"{exc.code}: {exc}")
 
     # The remote transport's in-instance controller has already selected its
@@ -502,6 +504,8 @@ def cmd_exec(cfg, args) -> None:
                     required_capability="job.exec" if args.remote else None,
                 ))
             except TargetResolutionError as exc:
+                from sandbox.readiness.errors import raise_registration_refusal
+                raise_registration_refusal(exc)
                 die(f"{exc.code}: {exc}")
         if target.kind == "remote":
             _require_matching_remote_instance(args, target)

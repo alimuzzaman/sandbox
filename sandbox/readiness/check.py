@@ -69,10 +69,29 @@ def default_probes() -> Probes:
         sb_path=_remote.remote_sb_path,
         propose=lambda remote: RangeStore(remote, _remote.ssh_run).propose(),
         home=_sandbox_base(),
-        instance_present=lambda remote, target: _remote.remote_workspace_instance_name(
-            target.project_root, target.workspace_label) in {
-                row.get("name") for row in _remote.list_remote_instances(remote)},
+        instance_present=lambda remote, target: project_instance_present(
+            remote, target, ssh_run=_remote.ssh_run,
+            workspace_path=_remote.remote_workspace_path,
+            list_instances=_remote.list_remote_instances),
     )
+
+
+def project_instance_present(remote: dict, target, *, ssh_run: Callable,
+                             workspace_path: Callable, list_instances: Callable) -> bool | None:
+    """Whether the remote registry holds an instance for this project's
+    workspace. Instance names are derived (and truncated) on the remote, so
+    the lookup is by project, never by a predicted name. False when the
+    workspace does not exist; None when that cannot be observed; raises when
+    the registry cannot be read."""
+    import shlex
+    path = workspace_path(remote, target.project_root, target.workspace_label)
+    probe = ssh_run(remote, f"test -d {shlex.quote(path)}", timeout=rows.REACHABILITY_TIMEOUT)
+    code = getattr(probe, "returncode", None)
+    if code == 1:
+        return False
+    if code != 0:
+        return None
+    return bool(list_instances(remote, target_path=path))
 
 
 def readiness_dir(home: Path, remote: str) -> Path:

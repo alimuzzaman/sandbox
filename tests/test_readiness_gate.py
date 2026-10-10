@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -592,6 +593,154 @@ class EntryPointRefusalTests(unittest.TestCase):
                 self.assertRaises(RemoteNotReadyError) as caught:
             e2e.cmd_e2e({}, args)
         self.assertEqual(caught.exception.code, "remote_not_ready_capacity")
+
+
+class RoundFourTests(unittest.TestCase):
+    """Merge-gate round 4: project-scoped instance lookup, registration
+    refusals before transport construction, integrated handoff recording."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+
+    def test_default_ownership_probe_finds_registered_project_instances(self):
+        # Remote names are derived and truncated (24 chars), so the probe must
+        # ask the registry by project, never by a predicted name.
+        target = SimpleNamespace(project_root="/work/project", workspace_label="qa-branch")
+        listed = []
+
+        def instances(_remote, target_path=None):
+            listed.append(target_path)
+            return [{"name": "project-qa-branch-3", "label": "default"}]
+
+        def ssh(code):
+            return lambda *_a, **_k: subprocess.CompletedProcess([], code, "", "")
+        present = check.project_instance_present(
+            {}, target, ssh_run=ssh(0), workspace_path=lambda _r, _root, label: f"/r/ws-{label}",
+            list_instances=instances)
+        self.assertIs(present, True)
+        self.assertEqual(listed, ["/r/ws-qa-branch"])
+        self.assertIs(check.project_instance_present(
+            {}, target, ssh_run=ssh(0), workspace_path=lambda *_a: "/r/ws",
+            list_instances=lambda _r, target_path=None: []), False)
+        self.assertIs(check.project_instance_present(
+            {}, target, ssh_run=ssh(1), workspace_path=lambda *_a: "/r/ws",
+            list_instances=instances), False)
+        self.assertIsNone(check.project_instance_present(
+            {}, target, ssh_run=ssh(255), workspace_path=lambda *_a: "/r/ws",
+            list_instances=instances))
+
+        resolved = _target()
+        resolved.workspace_label = "qa-branch"
+        result = check.run("/work/project", "vps", probes=_probes(
+            self.home, resolve=lambda _p, _r: resolved,
+            instance_present=lambda remote, t: check.project_instance_present(
+                remote, t, ssh_run=ssh(0), workspace_path=lambda *_a: "/r/ws",
+                list_instances=instances)))
+        found = {item["aspect"]: item for item in result["rows"]}
+        self.assertEqual(found["ownership_repair"]["state"], "ready")
+
+    def test_registration_failure_returns_blocked_on_remote_entrypoints(self):
+        from unittest.mock import patch
+
+        from sandbox.application.target_service import TargetResolutionError
+        from sandbox.commands import e2e, lifecycle
+        from sandbox.readiness.errors import registration_refusal
+        for code, remedy in (("unknown_remote", "./sb remote list"),
+                             ("remote_not_provisioned", "./sb remote provision ghost")):
+            refusal = registration_refusal(TargetResolutionError(code, "x", remote_name="ghost"))
+            payload = refusal.to_payload()
+            self.assertEqual((payload["code"], payload["status"], payload["remedy"]),
+                             ("remote_not_ready_registration", "blocked", remedy))
+            self.assertEqual(payload["side_effects"]["bytes_transferred"], 0)
+        self.assertIsNone(registration_refusal(TargetResolutionError("invalid_project", "x")))
+
+        def unregistered(_request):
+            raise TargetResolutionError("unknown_remote", "not registered", remote_name="ghost")
+        service = SimpleNamespace(resolve=unregistered)
+        with patch("sandbox.application.context.durable_job_dependencies",
+                   return_value={"target_service": service}):
+            result = lifecycle._remote_lifecycle({}, SimpleNamespace(
+                project_dir="/work/p", remote="ghost", local=False, workspace=None,
+                label=None, json=True), "ensure")
+            self.assertEqual((result["status"], result["code"]),
+                             ("blocked", "remote_not_ready_registration"))
+            root = tempfile.mkdtemp()
+            core = SimpleNamespace(load_project_config=lambda _pd: {"root": root},
+                                   ConfigError=ValueError)
+            with patch.object(e2e, "_core", return_value=core), \
+                    patch.object(e2e, "_find_playwright_config",
+                                 return_value=Path(root) / "playwright.config.ts"), \
+                    self.assertRaises(RemoteNotReadyError) as caught:
+                e2e.cmd_e2e({}, SimpleNamespace(project_dir=root, remote="ghost", local=False,
+                                                workspace=None, json=True, timeout=60,
+                                                workers=1, playwright_config=None))
+        self.assertEqual(caught.exception.code, "remote_not_ready_registration")
+
+    def test_every_submitting_resolution_handler_maps_registration(self):
+        # Each `except TargetResolutionError` on a remote submission path turns a
+        # registration failure into the readiness refusal before exiting.
+        exempt = {("sandbox/commands/runtime.py", "local=True")}
+        files = [ROOT / "sandbox" / "commands" / name for name in (
+            "jobs_runtime.py", "ci.py", "runtime.py", "e2e.py", "debug.py", "lifecycle.py")]
+        files += [ROOT / "mcp" / "wp-server" / "tools" / name for name in ("wp.py", "jobs.py")]
+        checked = 0
+        for path in files:
+            lines = path.read_text().splitlines()
+            for index, line in enumerate(lines):
+                if "except TargetResolutionError" not in line and not (
+                        path.name in {"wp.py"} and "except (TargetResolutionError" in line):
+                    continue
+                window = "\n".join(lines[max(0, index - 6):index + 11])
+                rel = str(path.relative_to(ROOT))
+                if any(rel == name and marker in window for name, marker in exempt):
+                    continue
+                if path.name == "jobs_runtime.py" and "project_identity = " in window:
+                    continue  # job listing: a read, not a submission
+                checked += 1
+                with self.subTest(path=rel, line=index + 1):
+                    self.assertIn("registration_refusal", window)
+        self.assertGreaterEqual(checked, 11)
+
+    def test_remote_ensure_exec_handoff_records_operation_gate_proofs(self):
+        from unittest.mock import patch
+
+        from sandbox.commands import lifecycle
+        from sandbox.core import _remote
+        home = Path(self.home)
+        target = SimpleNamespace(kind="remote", remote_name="vps", project_root="/work/p",
+                                 remote={"name": "vps"}, workspace_label="default",
+                                 sources={"identity": "project-identity"})
+        service = SimpleNamespace(resolve=lambda _request: target)
+        proof = check.run("/work/project", "vps", probes=_probes(self.home), full=True)
+
+        def ensure(returncode, stdout):
+            with patch("sandbox.application.context.durable_job_dependencies",
+                       return_value={"target_service": service}), \
+                    patch("sandbox.readiness.gate.require_ready", return_value=proof), \
+                    patch.object(lifecycle, "_remote_ensure_reachability", return_value=None), \
+                    patch.object(_remote, "deploy_exact_working_tree",
+                                 return_value={"target_path": "/r/p"}), \
+                    patch.object(_remote, "prepare_remote_workspace", return_value="/r/ws"), \
+                    patch.object(_remote, "remote_sb_path", return_value="/r/sb"), \
+                    patch.object(_remote, "ssh_run_bounded",
+                                 return_value=subprocess.CompletedProcess(
+                                     [], returncode, stdout, "")), \
+                    patch("sandbox.core._paths._sandbox_base", return_value=home):
+                try:
+                    return lifecycle._remote_lifecycle({}, SimpleNamespace(
+                        project_dir="/work/p", remote="vps", local=False, workspace=None,
+                        label=None, json=True, reveal_login=False), "ensure")
+                except SystemExit:
+                    return None
+        ensure(1, "")  # a failed ensure records nothing
+        self.assertFalse((check.readiness_dir(home, "vps") / "ensure.json").exists())
+        ensure(0, json.dumps({"ok": True, "instance": "project-default"}) + "\n")
+        record = json.loads((check.readiness_dir(home, "vps") / "ensure.json").read_text())
+        self.assertEqual((record["installed_runtime_revision"], record["generation"]),
+                         (proof["installed_runtime_revision"], proof["generation"]))
+        # Exec with no gate proof (e.g. transport never reached the gate) records nothing.
+        self.assertFalse(check.record_exec("vps", "project-identity", home=home, proof=None))
+        self.assertTrue(check.record_exec("vps", "project-identity", home=home, proof=proof))
 
 
 if __name__ == "__main__":

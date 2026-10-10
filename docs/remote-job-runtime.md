@@ -158,8 +158,11 @@ admission still runs during the deploy. A probe still running at the 60 s
 deadline runs on a daemon thread and never delays the answer or the exit.
 A capacity verdict is published before its optional range proposal, so a
 slow proposal never hides a completed `not_ready`. Ownership repair is
-`not_applicable` when the remote's registered instances do not include the
-project's instance. The gate reuses the caller's resolved target, so an
+`not_applicable` when the remote's registry holds no instance for the
+project's workspace (looked up by project, not by a predicted name). An
+unknown or unprovisioned remote is refused as `remote_not_ready_registration`
+on every submission path, including when target resolution fails before the
+gate runs. The gate reuses the caller's resolved target, so an
 explicit `--config-file` survives it. Handoff is recorded only when the ensure
 and the exec passed gates at the same revision and generation. `ensure
 --remote` returns the same `blocked` envelope inside its usual error object,

@@ -837,6 +837,8 @@ def cmd_ci(cfg, args) -> None:
                 required_capability="job.exec" if not getattr(args, "local", False) else None,
             ))
         except TargetResolutionError as exc:
+            from sandbox.readiness.errors import raise_registration_refusal
+            raise_registration_refusal(exc)
             die(f"{exc.code}: {exc}")
     from sandbox.ci.workflow import WorkflowError, preflight
     try:

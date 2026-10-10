@@ -290,6 +290,11 @@ def run_tests(project_dir: str, phpunit_args: str = "",
                     cancel_on_stall=policy.cancel_on_stall, cleanup_policy=policy.cleanup_policy,
                     execution_policy_provenance=policy.provenance))
         except (TargetResolutionError, ValueError) as exc:
+            from sandbox.readiness.errors import registration_refusal
+            refusal = registration_refusal(exc)
+            if refusal is not None:
+                return {**refusal.to_payload(), "passed": False, "summary": None,
+                        "output": "", "mode": resolved_mode}
             return {"ok": False, "passed": False, "summary": None, "output": "", "mode": resolved_mode,
                     "error": str(exc)}
         except RemoteJobAdmissionError as exc:

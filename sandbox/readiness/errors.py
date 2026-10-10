@@ -63,3 +63,26 @@ def human_refusal(payload: dict) -> str | None:
         return None
     return (f"{payload.get('error')} ({payload.get('code')}). Nothing was transferred. "
             f"Remedy: {remedy}")
+
+
+_REGISTRATION_CODES = frozenset({"unknown_remote", "remote_not_provisioned"})
+
+
+def registration_refusal(exc) -> "RemoteNotReadyError | None":
+    """The readiness refusal for a target resolution that failed on the
+    remote's registration, or None for any other resolution failure."""
+    code = getattr(exc, "code", None)
+    if code not in _REGISTRATION_CODES:
+        return None
+    from sandbox.readiness.rows import registration
+    name = getattr(exc, "remote_name", None)
+    name = name if isinstance(name, str) else None
+    return RemoteNotReadyError(registration(code, name), remote=name)
+
+
+def raise_registration_refusal(exc) -> None:
+    """Raise ``registration_refusal(exc)`` when there is one; the caller's
+    admission handling then renders the blocked envelope."""
+    refusal = registration_refusal(exc)
+    if refusal is not None:
+        raise refusal from exc

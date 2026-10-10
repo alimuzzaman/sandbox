@@ -16,9 +16,10 @@ class TargetServiceProtocol(Protocol):
 
 
 class TargetResolutionError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, remote_name: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.remote_name = remote_name
 
 
 class TargetService:
@@ -89,11 +90,12 @@ class TargetService:
                 raise TargetResolutionError(
                     "unknown_remote",
                     f"remote {remote_name!r} is not registered; run `./sb remote list` "
-                    "or select another explicit target",
+                    "or select another explicit target", remote_name=remote_name,
                 )
             if not remote.get("provisioned"):
                 raise TargetResolutionError(
                     "remote_not_provisioned", f"remote {remote_name!r} is not provisioned",
+                    remote_name=remote_name,
                 )
             if request.required_capability is not None:
                 capabilities = remote.get("capabilities")

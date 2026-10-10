@@ -90,6 +90,10 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
         target = _target_service.resolve(TargetRequest(project_dir=project_dir, local=local, remote=remote,
             workspace=workspace, required_capability="job.exec" if not local else None))
     except Exception as exc:
+        from sandbox.readiness.errors import registration_refusal
+        refusal = registration_refusal(exc)
+        if refusal is not None:
+            return refusal.to_payload()
         return {"ok": False, "code": getattr(exc, "code", "invalid_target"), "error": str(exc)}
     try:
         policy, default_output = _mcp_execution_policy(
@@ -193,6 +197,10 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()
     except TargetResolutionError as exc:
+        from sandbox.readiness.errors import registration_refusal
+        refusal = registration_refusal(exc)
+        if refusal is not None:
+            return refusal.to_payload()
         return {"ok": False, "code": exc.code, "error": str(exc)}
     except ValueError:
         return {"ok": False, "code": "invalid_execution_policy", "error": "execution policy is invalid"}

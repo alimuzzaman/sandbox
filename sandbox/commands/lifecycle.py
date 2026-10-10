@@ -1089,6 +1089,15 @@ def _remote_readiness_doctor_rows(project_root: str) -> list[tuple[str, bool, st
     return found
 
 
+def _ensure_refusal(exc, remote_name: str | None) -> dict:
+    """``ensure --remote``'s error object carrying the readiness refusal."""
+    return {"ok": False, "status": "blocked", "code": exc.code,
+            "error": {"code": exc.code, "message": str(exc)},
+            "detail": exc.detail, "remedy": exc.detail.get("remedy"),
+            "side_effects": {"staging_started": False, "bytes_transferred": 0},
+            "target": {"remote": remote_name}}
+
+
 def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     """Run instance lifecycle operations against a selected provisioned remote."""
     remote_name = getattr(args, "remote", None)
@@ -1123,6 +1132,11 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         # selection and configured remote errors still fail closed.
         if exc.code == "invalid_project" and not remote_name and not getattr(args, "local", False):
             return None
+        if action == "ensure":
+            from sandbox.readiness.errors import registration_refusal
+            refusal = registration_refusal(exc)
+            if refusal is not None:
+                return _ensure_refusal(refusal, refusal.remote)
         die(f"{exc.code}: {exc}")
     if not _target_is_remote(target):
         return None
@@ -1137,11 +1151,7 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
                                             target=target)
         except RemoteNotReadyError as exc:
             # Refused before any source byte leaves this machine.
-            return {"ok": False, "status": "blocked", "code": exc.code,
-                    "error": {"code": exc.code, "message": str(exc)},
-                    "detail": exc.detail, "remedy": exc.detail.get("remedy"),
-                    "side_effects": {"staging_started": False, "bytes_transferred": 0},
-                    "target": {"remote": target.remote_name}}
+            return _ensure_refusal(exc, target.remote_name)
         # A reachability probe that timed out is `unknown` and does not refuse;
         # the existing guard still answers that case.
         refusal = _remote_ensure_reachability(target.remote_name, remote)

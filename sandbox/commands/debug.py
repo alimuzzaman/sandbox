@@ -349,6 +349,8 @@ def cmd_test(cfg, args) -> None:
                 allow_inferred_remote=False,
             ))
         except TargetResolutionError as exc:
+            from sandbox.readiness.errors import raise_registration_refusal
+            raise_registration_refusal(exc)
             die(f"{exc.code}: {exc}")
         if target.kind == "remote":
             from sandbox.commands.jobs_runtime import (_resolved_execution_policy,
@@ -425,6 +427,8 @@ def cmd_test(cfg, args) -> None:
             allow_inferred_remote=False,
         ))
     except TargetResolutionError as exc:
+        from sandbox.readiness.errors import raise_registration_refusal
+        raise_registration_refusal(exc)
         die(f"{exc.code}: {exc}")
     if selected_target.kind == "remote":
         from sandbox.commands.jobs_runtime import (_resolved_execution_policy,

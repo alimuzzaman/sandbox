@@ -52,7 +52,7 @@
 ## Phase 7: Polish
 
 - [x] T026 Docs: `docs/remote-hosting.md` pool plan and digest; final pass over US1-US3 docs and CHANGELOG.md
-- [ ] T027 Run `./sb selftest` and the architecture test
+- [x] T027 Run `./sb selftest` and the architecture test
 - [ ] T028 Live proof per quickstart on a disposable remote (remote install protocol; `xcloud-london` needs owner approval)
 
 ## Dependencies

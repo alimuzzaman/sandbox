@@ -146,6 +146,15 @@
   - **Delivery records.** They are already in SQLite keyed by scope digest
     and need no partition. Only 062's scope-key change applies.
 - **Rationale**: FR-025. A corrupt or locked file affects only its own target.
+- **Implementation note (T008)**: the per-key accessors sit behind the
+  existing `load_host_state()` / `save_host_state()` and `RecoveryRepository`
+  load/write, so no caller changed shape. `layout.compose` reads a converted
+  remote's targets from their own files; `layout.persist` writes only the
+  targets whose canonical JSON changed since load, deletes removed ones, and
+  refuses to replace a file that could not be read. A remote that is not
+  converted keeps using `hosts.json` exactly as before. Narrowing
+  `state_lock` to conversion and legacy use lands with the target lease (T012),
+  which is what makes holding it across a whole operation unnecessary.
 
 ## R9. Conversion and mixed state
 

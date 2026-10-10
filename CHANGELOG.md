@@ -8,6 +8,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Per-target hosting foundations (spec 060 Phase 1-2). A remote coordination
+  program under `<remote SANDBOX_HOME>/runtime/hosting-leases` (one flock,
+  owner-only files) keeps per-target leases with fencing tokens, a FIFO wait
+  queue, holds of at most 4 h, build slots under a per-remote cap (default 2)
+  and a 60 s remote-wide lease. `sb remote service migrate` now marks the
+  runtime as serving it; until then a coordination call refuses
+  `lease_authority_unavailable` with the migrate remedy. Controller state for
+  a remote converted to per-target files lives in
+  `runtime/host-targets/<sha16>.json`; only changed targets are written, and
+  a corrupt file affects only its own target. Remotes that are not converted
+  keep using `hosts.json` unchanged. The control protocol is now 4.
 - Docker-pool plan digest (spec 063 US4). `sb remote docker-pool` plans list
   the remote's hosted targets, the other running containers a daemon restart
   would also restart, a 16-hex `plan_digest` and the no-restart range

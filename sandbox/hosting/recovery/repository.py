@@ -15,6 +15,7 @@ from pathlib import Path
 
 from sandbox.core._paths import RUNTIME_DIR
 from sandbox.core._hosting import target_mutation_capability
+from sandbox.hosting.state_partition import layout
 from sandbox.hosting.images.staging_models import (
     AtomicHostStateEvidence, DurableTerminalAuthorityEvidence, staging_digest,
 )
@@ -37,7 +38,18 @@ class RecoveryRepository:
         self.state_path = raw_state.absolute()
         self.lock_dir = raw_locks.absolute()
 
+    @property
+    def partition(self) -> layout.PartitionStore:
+        """Per-target files of converted remotes, beside the legacy document."""
+        return layout.PartitionStore(self.state_path.parent)
+
     def load(self) -> dict:
+        try:
+            return layout.compose(self._load_legacy(), self.partition)
+        except layout.TargetStateError:
+            raise ValueError("invalid managed-host state format") from None
+
+    def _load_legacy(self) -> dict:
         if not self.state_path.exists() and not self.state_path.is_symlink():
             return {"version": 1, "hosts": {}}
         self._ensure_state_parent(create=False)
@@ -58,10 +70,22 @@ class RecoveryRepository:
     def read_trace_activation_nested(self, target_key: str | None, *, budget,
                                      request_id=None, remote=None, environment=None) -> dict | None:
         """Bounded read of owner-validated activation state; no migration or locks."""
-        from sandbox.hosting.images.activation.repository import decode_activation_state
         budget.check()
         if not self.state_path.exists() and not self.state_path.is_symlink():
-            return None
+            state = {"version": 1, "hosts": {}}
+        else:
+            state = self._read_bounded_legacy(budget)
+        try:
+            state = layout.compose(state, self.partition)
+        except layout.TargetStateError:
+            raise ValueError("owner_record_invalid") from None
+        if target_key is not None and layout.target_unreadable(state, target_key):
+            raise ValueError("owner_record_invalid")
+        budget.check()
+        return self._trace_lookup(state, target_key, budget, request_id=request_id,
+                                  remote=remote, environment=environment)
+
+    def _read_bounded_legacy(self, budget) -> dict:
         self._ensure_state_parent(create=False)
         descriptor = self._open_owned_file(self.state_path, create=False,
                                            label="managed-host state")
@@ -86,6 +110,11 @@ class RecoveryRepository:
         if (type(state) is not dict or type(state.get("version")) is not int
                 or state["version"] not in {1, 2} or type(state.get("hosts")) is not dict):
             raise ValueError("owner_record_invalid")
+        return state
+
+    @staticmethod
+    def _trace_lookup(state: dict, target_key, budget, *, request_id, remote, environment):
+        from sandbox.hosting.images.activation.repository import decode_activation_state
         if target_key is None:
             # A diagnostic lookup may recover the original native key from
             # retained state. It never resolves today's project manifest.
@@ -393,6 +422,8 @@ class RecoveryRepository:
             raise
 
     def target(self, state: dict, target_key: str) -> dict:
+        if layout.target_unreadable(state, target_key):
+            raise ValueError("invalid managed-host state format")
         record = state["hosts"].setdefault(target_key, {})
         generation = record.setdefault("generation", 0)
         if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
@@ -825,6 +856,12 @@ class RecoveryRepository:
         return _ActivationHostStatePort(self)
 
     def _write(self, state: dict) -> None:
+        try:
+            layout.persist(state, self.partition, self._write_legacy)
+        except layout.TargetStateError:
+            raise ValueError("invalid managed-host state format") from None
+
+    def _write_legacy(self, state: dict) -> None:
         self._ensure_state_parent(create=True)
         if self.state_path.exists() or self.state_path.is_symlink():
             descriptor = self._open_owned_file(

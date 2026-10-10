@@ -71,6 +71,7 @@ SHAPE_SOURCES = (
     "sandbox/transports/remote_workspaces.py",
     "sandbox/recovery/server_capture_helper.py",
     "sandbox/recovery/postgres_helper.py",
+    "sandbox/hosting/coordination/program.py",
 ) + RUNTIME_PRODUCERS
 
 # Bumped when the fingerprint method changes (not the payloads): a manifest

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from sandbox.core._config import ensure_pyyaml
 from sandbox.core._paths import RUNTIME_DIR
+from sandbox.hosting.state_partition import layout
 
 
 class HostingError(ValueError):
@@ -667,21 +668,37 @@ def load_host_state(path: Path | None = None) -> dict:
     """Read only Sandbox-managed host state; missing state is an empty mapping."""
     path = path or _STATE_FILE
     if not path.exists():
-        return {"version": 1, "hosts": {}}
+        state = {"version": 1, "hosts": {}}
+    else:
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HostingError(f"invalid managed-host state: {exc}") from exc
+        if state.get("version") != 1 or not isinstance(state.get("hosts"), dict):
+            raise HostingError("invalid managed-host state format")
     try:
-        state = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HostingError(f"invalid managed-host state: {exc}") from exc
-    if state.get("version") != 1 or not isinstance(state.get("hosts"), dict):
-        raise HostingError("invalid managed-host state format")
-    return state
+        return layout.compose(state, layout.PartitionStore(path.parent))
+    except layout.TargetStateError as exc:
+        raise HostingError(f"invalid managed-host state: {exc}") from None
 
 
 def save_host_state(state: dict, path: Path | None = None) -> None:
-    """Atomically persist managed state without touching project manifests."""
+    """Atomically persist managed state without touching project manifests.
+
+    Targets of a remote converted by ``sb host convert-state`` (spec 060) go
+    to their own files; only the ones that changed since load are written.
+    """
     path = path or _STATE_FILE
     if state.get("version") != 1 or not isinstance(state.get("hosts"), dict):
         raise HostingError("invalid managed-host state format")
+    try:
+        layout.persist(state, layout.PartitionStore(path.parent),
+                       lambda legacy: _save_legacy_host_state(legacy, path))
+    except layout.TargetStateError as exc:
+        raise HostingError(f"could not save managed-host state: {exc}") from None
+
+
+def _save_legacy_host_state(state: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix="hosts-", suffix=".json", dir=path.parent)
     try:
@@ -710,6 +727,10 @@ def allocate_loopback_port(state: dict, key: str) -> int:
     existing = state.get("hosts", {}).get(key, {})
     if isinstance(existing.get("loopback_port"), int):
         return existing["loopback_port"]
+    if getattr(state, "unreadable", None):
+        # An unreadable per-target file may hold a port this view cannot see.
+        raise HostingError("a per-target hosting state file is unreadable; "
+                           "cannot allocate a loopback port safely")
     used = {entry.get("loopback_port") for entry in state.get("hosts", {}).values()
             if isinstance(entry, dict) and isinstance(entry.get("loopback_port"), int)}
     offset = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) % _PORT_COUNT

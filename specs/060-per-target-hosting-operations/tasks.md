@@ -15,15 +15,15 @@
 - [x] T004 Implement `sandbox/hosting/coordination/program.py`
 - [x] T005 [P] Client tests: 15 s bound, invalid output rejected, SSH failure/timeout/missing marker → `lease_authority_unavailable` with migrate/repin remedy, no secret in errors in `tests/test_hosting_coordination_client.py`
 - [x] T006 Implement `sandbox/hosting/coordination/client.py`; mark `hosting_coordination` capability in `remote service migrate`
-- [ ] T007 [P] Per-target state tests: per-file read/write, corrupt file affects only its target, `iter_target_states` skips with per-target error, parity of record contents with today's `hosts.json` on 051/054 fixtures in `tests/test_hosting_state_partition.py`
-- [ ] T008 Implement `sandbox/hosting/state_partition/layout.py` and accessors in `sandbox/core/_hosting.py`; move callers off `load_host_state`/`save_host_state`; narrow `RecoveryRepository.state_lock` to conversion/legacy use
-- [ ] T009 Add program payloads to `SHAPE_SOURCES`, bump `CONTROL_PROTOCOL_SPOKEN` (coordinate number with 063 T006), re-record `control_shapes.json`
+- [x] T007 [P] Per-target state tests: per-file read/write, corrupt file affects only its target, `iter_target_states` skips with per-target error, parity of record contents with today's `hosts.json` on 051/054 fixtures in `tests/test_hosting_state_partition.py`
+- [x] T008 Implement `sandbox/hosting/state_partition/layout.py` and accessors in `sandbox/core/_hosting.py`; move callers off `load_host_state`/`save_host_state`; narrow `RecoveryRepository.state_lock` to conversion/legacy use
+- [x] T009 Add program payloads to `SHAPE_SOURCES`, bump `CONTROL_PROTOCOL_SPOKEN` (coordinate number with 063 T006), re-record `control_shapes.json`
 
 ## Phase 3: US1 Unrelated projects deploy at the same time (P1)
 
 - [ ] T010 [P] [US1] Concurrency tests: two targets on one remote and one controller to two remotes run concurrently; no controller-wide lock held across build/transfer/delivery/verification (instrumented lock tracer); login-url on idle target returns while another applies in `tests/test_hosting_concurrency.py`
 - [ ] T011 [US1] Implement `sandbox/hosting/coordination/lease.py` (TargetLease, renewal thread, lost flag, token passing)
-- [ ] T012 [US1] Route every target mutation in `sandbox/commands/hosting.py` (apply, sync, login-url, edge-continue, recover, retire-delivery, image stage/provision/activate/adopt/rollback/recover/settle) through TargetLease; registration lock only around registration reads
+- [ ] T012 [US1] Route every target mutation in `sandbox/commands/hosting.py` (apply, sync, login-url, edge-continue, recover, retire-delivery, image stage/provision/activate/adopt/rollback/recover/settle) through TargetLease; registration lock only around registration reads; narrow `RecoveryRepository.state_lock` to conversion/legacy use (moved from T008)
 - [ ] T013 [P] [US1] Shared-lease tests: edge/DNS/ingress reload only, 60 s bound, never across build or verification, rollback re-acquires in `tests/test_hosting_concurrency.py`
 - [ ] T014 [US1] Implement `sandbox/hosting/coordination/shared.py` (064 seam) and wrap edge, DNS and ingress reload steps in `sandbox/commands/hosting.py`
 

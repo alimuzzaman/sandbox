@@ -230,6 +230,32 @@ class RangeRuntimeTests(unittest.TestCase):
         self.assertEqual(self._sweep(live), {"released": 0, "retained": []})
         self.assertEqual([r["owner_id"] for r in self.store.stats()["table"]], ["instance:a"])
 
+    def test_reap_liveness_failure_under_lock_retains_owner_and_unlocks(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
+        runtime = self._home_runtime()
+        self.configs["a"] = config("sandbox-a", "default")
+        runtime.prepare("a")
+        calls = []
+
+        def live():
+            calls.append(1)
+            if len(calls) > 1:
+                raise OSError("registry unreadable")
+            return set()
+        with self.assertRaises(OSError):
+            self._sweep(live)
+        self.assertEqual(len(self.store.stats()["table"]), 1)
+        entered = threading.Event()
+        worker = threading.Thread(target=lambda: self._enter_exclusive(runtime, entered))
+        worker.start()
+        self.assertTrue(entered.wait(5))  # the lock was released
+        worker.join(5)
+
+    @staticmethod
+    def _enter_exclusive(runtime, entered):
+        with runtime.lifecycle("a", exclusive=True):
+            entered.set()
+
     def test_reap_removes_the_owners_current_networks(self):
         self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
         runtime = self._home_runtime()
@@ -285,6 +311,15 @@ class RangeRuntimeTests(unittest.TestCase):
         registry.put(str(kept), "default", instance="other")
         result = namespace["reconcile_after_removal"]({str(gone)}, {})
         self.assertEqual(result["registry_removed"], 2)
+        self.assertEqual({r["instance"] for r in registry.read_only_all().values()}, {"other"})
+
+        # An older v2 writer stored a bare-root key with no label.
+        legacy = (self.home / "deploy" / "legacy").resolve()
+        data = json.loads((runtime_dir / "registry.json").read_text())
+        data["instances"][str(legacy)] = {"root": str(legacy), "instance": "legacy"}
+        (runtime_dir / "registry.json").write_text(json.dumps(data))
+        result = namespace["reconcile_after_removal"]({str(legacy)}, {})
+        self.assertEqual(result["registry_removed"], 1)
         self.assertEqual({r["instance"] for r in registry.read_only_all().values()}, {"other"})
 
     def test_instance_owner_cursor_is_validated(self):

@@ -2649,6 +2649,9 @@ def reconcile_after_removal(removed_paths, workspace_ids):
             if not root:
                 continue
             label = record.get("label") if isinstance(record, dict) else None
+            # A legacy bare-root key carries no label; remove it by root.
+            if not (isinstance(key, str) and "::" in key):
+                label = None
             if Path(root).name in names and not Path(root).exists():
                 if repository.remove(root, label if isinstance(label, str) and label else None):
                     result["registry_removed"] += 1

@@ -524,10 +524,11 @@ class RoundTwoTests(unittest.TestCase):
         with patch.object(remote_cmd.sr, "get_remote", return_value={"name": "vps"}), \
                 patch.object(range_store, "RangeStore", Store), \
                 patch.object(remote_cmd, "_installed_protocol", return_value=3), \
-                patch.object(remote_cmd, "_invalidate_readiness", invalidated.append), \
+                patch.object(remote_cmd, "_invalidate_readiness",
+                             lambda name, before=False: invalidated.append((name, before))), \
                 contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             remote_cmd._cmd_network_range(args, True)
-        self.assertEqual(invalidated, ["vps"])
+        self.assertEqual(invalidated, [("vps", True), ("vps", False)])
 
 
 class EntryPointRefusalTests(unittest.TestCase):
@@ -759,6 +760,8 @@ class RoundFiveTests(unittest.TestCase):
         import importlib.util
         import types
         from unittest.mock import patch
+
+        import sandbox.commands.jobs_runtime  # noqa: F401
         httpx = types.ModuleType("httpx")
         deps = types.ModuleType("dependencies")
         deps.ToolDependencies = object
@@ -977,6 +980,193 @@ class RoundFiveTests(unittest.TestCase):
         human = run_test_process([str(ROOT / "sb"), "test", *pd], capture_output=True, text=True,
                                  env=env, timeout=120, cwd=str(ROOT))
         self.assertIn("Remedy: ./sb remote list", human.stderr)
+
+class RoundSixTests(unittest.TestCase):
+    """Fail-closed invalidation, MCP refusal envelopes, cache window, handoff."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+
+    def _stored_proof(self):
+        result = check.run("/work/project", "vps", probes=_probes(self.home), full=True)
+        stored = check.reusable("vps", result["project"], probes=_probes(self.home))
+        self.assertIsNotNone(stored)
+        return result
+
+    def test_failed_generation_rotation_prevents_stale_proof_reuse(self):
+        import contextlib
+        import io
+        import os
+        from unittest.mock import patch
+
+        from sandbox.commands import remote as remote_cmd
+        from sandbox.remote_network import store as range_store
+        result = self._stored_proof()
+        directory = check.readiness_dir(Path(self.home), "vps")
+        os.chmod(directory, 0o500)
+        err = io.StringIO()
+        try:
+            with patch("sandbox.core._paths._sandbox_base", return_value=Path(self.home)):
+                # Before a change: refuse, so nothing changes under a proof
+                # that could not be withdrawn.
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                    remote_cmd._invalidate_readiness("vps", before=True)
+                self.assertIn("readiness_invalidation_failed", err.getvalue())
+                # After a change: warn, naming the directory to delete.
+                warned = io.StringIO()
+                with contextlib.redirect_stderr(warned):
+                    remote_cmd._invalidate_readiness("vps")
+                self.assertIn(str(directory), warned.getvalue())
+        finally:
+            os.chmod(directory, 0o700)
+        self.assertEqual(result["generation"], check.generation(Path(self.home), "vps"))
+
+        assigned = []
+
+        class Store:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def assign(self, *_a, **_k):
+                assigned.append(True)
+                return {"status": "assigned"}
+
+            def list(self):
+                return []
+
+        def unwritable(_name, home=None):
+            raise PermissionError(13, "Permission denied")
+        args = SimpleNamespace(name="assign", ssh_url="vps", cidr="10.80.0.0/16",
+                               subnet_prefix=24, confirm=True)
+        with patch.object(remote_cmd.sr, "get_remote", return_value={"name": "vps"}), \
+                patch.object(range_store, "RangeStore", Store), \
+                patch.object(remote_cmd, "_installed_protocol", return_value=3), \
+                patch.object(check, "invalidate", unwritable), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            remote_cmd._cmd_network_range(args, True)
+        self.assertEqual(assigned, [])
+
+    def test_installs_invalidate_before_the_first_remote_write(self):
+        tree = ast.parse((ROOT / "sandbox" / "commands" / "remote.py").read_text())
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+        def calls(function, name):
+            return sorted(node.lineno for node in ast.walk(function)
+                          if isinstance(node, ast.Call) and getattr(node.func, "id",
+                                                                     getattr(node.func, "attr", None)) == name)
+
+        def fenced(function):
+            return [node.lineno for node in ast.walk(function)
+                    if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_invalidate_readiness"
+                    and any(k.arg == "before" for k in node.keywords)]
+        for name, first_write in (("_cmd_service", "_upload_runtime_source"),
+                                  ("_cmd_provision", "_upload_runtime_source"),
+                                  ("_cmd_up", "_upload_runtime_source"),
+                                  ("_cmd_network_range", "assign")):
+            with self.subTest(function=name):
+                function = functions[name]
+                before, writes = fenced(function), calls(function, first_write)
+                self.assertTrue(before and writes)
+                self.assertLess(min(before), min(writes))
+
+    def _tool(self, name, **modules):
+        import importlib.util
+        import types
+        from unittest.mock import patch
+
+        # Import outside the patched module table: patch.dict drops modules
+        # first imported inside it, and a re-import registers commands twice.
+        import sandbox.commands.jobs_runtime  # noqa: F401
+        stubs = {"httpx": types.ModuleType("httpx")}
+        deps = types.ModuleType("dependencies")
+        deps.ToolDependencies = object
+        stubs["dependencies"] = deps
+        stubs.update(modules)
+        with patch.dict(sys.modules, stubs):
+            path = ROOT / "mcp" / "wp-server" / "tools" / f"{name}.py"
+            spec = importlib.util.spec_from_file_location(f"_readiness6_{name}", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        return module
+
+    def test_mcp_submission_preserves_readiness_refusal(self):
+        from unittest.mock import patch
+
+        root = tempfile.mkdtemp()
+        target = SimpleNamespace(kind="remote", remote_name="vps", project_root=root,
+                                 workspace_label="default", runtime_policy={},
+                                 sources={"identity": "project-identity"})
+        service = SimpleNamespace(resolve=lambda _request: target)
+        identity = {"_resolved_project_identity": lambda _t: "project-identity",
+                    "_source_identity": lambda _root: SourceIdentity("caller")}
+        wp = self._tool("wp")
+        jobs = self._tool("jobs")
+        jobs._target_service = service
+        calls = {
+            "run_tests": (wp, lambda: wp.run_tests(project_dir=root, remote="vps")),
+            "job_start": (jobs, lambda: jobs.job_start(["true"], root, remote="vps")),
+        }
+        for name, (module, call) in calls.items():
+            with self.subTest(tool=name), EntryPointRefusalTests._patches(self), \
+                    patch("sandbox.application.context.durable_job_dependencies",
+                          return_value={"target_service": service}), \
+                    patch.multiple(module, **identity), \
+                    patch.object(wp, "_resolve_test_mode", return_value="unit"):
+                result = call()
+                self.assertIn("status", result, result)
+                self.assertEqual(
+                    (result["ok"], result["status"], result["code"], result["remedy"]),
+                    (False, "blocked", "remote_not_ready_capacity",
+                     "./sb remote network-range propose vps"))
+                self.assertEqual(result["side_effects"],
+                                 {"bytes_transferred": 0, "staging_started": False})
+
+    def test_mcp_sync_wrappers_preserve_readiness_refusal(self):
+        from unittest.mock import patch
+        envelope = RemoteNotReadyError(_ROW, remote="vps").to_payload()
+        completed = subprocess.CompletedProcess([], 1, "progress\n" + json.dumps(envelope) + "\n", "")
+        app = SimpleNamespace(
+            SANDBOX_ROOT=ROOT, _require_project_capability=lambda *_a, **_k: None,
+            _safe_json=lambda line: json.loads(line),
+            mcp=SimpleNamespace(tool=lambda *_a, **_k: (lambda function: function)))
+        calls = {
+            "ci": lambda m: m.ci_run(project_dir="/work/p", workflow="ci.yml", remote="vps"),
+            "e2e": lambda m: m.run_e2e(project_dir="/work/p", remote="vps"),
+        }
+        for name, call in calls.items():
+            with self.subTest(tool=name):
+                module = self._tool(name, app=app)
+                with patch.object(module.subprocess, "run", return_value=completed):
+                    result = call(module)
+                self.assertEqual(result, envelope)
+
+    def test_readiness_cache_window_is_300_seconds(self):
+        self.assertEqual(check.REUSE_SECONDS, 300)
+        result = check.run("/work/project", "vps", probes=_probes(self.home), full=True)
+        self.assertEqual(result["reusable_until"] - result["taken_at"], 300)
+        for now, reused in ((1000.0, True), (1299.0, True), (1300.0, False), (1301.0, False)):
+            with self.subTest(now=now):
+                proof = check.reusable("vps", result["project"],
+                                       probes=_probes(self.home, clock=lambda now=now: now))
+                self.assertIs(proof is not None, reused)
+
+    def test_handoff_rejects_revision_mismatch_without_generation_change(self):
+        home = Path(self.home)
+        other = "b" * 24
+        self.assertNotEqual(other, REVISION)
+        for generation_token in (None, "g1"):
+            with self.subTest(generation=generation_token):
+                ensured = {"installed_runtime_revision": REVISION, "generation": generation_token}
+                if generation_token is not None:
+                    check._write_private(check.readiness_dir(home, "vps") / "generation.json",
+                                         {"token": generation_token})
+                check.record_ensure("vps", "project-identity", home, proof=ensured)
+                self.assertFalse(check.record_exec(
+                    "vps", "project-identity", home,
+                    proof={"installed_runtime_revision": other, "generation": generation_token}))
+                self.assertTrue(check.record_exec("vps", "project-identity", home, proof=ensured))
+
 
 if __name__ == "__main__":
     unittest.main()

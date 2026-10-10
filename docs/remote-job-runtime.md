@@ -176,8 +176,11 @@ A passing check is stored per remote and project under
 the runtime revision recorded for the remote is unchanged. A `not_ready`
 proof is never reused. `remote service migrate`, `remote provision`,
 `remote up` and a confirmed `network-range assign` delete the remote's proofs
-and rotate its generation token, so a check already in flight when they ran
-publishes a proof that is never reused.
+and rotate its generation token before their first remote write and again
+after the change, so a check already in flight when they ran publishes a proof
+that is never reused. If the proofs cannot be withdrawn before the change, the
+command refuses with `readiness_invalidation_failed` and changes nothing; a
+failure after the change prints a warning naming the directory to delete.
 The `handoff` row turns `ready` once `ensure --remote` and then `exec
 --remote` both succeed at the installed revision. `sb doctor` lists the rows
 for the remote the focused project declares, registered or not.

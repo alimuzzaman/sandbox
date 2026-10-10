@@ -156,7 +156,11 @@
     its registration (`mcp_service.runtime_revision`). There is no installed-at
     timestamp, so a same-revision reinstall by another controller does not
     invalidate this controller's proofs. Local installs (`service migrate`,
-    `provision`, `up`) and `network-range assign` delete the remote's proofs.
+    `provision`, `up`) and `network-range assign` delete the remote's proofs
+    before their first remote write and again after the record changes. The
+    first deletion fails closed: if proofs cannot be withdrawn the command
+    stops before changing anything; a failure after the change warns with
+    the directory to delete.
   - A range release on the remote host cannot reach controller proofs. That
     is safe: a release only frees capacity, a `not_ready` proof is never
     reused, and capacity admission still runs at deploy.

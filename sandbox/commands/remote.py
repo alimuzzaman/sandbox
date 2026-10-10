@@ -617,13 +617,27 @@ def _cmd_readiness(args, as_json: bool) -> None:
         raise SystemExit(1)
 
 
-def _invalidate_readiness(name: str) -> None:
-    """Installs and range assignments change what a readiness proof attested."""
-    from sandbox.readiness.check import invalidate
+def _invalidate_readiness(name: str, *, before: bool = False) -> None:
+    """Installs and range assignments change what a readiness proof attested.
+
+    ``before`` runs ahead of the first remote write and fails closed: a proof
+    that cannot be withdrawn must not survive the change it attests to. The
+    call after the change fences checks that ran during it; if that one
+    fails, the earlier rotation already withdrew every older proof, so it
+    warns rather than reporting a completed change as failed."""
+    from sandbox.readiness.check import invalidate, readiness_dir
     try:
         invalidate(name)
-    except OSError:
-        pass
+    except OSError as exc:
+        from sandbox.core._paths import _sandbox_base
+        location = readiness_dir(_sandbox_base(), name)
+        if before:
+            die(f"readiness_invalidation_failed: could not withdraw readiness proofs "
+                f"for '{name}' in {location} ({exc.strerror or exc}); nothing was "
+                "changed on the remote. Fix the directory permissions and retry.")
+        print(f"warning: could not withdraw readiness proofs for '{name}' in {location} "
+              f"({exc.strerror or exc}); delete that directory before the next submission.",
+              file=sys.stderr)
 
 
 def _cmd_network_range(args, as_json: bool) -> None:
@@ -652,6 +666,8 @@ def _cmd_network_range(args, as_json: bool) -> None:
             prefix = DEFAULT_SUBNET_PREFIX if prefix is None else prefix
             store = range_store.RangeStore(
                 entry, installed_protocol=_installed_protocol(entry) if confirmed else None)
+            if confirmed:
+                _invalidate_readiness(name, before=True)
             result = store.assign(cidr, prefix, confirm=confirmed)
             payload = {"ok": True, "name": name, "status": result["status"],
                        "data": result, "error": None}
@@ -770,6 +786,7 @@ def _cmd_service(args, as_json: bool) -> None:
                     entry, args, target_revision)
                 source_revision = _local_git_revision()
                 upload_timeout = _runtime_source_upload_timeout_arg(args)
+                _invalidate_readiness(name, before=True)
                 staged_source = _upload_runtime_source(
                     entry["ssh"], source_revision=source_revision,
                     upload_timeout=upload_timeout
@@ -1499,6 +1516,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     # inline as base64 over the SSH argument to avoid quoting issues.
     import base64
     encoded = base64.b64encode(script).decode()
+    _invalidate_readiness(name, before=True)
     journal = _new_provision_log(name, control_transport)
     try:
         _record_provision_event(journal, "runtime_staging")
@@ -1622,6 +1640,7 @@ def _cmd_up(args, as_json: bool) -> None:
                 observed.get("probe_error") or "remote_service_probe_unavailable")
         upload_timeout = _runtime_source_upload_timeout_arg(args)
         source_revision = _local_git_revision()
+        _invalidate_readiness(name, before=True)
         staged_source = _upload_runtime_source(
             entry["ssh"], source_revision=source_revision, upload_timeout=upload_timeout)
         if control_transport == "tailscale":

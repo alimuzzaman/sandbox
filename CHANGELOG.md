@@ -15,7 +15,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `ensure --remote`, runs the check first and refuses on a `not_ready` row
   with `remote_not_ready_<aspect>` before any source byte is transferred; a
   passing proof is reused for 300 s at the same recorded runtime revision
-  and generation (a migrate, provision, `up` or range assign rotates it).
+  and generation (a migrate, provision, `up` or range assign rotates it before changing
+  the remote, and refuses if it cannot).
   The refusal is an admission refusal: CLI `--json`, MCP tools and detached
   resource jobs return the `blocked` envelope with its `remedy`, and human
   output prints the remedy; this includes `ensure --remote` and the async

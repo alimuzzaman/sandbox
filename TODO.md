@@ -76,6 +76,13 @@ not close the external or human gates listed below.
     hand);
   - `job-list --remote` fails with ENOSPC in `write_env_for_compose`
     (`core/_docker.py`); listing must not need a writable compose env.
+  - recovery findings (feedback `65688899`, incident `15b0bec6`):
+    `job-cleanup` left each workspace protected as `recent_activity` until
+    an explicit `workspace release` plus `reap --tier all`; reap `apply`
+    returned `partial` with `errors=[]` and unnamed outcomes (planned 28.5 GB,
+    observed 16.5 GB, unexplained); and the ssh transport consumes stdin, so a
+    `while read` loop over `--remote` commands stops after the first item
+    (run ssh with `-n` unless streaming input).
 
 - [ ] **Prove fail-closed disposable CI workspace terminal cleanup.**
   The local candidate binds controller materialization authority to the accepted

@@ -3276,15 +3276,19 @@
    "workspace_absent"
   ],
   "sandbox/transports/remote_jobs.py": [
+   "RemoteJobAdmissionError.to_payload:payload={capacity,code,error,evidence,ok,owner_classes,recovery,resource_class,resource_kind,retryable,side_effects,status,target}",
+   "RemoteJobAdmissionError.to_payload:payload[allocation_table]=",
+   "RemoteJobAdmissionError.to_payload:payload[side_effects]={network_allocation_started,staging_started}",
+   "RemoteJobAdmissionError.to_payload:read[allocation_table]",
    "RemoteJobAdmissionError.to_payload:read[capacity]",
    "RemoteJobAdmissionError.to_payload:read[code]",
    "RemoteJobAdmissionError.to_payload:read[evidence]",
+   "RemoteJobAdmissionError.to_payload:read[release_commands]",
    "RemoteJobAdmissionError.to_payload:read[remote]",
    "RemoteJobAdmissionError.to_payload:read[target]",
    "RemoteJobAdmissionError.to_payload:recovery={automatic_cleanup,automatic_retry,plan}",
    "RemoteJobAdmissionError.to_payload:recovery[guidance]=",
-   "RemoteJobAdmissionError.to_payload:return={capacity,code,error,evidence,ok,owner_classes,recovery,resource_class,resource_kind,retryable,side_effects,status,target}",
-   "RemoteJobAdmissionError.to_payload:return[side_effects]={network_allocation_started,staging_started}",
+   "RemoteJobAdmissionError.to_payload:recovery[release_commands]=",
    "RemoteJobTransport._deploy:deploy_kwargs[push_timeout]=",
    "RemoteJobTransport._execution_remote:read[capabilities]",
    "RemoteJobTransport._execution_remote:read[provisioned]",
@@ -3331,6 +3335,11 @@
    "RemoteJobTransportError.to_payload:_admission_target(0)={kind,remote}",
    "RemoteJobTransportError.to_payload:return={acceptance,code,error,ok,operation,retryable,status,target}",
    "RemoteJobTransportError.to_payload:return[?]={detail}",
+   "_admission_allocation_table:read[age_seconds]",
+   "_admission_allocation_table:read[owner_id]",
+   "_admission_allocation_table:read[owner_kind]",
+   "_admission_allocation_table:read[workspace_id]",
+   "_admission_allocation_table:rows.append(0)={age_seconds,owner_id,owner_kind,workspace_id}",
    "_admission_capacity:read[pool_id]",
    "_admission_capacity:read[pools]",
    "_admission_capacity:read[status]",
@@ -3382,6 +3391,8 @@
    "_require_submission_ack:read[parent_job_id]",
    "_require_submission_ack:read[status]",
    "acceptance",
+   "age_seconds",
+   "allocation_table",
    "argv",
    "artifact_only_output",
    "artifact_paths",
@@ -3434,6 +3445,8 @@
    "operation",
    "output_profile",
    "owner_classes",
+   "owner_id",
+   "owner_kind",
    "owner_uid",
    "ownership",
    "ownership_repair_attempted",
@@ -3453,6 +3466,7 @@
    "reason",
    "recovery",
    "relationship_id",
+   "release_commands",
    "remote",
    "request_id",
    "resource_class",
@@ -3471,6 +3485,7 @@
    "timeout",
    "usable_subnets",
    "workspace",
+   "workspace_id",
    "workspace_label",
    "workspace_mode",
    "workspace_path"
@@ -3832,5 +3847,5 @@
    "stage"
   ]
  },
- "spoken": 2
+ "spoken": 3
 }

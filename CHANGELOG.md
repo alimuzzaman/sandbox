@@ -15,7 +15,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   never assigns. Capacity admission now words a remote without daemon pools as
   `missing_pool_evidence` naming the range remedy, and its evaluator can count
   unallocated range capacity and refuse range exhaustion with a bounded
-  allocation table and release commands. Control protocol 2 wires them in:
+  allocation table and release commands. Control protocol 2 (range store) and
+  3 (range fields in the admission refusal) wire them in:
   admission counts range capacity read-only, the runtime allocates one
   subnet per created network before a stack's first `up` (built-in and
   generic Compose, detached jobs, introspect, the MCP wp-cli fallback) and

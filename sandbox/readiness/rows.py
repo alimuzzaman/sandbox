@@ -115,19 +115,22 @@ def capacity(capacity_decision: Callable, remote: dict, name: str) -> dict:
                remedy=f"./sb remote network-range list {name}")
 
 
-_NO_INSTANCE = 3
-
-
 def ownership_repair(ssh_run: Callable, remote: dict, name: str, sb_path: str,
-                     *, workspace: str | None = None) -> dict:
+                     *, instance: Callable | None = None) -> dict:
     """The repair runs through the remote ``sb``; it must be installed and
-    executable. ``not_applicable`` when the project has no workspace there."""
+    executable. ``not_applicable`` when ``instance()`` (the remote's registered
+    instance inventory) says the project has no instance there; an inventory
+    that cannot be read falls through to the helper check."""
     import shlex
-    command = f"test -x {shlex.quote(sb_path)}"
-    if workspace:
-        command = f"test -d {shlex.quote(workspace)} || exit {_NO_INSTANCE}; {command}"
+    if instance is not None:
+        try:
+            present = instance()
+        except Exception:
+            present = None
+        if present is False:
+            return not_applicable("ownership_repair", "no_instance")
     try:
-        result = ssh_run(remote, command, timeout=REACHABILITY_TIMEOUT)
+        result = ssh_run(remote, f"test -x {shlex.quote(sb_path)}", timeout=REACHABILITY_TIMEOUT)
     except subprocess.TimeoutExpired:
         return row("ownership_repair", "unknown", probe_state="timeout",
                    remedy=f"./sb remote service status {name}")
@@ -136,8 +139,6 @@ def ownership_repair(ssh_run: Callable, remote: dict, name: str, sb_path: str,
                    remedy=f"./sb remote service status {name}")
     if getattr(result, "returncode", 1) == 0:
         return row("ownership_repair", "ready")
-    if workspace and getattr(result, "returncode", 1) == _NO_INSTANCE:
-        return not_applicable("ownership_repair", "no_instance")
     if getattr(result, "returncode", 1) == 255:
         return row("ownership_repair", "unknown", probe_state="unavailable",
                    remedy="./sb remote list")

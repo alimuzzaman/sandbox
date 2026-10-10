@@ -1133,7 +1133,8 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         try:
             # Readiness first, so an unreachable remote refuses with the same
             # remote_not_ready_reachability contract as every other path.
-            require_ready(target.project_root, target.remote_name)
+            readiness_proof = require_ready(target.project_root, target.remote_name,
+                                            target=target)
         except RemoteNotReadyError as exc:
             # Refused before any source byte leaves this machine.
             return {"ok": False, "status": "blocked", "code": exc.code,
@@ -1277,7 +1278,8 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         from sandbox.readiness import check as _readiness
         try:
             _readiness.record_ensure(
-                target.remote_name, (getattr(target, "sources", None) or {}).get("identity") or target.project_root)
+                target.remote_name, (getattr(target, "sources", None) or {}).get("identity") or target.project_root,
+                proof=readiness_proof)
         except (OSError, ValueError):
             pass  # the handoff row stays unknown; the ensure itself succeeded
     return result_payload

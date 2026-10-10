@@ -220,10 +220,12 @@ class CheckTests(unittest.TestCase):
 
     def test_handoff_ready_after_ensure_then_exec(self):
         probes = _probes(self.home)
-        check.run("/work/project", "vps", probes=probes)
-        self.assertFalse(check.record_exec("vps", "project-identity", home=Path(self.home)))
-        check.record_ensure("vps", "project-identity", home=Path(self.home))
-        self.assertTrue(check.record_exec("vps", "project-identity", home=Path(self.home)))
+        proof = check.run("/work/project", "vps", probes=probes, full=True)
+        self.assertFalse(check.record_exec("vps", "project-identity", home=Path(self.home),
+                                           proof=proof))
+        check.record_ensure("vps", "project-identity", home=Path(self.home), proof=proof)
+        self.assertTrue(check.record_exec("vps", "project-identity", home=Path(self.home),
+                                          proof=proof))
         found = _rows(check.run("/work/project", "vps", probes=probes))
         self.assertEqual(found["handoff"]["state"], "ready")
 

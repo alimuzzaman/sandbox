@@ -158,7 +158,10 @@ admission still runs during the deploy. A probe still running at the 60 s
 deadline runs on a daemon thread and never delays the answer or the exit.
 A capacity verdict is published before its optional range proposal, so a
 slow proposal never hides a completed `not_ready`. Ownership repair is
-`not_applicable` when the project has no workspace on the remote. `ensure
+`not_applicable` when the remote's registered instances do not include the
+project's instance. The gate reuses the caller's resolved target, so an
+explicit `--config-file` survives it. Handoff is recorded only when the ensure
+and the exec passed gates at the same revision and generation. `ensure
 --remote` returns the same `blocked` envelope inside its usual error object,
 and the async `run_e2e`/`ci_run` launches wait long enough (120 s) to return
 it.

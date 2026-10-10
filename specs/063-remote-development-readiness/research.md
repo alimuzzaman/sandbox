@@ -160,10 +160,17 @@
   - A range release on the remote host cannot reach controller proofs. That
     is safe: a release only frees capacity, a `not_ready` proof is never
     reused, and capacity admission still runs at deploy.
-  - The ownership-repair row treats the project's remote workspace
-    directory as its instance: with no workspace there it is
-    `not_applicable/no_instance`; otherwise it checks that the remote `sb`
-    exists and is executable, in the same SSH probe.
+  - The ownership-repair row asks the remote's registered instance
+    inventory (`sb instances --json`) for the project's derived instance
+    name, inside the probe deadline: absent means `not_applicable/no_instance`
+    (a workspace directory can outlive a failed ensure or a deleted
+    instance, so it is not evidence). An unreadable inventory falls through
+    to the check that the remote `sb` exists and is executable.
+  - The gate takes the caller's resolved target (or the job submission), so
+    an explicit `--config-file` selection is never resolved away.
+  - A handoff is recorded only when the ensure's gate and the exec's gate
+    proved the same runtime revision and generation, and no invalidation
+    happened since.
 
 ## R7. Protocol bump
 

@@ -542,7 +542,8 @@ def cmd_exec(cfg, args) -> None:
                 from sandbox.readiness import check as _readiness
                 try:
                     _readiness.record_exec(target.remote_name, (getattr(target, "sources", None) or {}).get(
-                        "identity") or target.project_root)
+                        "identity") or target.project_root,
+                        proof=getattr(transport, "readiness_proof", None))
                 except (OSError, ValueError):
                     pass
                 return

@@ -551,6 +551,7 @@ class RemoteJobTransport:
         # sandbox.readiness.errors.RemoteNotReadyError before any transfer. Submission sites pass
         # ``sandbox.readiness.gate.require_ready``; control-only calls do not.
         self.readiness = readiness
+        self.readiness_proof = None  # the proof the last submission's gate passed
         self.ssh_run = ssh_run
         self.remote_lookup = remote_lookup
         self.sync_submit = sync_submit
@@ -669,7 +670,8 @@ class RemoteJobTransport:
             )
         remote = self._execution_remote(submission.remote_name)
         if self.readiness is not None:
-            self.readiness(submission.project_root, submission.remote_name)
+            self.readiness_proof = self.readiness(
+                submission.project_root, submission.remote_name, submission)
         if submission.sync_relationship_id is not None:
             capabilities = remote.get("capabilities")
             if not isinstance(capabilities, (list, tuple, set)) or \
@@ -741,7 +743,7 @@ class RemoteJobTransport:
             raise RemoteJobTransportError("remote matrix children must share one remote and project")
         remote = self._execution_remote(first.remote_name)
         if self.readiness is not None:
-            self.readiness(first.project_root, first.remote_name)
+            self.readiness_proof = self.readiness(first.project_root, first.remote_name, first)
         deployed = self._deploy(
             remote, first.project_root,
             deployment_timeout=max(item.deadline_seconds for item in submissions),

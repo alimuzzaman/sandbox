@@ -116,7 +116,7 @@ class GateTests(unittest.TestCase):
         def never(*_args, **_kwargs):
             self.fail("nothing may be transferred after a not_ready row")
 
-        def not_ready(_root, _remote):
+        def not_ready(_root, _remote, *_submission):
             raise RemoteNotReadyError({"aspect": "capacity", "state": "not_ready",
                                        "reason": "missing_pool_evidence",
                                        "remedy": "./sb remote network-range propose vps"},
@@ -308,10 +308,14 @@ class FenceAndDeadlineTests(unittest.TestCase):
 class HandoffIsolationTests(unittest.TestCase):
     def test_exec_for_another_project_records_nothing(self):
         home = Path(tempfile.mkdtemp())
-        check.run("/work/project", "vps", probes=_probes(home))
-        check.record_ensure("vps", "other-project", home=home)
-        self.assertFalse(check.record_exec("vps", "project-identity", home=home))
+        proof = check.run("/work/project", "vps", probes=_probes(home), full=True)
+        check.record_ensure("vps", "other-project", home=home, proof=proof)
+        self.assertFalse(check.record_exec("vps", "project-identity", home=home, proof=proof))
         self.assertFalse((check.readiness_dir(home, "vps") / "handoff.json").exists())
+
+
+def _ok_ssh(*_args, **_kwargs):
+    return subprocess.CompletedProcess([], 0, "", "")
 
 
 class RoundTwoTests(unittest.TestCase):
@@ -340,30 +344,88 @@ class RoundTwoTests(unittest.TestCase):
             release.set()
         self.assertEqual(caught.exception.code, "remote_not_ready_capacity")
 
-    def test_ownership_is_not_applicable_without_a_project_workspace(self):
+    def test_ownership_not_applicable_after_failed_ensure_or_instance_delete(self):
+        # A workspace directory may outlive its instance; only the remote's
+        # registered instance inventory decides.
         from sandbox.readiness import rows
-        seen = []
-
-        def ssh(_remote, command, timeout=None):
-            seen.append(command)
-            return subprocess.CompletedProcess([], 3 if "test -d" in command else 0, "", "")
         target = _target()
         target.workspace_label = "default"
         result = check.run("/work/project", "vps", probes=_probes(
-            self.home, ssh_run=ssh, resolve=lambda _p, _r: target,
-            workspace_path=lambda _remote, _target: "/home/u/ws-project"))
+            self.home, resolve=lambda _p, _r: target,
+            instance_present=lambda _remote, _target: False))
         found = {item["aspect"]: item for item in result["rows"]}
         self.assertEqual((found["ownership_repair"]["state"], found["ownership_repair"]["reason"]),
                          ("not_applicable", "no_instance"))
-        self.assertTrue(any("/home/u/ws-project" in command for command in seen))
-        present = rows.ownership_repair(
-            lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""), {}, "vps", "/x/sb",
-            workspace="/home/u/ws")
-        self.assertEqual(present["state"], "ready")
-        missing_helper = rows.ownership_repair(
-            lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", ""), {}, "vps", "/x/sb",
-            workspace="/home/u/ws")
-        self.assertEqual(missing_helper["reason"], "repair_helper_missing")
+        helper_missing = lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", "")  # noqa: E731
+        self.assertEqual(rows.ownership_repair(helper_missing, {}, "vps", "/x/sb",
+                                               instance=lambda: False)["state"],
+                         "not_applicable")
+        self.assertEqual(rows.ownership_repair(_ok_ssh, {}, "vps", "/x/sb",
+                                               instance=lambda: True)["state"], "ready")
+
+        def unreadable():
+            raise RuntimeError("could not list remote Sandbox instances")
+        self.assertEqual(rows.ownership_repair(helper_missing, {}, "vps", "/x/sb",
+                                               instance=unreadable)["reason"],
+                         "repair_helper_missing")
+
+    def test_workspace_resolution_shares_the_readiness_deadline(self):
+        import threading
+        import time
+        from unittest.mock import patch
+        release = threading.Event()
+        target = _target()
+        target.workspace_label = "default"
+
+        def slow_inventory(_remote, _target):
+            release.wait(5)
+            return True
+
+        def hang(_remote, *, remote_name):
+            release.wait(5)
+            return {"ok": True}
+        started = time.monotonic()
+        try:
+            with patch.object(check, "DEADLINE_SECONDS", 0.5):
+                result = check.run("/work/project", "vps", probes=_probes(
+                    self.home, resolve=lambda _p, _r: target, capacity_decision=hang,
+                    instance_present=slow_inventory))
+        finally:
+            release.set()
+        self.assertLess(time.monotonic() - started, 2)
+        found = {item["aspect"]: item for item in result["rows"]}
+        self.assertEqual(found["ownership_repair"]["probe_state"], "timeout")
+
+    def test_remote_ensure_and_tests_preserve_explicit_config_selection(self):
+        # The caller resolved with its --config-file; the gate must not
+        # resolve again (which would lose the selection).
+        def no_resolution(_project, _remote):
+            self.fail("the gate re-resolved a target the caller already resolved")
+        target = _target()
+        proof = gate.require_ready("/work/project", "vps", target=target,
+                                   probes=_probes(self.home, resolve=no_resolution))
+        self.assertEqual(proof["remote"], "vps")
+        submission = JobSubmission("test", "/work/project", "project-identity", "remote",
+                                   "unit", ("echo", "x"), 60, SourceIdentity("caller"),
+                                   remote_name="vps", workspace_mode="isolated")
+        proof = gate.require_ready("/work/project", "vps", submission,
+                                   probes=_probes(self.home, resolve=no_resolution))
+        self.assertEqual(proof["project"], "project-identity")
+
+    def test_exec_revision_a_cannot_record_handoff_for_revision_b(self):
+        home = Path(self.home)
+        proof_a = check.run("/work/project", "vps", probes=_probes(self.home), full=True)
+        check.record_ensure("vps", "project-identity", home=home, proof=proof_a)
+        # A migrate lands between the exec's gate and its completion.
+        check.invalidate("vps", home)
+        migrated = {**_probes(self.home).__dict__}
+        migrated["service_status"] = lambda _remote: {
+            "installed_runtime_revision": "b" * 24,
+            "compatibility": {"ok": True, "state": "compatible"}}
+        proof_b = check.run("/work/project", "vps", probes=check.Probes(**migrated), full=True)
+        self.assertFalse(check.record_exec("vps", "project-identity", home=home, proof=proof_a))
+        self.assertFalse(check.record_exec("vps", "project-identity", home=home, proof=proof_b))
+        self.assertFalse((check.readiness_dir(home, "vps") / "handoff.json").exists())
 
     def test_ensure_returns_the_blocked_envelope_and_prints_the_remedy(self):
         import contextlib
@@ -376,7 +438,7 @@ class RoundTwoTests(unittest.TestCase):
                                  remote={"name": "vps"}, workspace_label="default",
                                  sources={})
 
-        def refuse(_root, _remote):
+        def refuse(_root, _remote, *_args, **_kwargs):
             raise RemoteNotReadyError(_ROW, remote="vps")
         service = SimpleNamespace(resolve=lambda _request: target)
         with patch("sandbox.application.context.durable_job_dependencies",
@@ -465,6 +527,71 @@ class RoundTwoTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             remote_cmd._cmd_network_range(args, True)
         self.assertEqual(invalidated, ["vps"])
+
+
+class EntryPointRefusalTests(unittest.TestCase):
+    """The real submission paths, driven through the real transport: a
+    readiness refusal escapes before any deploy, so the CLI's admission
+    dispatcher (tested above) renders it."""
+
+    def _patches(self):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        from sandbox.core import _remote
+
+        def refuse(*_args, **_kwargs):
+            raise RemoteNotReadyError(_ROW, remote="vps")
+
+        def never(*_args, **_kwargs):
+            raise AssertionError("nothing may be deployed after a refusal")
+        stack = ExitStack()
+        stack.enter_context(patch("sandbox.readiness.gate.require_ready", refuse))
+        stack.enter_context(patch.object(_remote, "deploy_exact_working_tree", never))
+        stack.enter_context(patch.object(_remote, "get_remote", return_value={
+            "provisioned": True, "capabilities": ["job.exec", "job.execution-policy.v1"]}))
+        return stack
+
+    def _submission(self):
+        return JobSubmission("test", "/work/project", "project-identity", "remote", "ci",
+                             ("echo", "x"), 60, SourceIdentity("caller"),
+                             remote_name="vps", workspace_mode="isolated")
+
+    def test_ci_remote_run_refuses_before_transfer(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from sandbox.commands import ci
+        target = SimpleNamespace(kind="remote", remote_name="vps", workspace_label="ci")
+        with self._patches(), patch.object(ci, "_remote_ci_submissions",
+                                           return_value=[self._submission()]), \
+                self.assertRaises(RemoteNotReadyError) as caught:
+            ci._run_remote_ci(target, "/work/project", Path("ci.yml"), {}, SimpleNamespace(),
+                              as_json=True)
+        self.assertEqual(caught.exception.code, "remote_not_ready_capacity")
+
+    def test_e2e_remote_run_refuses_before_transfer(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from sandbox.commands import e2e
+        root = tempfile.mkdtemp()
+        target = SimpleNamespace(kind="remote", remote_name="vps", workspace_label="e2e")
+        core = SimpleNamespace(load_project_config=lambda _pd: {"root": root},
+                               ConfigError=ValueError)
+        service = SimpleNamespace(resolve=lambda _request: target)
+        args = SimpleNamespace(project_dir=root, remote="vps", local=False, workspace=None,
+                               json=True, timeout=60, workers=1, playwright_config=None)
+        with self._patches(), patch.object(e2e, "_core", return_value=core), \
+                patch.object(e2e, "_find_playwright_config",
+                             return_value=Path(root) / "playwright.config.ts"), \
+                patch("sandbox.application.context.durable_job_dependencies",
+                      return_value={"target_service": service}), \
+                patch.object(e2e, "_remote_shard_submissions",
+                             return_value=[self._submission()]), \
+                self.assertRaises(RemoteNotReadyError) as caught:
+            e2e.cmd_e2e({}, args)
+        self.assertEqual(caught.exception.code, "remote_not_ready_capacity")
 
 
 if __name__ == "__main__":

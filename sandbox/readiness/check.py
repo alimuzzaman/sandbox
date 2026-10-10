@@ -45,9 +45,9 @@ class Probes:
     propose: Callable          # registration -> {"proposed", "assign_command", ...}
     clock: Callable = time.time
     home: Path | None = None
-    # (registration, target) -> the project's remote workspace path; None
-    # skips the no-instance check.
-    workspace_path: Callable | None = None
+    # (registration, target) -> whether the project's instance is registered
+    # on the remote; None skips the no-instance check.
+    instance_present: Callable | None = None
 
 
 def default_probes() -> Probes:
@@ -69,8 +69,9 @@ def default_probes() -> Probes:
         sb_path=_remote.remote_sb_path,
         propose=lambda remote: RangeStore(remote, _remote.ssh_run).propose(),
         home=_sandbox_base(),
-        workspace_path=lambda remote, target: _remote.remote_workspace_path(
-            remote, target.project_root, target.workspace_label),
+        instance_present=lambda remote, target: _remote.remote_workspace_instance_name(
+            target.project_root, target.workspace_label) in {
+                row.get("name") for row in _remote.list_remote_instances(remote)},
     )
 
 
@@ -159,19 +160,23 @@ def reusable(remote: str, identity: str, *, probes: Probes) -> dict | None:
     return proof
 
 
-def run(project_dir: str, remote: str | None, *, probes: Probes | None = None) -> dict:
+def run(project_dir: str, remote: str | None, *, probes: Probes | None = None,
+        target=None, full: bool = False) -> dict:
     """One readiness result (the contract's ``data``); stores a proof when a
-    remote was selected and registered."""
+    remote was selected and registered. ``target`` is the caller's already
+    resolved target, so its explicit configuration selection is kept; ``full``
+    returns the stored proof, generation included."""
     probes = probes or default_probes()
     taken_at = int(probes.clock())
     result = {"remote": remote, "remote_selection": "explicit" if remote else None,
               "rows": [], "installed_runtime_revision": None,
               "taken_at": taken_at, "reusable_until": taken_at + REUSE_SECONDS}
-    try:
-        target = probes.resolve(project_dir, remote)
-        error_code = None
-    except Exception as exc:  # TargetResolutionError and config failures
-        target, error_code = None, getattr(exc, "code", None) or "invalid_project"
+    error_code = None
+    if target is None:
+        try:
+            target = probes.resolve(project_dir, remote)
+        except Exception as exc:  # TargetResolutionError and config failures
+            target, error_code = None, getattr(exc, "code", None) or "invalid_project"
     if target is not None:
         result["remote_selection"] = (getattr(target, "sources", None) or {}).get(
             "remote_selection")
@@ -191,7 +196,7 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None) -
     identity = (getattr(target, "sources", None) or {}).get("identity") or target.project_root
     # Read before probing: an invalidation during the probes rotates it.
     token = generation(probes.home, remote)
-    evaluated = _evaluate(registration, remote, probes, _workspace(registration, target, probes))
+    evaluated = _evaluate(registration, remote, probes, _instance_check(registration, target, probes))
     revision = evaluated.pop("_revision", None)
     proposed = evaluated.pop("_proposed", None)
     handoff_record = _read(readiness_dir(probes.home, remote) / "handoff.json")
@@ -203,22 +208,21 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None) -
     result["installed_runtime_revision"] = revision
     if proposed is not None:
         result["proposed_range"] = proposed
-    _write_private(readiness_dir(probes.home, remote) / f"{project_key(identity)}.json",
-                   {**result, "project": identity, "generation": token})
-    return result
+    proof = {**result, "project": identity, "generation": token}
+    _write_private(readiness_dir(probes.home, remote) / f"{project_key(identity)}.json", proof)
+    return proof if full else result
 
 
-def _workspace(registration: dict, target, probes: Probes) -> str | None:
-    if probes.workspace_path is None or not getattr(target, "workspace_label", None):
+def _instance_check(registration: dict, target, probes: Probes) -> Callable | None:
+    """A deferred instance lookup; it runs inside the ownership probe, under
+    the deadline."""
+    if probes.instance_present is None or not getattr(target, "workspace_label", None):
         return None
-    try:
-        return probes.workspace_path(registration, target)
-    except Exception:
-        return None
+    return lambda: probes.instance_present(registration, target)
 
 
 def _evaluate(registration: dict, name: str, probes: Probes,
-              workspace: str | None = None) -> dict:
+              instance: Callable | None = None) -> dict:
     """Reachability, compatibility, capacity and repair rows under the deadline."""
     found: dict = {}
     lock = threading.Lock()
@@ -246,7 +250,7 @@ def _evaluate(registration: dict, name: str, probes: Probes,
         "capacity": capacity,
         "ownership_repair": lambda: {"ownership_repair": rows.ownership_repair(
             probes.ssh_run, registration, name, probes.sb_path(registration),
-            workspace=workspace)},
+            instance=instance)},
     }
 
     def worker(task):
@@ -286,27 +290,46 @@ def _proposal(registration: dict, probes: Probes) -> dict | None:
             "assign_command": proposed["assign_command"]}
 
 
-def record_ensure(remote: str, identity: str, home: Path | None = None) -> None:
-    """``ensure --remote`` succeeded; ``exec --remote`` completes the handoff."""
+def _bound(proof) -> tuple[str, str | None] | None:
+    """The revision and generation an operation's own gate proved, or None.
+    A ``None`` generation means the remote was never invalidated."""
+    if not isinstance(proof, dict):
+        return None
+    revision, token = proof.get("installed_runtime_revision"), proof.get("generation")
+    if not isinstance(revision, str) or not (token is None or isinstance(token, str)):
+        return None
+    return revision, token
+
+
+def record_ensure(remote: str, identity: str, home: Path | None = None, *,
+                  proof: dict | None = None) -> None:
+    """``ensure --remote`` succeeded; ``exec --remote`` completes the handoff.
+    ``proof`` is the one this ensure's gate passed; it binds the record to a
+    revision and generation."""
     home = home or _home()
-    _write_private(readiness_dir(home, remote) / "ensure.json",
-                   {"project": identity, "recorded_at": int(time.time())})
+    bound = _bound(proof)
+    _write_private(readiness_dir(home, remote) / "ensure.json", {
+        "project": identity, "recorded_at": int(time.time()),
+        "installed_runtime_revision": bound[0] if bound else None,
+        "generation": bound[1] if bound else None})
 
 
-def record_exec(remote: str, identity: str, home: Path | None = None) -> bool:
-    """``exec --remote`` succeeded after ``ensure``: record the round trip at the
-    installed revision of the current proof. True when a handoff was recorded."""
+def record_exec(remote: str, identity: str, home: Path | None = None, *,
+                proof: dict | None = None) -> bool:
+    """``exec --remote`` succeeded after ``ensure``: record the round trip.
+    Both operations' gates must have proved the same revision and generation,
+    and no invalidation may have happened since. True when recorded."""
     home = home or _home()
     directory = readiness_dir(home, remote)
     ensured = _read(directory / "ensure.json")
-    proof = _read(directory / f"{project_key(identity)}.json")
-    if not ensured or ensured.get("project") != identity or not proof:
+    bound = _bound(proof)
+    if not ensured or ensured.get("project") != identity or bound is None:
         return False
-    revision = proof.get("installed_runtime_revision")
-    if not isinstance(revision, str):
+    if (ensured.get("installed_runtime_revision"), ensured.get("generation")) != bound \
+            or generation(home, remote) != bound[1]:
         return False
     _write_private(directory / "handoff.json", {
-        "installed_runtime_revision": revision, "proven_at": int(time.time()),
+        "installed_runtime_revision": bound[0], "proven_at": int(time.time()),
         "project": identity})
     return True
 

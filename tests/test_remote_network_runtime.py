@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 from sandbox.remote_network import runtime as range_runtime  # noqa: E402
 from sandbox.remote_network import store as range_store  # noqa: E402
 from sandbox.remote_network.ranges import RangeError  # noqa: E402
+from tests.subprocess_support import synthetic_environment  # noqa: E402
 from tests.test_remote_network_program import HOLDER, NEW, _LocalRemote, _write_tool  # noqa: E402
 
 
@@ -555,7 +556,8 @@ class ComposeHookTests(unittest.TestCase):
             lock = home / "o" / "x.lock"
             with ranges.lifecycle("x") as descriptor:
                 child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
-                                         stdin=subprocess.PIPE, pass_fds=(descriptor,))
+                                         stdin=subprocess.PIPE, pass_fds=(descriptor,),
+                                         env=synthetic_environment())
             try:
                 # The parent has closed its copy; the detached child still holds it.
                 with range_runtime._try_exclusive(lock) as idle:
@@ -597,37 +599,54 @@ class ComposeHookTests(unittest.TestCase):
         self.assertEqual(launched.call_count, 1)
         self.assertEqual(held, [True, False])
 
-    def test_detached_supervisor_abandoned_before_handle_releases_range_lock(self):
+    def _abandoned_supervisor(self, root):
+        """Run the real job supervisor whose launcher never publishes the handle."""
         import subprocess
         from types import SimpleNamespace
         from unittest.mock import patch
         from sandbox.commands import jobs
+        with patch.object(jobs, "wp_dir", return_value=root), \
+                patch.object(jobs, "_is_herd_instance", return_value=False), \
+                patch.object(jobs, "project_name", return_value="sandbox-unit"), \
+                patch.object(jobs, "compose_file", return_value=root / "unit.yml"), \
+                patch.object(jobs, "_BOOTSTRAP_TICKS", 5), \
+                patch("sandbox.remote_network.runtime.default_runtime", return_value=None), \
+                patch.object(jobs.subprocess, "Popen",
+                             return_value=SimpleNamespace(pid=1)) as launched:
+            jobs.launch_job("unit", ["option", "get", "siteurl"])
+        script = launched.call_args.args[0][2]
+        ranges = range_runtime.RangeRuntime(root, store=None, overrides=root / "o",
+                                            compose_config=dict)
+        status, handle, marker = root / "job.status", root / "job.pid", root / "compose-ran"
+        # The launcher "dies" here: it never publishes the handle.
+        with ranges.lifecycle("unit") as descriptor:
+            supervisor = subprocess.Popen(
+                ["sh", "-c", script, "c", "c", str(status), str(handle),
+                 str(root / "job.tmp"), "touch", str(marker)],
+                pass_fds=(descriptor,), env=synthetic_environment())
+        return supervisor.wait(timeout=30), status, handle, marker
+
+    def test_detached_supervisor_abandoned_before_handle_releases_range_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch.object(jobs, "wp_dir", return_value=root), \
-                    patch.object(jobs, "_is_herd_instance", return_value=False), \
-                    patch.object(jobs, "project_name", return_value="sandbox-unit"), \
-                    patch.object(jobs, "compose_file", return_value=root / "unit.yml"), \
-                    patch.object(jobs, "_BOOTSTRAP_TICKS", 5), \
-                    patch("sandbox.remote_network.runtime.default_runtime", return_value=None), \
-                    patch.object(jobs.subprocess, "Popen",
-                                 return_value=SimpleNamespace(pid=1)) as launched:
-                jobs.launch_job("unit", ["option", "get", "siteurl"])
-            script = launched.call_args.args[0][2]
-            ranges = range_runtime.RangeRuntime(root, store=None, overrides=root / "o",
-                                                compose_config=dict)
-            status, handle = root / "job.status", root / "job.pid"
-            marker = root / "compose-ran"
-            # The launcher "dies" here: it never publishes the handle.
-            with ranges.lifecycle("unit") as descriptor:
-                supervisor = subprocess.Popen(
-                    ["sh", "-c", script, "c", "c", str(status), str(handle),
-                     str(root / "job.tmp"), "touch", str(marker)], pass_fds=(descriptor,))
-            self.assertEqual(supervisor.wait(timeout=30), 125)
+            code, status, _, marker = self._abandoned_supervisor(root)
+            self.assertEqual(code, 125)
             self.assertEqual(status.read_text(), "125")
             self.assertFalse(marker.exists())
             with range_runtime._try_exclusive(root / "o" / "unit.lock") as idle:
                 self.assertTrue(idle)
+
+    def test_detached_supervisor_late_handle_keeps_bootstrap_failure(self):
+        from sandbox.commands import jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, status, handle, marker = self._abandoned_supervisor(root)
+            # A slow launcher publishes its handle after the supervisor gave up.
+            handle.write_text("launch:1")
+            self.assertEqual(jobs._reconcile_job("unit", "x", (root / "job.log", status, handle)),
+                             "completed")
+            self.assertEqual(status.read_text(), "125")
+            self.assertFalse(marker.exists())
 
     def test_introspect_runs_under_the_lock(self):
         import subprocess

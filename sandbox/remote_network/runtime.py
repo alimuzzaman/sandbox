@@ -192,10 +192,8 @@ def _try_exclusive(path: Path):
     if not _INSTANCE.fullmatch(path.stem):
         yield False
         return
-    if not path.is_file():
-        yield True
-        return
-    descriptor = os.open(path, os.O_RDWR)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -207,18 +205,21 @@ def _try_exclusive(path: Path):
         os.close(descriptor)
 
 
-def release_removed_instances(live, home: Path | None = None, *,
+def release_removed_instances(live: Callable[[], set], home: Path | None = None, *,
                               remove_network: Callable[[str], bool] = _remove_network,
                               grace_seconds: int = SWEEP_GRACE_SECONDS) -> dict:
     """Free the allocations of instances that no longer exist (research R5).
 
     Reap removes deployment roots and their containers directly, without a
     ``compose down``, so the instance hook never runs there and the stack
-    networks are left behind. Every instance owner not in ``live`` (the
-    instance names still registered on this host) has its networks removed
-    first and is released only once all are gone: a surviving network still
-    occupies its subnet. A retained owner is still unregistered on the next
-    reap, so the sweep retries it; owners are paged, never truncated.
+    networks are left behind. ``live()`` returns the instance names still
+    registered on this host and raises when that evidence is unavailable.
+    Every other instance owner has its networks removed first and is released
+    only once all are gone: a surviving network still occupies its subnet.
+    Liveness and the owner's networks are read again under its exclusive
+    lifecycle lock, so an ``up`` that finished meanwhile is never released. A
+    retained owner is still unregistered on the next reap, so the sweep retries
+    it; owners are paged, never truncated.
     """
     if home is None:
         from sandbox.core._paths import _sandbox_base
@@ -231,15 +232,22 @@ def release_removed_instances(live, home: Path | None = None, *,
     after = None
     while True:
         page = store.instance_owners(after)
+        registered = live()
+        previous = after
         for owner in page["owners"]:
+            cursor, previous = previous, owner["owner_id"]
             name = owner["owner_id"].removeprefix("instance:")
             # A just-allocated owner may precede its registry record.
-            if name in live or owner["age_seconds"] < grace_seconds:
+            if name in registered or owner["age_seconds"] < grace_seconds:
                 continue
             with _try_exclusive(overrides / f"{name}.lock") as idle:
                 if not idle:
                     continue  # a Compose call for it is in flight
-                if all([remove_network(network) for network in owner["networks"]]):
+                current = _current_owner(store, cursor, owner["owner_id"])
+                if current is None or name in live() \
+                        or current["age_seconds"] < grace_seconds:
+                    continue
+                if all([remove_network(network) for network in current["networks"]]):
                     result["released"] += store.release_owner(owner_id=owner["owner_id"])
                     (overrides / f"{name}.yml").unlink(missing_ok=True)
                 else:
@@ -247,6 +255,12 @@ def release_removed_instances(live, home: Path | None = None, *,
         if not page["truncated"] or not page["owners"]:
             return result
         after = page["owners"][-1]["owner_id"]
+
+
+def _current_owner(store: RangeStore, cursor: str | None, owner_id: str) -> dict | None:
+    """The owner's allocations as they are now (first row after ``cursor``)."""
+    rows = store.instance_owners(cursor)["owners"]
+    return rows[0] if rows and rows[0]["owner_id"] == owner_id else None
 
 
 def default_runtime(*, compose_config: Callable[[str], dict],

@@ -268,8 +268,11 @@ allocations live on the remote under `$SANDBOX_HOME/runtime/network-ranges/`
   retention expiry) sweeps every instance no longer registered on the host:
   it removes that instance's networks, then frees its allocations. An
   instance allocated in the last ten minutes or with a Compose call in flight
-  is skipped. One whose network is still in use is kept, the reap reports
-  `partial` (`range_networks_in_use`), and the next reap retries it. That pair is
+  is skipped, and liveness and the instance's networks are read again under
+  its lock before anything is removed. One whose network is still in use is
+  kept, the reap reports `partial` (`range_networks_in_use`), and the next
+  reap retries it. Without a readable registry the sweep releases nothing
+  (`range_release_unavailable`). That pair is
   the remedy the exhaustion refusal prints, in `release_commands` and in the
   public admission refusal's `allocation_table`. A stack killed any other
   way keeps its subnets, attributed and counted, until one of those runs. A

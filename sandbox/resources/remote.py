@@ -2640,12 +2640,17 @@ def reconcile_after_removal(removed_paths, workspace_ids):
         from sandbox.project_registry import JsonRegistryRepository
 
         repository = JsonRegistryRepository(RUNTIME / "registry.json")
-        for root, record in list(repository.read_only_all().items()):
-            key = root if isinstance(root, str) else getattr(record, "root", "")
-            if not isinstance(key, str) or not key:
+        for key, record in list(repository.read_only_all().items()):
+            # Keys are `<root>::<label>`; match and remove by the record's own
+            # root and label, so labelled instances are reconciled too.
+            root = record.get("root") if isinstance(record, dict) else None
+            if not isinstance(root, str) or not root:
+                root = key.rsplit("::", 1)[0] if isinstance(key, str) else ""
+            if not root:
                 continue
-            if Path(key).name in names and not Path(key).exists():
-                if repository.remove(key):
+            label = record.get("label") if isinstance(record, dict) else None
+            if Path(root).name in names and not Path(root).exists():
+                if repository.remove(root, label if isinstance(label, str) and label else None):
                     result["registry_removed"] += 1
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
         result["status"] = "partial"
@@ -2686,8 +2691,15 @@ def _sweep_ranges(result):
         from sandbox.project_registry import JsonRegistryRepository
         from sandbox.remote_network.runtime import release_removed_instances
 
-        live = {record.get("instance") for record in
-                JsonRegistryRepository(RUNTIME / "registry.json").read_only_all().values()}
+        registry = RUNTIME / "registry.json"
+
+        def live():
+            # A missing registry is no evidence that instances are gone.
+            if not registry.is_file():
+                raise FileNotFoundError("registry.json")
+            return {record.get("instance") for record in
+                    JsonRegistryRepository(registry).read_only_all().values()}
+
         swept = release_removed_instances(live, HOME)
     except Exception:
         result["status"] = "partial"

@@ -153,7 +153,8 @@ class RangeRuntimeTests(unittest.TestCase):
         kw.setdefault("remove_network", lambda _n: True)
         kw.setdefault("grace_seconds", 0)
         with patch.object(range_runtime, "_LocalRunner", return_value=self.runner):
-            return range_runtime.release_removed_instances(live, self.home, **kw)
+            return range_runtime.release_removed_instances(
+                live if callable(live) else (lambda: set(live)), self.home, **kw)
 
     def _home_runtime(self):
         return range_runtime.RangeRuntime(
@@ -197,15 +198,101 @@ class RangeRuntimeTests(unittest.TestCase):
             def read_only_all(self):
                 return {"/d/site-b": {"instance": "b"}}
         seen = []
+        sweep_ranges = namespace["_sweep_ranges"]
+        # No registry file: no liveness evidence, so nothing is released.
+        with patch.object(range_runtime, "release_removed_instances",
+                          side_effect=lambda live, home: live()):
+            self.assertEqual(sweep_ranges({"status": "complete"}),
+                             {"status": "partial", "reason": "range_release_unavailable"})
+        (self.home / "runtime" / "registry.json").write_text("{}")
         with patch("sandbox.project_registry.JsonRegistryRepository", Registry), \
                 patch.object(range_runtime, "release_removed_instances",
-                             side_effect=lambda live, home: seen.append(live)
+                             side_effect=lambda live, home: seen.append(live())
                              or {"released": 1, "retained": ["a"]}):
             result = namespace["_sweep_ranges"]({"status": "complete"})
         self.assertEqual(seen, [{"b"}])
         self.assertEqual(result, {"status": "partial", "reason": "range_networks_in_use",
                                   "range_allocations_released": 1,
                                   "range_allocations_retained": 1})
+
+    def test_reap_rechecks_owner_and_registry_after_acquiring_lock(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
+        runtime = self._home_runtime()
+        self.configs["a"] = config("sandbox-a", "default")
+        runtime.prepare("a")
+        calls = []
+
+        def live():
+            calls.append(1)
+            # Unregistered when the page is read, registered by the time the
+            # sweep holds a's lock (an ensure finished in between).
+            return set() if len(calls) == 1 else {"a"}
+        self.assertEqual(self._sweep(live), {"released": 0, "retained": []})
+        self.assertEqual([r["owner_id"] for r in self.store.stats()["table"]], ["instance:a"])
+
+    def test_reap_removes_the_owners_current_networks(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
+        runtime = self._home_runtime()
+        self.configs["a"] = config("sandbox-a", "default")
+        runtime.prepare("a")
+        removed = []
+        real = self.store.instance_owners
+
+        def grow(after=None):
+            page = real(after)
+            if not removed and not getattr(grow, "done", False):
+                grow.done = True  # a second network appears after the page read
+                self.configs["a"] = config("sandbox-a", "default", "backend")
+                runtime.prepare("a")
+            return page
+        from unittest.mock import patch
+        with patch.object(range_store.RangeStore, "instance_owners",
+                          side_effect=lambda after=None: grow(after)):
+            result = self._sweep(set(), remove_network=lambda n: removed.append(n) or True)
+        self.assertEqual(result, {"released": 2, "retained": []})
+        self.assertEqual(removed, ["sandbox-a_backend", "sandbox-a_default"])
+
+    def test_reap_refuses_without_liveness_evidence(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
+        self.configs["a"] = config("sandbox-a", "default")
+        self._home_runtime().prepare("a")
+
+        def missing():
+            raise FileNotFoundError("registry.json")
+        with self.assertRaises(FileNotFoundError):
+            self._sweep(missing)
+        self.assertEqual(len(self.store.stats()["table"]), 1)
+
+    def test_reconcile_removes_labelled_records_of_removed_roots(self):
+        import ast
+        from sandbox.project_registry import JsonRegistryRepository
+        from sandbox.resources.remote import _REMOTE_PROGRAM
+        tree = ast.parse(_REMOTE_PROGRAM.replace("__REQUEST__", "'{}'"))
+        wanted = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name in {"reconcile_after_removal", "_sweep_ranges"}]
+        runtime_dir = self.home / "runtime"
+        runtime_dir.mkdir(exist_ok=True)
+        namespace = {"RUNTIME": runtime_dir, "HOME": self.home, "Path": Path,
+                     "LEASE_NAME": __import__("re").compile(r"[A-Za-z0-9_.-]+"),
+                     "LEASE_DIR": runtime_dir / "leases", "SB": "sb",
+                     "run": lambda argv, timeout: (0, "", "")}
+        exec(compile(ast.Module(wanted, []), "remote", "exec"), namespace)
+        registry = JsonRegistryRepository(runtime_dir / "registry.json")
+        gone, kept = self.home / "deploy" / "site", self.home / "deploy" / "other"
+        kept.mkdir(parents=True)
+        registry.put(str(gone), "default", instance="site")
+        registry.put(str(gone), "qa", instance="site-qa")
+        registry.put(str(kept), "default", instance="other")
+        result = namespace["reconcile_after_removal"]({str(gone)}, {})
+        self.assertEqual(result["registry_removed"], 2)
+        self.assertEqual({r["instance"] for r in registry.read_only_all().values()}, {"other"})
+
+    def test_instance_owner_cursor_is_validated(self):
+        self.store.assign("10.200.0.0/24", 26, confirm=True, holder=HOLDER)
+        for cursor in ("$(id)", "../x", ""):
+            with self.subTest(cursor=cursor), self.assertRaises(RangeError) as caught:
+                self.store.instance_owners(cursor)
+            self.assertEqual(caught.exception.code, "range_request_invalid")
 
     def test_reap_removes_networks_first_and_retries_survivors(self):
         self.store.assign("10.200.0.0/24", 25, confirm=True, holder=HOLDER)
@@ -273,7 +360,7 @@ class RangeRuntimeTests(unittest.TestCase):
 
     def test_reap_sweep_is_inert_without_ranges(self):
         self.runner.fail = True
-        self.assertEqual(range_runtime.release_removed_instances(set(), self.home),
+        self.assertEqual(range_runtime.release_removed_instances(set, self.home),
                          {"released": 0, "retained": []})
 
     def test_instance_names_that_cannot_be_owner_ids_are_refused(self):

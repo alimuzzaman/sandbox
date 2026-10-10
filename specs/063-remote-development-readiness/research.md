@@ -126,7 +126,10 @@
   instance owners missing from the registry (paged, never truncated), removes
   their networks and releases each only once they are gone. A kept owner is
   reported `partial` and retried by the next reap; owners younger than ten
-  minutes or with a held lifecycle lock are skipped. The operator remedy is `workspace release` followed by
+  minutes or with a held lifecycle lock are skipped, liveness and the owner's
+  networks are re-read under its lock, and a missing registry stops the
+  sweep. Reconciliation removes registry records by their own root and
+  label, so labelled instances of a reaped root stop counting as live. The operator remedy is `workspace release` followed by
   `workspace reap --confirm`.
 - **Rationale**: The workspace lifecycle already owns retention; no new timer
   is needed.

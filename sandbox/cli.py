@@ -117,6 +117,30 @@ def _global_label_before_subcommand(argv: list[str]) -> str | None:
     return None
 
 
+_LOCAL_NOTICE_COMMANDS = frozenset({"test", "e2e", "ci", "exec", "job-start"})
+
+
+def _local_selection_notice(args) -> None:
+    """An explicit ``--local`` submission while the project's declared remote
+    is not ready says so on stderr (spec 063 FR-022). Skipped inside a durable
+    job: a remote runtime runs its co-located ``--local`` children there, and
+    the controller's declaration means nothing on that host."""
+    if args.cmd not in _LOCAL_NOTICE_COMMANDS or getattr(args, "local", False) is not True:
+        return
+    if os.environ.get("SANDBOX_DURABLE_JOB_ID"):
+        return
+    project_dir = getattr(args, "project_dir", None)
+    if not project_dir:
+        return
+    from sandbox.readiness import notice
+    try:
+        found = notice.local_notice(project_dir)
+    except Exception:
+        return
+    if found:
+        print(notice.human_notice(found), file=sys.stderr)
+
+
 def _dispatch_remote_admission_error(exc: RemoteJobAdmissionError, args) -> None:
     """Render the transport's bounded admission envelope at the CLI edge."""
     payload = exc.to_payload()
@@ -1895,6 +1919,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     handler = (COMMANDS["setup"] if (args.cmd == "apply"
                                      and not getattr(args, "project_dir", None))
                else COMMANDS[args.cmd])
+    _local_selection_notice(args)
     try:
         handler(cfg, args)
     except RemoteJobAdmissionError as exc:

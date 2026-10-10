@@ -22,16 +22,23 @@ class RemoteNotReadyError(RemoteJobAdmissionError):
     _ASPECTS = frozenset({"registration", "reachability", "runtime_compatibility",
                           "capacity", "ownership_repair", "handoff"})
 
-    def __init__(self, row: dict, *, remote: str | None = None) -> None:
+    def __init__(self, row: dict, *, remote: str | None = None,
+                 selection: str | None = None) -> None:
         aspect = row.get("aspect") if isinstance(row, dict) else None
         aspect = aspect if aspect in self._ASPECTS else "registration"
         reason = row.get("reason") if isinstance(row.get("reason"), str) else "not_ready"
         remedy = row.get("remedy") if isinstance(row.get("remedy"), str) else None
         self.code = f"remote_not_ready_{aspect}"
         self.remote = remote
+        # How the refused remote was chosen (FR-021): explicit, profile,
+        # single-configured, or None when no remote could be chosen.
+        self.remote_selection = selection if isinstance(selection, str) else None
         detail = {"aspect": aspect, "reason": reason, "bytes_transferred": 0}
         if remedy is not None:
             detail["remedy"] = remedy
+        if aspect == "registration":
+            from sandbox.readiness.rows import selection_fields
+            detail.update(selection_fields(row))
         self._decision = {}
         # Skip the admission constructor: there is no capacity decision here.
         RemoteJobTransportError.__init__(
@@ -48,6 +55,7 @@ class RemoteNotReadyError(RemoteJobAdmissionError):
         payload["side_effects"] = {"staging_started": False, "bytes_transferred": 0}
         if "remedy" in self.detail:
             payload["remedy"] = self.detail["remedy"]
+        payload["remote_selection"] = self.remote_selection
         return payload
 
 
@@ -65,7 +73,8 @@ def human_refusal(payload: dict) -> str | None:
             f"Remedy: {remedy}")
 
 
-_REGISTRATION_CODES = frozenset({"unknown_remote", "remote_not_provisioned"})
+_REGISTRATION_CODES = frozenset({"unknown_remote", "remote_not_provisioned",
+                                 "ambiguous_remote"})
 
 
 def registration_refusal(exc) -> "RemoteNotReadyError | None":
@@ -74,10 +83,14 @@ def registration_refusal(exc) -> "RemoteNotReadyError | None":
     code = getattr(exc, "code", None)
     if code not in _REGISTRATION_CODES:
         return None
-    from sandbox.readiness.rows import registration
+    from sandbox.readiness.rows import SELECTION_SOURCES, registration
     name = getattr(exc, "remote_name", None)
     name = name if isinstance(name, str) else None
-    return RemoteNotReadyError(registration(code, name), remote=name)
+    data = getattr(exc, "data", None)
+    data = data if isinstance(data, dict) else None
+    selection = SELECTION_SOURCES.get((data or {}).get("name_source"))
+    return RemoteNotReadyError(registration(code, name, selection=data), remote=name,
+                               selection=selection)
 
 
 def raise_registration_refusal(exc) -> None:

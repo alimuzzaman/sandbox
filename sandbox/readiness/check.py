@@ -190,12 +190,21 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None,
     result = {"remote": remote, "remote_selection": "explicit" if remote else None,
               "rows": [], "installed_runtime_revision": None,
               "taken_at": taken_at, "reusable_until": taken_at + REUSE_SECONDS}
-    error_code = None
+    error_code = selection = None
     if target is None:
         try:
             target = probes.resolve(project_dir, remote)
         except Exception as exc:  # TargetResolutionError and config failures
             target, error_code = None, getattr(exc, "code", None) or "invalid_project"
+            selection = getattr(exc, "data", None)
+            selection = selection if isinstance(selection, dict) else None
+            refused = getattr(exc, "remote_name", None)
+            if remote is None and isinstance(refused, str):
+                # The declared remote that failed registration (FR-020).
+                remote = result["remote"] = refused
+            if remote is not None and selection is not None:
+                result["remote_selection"] = rows.SELECTION_SOURCES.get(
+                    selection.get("name_source"), result["remote_selection"])
     if target is not None:
         result["remote_selection"] = (getattr(target, "sources", None) or {}).get(
             "remote_selection")
@@ -207,7 +216,7 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None,
             return result
         remote = result["remote"] = target.remote_name
     if error_code is not None:
-        result["rows"] = [rows.registration(error_code, remote)] + [
+        result["rows"] = [rows.registration(error_code, remote, selection=selection)] + [
             rows.not_applicable(aspect, "no_registration") for aspect in rows.ASPECTS[1:]]
         return result
 

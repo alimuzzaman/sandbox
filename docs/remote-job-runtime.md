@@ -160,10 +160,31 @@ A capacity verdict is published before its optional range proposal, so a
 slow proposal never hides a completed `not_ready`. Ownership repair is
 `not_applicable` when the remote's registry holds no instance for the
 project's workspace (looked up by project, not by a predicted name). An
-unknown or unprovisioned remote is refused as `remote_not_ready_registration`
-on every submission path, including when target resolution fails before the
-gate runs and MCP `run_tests` automatic selection (other resolution failures
-there keep the local PHPUnit path). A bare `sb exec` with no local instance
+unknown, unprovisioned or ambiguous remote is refused as
+`remote_not_ready_registration` on every submission path, including when
+target resolution fails before the gate runs and MCP `run_tests` automatic
+selection.
+
+Selection is told, never guessed (spec 063 US3). The refusal's `detail`
+names what to fix: for `unknown_remote` the refused `name`, its
+`name_source` (`caller` for `--remote`, `declaration` for `runtime.remote`
+in `sandbox.config.json`), the `registered` names and a `hint`; for
+`ambiguous_remote` the eligible `candidates`; for `remote_not_provisioned`
+the `./sb remote provision NAME` remedy. Names are bounded to 50 and must be
+name-shaped. The envelope and the readiness result carry `remote_selection`
+(`explicit`, `profile`, `single-configured`, or null when no remote could be
+chosen). Nothing falls back to a local run: MCP `run_tests` with no selector
+refuses every resolution failure except a project Sandbox cannot load, which
+keeps the historical local PHPUnit path. A local run needs `--local` (MCP
+`local=True`); when the project declares a remote whose registration fails
+or whose stored proof has a `not_ready` row, the CLI prints `remote_selection:
+local; the declared remote 'NAME' is not ready: ASPECT (REASON)` on stderr,
+and MCP `run_tests`/`job_start` add `{remote_selection: "local",
+declared_remote, failing_aspect, reason}` to the result. The notice reads the
+stored proof and never probes; it is skipped inside durable jobs, where a
+remote runtime runs its own co-located `--local` children. The CLI's
+successful `test`/`job-start` JSON does not gain `remote_selection`: those
+producers' keys are part of control protocol 3 (`sandbox/remote_runtime/shapes.py`). A bare `sb exec` with no local instance
 stops at instance routing before it resolves a target; pass `--remote`. The gate reuses the caller's resolved target, so an
 explicit `--config-file` survives it. Handoff is recorded only when the ensure
 and the exec passed gates at the same revision and generation. `ensure

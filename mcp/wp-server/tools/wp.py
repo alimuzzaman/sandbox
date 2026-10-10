@@ -217,8 +217,14 @@ def run_tests(project_dir: str, phpunit_args: str = "",
       and job_output/job_follow for retained progress instead of streaming its
       child process through MCP.
 
+    local: run on the local instance. Without a selector the project's remote
+      is used; a remote that cannot be selected (unknown, unprovisioned,
+      ambiguous, without job.exec) refuses rather than running locally.
+
     Returns {ok, passed, summary, output, mode}. Remote acceptance additionally
     returns job_id and lifecycle; `passed` is null until its durable job ends.
+    A local=True result adds remote_selection, plus declared_remote,
+    failing_aspect and reason when the declared remote is not ready.
     """
     if mode is not None and mode not in {"auto", "unit", "integration"}:
         return {"ok": False, "passed": False, "summary": None,
@@ -242,13 +248,19 @@ def run_tests(project_dir: str, phpunit_args: str = "",
             if auto_target.kind == "remote":
                 selected_remote, workspace = auto_target.remote_name, auto_target.workspace_label
         except Exception as exc:
-            # A declared remote that is unknown or unprovisioned refuses here;
-            # any other resolution failure keeps the historical local path.
+            # A remote that cannot be selected (unknown, unprovisioned,
+            # ambiguous, or lacking the capability) refuses here; a local run
+            # needs local=True (spec 063 FR-022). Only a project Sandbox
+            # cannot load keeps the historical local PHPUnit path.
             from sandbox.readiness.errors import registration_refusal
             refusal = registration_refusal(exc)
             if refusal is not None:
                 return {**refusal.to_payload(), "passed": False, "summary": None,
                         "output": "", "mode": resolved_mode}
+            code = getattr(exc, "code", None)
+            if isinstance(code, str) and code != "invalid_project":
+                return {"ok": False, "passed": False, "summary": None, "output": "",
+                        "mode": resolved_mode, "code": code, "error": str(exc)}
     if not local and (selected_remote or workspace is not None):
         # Keep remote tests inside the shared detached runtime. The command
         # executes from the deployed project root, so `.` names the exact tree
@@ -328,7 +340,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     if err:
         return err
     sb = SANDBOX_ROOT / "sb"
-    cmd = [str(sb), "test", "--project-dir", project_dir]
+    # This is the local path: say so, so the CLI never re-selects a remote.
+    cmd = [str(sb), "test", "--local", "--project-dir", project_dir]
     if config_file:
         cmd += ["--config-file", config_file]
     if label:
@@ -346,13 +359,19 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     import re as _re
     m = _re.search(r"(OK \(\d+ test.*?\)|FAILURES!.*|ERRORS!.*|Tests: \d.*)", out)
     resolved = _re.search(r"^\s*mode:\s+(auto|unit|integration)\s*$", out, _re.MULTILINE)
-    return {
+    result = {
         "ok": res.returncode == 0,
         "passed": res.returncode == 0,
         "summary": m.group(1) if m else None,
         "output": out[-4000:],
         "mode": resolved_mode,
     }
+    if local:
+        # An explicit local run states the declared remote it bypassed when
+        # that remote is not ready (spec 063 FR-022).
+        from sandbox.readiness.notice import local_notice
+        result.update(local_notice(project_dir) or {"remote_selection": "local"})
+    return result
 
 
 def wp_cli_async(command: str, *, project_dir: str, label: str | None = None,

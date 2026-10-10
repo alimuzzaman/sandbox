@@ -39,7 +39,8 @@ def require_ready(project_dir: str, remote: str, submission=None, *,
         proof = check.run(project_dir, remote, probes=probes, target=resolved, full=True)
     for row in proof.get("rows") or []:
         if isinstance(row, dict) and row.get("state") == "not_ready":
-            raise RemoteNotReadyError(row, remote=proof.get("remote") or remote)
+            raise RemoteNotReadyError(row, remote=proof.get("remote") or remote,
+                                      selection=proof.get("remote_selection"))
     return proof
 
 

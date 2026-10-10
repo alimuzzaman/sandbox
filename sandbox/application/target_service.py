@@ -15,11 +15,20 @@ class TargetServiceProtocol(Protocol):
     def resolve(self, request): ...
 
 
+SELECTION_HINT = ("set runtime.remote in sandbox.config.json to a registered remote, "
+                  "or pass --remote NAME")
+
+
 class TargetResolutionError(ValueError):
-    def __init__(self, code: str, message: str, *, remote_name: str | None = None) -> None:
+    def __init__(self, code: str, message: str, *, remote_name: str | None = None,
+                 data: dict | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.remote_name = remote_name
+        # Selection refusals (spec 063 FR-020) carry what the operator needs
+        # to re-point the project: the refused name, where it came from, and
+        # the registered or eligible names. Never inferred into a target.
+        self.data = data
 
 
 class TargetService:
@@ -75,6 +84,8 @@ class TargetService:
                     "ambiguous_remote",
                     "multiple configured remotes are eligible ({}); pass --remote NAME "
                     "or set a project target explicitly".format(names),
+                    data={"candidates": [name for name, _entry in candidates],
+                          "remedy": "./sb remote list", "hint": SELECTION_HINT},
                 )
             if len(candidates) == 1:
                 remote_name, _entry = candidates[0]
@@ -85,17 +96,23 @@ class TargetService:
                 selection_source = "local"
         remote = None
         if kind == "remote":
+            name_source = "caller" if request.remote else "declaration"
             remote = self._remote_lookup(remote_name)
             if not isinstance(remote, dict):
                 raise TargetResolutionError(
                     "unknown_remote",
                     f"remote {remote_name!r} is not registered; run `./sb remote list` "
                     "or select another explicit target", remote_name=remote_name,
+                    data={"name": remote_name, "name_source": name_source,
+                          "registered": self._registered_names(),
+                          "remedy": "./sb remote list", "hint": SELECTION_HINT},
                 )
             if not remote.get("provisioned"):
                 raise TargetResolutionError(
                     "remote_not_provisioned", f"remote {remote_name!r} is not provisioned",
                     remote_name=remote_name,
+                    data={"name": remote_name, "name_source": name_source,
+                          "remedy": f"./sb remote provision {remote_name}"},
                 )
             if request.required_capability is not None:
                 capabilities = remote.get("capabilities")
@@ -139,6 +156,25 @@ class TargetService:
             return None
         return runtime.get("remote")
 
+    def _catalog_items(self) -> list[tuple]:
+        if self._remote_list is None:
+            return []
+        try:
+            value = self._remote_list()
+        except (TypeError, KeyError, ValueError, AttributeError, OSError):
+            return []
+        if isinstance(value, dict):
+            return list(value.items())
+        if isinstance(value, (list, tuple, set)):
+            return [((entry.get("name") if isinstance(entry, dict) else None), entry)
+                    for entry in value]
+        return []
+
+    def _registered_names(self) -> list[str]:
+        """Every registered remote name, provisioned or not, for refusals."""
+        return sorted({name for name, entry in self._catalog_items()
+                       if isinstance(name, str) and name.strip() and isinstance(entry, dict)})
+
     def _configured_remote_candidates(self) -> list[tuple[str, dict]]:
         """Return provisioned configured remotes from the explicit catalog API.
 
@@ -147,22 +183,8 @@ class TargetService:
         inferred target, while explicit ``--remote`` continues to use the
         authoritative name lookup below.
         """
-        if self._remote_list is None:
-            return []
-        try:
-            value = self._remote_list()
-        except (TypeError, KeyError, ValueError, AttributeError, OSError):
-            return []
-        items = []
-        if isinstance(value, dict):
-            items = list(value.items())
-        elif isinstance(value, (list, tuple, set)):
-            items = [
-                ((entry.get("name") if isinstance(entry, dict) else None), entry)
-                for entry in value
-            ]
         eligible: list[tuple[str, dict]] = []
-        for name, entry in items:
+        for name, entry in self._catalog_items():
             if not isinstance(name, str) or not name.strip() or not isinstance(entry, dict):
                 continue
             if entry.get("provisioned") is True:

@@ -40,9 +40,9 @@
 
 ## Phase 5: US3 Retired or ambiguous remote is told, not guessed (P2)
 
-- [ ] T022 [P] [US3] Tests: `unknown_remote` carries name, source, registered list and remedy on every path; `ambiguous_remote` lists candidates; `remote_not_provisioned`; no local fallback; `--local` after `not_ready` states the declared remote and failing row in `tests/test_remote_selection_refusals.py`
-- [ ] T023 [US3] Enrich refusals and report `remote_selection` in `sandbox/application/target_service.py`; confirm by test that no submission path falls back to local (research R9: none does today; any path found falling back stops for parity evidence and approval, principle VI); add explicit `--local` selector where missing
-- [ ] T023a [US2/US3] Docs: `docs/remote-job-runtime.md` (readiness, proof reuse, selection, no fallback), MCP tool docs
+- [x] T022 [P] [US3] Tests: `unknown_remote` carries name, source, registered list and remedy on every path; `ambiguous_remote` lists candidates; `remote_not_provisioned`; no local fallback; `--local` after `not_ready` states the declared remote and failing row in `tests/test_remote_selection_refusals.py`
+- [x] T023 [US3] Enrich refusals and report `remote_selection` in `sandbox/application/target_service.py`; confirm by test that no submission path falls back to local (research R9: none does today; any path found falling back stops for parity evidence and approval, principle VI); add explicit `--local` selector where missing
+- [x] T023a [US2/US3] Docs: `docs/remote-job-runtime.md` (readiness, proof reuse, selection, no fallback), MCP tool docs
 
 ## Phase 6: US4 Daemon-pool change stays a visible maintenance step (P3)
 

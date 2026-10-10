@@ -23,6 +23,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   MCP `run_e2e`/`ci_run` launches, and an unknown or unprovisioned remote
   (`remote_not_ready_registration`), also when MCP `run_tests` selects the
   project's remote automatically. `sb doctor` covers the project's declared remote, registered or not.
+- Remote selection refusals (spec 063 US3). `unknown_remote` names the
+  refused remote, whether the caller or `runtime.remote` chose it, and the
+  registered remotes; `ambiguous_remote` (now a `remote_not_ready_registration`
+  refusal) lists the candidates; refusals and readiness results report
+  `remote_selection`. MCP `run_tests` no longer falls back to a local run on an
+  ambiguous remote or a remote without `job.exec`; pass `local=True`. An
+  explicit local run while the declared remote is not ready states the remote,
+  the failing row and its reason (CLI stderr, MCP `run_tests`/`job_start`
+  result), and MCP `run_tests(local=True)` now passes `--local` to `sb test`.
 - Development ranges on a remote (spec 063, first slice). `sb remote
   network-range propose|assign|list` proposes, plans or (with `--confirm`)
   records an operator range checked against Docker networks, host routes,

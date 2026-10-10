@@ -226,6 +226,18 @@
   If an implementation step finds a path that does fall back, it stops and
   records parity evidence and approval under principle VI before changing it.
 - **Rationale**: Silent fallback mislabeled evidence (feedback cebec97a).
+- **Found during US3 (2026-10-10)**: MCP `run_tests` with no selector did
+  fall back: on `ambiguous_remote` and `unsupported_capability` it ran
+  PHPUnit locally. Parity evidence: the CLI `sb test` refuses both. The user
+  approved refusing them (2026-10-10); every other resolution failure now
+  refuses too, except `invalid_project`, which keeps the local path for
+  projects Sandbox cannot load. Its local path now passes `--local` to
+  `sb test`, so a `local=True` call can no longer be re-selected onto the
+  declared remote. `tests/test_remote_selection_refusals.py` pins it.
+- **Limit**: the CLI's successful `test`/`job-start` JSON does not report
+  `remote_selection` (FR-021): its producers are in the control protocol 3
+  fingerprint, and adding the key needs a protocol bump. Refusals, readiness
+  results and MCP results report it.
 
 ## R10. Range support marker and 061 status
 

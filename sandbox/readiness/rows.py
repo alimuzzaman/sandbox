@@ -35,15 +35,53 @@ def row(aspect: str, state: str, *, reason: str | None = None,
     return value
 
 
-def registration(error_code: str | None, name: str | None) -> dict:
-    """``error_code`` is the target resolution refusal, or None when resolved."""
+_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_MAX_NAMES = 50
+# How the refused name was chosen, as the result's ``remote_selection``.
+SELECTION_SOURCES = {"caller": "explicit", "declaration": "profile"}
+
+
+def _names(value) -> list[str] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    return [name for name in value
+            if isinstance(name, str) and _SAFE_NAME.fullmatch(name)][:_MAX_NAMES]
+
+
+def selection_fields(selection: dict | None) -> dict:
+    """The bounded, name-shaped selection facts of a registration refusal
+    (spec 063 FR-020): the refused name and its source, and the registered
+    or eligible names to choose from. Anything else is dropped."""
+    if not isinstance(selection, dict):
+        return {}
+    fields = {}
+    name = selection.get("name")
+    if isinstance(name, str) and _SAFE_NAME.fullmatch(name):
+        fields["name"] = name
+    if selection.get("name_source") in SELECTION_SOURCES:
+        fields["name_source"] = selection["name_source"]
+    for key in ("registered", "candidates"):
+        names = _names(selection.get(key))
+        if names is not None:
+            fields[key] = names
+    hint = selection.get("hint")
+    if isinstance(hint, str) and len(hint) <= 200:
+        fields["hint"] = hint
+    return fields
+
+
+def registration(error_code: str | None, name: str | None, *,
+                 selection: dict | None = None) -> dict:
+    """``error_code`` is the target resolution refusal, or None when resolved;
+    ``selection`` is the refusal's data (``TargetResolutionError.data``)."""
     if error_code is None:
         return row("registration", "ready")
     remedies = {
         "remote_not_provisioned": f"./sb remote provision {name}" if name else "./sb remote list",
     }
-    return row("registration", "not_ready", reason=error_code,
-               remedy=remedies.get(error_code, "./sb remote list"))
+    return {**row("registration", "not_ready", reason=error_code,
+                  remedy=remedies.get(error_code, "./sb remote list")),
+            **selection_fields(selection)}
 
 
 def reachability(ssh_run: Callable, remote: dict, name: str) -> dict:

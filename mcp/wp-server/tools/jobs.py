@@ -142,12 +142,19 @@ def job_start(command: list[str], project_dir: str, *, local: bool = False,
     ``instance_exec`` for an argv that must execute in a declared Compose
     service rather than the selected job host.
     """
-    return _submit_explicit_job(command, project_dir, local=local, remote=remote,
-                                workspace=workspace, timeout_seconds=timeout_seconds,
-                                output_profile=output_profile, execution_profile=execution_profile,
-                                stall_seconds=stall_seconds, cancel_grace_seconds=cancel_grace_seconds,
-                                cancel_on_stall=cancel_on_stall, cleanup_policy=cleanup_policy,
-                                request_id=request_id)
+    result = _submit_explicit_job(command, project_dir, local=local, remote=remote,
+                                  workspace=workspace, timeout_seconds=timeout_seconds,
+                                  output_profile=output_profile, execution_profile=execution_profile,
+                                  stall_seconds=stall_seconds, cancel_grace_seconds=cancel_grace_seconds,
+                                  cancel_on_stall=cancel_on_stall, cleanup_policy=cleanup_policy,
+                                  request_id=request_id)
+    if local and isinstance(result, dict) and result.get("ok") is not False:
+        # An explicit local run states the declared remote it bypassed when
+        # that remote is not ready (spec 063 FR-022).
+        from sandbox.readiness.notice import local_notice
+        result = {**result, **(local_notice(project_dir, service=_target_service)
+                               or {"remote_selection": "local"})}
+    return result
 
 
 def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,

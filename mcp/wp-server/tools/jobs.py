@@ -208,7 +208,12 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
                 accepted = {**accepted, "remote_selection": (
                     getattr(first, "sources", None) or {}).get("remote_selection")}
             return accepted
-        return _job_service.submit_matrix(submissions)
+        accepted = _job_service.submit_matrix(submissions)
+        if local and isinstance(accepted, dict) and accepted.get("ok") is not False:
+            from sandbox.readiness.notice import local_notice
+            accepted = {**accepted, **(local_notice(project_dir, service=_target_service)
+                                       or {"remote_selection": "local"})}
+        return accepted
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()
     except TargetResolutionError as exc:

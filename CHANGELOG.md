@@ -32,6 +32,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   explicit local run while the declared remote is not ready states the remote,
   the failing row and its reason (CLI stderr, MCP `run_tests`/`job_start`
   result), and MCP `run_tests(local=True)` now passes `--local` to `sb test`.
+  A local `sb e2e --async` or `sb ci run --async` coordinator is now launched
+  with `--local`; before, it could select the project's declared remote.
 - Development ranges on a remote (spec 063, first slice). `sb remote
   network-range propose|assign|list` proposes, plans or (with `--confirm`)
   records an operator range checked against Docker networks, host routes,

@@ -718,7 +718,8 @@ def _run_remote_ci(target, root: str, wf_path: Path, plan: dict, args, *, as_jso
               "uncollectable_artifacts": sorted({
                   item["path"] for submission in submissions
                   for item in submission.compatibility_differences
-                  if str(item.get("id", "")).startswith("sandbox.artifact-uncollectable:")})}
+                  if str(item.get("id", "")).startswith("sandbox.artifact-uncollectable:")}),
+              **_selection(root, args, target)}
     if as_json:
         print(json.dumps(report, sort_keys=True))
     else:
@@ -877,7 +878,9 @@ def cmd_ci(cfg, args) -> None:
         # Detached run (sandbox/core/_asyncjobs.py) — a ci run mints multiple
         # instances itself, so it doesn't fit commands/jobs.py's per-instance
         # wp_cli_async model. Re-invoke ourselves without --async.
-        argv = [str(ROOT / "sb"), "ci", "run", str(wf_path),
+        # The coordinator keeps this resolved local target: without --local
+        # it would select the project's declared remote again.
+        argv = [str(ROOT / "sb"), "ci", "run", str(wf_path), "--local",
                "--project-dir", root, "--json"]
         for j in (getattr(args, "jobs", None) or []):
             argv += ["--job", j]
@@ -899,7 +902,7 @@ def cmd_ci(cfg, args) -> None:
             argv += ["--runtime", "none"]
         argv += ["--timeout", str(getattr(args, "timeout", None) or 900)]
         jid = launch_background_job(argv, cwd=ROOT)
-        print(json.dumps({"ok": True, "job_id": jid}))
+        print(json.dumps({"ok": True, "job_id": jid, **_selection(root, args, target)}))
         return
 
     job_filter = getattr(args, "jobs", None)
@@ -1040,7 +1043,8 @@ def cmd_ci(cfg, args) -> None:
     report = {"ok": result["ok"], "workflow": str(wf_path), "run_id": run_id,
               "jobs": job_ids, "cells": cells_out,
               "neutralized": neutralize_notes,
-              "summary": {"cells": len(cells_out), "passed": passed, "failed": failed}}
+              "summary": {"cells": len(cells_out), "passed": passed, "failed": failed},
+              **_selection(root, args, target)}
 
     if as_json:
         print(json.dumps(report))
@@ -1068,3 +1072,10 @@ def _cleanup_ci_temp_files(*paths: Path) -> None:
 
 
 register({'ci': cmd_ci})
+
+
+def _selection(root: str, args, target) -> dict:
+    """``remote_selection`` (and the local notice) for this run's JSON (spec 063)."""
+    from sandbox.readiness.notice import run_selection
+    return run_selection(root, local=bool(getattr(args, "local", False)), target=target,
+                         config_file=getattr(args, "config_file", None))

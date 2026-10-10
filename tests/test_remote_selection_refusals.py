@@ -516,14 +516,17 @@ class RoundTwoTests(unittest.TestCase):
             spec.loader.exec_module(module)
         return module
 
-    def test_mcp_e2e_and_ci_successes_report_remote_selection(self):
-        service = _service(self.root, {"default": "remote", "remote": "vps"})
-        deps = {"target_service": service}
+    def test_mcp_e2e_and_ci_pass_the_cli_selection_through(self):
+        # The CLI child reports the target it used; MCP adds nothing of its own.
         cases = (
-            ("e2e", lambda m: m.run_e2e(str(self.root)), {"ok": True, "workers": []}),
-            ("e2e", lambda m: m.run_e2e(str(self.root), async_=True), {"ok": True, "job_id": "j"}),
+            ("e2e", lambda m: m.run_e2e(str(self.root)),
+             {"ok": True, "workers": [], "remote_selection": "local"}),
+            ("e2e", lambda m: m.run_e2e(str(self.root), async_=True),
+             {"ok": True, "job_id": "j", "remote_selection": "local"}),
             ("ci", lambda m: m.ci_run(str(self.root), "ci.yml"),
-             {"ok": True, "parent_job_id": "p", "children": []}),
+             {"ok": True, "parent_job_id": "p", "children": [], "remote_selection": "profile"}),
+            ("e2e", lambda m: m.run_e2e(str(self.root)),
+             {"ok": False, "status": "blocked", "code": "remote_not_ready_capacity"}),
         )
         for name, call, report in cases:
             module = self._tool(name)
@@ -531,24 +534,58 @@ class RoundTwoTests(unittest.TestCase):
             with self.subTest(name=name, report=report), \
                     patch.object(module.subprocess, "run", return_value=completed), \
                     patch("sandbox.application.context.durable_job_dependencies",
-                          return_value=deps):
-                self.assertEqual(call(module), {**report, "remote_selection": "profile"})
-        blocked = {"ok": False, "status": "blocked", "code": "remote_not_ready_capacity"}
-        module = self._tool("e2e")
-        completed = SimpleNamespace(returncode=1, stdout=json.dumps(blocked), stderr="")
-        with patch.object(module.subprocess, "run", return_value=completed):
-            self.assertEqual(module.run_e2e(str(self.root)), blocked)
+                          side_effect=AssertionError("resolved in MCP")):
+                self.assertEqual(call(module), report)
 
-    def test_with_selection_local_and_unresolvable(self):
-        local = notice.with_selection({"ok": True}, "/work/p", local=True,
-                                      service=SimpleNamespace(declared_remote=lambda _p: None))
-        self.assertEqual(local, {"ok": True, "remote_selection": "local"})
+    def test_mcp_e2e_and_ci_import_nothing_from_sandbox_at_module_level(self):
+        # e2e/ci-only catalogs start before the repository root is on sys.path.
+        import ast
+        for name in ("e2e", "ci"):
+            tree = ast.parse((ROOT / "mcp" / "wp-server" / "tools" / f"{name}.py").read_text())
+            modules = [node.module for node in tree.body
+                       if isinstance(node, ast.ImportFrom) and node.module] + [
+                alias.name for node in tree.body if isinstance(node, ast.Import)
+                for alias in node.names]
+            with self.subTest(name=name):
+                self.assertFalse([m for m in modules if m.split(".")[0] == "sandbox"])
 
-        def refuse(_request):
-            raise TargetResolutionError("ambiguous_remote", "x")
-        self.assertEqual(notice.with_selection({"ok": True}, "/work/p",
-                                               service=SimpleNamespace(resolve=refuse)),
-                         {"ok": True, "remote_selection": None})
+    def test_run_selection_follows_the_commands_own_target(self):
+        remote = SimpleNamespace(kind="remote", sources={"remote_selection": "single-configured"})
+        local = SimpleNamespace(kind="local", sources={"remote_selection": "local"})
+        self.assertEqual(notice.run_selection("/work/p", local=False, target=remote),
+                         {"remote_selection": "single-configured"})
+        self.assertEqual(notice.run_selection("/work/p", local=False, target=local),
+                         {"remote_selection": "local"})
+        self.assertEqual(notice.run_selection("/work/p", local=False, target=None),
+                         {"remote_selection": "local"})
+        found = {"remote_selection": "local", "declared_remote": "vps",
+                 "failing_aspect": "capacity", "reason": "subnet_exhausted"}
+        with patch.object(notice, "local_notice", return_value=found) as looked_up:
+            self.assertEqual(notice.run_selection("/work/p", local=True, target=local,
+                                                  config_file="sandbox.config.yml"), found)
+        looked_up.assert_called_once_with("/work/p", config_file="sandbox.config.yml")
+        from sandbox.commands import ci, e2e
+        args = SimpleNamespace(local=False, config_file=None)
+        for module in (ci, e2e):
+            with self.subTest(module=module.__name__):
+                self.assertEqual(module._selection("/work/p", args, remote),
+                                 {"remote_selection": "single-configured"})
+
+    def test_local_async_coordinators_keep_the_local_selector(self):
+        import ast
+        for name, verb in (("e2e", "e2e"), ("ci", "ci")):
+            tree = ast.parse((ROOT / "sandbox" / "commands" / f"{name}.py").read_text())
+            argvs = [node for node in ast.walk(tree) if isinstance(node, ast.List)
+                     and any(isinstance(item, ast.Call) for item in node.elts)
+                     and any(isinstance(item, ast.Constant) and item.value == verb
+                             for item in node.elts)
+                     and any(isinstance(item, ast.Constant) and item.value == "--json"
+                             for item in node.elts)]
+            with self.subTest(name=name):
+                self.assertTrue(argvs)
+                for argv in argvs:
+                    self.assertIn("--local", [item.value for item in argv.elts
+                                              if isinstance(item, ast.Constant)])
 
     def test_mcp_matrix_success_reports_remote_selection(self):
         import importlib.util
@@ -642,6 +679,39 @@ class RoundTwoTests(unittest.TestCase):
         self.assertEqual([request.config_file for request in requests], ["sandbox.config.yml"])
         self.assertEqual((result["workspace"], result["remote_selection"]), ("php", "profile"))
         self.assertEqual(submitted[0][4], "php")
+
+
+    def test_mcp_local_matrix_carries_the_notice(self):
+        import importlib.util
+        import types
+
+        import sandbox.commands.jobs_runtime  # noqa: F401
+        deps = types.ModuleType("dependencies")
+        deps.ToolDependencies = object
+        with patch.dict(sys.modules, {"dependencies": deps}):
+            path = ROOT / "mcp" / "wp-server" / "tools" / "jobs.py"
+            spec = importlib.util.spec_from_file_location("_selection_jobs_local_matrix", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        target = SimpleNamespace(kind="local", remote_name=None, workspace_label="a",
+                                 project_root=str(self.root), runtime_policy={},
+                                 sources={"remote_selection": "explicit"})
+        module._target_service = SimpleNamespace(resolve=lambda _request: target)
+        module._job_service = SimpleNamespace(
+            submit_matrix=lambda _submissions: {"ok": True, "parent_job_id": "p"})
+        policy = SimpleNamespace(deadline_seconds=60, execution_profile=None,
+                                 deadline_source=None, deadline_reminder=None,
+                                 stall_seconds=None, cancel_grace_seconds=None,
+                                 cancel_on_stall=None, cleanup_policy=None, provenance={})
+        found = {"remote_selection": "local", "declared_remote": "vps",
+                 "failing_aspect": "registration", "reason": "unknown_remote"}
+        with patch.object(module, "_mcp_execution_policy", return_value=(policy, None)), \
+                patch.object(module, "JobSubmission", side_effect=lambda *a, **k: a), \
+                patch.object(module, "_resolved_project_identity", return_value="id"), \
+                patch.object(module, "_source_identity", return_value=None), \
+                patch.object(notice, "local_notice", return_value=found):
+            result = module.job_matrix(["true"], ["a", "b"], str(self.root), local=True)
+        self.assertEqual(result, {"ok": True, "parent_job_id": "p", **found})
 
 
 if __name__ == "__main__":

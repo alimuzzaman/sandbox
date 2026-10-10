@@ -365,6 +365,7 @@ def cmd_e2e(cfg, args) -> None:
         except Exception as exc:
             die(f"remote E2E acceptance failed: {exc}")
         accepted["workers"] = workers
+        accepted.update(_selection(root, args, target))
         if getattr(args, "json", False): print(json.dumps(accepted, sort_keys=True))
         else: print(accepted["parent_job_id"])
         return
@@ -384,7 +385,9 @@ def cmd_e2e(cfg, args) -> None:
         # commands/jobs.py's wp_cli_async (one command in one container); e2e
         # mints multiple instances itself. Re-invoke ourselves without
         # --async so the actual work happens in the detached process.
-        argv = [str(ROOT / "sb"), "e2e", "--project-dir", root,
+        # The coordinator keeps this resolved local target: without --local
+        # it would select the project's declared remote again.
+        argv = [str(ROOT / "sb"), "e2e", "--local", "--project-dir", root,
                "--workers", str(workers), "--json"]
         if getattr(args, "concurrency", None):
             argv += ["--concurrency", str(args.concurrency)]
@@ -401,7 +404,7 @@ def cmd_e2e(cfg, args) -> None:
         if passthrough:
             argv += ["--"] + passthrough
         jid = launch_background_job(argv, cwd=ROOT)
-        print(json.dumps({"ok": True, "job_id": jid}))
+        print(json.dumps({"ok": True, "job_id": jid, **_selection(root, args, target)}))
         return
 
     if write_wp_env_port and workers > 1:
@@ -460,6 +463,7 @@ def cmd_e2e(cfg, args) -> None:
     failed = report["failed"]
 
     if as_json:
+        report.update(_selection(root, args, target))
         print(json.dumps(report))
         if not report["ok"]:
             import sys as _sys
@@ -477,3 +481,10 @@ def cmd_e2e(cfg, args) -> None:
 
 
 register({'e2e': cmd_e2e})
+
+
+def _selection(root: str, args, target) -> dict:
+    """``remote_selection`` (and the local notice) for this run's JSON (spec 063)."""
+    from sandbox.readiness.notice import run_selection
+    return run_selection(root, local=bool(getattr(args, "local", False)), target=target,
+                         config_file=getattr(args, "config_file", None))

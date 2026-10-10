@@ -172,8 +172,10 @@ in `sandbox.config.json`), the `registered` names and a `hint`; for
 `ambiguous_remote` the eligible `candidates`; for `remote_not_provisioned`
 the `./sb remote provision NAME` remedy. Names are bounded to 50 and must be
 name-shaped, and human output prints the same facts. The envelope, the
-readiness result and successful MCP `run_tests`, `job_start`, `job_matrix`,
-`run_e2e` and `ci_run` results carry `remote_selection` (`explicit`, `profile`, `single-configured`, or null
+readiness result, successful MCP `run_tests`, `job_start` and `job_matrix`
+results, and the `sb e2e`/`sb ci run` JSON (which MCP `run_e2e`/`ci_run`
+return unchanged) carry `remote_selection`, taken from the target the command
+itself used (`explicit`, `profile`, `single-configured`, or null
 when no remote could be chosen); a refusal raised by the gate keeps the
 selection of the caller's own resolution. Nothing falls back to a local run: MCP `run_tests` with no selector
 refuses every resolution failure except a project Sandbox cannot load, which
@@ -181,8 +183,10 @@ keeps the historical local PHPUnit path. A local run needs `--local` (MCP
 `local=True`); when the project declares a remote whose registration fails
 or whose stored proof has a `not_ready` row, the CLI prints `remote_selection:
 local; the declared remote 'NAME' is not ready: ASPECT (REASON)` on stderr,
-and MCP `run_tests`/`job_start` add `{remote_selection: "local",
-declared_remote, failing_aspect, reason}` to the result. The notice follows the
+and MCP `run_tests`/`job_start`/`job_matrix` and the `e2e`/`ci` JSON add
+`{remote_selection: "local", declared_remote, failing_aspect, reason}` to the
+result. A local `--async` e2e or CI coordinator is launched with `--local`, so
+it cannot select the declared remote again. The notice follows the
 command's project (the working directory when `--project-dir` is omitted) and
 its `--config-file`, reads the stored proof and never probes; it is skipped inside durable jobs, where a
 remote runtime runs its own co-located `--local` children. The CLI's

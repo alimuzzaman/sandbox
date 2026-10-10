@@ -3,7 +3,6 @@ import json
 import subprocess
 
 from app import SANDBOX_ROOT, _require_project_capability, _safe_json, mcp
-from sandbox.readiness.notice import with_selection
 
 
 ASYNC_LAUNCH_SECONDS = 120
@@ -153,7 +152,7 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
         if isinstance(launched, dict) and (
                 "job_id" in launched or launched.get("status") == "blocked" or
                 ("parent_job_id" in launched and "children" in launched)):
-            return with_selection(launched, project_dir, local=local, remote=remote)
+            return launched
         return {"ok": False, "code": res.returncode,
                 "error": (res.stderr or res.stdout or "async launch failed").strip()[:2000]}
     try:
@@ -170,6 +169,6 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     if isinstance(report, dict) and (
             "cells" in report or
             ("parent_job_id" in report and "children" in report)):
-        return with_selection(report, project_dir, local=local, remote=remote)
+        return report
     return {"ok": False, "code": res.returncode,
             "error": (res.stderr or res.stdout or "ci run failed").strip()[:2000]}

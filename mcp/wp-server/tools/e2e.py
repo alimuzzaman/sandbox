@@ -3,7 +3,6 @@ import json
 import subprocess
 
 from app import SANDBOX_ROOT, _require_project_capability, _safe_json, mcp
-from sandbox.readiness.notice import with_selection
 
 
 ASYNC_LAUNCH_SECONDS = 120
@@ -83,7 +82,7 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
         launched = _safe_json(lines[-1]) if lines else None
         if isinstance(launched, dict) and ("job_id" in launched
                                            or launched.get("status") == "blocked"):
-            return with_selection(launched, project_dir, local=local, remote=remote)
+            return launched
         return {"ok": False, "code": res.returncode,
                 "error": (res.stderr or res.stdout or "async launch failed").strip()[:2000]}
     try:
@@ -95,6 +94,6 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
     report = _safe_json(lines[-1]) if lines else None
     if isinstance(report, dict) and ("workers" in report or report.get("status") == "blocked"):
         # A blocked envelope is a typed refusal before transfer (spec 063).
-        return with_selection(report, project_dir, local=local, remote=remote)
+        return report
     return {"ok": False, "code": res.returncode,
             "error": (res.stderr or res.stdout or "e2e failed").strip()[:2000]}

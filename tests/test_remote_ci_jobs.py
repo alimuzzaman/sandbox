@@ -33,12 +33,6 @@ def _load_mcp_ci_tool():
     return module
 
 
-
-def _stub_selection(result, _project_dir, **_kwargs):
-    # Spec 063 FR-021 adds how the target was selected; resolved for real in
-    # tests/test_remote_selection_refusals.py.
-    return {**result, "remote_selection": "stub"}
-
 class RemoteCIJobTests(unittest.TestCase):
     def test_workflow_matrix_becomes_independent_durable_children(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -337,11 +331,10 @@ class RemoteCIJobTests(unittest.TestCase):
         ]
         for report in reports:
             completed = SimpleNamespace(returncode=0, stdout=json.dumps(report) + "\n", stderr="")
-            with patch.object(module.subprocess, "run", return_value=completed), \
-                    patch.object(module, "with_selection", _stub_selection):
+            with patch.object(module.subprocess, "run", return_value=completed):
                 result = module.ci_run("/tmp/project", "ci.yml", local="cells" in report,
                                        remote=None if "cells" in report else "remote-1")
-            self.assertEqual(result, {**report, "remote_selection": "stub"})
+            self.assertEqual(result, report)
 
     def test_mcp_runtime_none_forwards_without_wordpress_capability(self):
         module = _load_mcp_ci_tool()
@@ -349,10 +342,9 @@ class RemoteCIJobTests(unittest.TestCase):
         completed = SimpleNamespace(returncode=0, stdout=json.dumps(report) + "\n", stderr="")
         with patch.object(module, "_require_project_capability",
                           return_value={"ok": False, "error": "wordpress required"}), \
-                patch.object(module.subprocess, "run", return_value=completed) as run, \
-                patch.object(module, "with_selection", _stub_selection):
+                patch.object(module.subprocess, "run", return_value=completed) as run:
             result = module.ci_run("/tmp/project", "ci.yml", local=True, runtime="none")
-        self.assertEqual(result, {**report, "remote_selection": "stub"})
+        self.assertEqual(result, report)
         command = run.call_args.args[0]
         self.assertIn("--runtime", command)
         self.assertEqual(command[command.index("--runtime") + 1], "none")
@@ -368,7 +360,6 @@ class RemoteCIJobTests(unittest.TestCase):
         report = {"ok": True, "parent_job_id": "p" * 32,
                   "children": [{"job_id": "c" * 32}]}
         completed = SimpleNamespace(returncode=0, stdout=json.dumps(report) + "\n", stderr="")
-        with patch.object(module.subprocess, "run", return_value=completed), \
-                patch.object(module, "with_selection", _stub_selection):
+        with patch.object(module.subprocess, "run", return_value=completed):
             result = module.ci_run("/tmp/project", "ci.yml", remote="remote-1", async_=True)
-        self.assertEqual(result, {**report, "remote_selection": "stub"})
+        self.assertEqual(result, report)

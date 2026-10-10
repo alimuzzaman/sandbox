@@ -197,6 +197,28 @@ not close the external or human gates listed below.
   `cf4821a06d74a913a9a3947f7cc9349bcb9a1a54`; remote `T016–T017` and human
   `T018` remain gated. The accepted local work is integrated in this batch.
 
+- [ ] **Inventory every artifact a temporary remote instance creates, so
+  cleanup can remove all of them.** Requested 2026-10-10. Enumerate what one
+  short-lived remote instance leaves on the host, from deploy or ensure
+  through job runs to teardown. Candidates to confirm, not a finished list:
+  - the workspace checkout and staged runtime source
+  - registry and instance records under the remote `$SANDBOX_HOME`
+  - Compose files, containers, networks, volumes and images, including
+    `node-modules` volumes
+  - development-range allocations and overrides
+    (`runtime/network-ranges/overrides/<instance>.yml`)
+  - durable job rows, logs, outputs and artifacts
+  - edge or front-door routes and certificates
+  - pro-plugin mirrors and readiness or handoff records
+  - controller-side state under the local `$SANDBOX_HOME`
+
+  Record each artifact's path or identifier, its owner, and the command that
+  removes it today (`down -v`, reap, `workspace release`, `--prune-routes`, or
+  none). Then close the gaps so cleanup removes the full set. Measure on a
+  disposable remote instance, never by inferring from names or age. Keep
+  deletions manifest-first and keep the
+  `workspace_index_incomplete` fail-closed rule.
+
 ### Linux/native adoption proof
 
 - [ ] **Ingress qualification and host proof** — complete

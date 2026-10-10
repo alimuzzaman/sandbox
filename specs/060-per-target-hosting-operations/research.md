@@ -132,7 +132,7 @@
 ## R8. Controller state partition
 
 - **Decision**:
-  - **Layout.** `hosts.json` becomes `runtime/hosts/<sha16(state_key)>.json`.
+  - **Layout.** `hosts.json` becomes `runtime/host-targets/<sha16(state_key)>.json`.
     Each document holds one target record plus its `state_key`.
   - **Writes.** A write takes a per-target flock (the existing effect lock),
     then an atomic replace.

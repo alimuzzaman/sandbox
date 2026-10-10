@@ -6,13 +6,13 @@
 
 ## Phase 1: Setup
 
-- [ ] T001 Create packages `sandbox/hosting/coordination/__init__.py` and `sandbox/hosting/state_partition/__init__.py`; register remote store and controller per-target state through the state contract checked by `tests/test_architecture_boundaries.py`
-- [ ] T002 [P] Two-controller test harness (two temp `SANDBOX_HOME`s, local `sh -c` remote stand-in sharing one remote home, `multiprocessing` runners) in `tests/hosting_coordination_support.py`
+- [x] T001 Create packages `sandbox/hosting/coordination/__init__.py` and `sandbox/hosting/state_partition/__init__.py`; register remote store and controller per-target state through the state contract checked by `tests/test_architecture_boundaries.py`
+- [x] T002 [P] Two-controller test harness (two temp `SANDBOX_HOME`s, local `sh -c` remote stand-in sharing one remote home, `multiprocessing` runners) in `tests/hosting_coordination_support.py`
 
 ## Phase 2: Foundational
 
-- [ ] T003 [P] Program tests run for real against a temp remote home: admit/renew/release, FIFO queue with deadlines, fencing token monotonic, expiry with phase → `fenced_pending_cessation`, hold claim/renew/release/break, build slots, shared lease 60 s, list bounds, read-only list creates nothing, modes 0700/0600, capability marker absent → typed refusal in `tests/test_hosting_coordination_program.py`
-- [ ] T004 Implement `sandbox/hosting/coordination/program.py`
+- [x] T003 [P] Program tests run for real against a temp remote home: admit/renew/release, FIFO queue with deadlines, fencing token monotonic, expiry with phase → `fenced_pending_cessation`, hold claim/renew/release/break, build slots, shared lease 60 s, list bounds, read-only list creates nothing, modes 0700/0600, capability marker absent → typed refusal in `tests/test_hosting_coordination_program.py`
+- [x] T004 Implement `sandbox/hosting/coordination/program.py`
 - [ ] T005 [P] Client tests: 15 s bound, invalid output rejected, SSH failure/timeout/missing marker → `lease_authority_unavailable` with migrate/repin remedy, no secret in errors in `tests/test_hosting_coordination_client.py`
 - [ ] T006 Implement `sandbox/hosting/coordination/client.py`; mark `hosting_coordination` capability in `remote service migrate`
 - [ ] T007 [P] Per-target state tests: per-file read/write, corrupt file affects only its target, `iter_target_states` skips with per-target error, parity of record contents with today's `hosts.json` on 051/054 fixtures in `tests/test_hosting_state_partition.py`

@@ -45,9 +45,12 @@ conversion, which this feature owns.
   - `targets/<sha16>.json`: lease, hold, current operation, queue and history tail;
   - `remote.json`: build cap, cap history, build slots and the remote-wide lease;
   - `coord.lock`: flock.
-- **Controller**: `$SANDBOX_HOME/runtime/hosts/<sha16>.json`, one document per
+- **Controller**: `$SANDBOX_HOME/runtime/host-targets/<sha16>.json`, one document per
   target, replacing `runtime/hosts.json`. `runtime/hosts-conversion.json`
   records the conversion progress per remote.
+  (Not `runtime/hosts/`: a hosting remote already keeps per-target runtime
+  directories at `runtime/hosts/<project>/<environment>`, and a controller can
+  share its home with a host.)
 
 **Testing**:
 - `unittest` through `./sb selftest`, plus the architecture test.

@@ -277,6 +277,8 @@ target.update(imported_parent.values())
             ROOT / "sandbox" / "hermes",
             ROOT / "sandbox" / "remote_network",
             ROOT / "sandbox" / "readiness",
+            ROOT / "sandbox" / "hosting" / "coordination",
+            ROOT / "sandbox" / "hosting" / "state_partition",
         )
         violations = []
         for package in roots:
@@ -338,6 +340,23 @@ target.update(imported_parent.values())
                 r"runtime[^\n]{0,80}(?:resolver|domain)[^\n]{0,80}\.json", text,
             ):
                 violations.append(relative)
+        self.assertEqual(violations, [])
+
+    def test_hosting_coordination_state_has_one_owner_package(self):
+        """Spec 060: the remote lease store and the per-target controller
+        state are named only by their owning packages."""
+        owners = {
+            "hosting-leases": "sandbox/hosting/coordination/",
+            "hosts-conversion.json": "sandbox/hosting/state_partition/",
+            "host-targets": "sandbox/hosting/state_partition/",
+        }
+        violations = []
+        for path in production_python_files():
+            relative = str(path.relative_to(ROOT))
+            text = path.read_text()
+            for needle, owner in owners.items():
+                if needle in text and not relative.startswith(owner):
+                    violations.append(f"{relative}: {needle}")
         self.assertEqual(violations, [])
 
     def test_ingress_state_has_one_repository_owner_and_no_transport_consumers(self):

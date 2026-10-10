@@ -35,7 +35,7 @@
 
 ## Controller state
 
-- `runtime/hosts/<sha16>.json`: `{version: 2, state_key, record}`; record keeps today's per-target fields unchanged in meaning (active_operation, recovery_uncertainty, image_activation, generation, receipts).
+- `runtime/host-targets/<sha16>.json`: `{version: 2, state_key, record}`; record keeps today's per-target fields unchanged in meaning (active_operation, recovery_uncertainty, image_activation, generation, receipts).
 - `runtime/hosts-conversion.json`: `{version: 1, remotes: {<name>: {state: in_progress|converted, steps_done: [...], started_at, finished_at}}}`.
 
 ## State transitions

@@ -26,6 +26,8 @@
 
 `admit`, `renew`, `release`, `phase-report`, `hold-claim`, `hold-renew`, `hold-release`, `hold-break`, `build-acquire`, `build-release`, `shared-acquire`, `shared-release`, `cap-get`, `cap-set`, `list`, `register-controller`, `capability`.
 
+`enable` (written only by `remote service migrate`) creates the store and the `capability.json` marker; every other action refuses `lease_authority_unavailable` (`reason: capability_missing`) without it and creates nothing. `phase-report` takes `event: start|check|end`; `check` is the remote phase launcher's token test. Program-level refusals beyond the data-model codes: `shared_lease_busy` (the client polls it up to the 64 seam's bound), and `queue_full` as a flag on a waiter's refusal.
+
 Each runs under `coord.lock`, completes within 15 s, emits one JSON line validated by `client.py`, and never emits secrets. All payload keys are part of the 061 FR-006 shape manifest.
 
 ## Seam for 064

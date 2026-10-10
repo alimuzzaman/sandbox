@@ -134,3 +134,38 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
             (res["stderr"] or res["stdout"] or "deploy failed").strip()[:2000]
         ),
     }
+
+
+@mcp.tool()
+def remote_readiness(project_dir: str, remote: str | None = None) -> dict:
+    """Can this project run on a remote now? Read-only, one row per aspect
+    (registration, reachability, runtime_compatibility, capacity,
+    ownership_repair, handoff), each ready / not_ready / unknown /
+    not_applicable, with a CLI remedy for every not_ready or unknown row.
+
+    project_dir: the project whose remote target is checked.
+    remote: a registered remote name; omit to use the project's declared
+      remote (a project with no remote reports every row not_applicable).
+
+    Only not_ready refuses a later remote submission. Rows that do not finish
+    within 60 s are unknown. Same envelope as
+    `./sb remote readiness [NAME] --project-dir DIR --json`:
+    {ok, action: "readiness", data: {remote, remote_selection, rows,
+    installed_runtime_revision, taken_at, reusable_until}, error}.
+    """
+    sb = SANDBOX_ROOT / "sb"
+    cmd = [str(sb), "remote", "readiness"]
+    if remote:
+        cmd.append(remote)
+    cmd.extend(["--project-dir", project_dir, "--json"])
+    res = _run_sandbox_json(cmd, 120)
+    if res["timed_out"]:
+        return {"ok": False, "action": "readiness", "data": None,
+                "error": {"code": "readiness_timeout",
+                          "message": "remote readiness timed out after 120s"}}
+    result = res["payload"]
+    if isinstance(result, dict) and result.get("action") == "readiness":
+        return result
+    return {"ok": False, "action": "readiness", "data": None,
+            "error": {"code": "readiness_failed", "message": _redact_ssh_connection(
+                (res["stderr"] or res["stdout"] or "readiness failed").strip()[:2000])}}

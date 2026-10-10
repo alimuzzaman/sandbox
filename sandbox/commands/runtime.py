@@ -522,9 +522,10 @@ def cmd_exec(cfg, args) -> None:
         if target.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
+            from sandbox.readiness.gate import require_ready
             transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path)
+                remote_sb_path=_remote.remote_sb_path, readiness=require_ready)
             accepted = transport.submit(submission)
         else:
             service = durable_job_dependencies()["job_service"]
@@ -537,6 +538,13 @@ def cmd_exec(cfg, args) -> None:
                     transport, target.remote_name, accepted, job_id, policy,
                     output_profile, as_json=bool(args.json),
                 )
+                # Reached only on success: a failed exec exits in the follower.
+                from sandbox.readiness import check as _readiness
+                try:
+                    _readiness.record_exec(target.remote_name, (getattr(target, "sources", None) or {}).get(
+                        "identity") or target.project_root)
+                except (OSError, ValueError):
+                    pass
                 return
         if args.detach:
             if args.json:

@@ -370,9 +370,10 @@ def cmd_test(cfg, args) -> None:
                 execution_policy_provenance=policy.provenance)
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
+            from sandbox.readiness.gate import require_ready
             transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path)
+                remote_sb_path=_remote.remote_sb_path, readiness=require_ready)
             _announce_remote_test(target.remote_name, as_json)
             accepted = _submit_remote_test(lambda: transport.submit(submission),
                                            target.remote_name, as_json)
@@ -454,9 +455,10 @@ def cmd_test(cfg, args) -> None:
                 selected_config_file)
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
+            from sandbox.readiness.gate import require_ready
             transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path)
+                remote_sb_path=_remote.remote_sb_path, readiness=require_ready)
             _announce_remote_test(selected_target.remote_name, cli_json)
             accepted = _submit_remote_test(lambda: transport.submit_many(submissions),
                                            selected_target.remote_name, cli_json)
@@ -485,9 +487,10 @@ def cmd_test(cfg, args) -> None:
         )
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.readiness.gate import require_ready
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
             ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-            remote_sb_path=_remote.remote_sb_path)
+            remote_sb_path=_remote.remote_sb_path, readiness=require_ready)
         _announce_remote_test(selected_target.remote_name, cli_json)
         accepted = _submit_remote_test(lambda: transport.submit(submission),
                                        selected_target.remote_name, cli_json)

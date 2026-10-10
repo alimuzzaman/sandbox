@@ -127,6 +127,16 @@ class TargetService:
             remote=remote, runtime_policy=runtime,
         )
 
+    def declared_remote(self, project_dir: str) -> str | None:
+        """The remote name the project's runtime policy names, registered or
+        not; None when the project names none or cannot be loaded."""
+        try:
+            config = self._config_loader(project_dir)
+            runtime = normalize_runtime_policy((config or {}).get("runtime"))
+        except Exception:
+            return None
+        return runtime.get("remote")
+
     def _configured_remote_candidates(self) -> list[tuple[str, dict]]:
         """Return provisioned configured remotes from the explicit catalog API.
 

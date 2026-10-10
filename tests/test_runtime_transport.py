@@ -23,6 +23,15 @@ class RejectingService:
 
 
 class TestRuntimeTransportPreflight(unittest.TestCase):
+    def setUp(self):
+        # The readiness gate (spec 063) has its own tests; these fixtures
+        # resolve fake targets that must never reach live probes.
+        for target in ("sandbox.readiness.gate.require_ready",
+                       "sandbox.readiness.check.record_ensure"):
+            patcher = mock.patch(target, return_value={})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_cli_ensure_preserves_typed_mount_refusal_json_and_human_guidance(self):
         import sandbox.commands.instances_cmd as commands
 
@@ -882,6 +891,15 @@ class TestRemoteExecInstanceSelection(unittest.TestCase):
 
 
 class TestStatusJsonRedaction(unittest.TestCase):
+    def setUp(self):
+        # The readiness gate (spec 063) has its own tests; these fixtures
+        # resolve fake targets that must never reach live probes.
+        for target in ("sandbox.readiness.gate.require_ready",
+                       "sandbox.readiness.check.record_ensure"):
+            patcher = mock.patch(target, return_value={})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _status_args(self):
         return types.SimpleNamespace(json=True, resolved_instance="fixture")
 

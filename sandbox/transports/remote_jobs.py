@@ -194,6 +194,36 @@ def _admission_target(value: object) -> dict:
     return {"kind": "remote", "remote": remote}
 
 
+class RemoteNotReadyError(RemoteJobTransportError):
+    """A readiness row refused the submission before any byte was sent (spec 063)."""
+
+    retryable = False
+    _ASPECTS = frozenset({"registration", "reachability", "runtime_compatibility",
+                          "capacity", "ownership_repair", "handoff"})
+
+    def __init__(self, row: dict, *, remote: str | None = None) -> None:
+        aspect = row.get("aspect") if isinstance(row, dict) else None
+        aspect = aspect if aspect in self._ASPECTS else "registration"
+        reason = row.get("reason") if isinstance(row.get("reason"), str) else "not_ready"
+        remedy = row.get("remedy") if isinstance(row.get("remedy"), str) else None
+        self.code = f"remote_not_ready_{aspect}"
+        self.remote = remote
+        detail = {"aspect": aspect, "reason": reason, "bytes_transferred": 0}
+        if remedy is not None:
+            detail["remedy"] = remedy
+        super().__init__(f"remote is not ready: {aspect} ({reason})",
+                         retryable=False, detail=detail)
+
+    def to_payload(self, *, remote: str | None = None,
+                   operation: str | None = None) -> dict:
+        payload = super().to_payload(remote=remote or self.remote, operation=operation)
+        # A definite refusal before deployment: nothing was accepted or staged.
+        payload["status"] = "blocked"
+        payload["acceptance"] = None
+        payload["side_effects"] = {"staging_started": False, "bytes_transferred": 0}
+        return payload
+
+
 class RemoteJobAdmissionError(RemoteJobTransportError):
     """A bounded public refusal raised before remote staging can begin."""
 
@@ -544,8 +574,13 @@ class RemoteJobTransport:
 
     def __init__(self, *, deploy: Callable, ssh_run: Callable, remote_lookup: Callable,
                  remote_sb_path: Callable | None = None,
-                 sync_submit: Callable | None = None) -> None:
+                 sync_submit: Callable | None = None,
+                 readiness: Callable | None = None) -> None:
         self.deploy = deploy
+        # Spec 063 US2: ``readiness(project_root, remote_name)`` refuses with
+        # RemoteNotReadyError before any transfer. Submission sites pass
+        # ``sandbox.readiness.gate.require_ready``; control-only calls do not.
+        self.readiness = readiness
         self.ssh_run = ssh_run
         self.remote_lookup = remote_lookup
         self.sync_submit = sync_submit
@@ -663,6 +698,8 @@ class RemoteJobTransport:
                 "synchronized job execution is unavailable without an enforced source authority"
             )
         remote = self._execution_remote(submission.remote_name)
+        if self.readiness is not None:
+            self.readiness(submission.project_root, submission.remote_name)
         if submission.sync_relationship_id is not None:
             capabilities = remote.get("capabilities")
             if not isinstance(capabilities, (list, tuple, set)) or \
@@ -733,6 +770,8 @@ class RemoteJobTransport:
                     item.project_root != first.project_root for item in submissions)):
             raise RemoteJobTransportError("remote matrix children must share one remote and project")
         remote = self._execution_remote(first.remote_name)
+        if self.readiness is not None:
+            self.readiness(first.project_root, first.remote_name)
         deployed = self._deploy(
             remote, first.project_root,
             deployment_timeout=max(item.deadline_seconds for item in submissions),

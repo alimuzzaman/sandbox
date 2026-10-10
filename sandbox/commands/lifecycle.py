@@ -1058,6 +1058,37 @@ def _direct_remote_lifecycle(remote_name: str, instance: str,
     return {**(payload or {"ok": True}), "target": target}
 
 
+def _remote_readiness_doctor_rows(project_root: str) -> list[tuple[str, bool, str]]:
+    """Readiness rows for the remote the project declares, registered or not
+    (spec 063 FR-019). Only ``not_ready`` fails; the other states are notes."""
+    from sandbox.application.context import durable_job_dependencies
+    from sandbox.readiness import check as _readiness
+    try:
+        declared = durable_job_dependencies()["target_service"].declared_remote(project_root)
+    except Exception:
+        return []
+    if not declared:
+        return []
+    probes = _readiness.default_probes()
+    proof = None
+    try:
+        target = probes.resolve(project_root, declared)
+        proof = _readiness.reusable(
+            declared, (getattr(target, "sources", None) or {}).get("identity") or target.project_root,
+            probes=probes)
+    except Exception:
+        pass
+    proof = proof or _readiness.run(project_root, declared, probes=probes)
+    found = []
+    for item in proof.get("rows") or []:
+        detail = item.get("reason") or item.get("probe_state")
+        label = f"{declared} (declared): {item['aspect']} {item['state']}"
+        if detail:
+            label += f" ({detail})"
+        found.append((label, item["state"] != "not_ready", item.get("remedy") or ""))
+    return found
+
+
 def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     """Run instance lifecycle operations against a selected provisioned remote."""
     remote_name = getattr(args, "remote", None)
@@ -1100,6 +1131,14 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         refusal = _remote_ensure_reachability(target.remote_name, remote)
         if refusal is not None:
             return refusal
+        from sandbox.readiness.gate import require_ready
+        from sandbox.transports.remote_jobs import RemoteNotReadyError
+        try:
+            require_ready(target.project_root, target.remote_name)
+        except RemoteNotReadyError as exc:
+            # Refused before any source byte leaves this machine.
+            return {"ok": False, "error": {"code": exc.code, "message": str(exc)},
+                    "detail": exc.detail, "target": {"remote": target.remote_name}}
         deployed = _remote.deploy_exact_working_tree(
             remote, target.project_root, remote_name=target.remote_name,
         )
@@ -1225,8 +1264,16 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     if action == "logs":
         return {"ok": True, "action": action, "output": result.stdout or "",
                 "target": {"remote": target.remote_name, "workspace": target.workspace_label}}
-    return {**(payload or {"ok": True}), "target": {"remote": target.remote_name,
-            "workspace": target.workspace_label}, "source": deployed}
+    result_payload = {**(payload or {"ok": True}), "target": {"remote": target.remote_name,
+                      "workspace": target.workspace_label}, "source": deployed}
+    if action == "ensure" and result_payload.get("ok") is not False:
+        from sandbox.readiness import check as _readiness
+        try:
+            _readiness.record_ensure(
+                target.remote_name, (getattr(target, "sources", None) or {}).get("identity") or target.project_root)
+        except (OSError, ValueError):
+            pass  # the handoff row stays unknown; the ensure itself succeeded
+    return result_payload
 
 def cmd_shell(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.exec")
@@ -1748,6 +1795,9 @@ def cmd_doctor(cfg, args) -> None:
         for remote_check in remote_doctor_checks(remote):
             check(f"{name}: {remote_check['label']}", remote_check["ok"],
                   hint=remote_check["hint"])
+    if proj_root:
+        for label, row_ok, hint in _remote_readiness_doctor_rows(proj_root):
+            check(label, row_ok, hint=hint)
 
     section("Storage pressure")
     for label, pressure_ok, pressure_hint in _storage_pressure_doctor_checks():

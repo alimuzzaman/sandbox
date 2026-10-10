@@ -374,6 +374,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("secret_validate", "key,profile,project_dir,source"),
             ("secret_use_profile", "profile,project_dir"),
             ("run_plugin_check", "project_dir"), ("remote_deploy", "project_dir,remote"),
+            ("remote_readiness", "project_dir"),
             ("hermes_status", "remote"), ("hermes_run", "prompt,remote,repo"),
             ("hermes_job_status", "job_id,remote"), ("hermes_job_kill", "job_id,remote"),
             ("hermes_cron_list", "remote"), ("hermes_cron_validate", "remote"),

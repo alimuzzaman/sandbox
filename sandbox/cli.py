@@ -846,8 +846,11 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Development ranges (spec 063):\n"
             "  ./sb remote network-range propose|list NAME [--json]\n"
             "  ./sb remote network-range assign NAME --cidr CIDR [--subnet-prefix N] [--confirm] [--json]"
+            "\n"
+            "Readiness (spec 063):\n"
+            "  ./sb remote readiness [NAME] [--project-dir DIR] [--json]"
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "

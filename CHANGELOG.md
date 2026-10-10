@@ -8,6 +8,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Remote readiness (spec 063 US2). `sb remote readiness [NAME]` and the MCP
+  tool `remote_readiness` report six rows (registration, reachability,
+  runtime compatibility, capacity, ownership repair, handoff) under a 60 s
+  deadline, each with a CLI remedy. Every remote submission, including
+  `ensure --remote`, runs the check first and refuses on a `not_ready` row
+  with `remote_not_ready_<aspect>` before any source byte is transferred; a
+  passing proof is reused for 300 s at the same recorded runtime revision.
+  `sb doctor` covers the project's declared remote, registered or not.
 - Development ranges on a remote (spec 063, first slice). `sb remote
   network-range propose|assign|list` proposes, plans or (with `--confirm`)
   records an operator range checked against Docker networks, host routes,

@@ -97,7 +97,7 @@ BUILTIN_TOOL_NAMES = {
     "ci": ("ci_plan", "ci_run"),
     "asyncjobs": ("async_job_status", "async_job_kill"),
     "plugin_check": ("run_plugin_check",),
-    "remote": ("remote_deploy",),
+    "remote": ("remote_deploy", "remote_readiness"),
     "hermes": ("hermes_status", "hermes_run", "hermes_job_status", "hermes_job_kill", "hermes_cron_list", "hermes_cron_validate", "hermes_cron_create", "hermes_cron_route", "hermes_cron_run", "hermes_cron_output", "hermes_authorization_sync", "hermes_authorization_list", "hermes_authorization_show", "hermes_authorization_request", "hermes_authorization_approve", "hermes_health", "hermes_worktree_list", "hermes_worktree_inspect", "hermes_worktree_preserve", "hermes_repo_sync", "hermes_gateway_converge", "hermes_cron_catalog", "hermes_cron_reconcile", "hermes_cron_verify"),
     "recovery": ("recovery_profiles", "recovery_plan", "recovery_list", "recovery_verify", "recovery_create", "recovery_capture", "recovery_capture_status", "recovery_promote", "recovery_restore_plan", "recovery_restore_apply", "recovery_schedule_plan", "recovery_retention_plan", "recovery_retention"),
     "sync": ("sync_once", "sync_status", "sync_start", "sync_stop", "sync_resolve"),

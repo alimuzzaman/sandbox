@@ -354,9 +354,10 @@ def cmd_e2e(cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobAdmissionError, RemoteJobTransport
         try:
+            from sandbox.readiness.gate import require_ready
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
+                remote_sb_path=_remote.remote_sb_path, readiness=require_ready).submit_many(submissions)
         except RemoteJobAdmissionError:
             raise
         except Exception as exc:

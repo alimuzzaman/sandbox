@@ -132,6 +132,35 @@ that belongs to the project. Unattributed legacy records are listed under
 every project and are not candidates. If more than one attributed record
 remains, the refusal lists `candidates` with status and source; rerun with
 `--workspace-id <id>`.
+## Readiness before submission
+
+`./sb remote readiness [NAME] [--project-dir DIR] [--json]` (MCP
+`remote_readiness`) answers whether the project can run on the remote now,
+one row per aspect: `registration`, `reachability`, `runtime_compatibility`,
+`capacity`, `ownership_repair`, `handoff`. Each row is `ready`, `not_ready`,
+`unknown` or `not_applicable`, and every `not_ready` or `unknown` row carries
+a `./sb` remedy. The rows run concurrently under a 60 s deadline; a row that
+does not finish is `unknown` (`timeout`). A project with no remote reports
+every row `not_applicable`. When capacity is `missing_pool_evidence` and the
+range inventory is complete, `data.proposed_range` carries a range and its
+`assign_command`.
+
+Every remote submission (`test`, `run_tests`, `e2e`, `ci run`, `exec
+--remote`, `job-start`, `job-matrix`, detached resource jobs, `ensure
+--remote`) runs the same check before any source byte leaves the machine and
+refuses on the first `not_ready` row with `remote_not_ready_<aspect>`,
+`status: blocked` and `bytes_transferred: 0`. `unknown` and `not_applicable`
+never refuse; capacity admission still runs during the deploy.
+
+A passing check is stored per remote and project under
+`$SANDBOX_HOME/runtime/readiness/<remote>/` (0600) and reused for 300 s while
+the runtime revision recorded for the remote is unchanged. A `not_ready`
+proof is never reused. `remote service migrate`, `remote provision`,
+`remote up` and a confirmed `network-range assign` delete the remote's proofs.
+The `handoff` row turns `ready` once `ensure --remote` and then `exec
+--remote` both succeed at the installed revision. `sb doctor` lists the rows
+for the remote the focused project declares, registered or not.
+
 ## Ordinary hosted apply admission
 
 Process observation uses a real boot-session identity. An active record written

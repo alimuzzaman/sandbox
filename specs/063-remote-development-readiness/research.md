@@ -151,6 +151,18 @@
   within 300 s only when the revision still matches.
 - **Rationale**: The rows reuse existing probes, so there is no new remote
   surface. A proof bound to the revision honors FR-018.
+- **Implementation limits** (US2):
+  - The revision a proof is bound to is the one this controller recorded in
+    its registration (`mcp_service.runtime_revision`). There is no installed-at
+    timestamp, so a same-revision reinstall by another controller does not
+    invalidate this controller's proofs. Local installs (`service migrate`,
+    `provision`, `up`) and `network-range assign` delete the remote's proofs.
+  - A range release on the remote host cannot reach controller proofs. That
+    is safe: a release only frees capacity, a `not_ready` proof is never
+    reused, and capacity admission still runs at deploy.
+  - The ownership-repair row checks that the remote `sb` exists and is
+    executable for every registered remote; it does not look up an instance,
+    so it reports `ready` or `not_ready` rather than `not_applicable`.
 
 ## R7. Protocol bump
 

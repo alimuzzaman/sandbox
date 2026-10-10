@@ -455,9 +455,10 @@ def cmd_job_start(_cfg, args) -> None:
     if target.kind == "remote":
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.readiness.gate import require_ready
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
             ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-            remote_sb_path=_remote.remote_sb_path)
+            remote_sb_path=_remote.remote_sb_path, readiness=require_ready)
         accepted = transport.submit(submission)
         read_state = lambda job_id: transport.status(target.remote_name, job_id)
         interval = 2.0
@@ -974,8 +975,9 @@ def cmd_declared_test_plan(_cfg, args) -> None:
     if target.kind == "remote":
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.readiness.gate import require_ready
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path, readiness=require_ready).submit_many(submissions)
     else:
         result = dependencies["job_service"].submit_matrix(submissions)
     result = {**result, "plan": args.plan,
@@ -1110,8 +1112,9 @@ def cmd_job_matrix(_cfg, args) -> None:
     if target.kind == "remote":
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.readiness.gate import require_ready
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path, readiness=require_ready)
         result = transport.submit_many(submissions)
     else:
         result = dependencies["job_service"].submit_matrix(

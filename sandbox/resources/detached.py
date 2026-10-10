@@ -175,11 +175,12 @@ def start(args) -> dict:
             probe_budget=probe_budget,
         )
         if target.kind == "remote":
+            from sandbox.readiness.gate import require_ready
             accepted = RemoteJobTransport(
                 deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run,
                 remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path,
+                remote_sb_path=_remote.remote_sb_path, readiness=require_ready,
             ).submit(submission)
         else:
             accepted = dependencies["job_service"].submit(submission)

@@ -112,9 +112,10 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
         if target.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
+            from sandbox.readiness.gate import require_ready
             return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit(submission)
+                remote_sb_path=_remote.remote_sb_path, readiness=require_ready).submit(submission)
         return _job_service.submit(submission)
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()
@@ -184,9 +185,10 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
         if first.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
+            from sandbox.readiness.gate import require_ready
             return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
+                remote_sb_path=_remote.remote_sb_path, readiness=require_ready).submit_many(submissions)
         return _job_service.submit_matrix(submissions)
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()

@@ -261,6 +261,7 @@ def cmd_remote(cfg, args) -> None:
         "edge": _cmd_edge,
         "pin": _cmd_pin,
         "network-range": _cmd_network_range,
+        "readiness": _cmd_readiness,
     }
     try:
         dispatch[action](args, as_json)
@@ -581,6 +582,50 @@ def _network_range_hint(entry: dict) -> dict:
         return {"state": "unknown", "reason": exc.code}
 
 
+
+
+def _cmd_readiness(args, as_json: bool) -> None:
+    """`sb remote readiness [NAME] [--project-dir DIR]` (spec 063 US2).
+
+    ``not_ready`` rows are data; ``ok`` is false only when the check cannot
+    run for the project at all."""
+    from sandbox.readiness import check
+    project_dir = getattr(args, "project_dir", None) or os.getcwd()
+    data = check.run(project_dir, getattr(args, "name", None))
+    first = (data.get("rows") or [{}])[0]
+    if first.get("aspect") == "registration" and first.get("reason") == "invalid_project":
+        payload = {"ok": False, "action": "readiness", "data": data,
+                   "error": {"code": "invalid_project",
+                             "message": f"no Sandbox project at {project_dir}"}}
+    else:
+        payload = {"ok": True, "action": "readiness", "data": data, "error": None}
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(f"remote: {data.get('remote') or '(local)'}"
+              f"  selection: {data.get('remote_selection') or '-'}")
+        for item in data.get("rows") or []:
+            detail = item.get("reason") or item.get("probe_state") or ""
+            line = f"  {item['aspect']:<22} {item['state']:<15} {detail}"
+            if item.get("remedy"):
+                line += f"  -> {item['remedy']}"
+            print(line.rstrip())
+        proposed = data.get("proposed_range")
+        if isinstance(proposed, dict):
+            print(f"  proposed range: {proposed.get('cidr')}  -> {proposed.get('assign_command')}")
+    if not payload["ok"]:
+        raise SystemExit(1)
+
+
+def _invalidate_readiness(name: str) -> None:
+    """Installs and range assignments change what a readiness proof attested."""
+    from sandbox.readiness.check import invalidate
+    try:
+        invalidate(name)
+    except OSError:
+        pass
+
+
 def _cmd_network_range(args, as_json: bool) -> None:
     """`sb remote network-range <propose|assign|list> <name>` (spec 063 US1)."""
     from sandbox.remote_network import store as range_store
@@ -612,6 +657,7 @@ def _cmd_network_range(args, as_json: bool) -> None:
                        "data": result, "error": None}
             if confirmed:
                 _record_network_ranges(name, store.list())
+                _invalidate_readiness(name)
         else:
             store = range_store.RangeStore(entry)
             listed = store.list()
@@ -763,6 +809,7 @@ def _cmd_service(args, as_json: bool) -> None:
                     "runtime check until they migrate again"]
             if confirmed:
                 sr.put_remote(name, mcp_service=plan["service"])
+                _invalidate_readiness(name)
                 if acknowledged_pins:
                     # Only after a completed install: a failed or indeterminate
                     # migrate raised above and breaks no pin.
@@ -1503,6 +1550,7 @@ def _cmd_provision(args, as_json: bool) -> None:
                           mcp_port=port, bearer_token=token, provisioned=True,
                           capabilities=["job.exec", "job.execution-policy.v1"],
                           mcp_service=applied["service"])
+            _invalidate_readiness(name)
         else:
             control_url = f"https://{public_host}"
             sr.configure_https_proxy(entry, public_host, port)
@@ -1515,6 +1563,7 @@ def _cmd_provision(args, as_json: bool) -> None:
                           mcp_port=port, bearer_token=token, provisioned=True,
                           capabilities=["job.exec", "job.execution-policy.v1"],
                           mcp_service=applied["service"])
+            _invalidate_readiness(name)
             tailscale_ip = None
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "control_service_failed", status="failed", detail=str(e))
@@ -1584,6 +1633,7 @@ def _cmd_up(args, as_json: bool) -> None:
                 staged_source=staged_source,
             )
             sr.put_remote(name, mcp_service=plan["service"])
+            _invalidate_readiness(name)
         else:
             public_host = entry.get("control_host")
             if not public_host:
@@ -1599,6 +1649,7 @@ def _cmd_up(args, as_json: bool) -> None:
                 staged_source=staged_source,
             )
             sr.put_remote(name, mcp_service=plan["service"])
+            _invalidate_readiness(name)
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         error_code = (f"{e.code}: " if isinstance(
             e, RemoteRuntimeSourceIndeterminate) else "")

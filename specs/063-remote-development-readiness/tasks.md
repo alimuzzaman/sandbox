@@ -30,13 +30,13 @@
 
 ## Phase 4: US2 One readiness answer before submitting (P1)
 
-- [ ] T016 [P] [US2] Tests for each row's states and remedies (remedies parse against the CLI), the 60 s deadline turning unfinished rows `unknown`, a reachable remote with no probe timeouts completing within 30 s (SC-003, fake clock), proposed range only when unassigned and inventory complete, `remote_selection` on every success result in `tests/test_readiness.py`
-- [ ] T017 [US2] Implement `sandbox/readiness/rows.py` and `sandbox/readiness/check.py` (concurrent rows, per-project proof file 0600, reuse rules and invalidation from data-model, handoff record)
-- [ ] T018 [US2] Add `remote readiness` CLI action and the MCP tool `remote_readiness` with the shared envelope (`sandbox/commands/remote.py`, `sandbox/cli.py`, `mcp/wp-server/tools/remote.py`, registered in `mcp/wp-server/tools/manifest.py`)
-- [ ] T019 [P] [US2] Tests: every submission path refuses with the first `not_ready` row before transfer (`bytes_transferred: 0`), never on `unknown`/`not_applicable`, reuses a fresh all-ready proof for the same project only, never reuses a `not_ready` proof, re-checks after a revision change, after a same-revision migrate (`installed_at`), and after range assign or release-owner, and reports `remote_selection` on success in `tests/test_readiness_gate.py`
-- [ ] T020 [US2] Implement `sandbox/readiness/gate.py` and call it from `test`/`run_tests`, `e2e`/`run_e2e`, `ci`/`ci_run`, `exec --remote`, `job-start`, `ensure --remote`; record the handoff after ensure→exec succeeds
-- [ ] T020a [P] [US2] Tests: doctor "Remote targets" lists every declared remote, including unregistered names, with readiness rows in `tests/test_doctor_remote_targets.py`
-- [ ] T021 [US2] `sb doctor` "Remote targets" covers every declared remote including unregistered names using readiness rows in `sandbox/commands/lifecycle.py`
+- [x] T016 [P] [US2] Tests for each row's states and remedies (remedies parse against the CLI), the 60 s deadline turning unfinished rows `unknown`, a reachable remote with no probe timeouts completing within 30 s (SC-003, fake clock), proposed range only when unassigned and inventory complete, `remote_selection` on every success result in `tests/test_readiness.py`
+- [x] T017 [US2] Implement `sandbox/readiness/rows.py` and `sandbox/readiness/check.py` (concurrent rows, per-project proof file 0600, reuse rules and invalidation from data-model, handoff record)
+- [x] T018 [US2] Add `remote readiness` CLI action and the MCP tool `remote_readiness` with the shared envelope (`sandbox/commands/remote.py`, `sandbox/cli.py`, `mcp/wp-server/tools/remote.py`, registered in `mcp/wp-server/tools/manifest.py`)
+- [x] T019 [P] [US2] Tests: every submission path refuses with the first `not_ready` row before transfer (`bytes_transferred: 0`), never on `unknown`/`not_applicable`, reuses a fresh all-ready proof for the same project only, never reuses a `not_ready` proof, re-checks after a revision change, after a same-revision migrate (`installed_at`), and after range assign or release-owner, and reports `remote_selection` on success in `tests/test_readiness_gate.py`
+- [x] T020 [US2] Implement `sandbox/readiness/gate.py` and call it from `test`/`run_tests`, `e2e`/`run_e2e`, `ci`/`ci_run`, `exec --remote`, `job-start`, `ensure --remote`; record the handoff after ensure→exec succeeds
+- [x] T020a [P] [US2] Tests: doctor "Remote targets" lists every declared remote, including unregistered names, with readiness rows in `tests/test_doctor_remote_targets.py`
+- [x] T021 [US2] `sb doctor` "Remote targets" covers every declared remote including unregistered names using readiness rows in `sandbox/commands/lifecycle.py`
 
 ## Phase 5: US3 Retired or ambiguous remote is told, not guessed (P2)
 

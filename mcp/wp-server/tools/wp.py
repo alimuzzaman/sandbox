@@ -66,9 +66,10 @@ def _remote_job_transport():
     """Build the remote test transport with the staged CLI path policy."""
     from sandbox.core import _remote
     from sandbox.transports.remote_jobs import RemoteJobTransport
+    from sandbox.readiness.gate import require_ready
     return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
         ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-        remote_sb_path=_remote.remote_sb_path)
+        remote_sb_path=_remote.remote_sb_path, readiness=require_ready)
 
 
 def _resolve_test_mode(project_dir: str, label: str | None, explicit: str | None,

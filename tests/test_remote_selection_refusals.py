@@ -317,7 +317,8 @@ class LocalAfterNotReadyNoticeTests(unittest.TestCase):
                              {**accepted, **found})
         with patch.object(notice, "local_notice", side_effect=AssertionError("looked up")), \
                 patch.object(module, "_submit_explicit_job", return_value=accepted):
-            self.assertEqual(module.job_start(["true"], "/work/p"), accepted)
+            self.assertEqual(module.job_start(["true"], "/work/p"),
+                             {**accepted, "remote_selection": "local"})
 
 
 class RoundOneTests(unittest.TestCase):
@@ -712,6 +713,81 @@ class RoundTwoTests(unittest.TestCase):
                 patch.object(notice, "local_notice", return_value=found):
             result = module.job_matrix(["true"], ["a", "b"], str(self.root), local=True)
         self.assertEqual(result, {"ok": True, "parent_job_id": "p", **found})
+
+
+class RoundFourTests(unittest.TestCase):
+    """Sol merge-gate round 4 for US3."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+
+    def test_local_notice_does_not_initialize_or_reconcile_state(self):
+        resolved = []
+        stub = SimpleNamespace(declared_remote=lambda _p: resolved.append("declared") or None)
+        with patch("sandbox.application.context.durable_job_dependencies",
+                   side_effect=AssertionError("durable-job services built")), \
+                patch("sandbox.application.context.target_service", return_value=stub):
+            self.assertIsNone(notice.local_notice(str(self.root)))
+            self.assertEqual(notice.run_selection(str(self.root), local=True),
+                             {"remote_selection": "local"})
+        self.assertEqual(resolved, ["declared", "declared"])
+
+    def test_target_service_factory_is_the_durable_resolver(self):
+        from sandbox.application import context
+        from sandbox.application.target_service import TargetService
+        self.assertIsInstance(context.target_service(), TargetService)
+
+    def test_mcp_implicit_local_success_reports_selection(self):
+        local_target = SimpleNamespace(kind="local", remote_name=None, workspace_label="a",
+                                       project_root=str(self.root), runtime_policy={},
+                                       sources={"remote_selection": "local"})
+        completed = SimpleNamespace(returncode=0, stdout="OK (1 test, 1 assertion)", stderr="")
+        for name, resolve in (
+                ("no remote", lambda _request: local_target),
+                ("invalid_project", lambda _request: (_ for _ in ()).throw(
+                    TargetResolutionError("invalid_project", "not a sandbox project")))):
+            module = NoLocalFallbackTests._wp_tool(self)
+            module._require_project_capability = lambda *_a, **_k: None
+            module._project_instance = lambda *_a, **_k: ("inst", None)
+            module._managed_execution_unavailable = lambda *_a, **_k: None
+            module.SANDBOX_ROOT = ROOT
+            with self.subTest(path=name), \
+                    patch("sandbox.application.context.durable_job_dependencies",
+                          return_value={"target_service": SimpleNamespace(resolve=resolve)}), \
+                    patch.object(notice, "local_notice", side_effect=AssertionError("notice")), \
+                    patch.object(module, "_resolve_test_mode", return_value="unit"), \
+                    patch.object(module.subprocess, "run", return_value=completed):
+                result = module.run_tests(project_dir=str(self.root))
+                self.assertEqual((result["passed"], result["remote_selection"]), (True, "local"))
+
+        import importlib.util
+        import types
+
+        import sandbox.commands.jobs_runtime  # noqa: F401
+        deps = types.ModuleType("dependencies")
+        deps.ToolDependencies = object
+        with patch.dict(sys.modules, {"dependencies": deps}):
+            path = ROOT / "mcp" / "wp-server" / "tools" / "jobs.py"
+            spec = importlib.util.spec_from_file_location("_selection_jobs_implicit", path)
+            jobs = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(jobs)
+        jobs._target_service = SimpleNamespace(resolve=lambda _request: local_target)
+        jobs._job_service = SimpleNamespace(
+            submit=lambda _submission: {"ok": True, "job_id": "j"},
+            submit_matrix=lambda _submissions: {"ok": True, "parent_job_id": "p"})
+        policy = SimpleNamespace(deadline_seconds=60, execution_profile=None,
+                                 deadline_source=None, deadline_reminder=None,
+                                 stall_seconds=None, cancel_grace_seconds=None,
+                                 cancel_on_stall=None, cleanup_policy=None, provenance={})
+        with patch.object(jobs, "_mcp_execution_policy", return_value=(policy, None)), \
+                patch.object(jobs, "JobSubmission", side_effect=lambda *a, **k: a), \
+                patch.object(jobs, "_resolved_project_identity", return_value="id"), \
+                patch.object(jobs, "_source_identity", return_value=None), \
+                patch.object(notice, "local_notice", side_effect=AssertionError("notice")):
+            self.assertEqual(jobs.job_start(["true"], str(self.root)),
+                             {"ok": True, "job_id": "j", "remote_selection": "local"})
+            self.assertEqual(jobs.job_matrix(["true"], ["a", "b"], str(self.root)),
+                             {"ok": True, "parent_job_id": "p", "remote_selection": "local"})
 
 
 if __name__ == "__main__":

@@ -14,8 +14,10 @@ def local_notice(project_dir: str, *, service=None, home=None,
     from sandbox.readiness import check
     try:
         if service is None:
-            from sandbox.application.context import durable_job_dependencies
-            service = durable_job_dependencies()["target_service"]
+            # Target-only: building the durable-job services would run
+            # workspace and job reconciliation, which a notice must not do.
+            from sandbox.application.context import target_service
+            service = target_service()
         declared = service.declared_remote(project_dir, config_file=config_file) \
             if config_file is not None else service.declared_remote(project_dir)
     except Exception:

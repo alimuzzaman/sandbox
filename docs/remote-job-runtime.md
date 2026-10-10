@@ -175,7 +175,7 @@ name-shaped, and human output prints the same facts. The envelope, the
 readiness result, successful MCP `run_tests`, `job_start` and `job_matrix`
 results, and the `sb e2e`/`sb ci run` JSON (which MCP `run_e2e`/`ci_run`
 return unchanged) carry `remote_selection`, taken from the target the command
-itself used (`explicit`, `profile`, `single-configured`, or null
+itself used; a successful local MCP run reports `local` (`explicit`, `profile`, `single-configured`, or null
 when no remote could be chosen); a refusal raised by the gate keeps the
 selection of the caller's own resolution. Nothing falls back to a local run: MCP `run_tests` with no selector
 refuses every resolution failure except a project Sandbox cannot load, which
@@ -188,7 +188,9 @@ and MCP `run_tests`/`job_start`/`job_matrix` and the `e2e`/`ci` JSON add
 result. A local `--async` e2e or CI coordinator is launched with `--local`, so
 it cannot select the declared remote again. The notice follows the
 command's project (the working directory when `--project-dir` is omitted) and
-its `--config-file`, reads the stored proof and never probes; it is skipped inside durable jobs, where a
+its `--config-file`, reads the stored proof and never probes, and uses the
+target resolver alone, so it opens no job or workspace store and runs no
+reconciliation; it is skipped inside durable jobs, where a
 remote runtime runs its own co-located `--local` children. The CLI's
 successful `test`/`job-start` JSON does not gain `remote_selection`: those
 producers' keys are part of control protocol 3 (`sandbox/remote_runtime/shapes.py`). A bare `sb exec` with no local instance

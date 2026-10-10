@@ -378,6 +378,9 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         from sandbox.readiness.notice import local_notice
         result.update(local_notice(project_dir, config_file=config_file)
                       or {"remote_selection": "local"})
+    else:
+        # No remote was selected (or the project is not a Sandbox project).
+        result["remote_selection"] = "local"
     return result
 
 

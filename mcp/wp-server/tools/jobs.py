@@ -152,12 +152,16 @@ def job_start(command: list[str], project_dir: str, *, local: bool = False,
                                   stall_seconds=stall_seconds, cancel_grace_seconds=cancel_grace_seconds,
                                   cancel_on_stall=cancel_on_stall, cleanup_policy=cleanup_policy,
                                   request_id=request_id)
-    if local and isinstance(result, dict) and result.get("ok") is not False:
-        # An explicit local run states the declared remote it bypassed when
-        # that remote is not ready (spec 063 FR-022).
-        from sandbox.readiness.notice import local_notice
-        result = {**result, **(local_notice(project_dir, service=_target_service)
-                               or {"remote_selection": "local"})}
+    if isinstance(result, dict) and result.get("ok") is not False:
+        if local:
+            # An explicit local run states the declared remote it bypassed
+            # when that remote is not ready (spec 063 FR-022).
+            from sandbox.readiness.notice import local_notice
+            result = {**result, **(local_notice(project_dir, service=_target_service)
+                                   or {"remote_selection": "local"})}
+        elif "remote_selection" not in result:
+            # A remote acceptance already reports its selection.
+            result = {**result, "remote_selection": "local"}
     return result
 
 
@@ -209,10 +213,10 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
                     getattr(first, "sources", None) or {}).get("remote_selection")}
             return accepted
         accepted = _job_service.submit_matrix(submissions)
-        if local and isinstance(accepted, dict) and accepted.get("ok") is not False:
+        if isinstance(accepted, dict) and accepted.get("ok") is not False:
             from sandbox.readiness.notice import local_notice
-            accepted = {**accepted, **(local_notice(project_dir, service=_target_service)
-                                       or {"remote_selection": "local"})}
+            accepted = {**accepted, **((local_notice(project_dir, service=_target_service)
+                                        if local else None) or {"remote_selection": "local"})}
         return accepted
     except RemoteJobAdmissionError as exc:
         return exc.to_payload()

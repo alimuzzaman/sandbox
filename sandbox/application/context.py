@@ -1472,17 +1472,27 @@ def workspace_ownership_projection() -> dict:
     )
 
 
+def target_service():
+    """The target resolver alone: configuration and the remote registry, read
+    only. Unlike ``durable_job_dependencies`` it opens no job or workspace
+    repository and runs no reconciliation, so diagnostics can use it."""
+    import sandbox_core as sc
+
+    from sandbox.application.target_service import TargetService
+    from sandbox.core._remote import get_remote, list_remotes
+    return TargetService(config_loader=sc.load_project_config, remote_lookup=get_remote,
+                         remote_list=list_remotes)
+
+
 def durable_job_dependencies():
     """Compose host-local durable-job services for CLI and MCP adapters."""
     import time
     import sandbox_core as sc
 
     from sandbox.application.job_service import JobService
-    from sandbox.application.target_service import TargetService
     from sandbox.application.workspace_service import WorkspaceService
     from sandbox.config.runtime import BUILTIN_EXECUTION_PROFILES, BUILTIN_OUTPUT_PROFILES
     from sandbox.core._paths import RUNTIME_DIR
-    from sandbox.core._remote import get_remote, list_remotes
     from sandbox.jobs.manifest import builtin_job_component_registry
     from sandbox.jobs.process import capture_process_identity
     from sandbox.jobs.registry import JobRepository
@@ -1500,9 +1510,7 @@ def durable_job_dependencies():
         repository=repository, storage=storage,
         process_identity=capture_process_identity, clock=time, profiles=profiles,
     )
-    target = TargetService(
-        config_loader=sc.load_project_config, remote_lookup=get_remote,
-        remote_list=list_remotes)
+    target = target_service()
     scheduler = JobScheduler(repository)
     workspace_repository = WorkspaceRepository(
         RUNTIME_DIR / "workspaces" / "index.sqlite3",

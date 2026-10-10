@@ -13,7 +13,7 @@ from sandbox.readiness import check
 
 def require_ready(project_dir: str, remote: str, *, probes: check.Probes | None = None) -> dict:
     """The reusable or fresh proof for ``remote``; raises ``RemoteNotReadyError``."""
-    from sandbox.transports.remote_jobs import RemoteNotReadyError
+    from sandbox.readiness.errors import RemoteNotReadyError
     probes = probes or check.default_probes()
     proof = None
     try:

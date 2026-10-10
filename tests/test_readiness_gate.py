@@ -12,8 +12,8 @@ sys.path.insert(0, str(ROOT))
 
 from sandbox.jobs.models import JobSubmission, SourceIdentity  # noqa: E402
 from sandbox.readiness import check, gate  # noqa: E402
-from sandbox.transports.remote_jobs import (  # noqa: E402
-    RemoteJobTransport, RemoteNotReadyError)
+from sandbox.readiness.errors import RemoteNotReadyError  # noqa: E402
+from sandbox.transports.remote_jobs import RemoteJobTransport  # noqa: E402
 from tests.test_readiness import REMOTE, REVISION, _probes, _target  # noqa: E402
 
 

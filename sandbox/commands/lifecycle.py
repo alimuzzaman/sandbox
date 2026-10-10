@@ -1132,7 +1132,7 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         if refusal is not None:
             return refusal
         from sandbox.readiness.gate import require_ready
-        from sandbox.transports.remote_jobs import RemoteNotReadyError
+        from sandbox.readiness.errors import RemoteNotReadyError
         try:
             require_ready(target.project_root, target.remote_name)
         except RemoteNotReadyError as exc:

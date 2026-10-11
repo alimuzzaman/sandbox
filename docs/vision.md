@@ -2,7 +2,7 @@ AI-Powered WordPress Plugin Development System named Sandbox
 
 I want to build a system that helps my company ship WordPress plugins faster, smoother, and with higher accuracy.
 
-My company is based on WordPress plugin development. We build and maintain multiple plugin types, including Gutenberg blocks, Elementor widgets, and standalone WordPress plugins (like those listed here: https://wpdeveloper.com/plugins/).
+My company is based on WordPress plugin development. We build and maintain multiple plugin types, including Gutenberg blocks, Elementor widgets, and standalone WordPress plugins.
 
 🧠 Core Idea
 

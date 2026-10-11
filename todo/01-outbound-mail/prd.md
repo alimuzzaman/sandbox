@@ -77,7 +77,7 @@ Ordered, because the first three must agree exactly or nothing else matters:
 | `send` | Relays to the host MTA; From = `wordpress@<instance-domain>`; recipient allowlist enforced before handoff | Opt-in per instance |
 | `send` (unrestricted) | No allowlist — permanent hosted sites only, declared in `sandbox.hosting.yml` | Permanent sites |
 
-The allowlist is a list of recipient domains (`@wpdeveloper.com`, `@gmail.com`). A recipient outside it is captured to Mailpit instead of sent, and the substitution is logged — never silently dropped. Local instances cannot be switched to `send`: `.tst` has no public DNS and nothing to authenticate.
+The allowlist is a list of recipient domains (`@example.com`, `@gmail.com`). A recipient outside it is captured to Mailpit instead of sent, and the substitution is logged — never silently dropped. Local instances cannot be switched to `send`: `.tst` has no public DNS and nothing to authenticate.
 
 ### 4.4 DNS automation
 

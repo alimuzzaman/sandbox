@@ -4,6 +4,7 @@ Each call goes through a local ``sh -c`` stand-in for ``ssh_run`` against a
 temporary remote Sandbox home, exactly as the client sends it.
 """
 import json
+import hashlib
 import os
 import stat
 import subprocess
@@ -27,6 +28,10 @@ CONTROLLER_B = "h-" + "b" * 16
 def who(operation="apply", controller=CONTROLLER_A, request="r1"):
     return {"operation": operation, "request_id": request, "controller_id": controller,
             "session": "s1"}
+
+
+def program_target(key):
+    return hashlib.sha256(key.encode()).hexdigest()[:16] + ".json"
 
 
 class ProgramTests(unittest.TestCase):
@@ -451,6 +456,26 @@ class ProgramTests(unittest.TestCase):
         states = {t["state"] for t in self.call("list")["targets"]}
         self.assertEqual(states, {"unreadable", "leased"})
 
+
+    def test_listing_isolates_malformed_and_foreign_target_records(self):
+        self.enable()
+        third = "london/site3/production"
+        for key in (KEY, OTHER, third):
+            self.admit(key)
+        files = {key: self.store / "targets" / os.path.basename(program_target(key))
+                 for key in (KEY, OTHER, third)}
+        broken = json.loads(files[KEY].read_text())
+        broken["lease"]["expires_at"] = "broken"
+        files[KEY].write_text(json.dumps(broken))
+        before = files[KEY].read_bytes()
+        foreign = json.loads(files[OTHER].read_text())
+        foreign["state_key"] = third  # parses, but does not hash to this file
+        files[OTHER].write_text(json.dumps(foreign))
+        listing = self.call("list")["targets"]
+        self.assertEqual(sorted(t["target"] for t in listing if t["state"] != "unreadable"),
+                         [third])
+        self.assertEqual(sum(t["state"] == "unreadable" for t in listing), 2)
+        self.assertEqual(files[KEY].read_bytes(), before)
 
 if __name__ == "__main__":
     unittest.main()

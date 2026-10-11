@@ -305,11 +305,15 @@ if action == "list":
     names = sorted(os.listdir(targets_dir)) if os.path.isdir(targets_dir) else []
     names = [n for n in names if re.fullmatch(r"[0-9a-f]{16}\.json", n)]
     for name in names[:MAX_TARGETS]:
-        value = load(os.path.join(targets_dir, name))
+        # A record is listed only when it parses and its key hashes to this file;
+        # a malformed or foreign one is reported unreadable, never fatal.
+        raw = load(os.path.join(targets_dir, name))
+        key = raw.get("state_key") if raw else None
+        value = parse_target(key) if isinstance(key, str) \
+            and os.path.basename(target_file(key)) == name else False
         if not value:
             targets.append({"target": None, "state": "unreadable", "file": name})
             continue
-        value = normalize(value)
         lease, hold = value.get("lease"), value.get("hold")
         state = "fenced" if value.get("fence") == "fenced_pending_cessation" else \
             "leased" if lease else "held" if hold else "idle"

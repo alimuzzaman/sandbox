@@ -1,6 +1,6 @@
 # Fast Plugin Ship Workflow
 
-Use this workflow for WPDeveloper plugin work: bug fixes, features, QA fixes, and release prep.
+Use this workflow for WordPress plugin work: bug fixes, features, QA fixes, and release prep.
 
 The goal is to move from issue to verified fix to ready-to-ship with the smallest safe loop. Plugin-specific `CLAUDE.md` files and skills override this workflow when they give more precise instructions.
 

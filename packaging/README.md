@@ -24,7 +24,7 @@ the `.venv`s) can never leak even though `.npmignore` does not prune inside
 
 ```bash
 npm pack                                   # build the tarball
-npm install -g ./wpdeveloper-sandbox-*.tgz # or: npm i -g @alimuzzaman/sandbox
+npm install -g ./alimuzzaman-sandbox-*.tgz # or: npm i -g @alimuzzaman/sandbox
 sandbox --help
 ```
 

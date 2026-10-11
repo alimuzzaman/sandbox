@@ -14,7 +14,7 @@ Sync Impact Report
 - Follow-up TODOs: none
 -->
 
-# WPDeveloper Sandbox Constitution
+# Sandbox Constitution
 
 The Sandbox is the `sb` CLI, `sandbox_core.py`, and the MCP `wp-server` that together
 give developers a per-project WordPress dev/test stack. This constitution governs how

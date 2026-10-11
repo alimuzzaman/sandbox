@@ -322,6 +322,6 @@ team learns from it. Skip if the build was unremarkable.
 | New admin page, new CLI subcommand, new MCP tool | `build-feature` (treat the sandbox itself as the plugin) |
 
 The workflow is intentionally generic — it doesn't assume Gutenberg or
-Elementor or any specific plugin. It works for any WPDeveloper plugin
+Elementor or any specific plugin. It works for any WordPress plugin
 the focused dev is in, and it works for non-WP code (the sandbox CLI
 itself) when extended that way.

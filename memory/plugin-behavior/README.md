@@ -1,6 +1,6 @@
 # Plugin Behavior Notes
 
-Short, durable findings about how WPDeveloper plugins (and the third-party
+Short, durable findings about how the plugins we build (and the third-party
 plugins our customers run alongside them) actually behave at runtime.
 
 This folder is **tracked in git** — anything here is shared with the team.

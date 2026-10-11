@@ -405,7 +405,7 @@ not close remote, live, or human-authority gates.
 | 353 | active | P2 | open | low | 35ed60860c8c1d2d034c8d5489d456d8 | feedback list rejects documented over-limit request |
 | 354 | active | P3 | open | low | aa6452605024ed41759ec4f3e8a8050b | Retained remote gate exposed invalid benchmark fixture tree IDs |
 | 355 | active | P3 | open | low | 65d5427835e56f60a2cd0637a40cc2e3 | T118 remote product gate failed on closed-list ordering mismatch |
-| 356 | active | P3 | open | low | ff8b94dc66c07e836837b46a0030abc8 | Keyless WPDeveloper pro activation misses xspeed-pro (keyword list) |
+| 356 | active | P3 | open | low | ff8b94dc66c07e836837b46a0030abc8 | Keyless Pro activation misses xspeed-pro (keyword list) |
 | 357 | active | P3 | open | low | bcdb8d8f647df1652727abbcbf616ed4 | Plugin replacement can report success before detecting an unusable runtime archive |
 | 358 | active | P3 | open | low | ade1ef130bd7178813711b00c29d3150 | Focused HSSB icon-default PHPUnit run found stale golden and payload-shape expectations |
 | 359 | active | P3 | open | low | d79dcb78281523725565a2e3ad0eed6d | Full HSSB PHPUnit run found nine icon-default expectation mismatches |

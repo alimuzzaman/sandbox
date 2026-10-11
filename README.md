@@ -1,6 +1,6 @@
 # Sandbox
 
-A real WordPress environment for designers, developers, and QA at WPDeveloper —
+A real WordPress environment for plugin designers, developers, and QA teams,
 drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 
 ## Scoped recovery
@@ -1050,7 +1050,7 @@ Two layers:
 defaults:
   plugins_home: "$HOME/dev"     # where cloned plugins live
   pro_plugins_home: "$HOME/Sites/plugins-pro"   # shared Pro store, offered on demand
-  github_org: "wpdeveloper"
+  github_org: "your-org"
 ```
 
 Sandbox validates this machine-local YAML before using it. Under a shared lock,

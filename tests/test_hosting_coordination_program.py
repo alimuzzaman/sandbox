@@ -329,6 +329,37 @@ class ProgramTests(unittest.TestCase):
         stranger = self.call("build-acquire", state_key=KEY, lease_id="l-" + "0" * 16)
         self.assertEqual(stranger["refused"], "lease_lost")
 
+    def test_renewed_build_slots_survive_original_expiry_and_keep_cap(self):
+        self.enable()
+        keys = [f"london/site{i}/production" for i in range(3)]
+        leases = [self.admit(key, ttl=5 if index < 2 else None)["lease"]
+                  for index, key in enumerate(keys)]
+        for index in range(2):
+            self.assertTrue(self.call("build-acquire", state_key=keys[index],
+                                      lease_id=leases[index]["lease_id"])["acquired"])
+            renewed = self.call("renew", state_key=keys[index],
+                                lease_id=leases[index]["lease_id"], fencing_token=1, ttl=90)
+            self.assertFalse(renewed["lost"])
+        time.sleep(5.5)  # past every slot's cached expiry; both leases still live
+        refused = self.call("build-acquire", state_key=keys[2], lease_id=leases[2]["lease_id"])
+        self.assertEqual(refused.get("refused"), "build_cap_reached", refused)
+        self.assertEqual(len(refused["build_holders"]), 2)
+
+    def test_busy_store_lock_refuses_within_its_bound(self):
+        self.enable()
+        import fcntl
+        descriptor = os.open(self.store / "coord.lock", os.O_RDWR)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        started = time.monotonic()
+        refused = self.admit()
+        elapsed = time.monotonic() - started
+        self.assertEqual(refused["refused"], "lease_authority_unavailable")
+        self.assertEqual(refused["reason"], "store_busy")
+        self.assertLess(elapsed, program.LOCK_WAIT_SECONDS + 3)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        self.assertTrue(self.admit()["admitted"])
+
     def test_shared_lease_is_single_and_bounded(self):
         self.enable()
         shared = self.call("shared-acquire", state_key=KEY, step="edge", bound=60)["shared_lease"]

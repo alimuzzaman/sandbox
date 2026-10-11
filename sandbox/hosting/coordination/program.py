@@ -34,6 +34,8 @@ MAX_QUEUE = 32
 MAX_HISTORY = 64
 MAX_PURPOSE = 120
 MAX_REASON = 200
+# Inside the client's 15 s call bound, so a busy store refuses rather than hangs.
+LOCK_WAIT_SECONDS = 10
 
 ACTIONS = (
     "admit", "renew", "release", "phase-report", "hold-claim", "hold-renew",
@@ -49,7 +51,7 @@ request = json.loads(base64.b64decode(sys.argv[2]).decode())
 if not isinstance(request, dict):
     raise SystemExit(3)
 TTL, SHARED_MAX, HOLD_DEFAULT, HOLD_MAX = 90, 60, 3600, 14400
-WAITER_LAPSE, CAP_DEFAULT, CAP_MAX = 10, 2, 64
+WAITER_LAPSE, CAP_DEFAULT, CAP_MAX, LOCK_WAIT = 10, 2, 64, 10
 MAX_TARGETS, MAX_QUEUE, MAX_HISTORY, MAX_CONTROLLERS = 64, 32, 64, 256
 CONTROLLER = re.compile(r"h-[0-9a-f]{16}")
 LEASE = re.compile(r"l-[0-9a-f]{16}")
@@ -133,7 +135,17 @@ lock = os.open(os.path.join(root, "coord.lock"),
                os.O_RDONLY if action in READS else os.O_CREAT | os.O_RDWR, 0o600) \
     if action not in READS or os.path.exists(os.path.join(root, "coord.lock")) else None
 if lock is not None:
-    fcntl.flock(lock, fcntl.LOCK_SH if action in READS else fcntl.LOCK_EX)
+    # Bounded: a held store refuses instead of hanging the caller's shell.
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(lock, (fcntl.LOCK_SH if action in READS else fcntl.LOCK_EX)
+                        | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                out({"refused": "lease_authority_unavailable", "reason": "store_busy"})
+            time.sleep(0.05)
 
 def put(target, value):
     temp = target + ".tmp"
@@ -243,8 +255,8 @@ def read_remote(create):
         value["shared_lease"] = None
     live = []
     for slot in value.get("build_slots") or []:
-        if slot["expires_at"] <= now:
-            continue
+        # The slot lives as long as its target lease, which renewals extend
+        # without touching this record; never expire it on the cached time.
         record = read_target(slot["state_key"], False)
         lease = record.get("lease") if record else None
         if lease and lease["lease_id"] == slot["lease_id"]:

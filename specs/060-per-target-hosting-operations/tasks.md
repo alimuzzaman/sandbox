@@ -14,7 +14,7 @@
 - [x] T003 [P] Program tests run for real against a temp remote home: admit/renew/release, FIFO queue with deadlines, fencing token monotonic, expiry with phase → `fenced_pending_cessation`, hold claim/renew/release/break, build slots, shared lease 60 s, list bounds, read-only list creates nothing, modes 0700/0600, capability marker absent → typed refusal in `tests/test_hosting_coordination_program.py`
 - [x] T004 Implement `sandbox/hosting/coordination/program.py`
 - [x] T005 [P] Client tests: 15 s bound, invalid output rejected, SSH failure/timeout/missing marker → `lease_authority_unavailable` with migrate/repin remedy, no secret in errors in `tests/test_hosting_coordination_client.py`
-- [x] T006 Implement `sandbox/hosting/coordination/client.py`; mark `hosting_coordination` capability in `remote service migrate`
+- [x] T006 Implement `sandbox/hosting/coordination/client.py`; mark `hosting_coordination` capability in `remote service migrate` (the migrate `enable` step was withdrawn after the merge-gate review: enabling moves to T028, per the dependency rule below)
 - [x] T007 [P] Per-target state tests: per-file read/write, corrupt file affects only its target, `iter_target_states` skips with per-target error, parity of record contents with today's `hosts.json` on 051/054 fixtures in `tests/test_hosting_state_partition.py`
 - [x] T008 Implement `sandbox/hosting/state_partition/layout.py` and accessors in `sandbox/core/_hosting.py`; move callers off `load_host_state`/`save_host_state`; narrow `RecoveryRepository.state_lock` to conversion/legacy use
 - [x] T009 Add program payloads to `SHAPE_SOURCES`, bump `CONTROL_PROTOCOL_SPOKEN` (coordinate number with 063 T006), re-record `control_shapes.json`
@@ -57,7 +57,7 @@
 ## Phase 9: US7 Upgrade safety (P2)
 
 - [ ] T027 [P] [US7] Conversion tests on 051/052/054 + 062 fixtures: every outcome/receipt/generation queryable with same request id; interrupted conversion resumes; mixed state refuses on this and on a second unconverted controller; older controller gets `protocol_too_old` with zero writes in `tests/test_hosting_conversion.py`
-- [ ] T028 [US7] Implement `sandbox/hosting/state_partition/conversion.py` including the 062 scope-key step; `host convert-state` CLI/MCP; mixed-state guard in every hosting mutation entry
+- [ ] T028 [US7] Implement `sandbox/hosting/state_partition/conversion.py` including the 062 scope-key step; `host convert-state` CLI/MCP; mixed-state guard in every hosting mutation entry; the program's `enable` action runs from this conversion (or a dedicated confirmed step), never from `remote service migrate`
 
 ## Phase 10: Polish
 

@@ -477,5 +477,25 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(sum(t["state"] == "unreadable" for t in listing), 2)
         self.assertEqual(files[KEY].read_bytes(), before)
 
+    def test_listing_isolates_unhashable_keyless_and_holderless_records(self):
+        self.enable()
+        keys = [f"london/site{n}/production" for n in range(4)]
+        for key in keys:
+            self.admit(key)
+        files = [self.store / "targets" / os.path.basename(program_target(k)) for k in keys]
+        # A lone surrogate decodes from JSON but cannot be encoded for hashing.
+        files[0].write_text(files[0].read_text().replace(
+            json.dumps(keys[0]), '"london/\\ud800/production"'))
+        keyless = json.loads(files[1].read_text())
+        keyless["state_key"] = 7
+        files[1].write_text(json.dumps(keyless))
+        holderless = json.loads(files[2].read_text())
+        del holderless["lease"]["holder"]
+        files[2].write_text(json.dumps(holderless))
+        listing = self.call("list")["targets"]
+        self.assertEqual([t["target"] for t in listing if t["state"] != "unreadable"],
+                         [keys[3]])
+        self.assertEqual(sum(t["state"] == "unreadable" for t in listing), 3)
+
 if __name__ == "__main__":
     unittest.main()

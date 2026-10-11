@@ -21,8 +21,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `lease_authority_unavailable`. Controller state for
   a remote converted to per-target files lives in
   `runtime/host-targets/<sha16>.json`; only changed targets are written, and
-  a corrupt file affects only its own target. Remotes that are not converted
-  keep using `hosts.json` unchanged. The control protocol is now 6.
+  a corrupt file affects only its own target, and the coordination listing
+  reports a malformed or foreign record as unreadable. Remotes that are not
+  converted keep using `hosts.json` unchanged. The control protocol is now 7.
 - Docker-pool plan digest (spec 063 US4). `sb remote docker-pool` plans list
   the remote's hosted targets, the other running containers a daemon restart
   would also restart, a 16-hex `plan_digest` and the no-restart range

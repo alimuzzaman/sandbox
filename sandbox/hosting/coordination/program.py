@@ -299,6 +299,32 @@ def owned_lease(record):
     return lease if lease and lease["lease_id"] == request.get("lease_id") \
         and record.get("fencing_token") == request.get("fencing_token") else None
 
+def list_entry(name):
+    raw = load(os.path.join(targets_dir, name))
+    key = raw.get("state_key") if raw else None
+    value = parse_target(key) if isinstance(key, str) \
+        and os.path.basename(target_file(key)) == name else False
+    if not value:
+        return None
+    lease, hold = value.get("lease"), value.get("hold")
+    state = "fenced" if value.get("fence") == "fenced_pending_cessation" else \
+        "leased" if lease else "held" if hold else "idle"
+    entry = {"target": value["state_key"], "state": state,
+             "fencing_token": value.get("fencing_token", 0),
+             "queue": [{"operation": w["holder"]["operation"],
+                        "controller": w["holder"]["controller_id"],
+                        "enqueued_at": w["enqueued_at"]}
+                       for w in value.get("queue", [])[:MAX_QUEUE]]}
+    if lease:
+        entry.update(operation=lease["holder"]["operation"], holder=lease["holder"],
+                     since=lease["started_at"])
+    elif value.get("phase"):
+        entry.update(holder=value["phase"].get("holder"),
+                     since=value["phase"].get("dispatched_at"))
+    if hold:
+        entry["hold"] = hold_view(hold)
+    return entry
+
 if action == "list":
     remote = read_remote(False)
     targets = []
@@ -307,31 +333,11 @@ if action == "list":
     for name in names[:MAX_TARGETS]:
         # A record is listed only when it parses and its key hashes to this file;
         # a malformed or foreign one is reported unreadable, never fatal.
-        raw = load(os.path.join(targets_dir, name))
-        key = raw.get("state_key") if raw else None
-        value = parse_target(key) if isinstance(key, str) \
-            and os.path.basename(target_file(key)) == name else False
-        if not value:
-            targets.append({"target": None, "state": "unreadable", "file": name})
-            continue
-        lease, hold = value.get("lease"), value.get("hold")
-        state = "fenced" if value.get("fence") == "fenced_pending_cessation" else \
-            "leased" if lease else "held" if hold else "idle"
-        entry = {"target": value["state_key"], "state": state,
-                 "fencing_token": value.get("fencing_token", 0),
-                 "queue": [{"operation": w["holder"]["operation"],
-                            "controller": w["holder"]["controller_id"],
-                            "enqueued_at": w["enqueued_at"]}
-                           for w in value.get("queue", [])[:MAX_QUEUE]]}
-        if lease:
-            entry.update(operation=lease["holder"]["operation"], holder=lease["holder"],
-                         since=lease["started_at"])
-        elif value.get("phase"):
-            entry.update(holder=value["phase"].get("holder"),
-                         since=value["phase"].get("dispatched_at"))
-        if hold:
-            entry["hold"] = hold_view(hold)
-        targets.append(entry)
+        try:
+            entry = list_entry(name)
+        except (TypeError, KeyError, ValueError, AttributeError, UnicodeError):
+            entry = None
+        targets.append(entry or {"target": None, "state": "unreadable", "file": name})
     shared = remote.get("shared_lease")
     out({"build_cap": remote["build_cap"],
          "build_holders": [{"target": s["state_key"], "lease_id": s["lease_id"],

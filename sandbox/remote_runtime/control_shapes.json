@@ -1653,9 +1653,6 @@
    "workspaces"
   ],
   "sandbox/hosting/coordination/program.py": [
-   "<:PROGRAM>:entry={fencing_token,queue,state,target}",
-   "<:PROGRAM>:entry[hold]=",
-   "<:PROGRAM>:entry[queue]={controller,enqueued_at,operation}",
    "<:PROGRAM>:finish(0)#2={lease,lost}",
    "<:PROGRAM>:finish(0)#3={released,target}",
    "<:PROGRAM>:finish(0)#4={fence,recorded}",
@@ -1732,14 +1729,10 @@
    "<:PROGRAM>:read[hold]",
    "<:PROGRAM>:read[hold_id]",
    "<:PROGRAM>:read[holder]",
-   "<:PROGRAM>:read[holder][controller_id]",
-   "<:PROGRAM>:read[holder][operation]",
    "<:PROGRAM>:read[lease]",
    "<:PROGRAM>:read[lease][lease_id]",
    "<:PROGRAM>:read[lease_id]",
    "<:PROGRAM>:read[phase]",
-   "<:PROGRAM>:read[phase][dispatched_at]",
-   "<:PROGRAM>:read[phase][holder]",
    "<:PROGRAM>:read[phase_id]",
    "<:PROGRAM>:read[pid]",
    "<:PROGRAM>:read[purpose]",
@@ -1794,6 +1787,23 @@
    "<:PROGRAM>holder:read[operation]",
    "<:PROGRAM>holder:read[request_id]",
    "<:PROGRAM>holder:read[session]",
+   "<:PROGRAM>list_entry:entry={fencing_token,queue,state,target}",
+   "<:PROGRAM>list_entry:entry[hold]=",
+   "<:PROGRAM>list_entry:entry[queue]={controller,enqueued_at,operation}",
+   "<:PROGRAM>list_entry:read[enqueued_at]",
+   "<:PROGRAM>list_entry:read[fence]",
+   "<:PROGRAM>list_entry:read[fencing_token]",
+   "<:PROGRAM>list_entry:read[hold]",
+   "<:PROGRAM>list_entry:read[holder]",
+   "<:PROGRAM>list_entry:read[holder][controller_id]",
+   "<:PROGRAM>list_entry:read[holder][operation]",
+   "<:PROGRAM>list_entry:read[lease]",
+   "<:PROGRAM>list_entry:read[phase]",
+   "<:PROGRAM>list_entry:read[phase][dispatched_at]",
+   "<:PROGRAM>list_entry:read[phase][holder]",
+   "<:PROGRAM>list_entry:read[queue]",
+   "<:PROGRAM>list_entry:read[started_at]",
+   "<:PROGRAM>list_entry:read[state_key]",
    "<:PROGRAM>normalize:history(1)#2={event,holder,lease_id}",
    "<:PROGRAM>normalize:history(1)#3={event,hold_id}",
    "<:PROGRAM>normalize:history(1)#4={event,phase_id}",
@@ -4109,5 +4119,5 @@
    "stage"
   ]
  },
- "spoken": 6
+ "spoken": 7
 }

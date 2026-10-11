@@ -1834,6 +1834,7 @@
    "<:PROGRAM>parse_target:read[lease]",
    "<:PROGRAM>parse_target:read[lease_id]",
    "<:PROGRAM>parse_target:read[state_key]",
+   "<:PROGRAM>read_remote:out(0)#2={reason,refused}",
    "<:PROGRAM>read_remote:out(0)={reason,refused}",
    "<:PROGRAM>read_remote:read[build_slots]",
    "<:PROGRAM>read_remote:read[expires_at]",
@@ -4119,5 +4120,5 @@
    "stage"
   ]
  },
- "spoken": 7
+ "spoken": 8
 }

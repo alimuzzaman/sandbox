@@ -175,11 +175,13 @@ def history(record, entry):
     entry["at"] = now
     record["history"] = (record.get("history") or [])[-(MAX_HISTORY - 1):] + [entry]
 
+PID_MAX = 4194304  # Linux pid_max ceiling; larger values cannot be probed
+
 def alive(phase):
     if phase.get("ended"):
         return False
     pid = phase.get("pid")
-    if type(pid) is not int or pid <= 1:
+    if type(pid) is not int or not 1 < pid <= PID_MAX:
         return True  # no probe: cessation cannot be shown, so assume running
     try:
         os.kill(pid, 0)
@@ -258,6 +260,8 @@ def write_target(record):
     os.chmod(targets_dir, 0o700)
     put(target_file(record["state_key"]), record)
 
+SHARED_FIELDS = ("lease_id", "step", "state_key", "acquired_at")
+
 def read_remote(create):
     value = load(remote_path)
     if value is False:
@@ -266,15 +270,28 @@ def read_remote(create):
         value = {"build_cap": CAP_DEFAULT, "cap_history": [], "build_slots": [],
                  "shared_lease": None, "controllers": []}
     shared = value.get("shared_lease")
+    if shared is not None and not (isinstance(shared, dict)
+                                   and isinstance(shared.get("expires_at"), int)
+                                   and all(k in shared for k in SHARED_FIELDS)):
+        # The shared lease serializes remote-wide steps; never guess it free.
+        out({"refused": "lease_authority_unavailable", "reason": "remote_record_unreadable"})
     if shared and shared["expires_at"] <= now:
         value["shared_lease"] = None
     live = []
     for slot in value.get("build_slots") or []:
         # The slot lives as long as its target lease, which renewals extend
         # without touching this record; never expire it on the cached time.
-        # An unreadable target falls back to the cached time so one corrupt
-        # record cannot hold a slot, or refuse every other target, forever.
-        record = parse_target(slot["state_key"])
+        # An unreadable target or malformed slot falls back to the cached time
+        # (or is dropped without one) so it cannot hold a slot, or refuse
+        # every other target, forever.
+        if not isinstance(slot, dict) or not isinstance(slot.get("expires_at"), int):
+            continue
+        key = slot.get("state_key")
+        try:
+            record = parse_target(key) if isinstance(key, str) \
+                and isinstance(slot.get("lease_id"), str) else False
+        except UnicodeError:
+            record = False
         if record is False:
             if slot["expires_at"] > now:
                 live.append(slot)
@@ -340,8 +357,8 @@ if action == "list":
         targets.append(entry or {"target": None, "state": "unreadable", "file": name})
     shared = remote.get("shared_lease")
     out({"build_cap": remote["build_cap"],
-         "build_holders": [{"target": s["state_key"], "lease_id": s["lease_id"],
-                            "since": s["started_at"]} for s in remote["build_slots"]],
+         "build_holders": [{"target": s.get("state_key"), "lease_id": s.get("lease_id"),
+                            "since": s.get("started_at")} for s in remote["build_slots"]],
          "shared_lease": {"step": shared["step"], "since": shared["acquired_at"],
                           "target": shared["state_key"]} if shared else None,
          "targets": targets, "truncated": len(names) > MAX_TARGETS})
@@ -349,8 +366,8 @@ if action == "list":
 if action == "cap-get":
     remote = read_remote(False)
     out({"build_cap": remote["build_cap"], "cap_history": remote.get("cap_history", [])[-16:],
-         "build_holders": [{"target": s["state_key"], "lease_id": s["lease_id"],
-                            "since": s["started_at"]} for s in remote["build_slots"]]})
+         "build_holders": [{"target": s.get("state_key"), "lease_id": s.get("lease_id"),
+                            "since": s.get("started_at")} for s in remote["build_slots"]]})
 
 if action == "cap-set":
     value = bounded(request.get("value"), 1, CAP_MAX, None)
@@ -406,7 +423,7 @@ if action in ("build-acquire", "build-release"):
     remote = read_remote(True)
     slots = remote["build_slots"]
     if action == "build-release":
-        kept = [s for s in slots if s["lease_id"] != lease_id]
+        kept = [s for s in slots if s.get("lease_id") != lease_id]
         remote["build_slots"] = kept
         write_remote(remote)
         out({"released": len(kept) != len(slots)})
@@ -414,12 +431,12 @@ if action in ("build-acquire", "build-release"):
     lease = record.get("lease") if record else None
     if not lease or lease["lease_id"] != lease_id:
         out({"refused": "lease_lost", "target": key})
-    if any(s["lease_id"] == lease_id for s in slots):
+    if any(s.get("lease_id") == lease_id for s in slots):
         out({"acquired": True, "build_cap": remote["build_cap"]})
     if len(slots) >= remote["build_cap"]:
         out({"refused": "build_cap_reached", "target": key, "cap": remote["build_cap"],
-             "build_holders": [{"target": s["state_key"], "lease_id": s["lease_id"],
-                                "since": s["started_at"]} for s in slots]})
+             "build_holders": [{"target": s.get("state_key"), "lease_id": s.get("lease_id"),
+                                "since": s.get("started_at")} for s in slots]})
     slots.append({"lease_id": lease_id, "state_key": key, "started_at": now,
                   "expires_at": lease["expires_at"]})
     write_remote(remote)
@@ -520,7 +537,7 @@ if action == "release":
     history(record, {"event": "release", "lease_id": lease["lease_id"]})
     remote = read_remote(True)
     remote["build_slots"] = [s for s in remote["build_slots"]
-                             if s["lease_id"] != lease["lease_id"]]
+                             if s.get("lease_id") != lease["lease_id"]]
     write_remote(remote)
     finish({"released": True, "target": key})
 

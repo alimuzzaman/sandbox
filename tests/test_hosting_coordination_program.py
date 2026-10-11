@@ -497,5 +497,51 @@ class ProgramTests(unittest.TestCase):
                          [keys[3]])
         self.assertEqual(sum(t["state"] == "unreadable" for t in listing), 3)
 
+    def test_oversized_phase_pid_counts_as_running(self):
+        self.enable()
+        for key in (KEY, OTHER):
+            self.admit(key)
+        path = self.store / "targets" / os.path.basename(program_target(KEY))
+        record = json.loads(path.read_text())
+        record["lease"] = None
+        record["fence"] = "fenced_pending_cessation"
+        record["phase"] = {"phase_id": "p1", "pid": 2 ** 100, "holder": None}
+        path.write_text(json.dumps(record))
+        listing = {t["target"]: t["state"] for t in self.call("list")["targets"]}
+        # An unprobeable pid cannot show cessation, so the fence holds.
+        self.assertEqual(listing, {KEY: "fenced", OTHER: "leased"})
+
+    def test_malformed_build_slots_expire_or_drop_without_refusing(self):
+        self.enable()
+        self.admit()
+        self.call("cap-set", value=2, controller_id=CONTROLLER_A)
+        remote_file = self.store / "remote.json"
+        remote = json.loads(remote_file.read_text())
+        future = int(time.time()) + 2
+        remote["build_slots"] = [
+            {"lease_id": "x", "expires_at": future, "started_at": 1},  # no state_key
+            {"state_key": KEY, "lease_id": "y", "started_at": 1},      # no expiry
+            "junk"]
+        remote_file.write_text(json.dumps(remote))
+        listing = self.call("list")
+        self.assertEqual([t["target"] for t in listing["targets"]], [KEY])
+        # The slot with a cached expiry still counts until then; the rest are gone.
+        self.assertEqual(len(listing["build_holders"]), 1)
+        self.assertIsNone(listing["build_holders"][0]["target"])
+        time.sleep(2.2)
+        self.assertEqual(self.call("list")["build_holders"], [])
+
+    def test_malformed_shared_lease_refuses_as_unreadable_remote(self):
+        self.enable()
+        self.admit()
+        self.call("cap-set", value=2, controller_id=CONTROLLER_A)
+        remote_file = self.store / "remote.json"
+        remote = json.loads(remote_file.read_text())
+        remote["shared_lease"] = {"step": "build"}  # no expiry
+        remote_file.write_text(json.dumps(remote))
+        refused = self.call("list")
+        self.assertEqual(refused.get("refused"), "lease_authority_unavailable", refused)
+        self.assertEqual(refused.get("reason"), "remote_record_unreadable")
+
 if __name__ == "__main__":
     unittest.main()

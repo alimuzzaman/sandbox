@@ -3,7 +3,7 @@
 One fixed program, sent over the authenticated SSH transport like the 061 pin
 program, owns ``<remote SANDBOX_HOME>/runtime/hosting-leases``:
 
-- ``capability.json``: written only by ``enable`` (``remote service migrate``);
+- ``capability.json``: written only by ``enable`` (the T028 conversion, never migrate);
   every other action refuses ``lease_authority_unavailable`` without it.
 - ``coord.lock``: the flock every action runs under, so admission is
   linearizable across controllers.
@@ -257,7 +257,14 @@ def read_remote(create):
     for slot in value.get("build_slots") or []:
         # The slot lives as long as its target lease, which renewals extend
         # without touching this record; never expire it on the cached time.
-        record = read_target(slot["state_key"], False)
+        # An unreadable target falls back to the cached time so one corrupt
+        # record cannot hold a slot, or refuse every other target, forever.
+        raw = load(target_file(slot["state_key"]))
+        if raw is False or (raw is not None and raw.get("state_key") != slot["state_key"]):
+            if slot["expires_at"] > now:
+                live.append(slot)
+            continue
+        record = normalize(raw) if raw is not None else None
         lease = record.get("lease") if record else None
         if lease and lease["lease_id"] == slot["lease_id"]:
             slot["expires_at"] = lease["expires_at"]

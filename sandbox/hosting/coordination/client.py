@@ -107,7 +107,8 @@ class CoordinationClient:
         name = self.entry.get("name") if isinstance(self.entry, dict) else None
         name = name if isinstance(name, str) and _SEGMENT.fullmatch(name) else "<remote>"
         return (f"./sb remote service migrate {name} --plan, then --confirm, so the "
-                "remote runtime carries hosting coordination")
+                "remote runtime carries hosting coordination; the per-target "
+                "conversion (spec 060 T028) then enables it")
 
     def _unavailable(self, message: str, reason: str | None = None) -> CoordinationError:
         return CoordinationError(LEASE_AUTHORITY_UNAVAILABLE, message,

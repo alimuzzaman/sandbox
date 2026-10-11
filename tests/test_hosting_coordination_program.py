@@ -345,6 +345,22 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(refused.get("refused"), "build_cap_reached", refused)
         self.assertEqual(len(refused["build_holders"]), 2)
 
+    def test_corrupt_target_slot_expires_on_cached_time(self):
+        self.enable()
+        lease = self.admit(ttl=2)["lease"]
+        self.assertTrue(self.call("build-acquire", state_key=KEY,
+                                  lease_id=lease["lease_id"])["acquired"])
+        (corrupt,) = (self.store / "targets").glob("*.json")
+        other = self.admit(OTHER)["lease"]
+        corrupt.write_text("{not json")
+        # Before its cached expiry the slot still counts against the cap.
+        self.assertEqual(self.call("cap-set", value=1, controller_id=CONTROLLER_A)["build_cap"], 1)
+        busy = self.call("build-acquire", state_key=OTHER, lease_id=other["lease_id"])
+        self.assertEqual(busy.get("refused"), "build_cap_reached", busy)
+        time.sleep(2.2)
+        self.assertTrue(self.call("build-acquire", state_key=OTHER,
+                                  lease_id=other["lease_id"])["acquired"])
+
     def test_busy_store_lock_refuses_within_its_bound(self):
         self.enable()
         import fcntl

@@ -14,7 +14,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   queue, holds of at most 4 h, build slots under a per-remote cap (default 2)
   and a 60 s remote-wide lease. The store lock wait is bounded at 10 s (a
   busy store refuses `lease_authority_unavailable`, reason `store_busy`), and
-  a build slot lives as long as its renewed target lease. Coordination is not
+  a build slot lives as long as its renewed target lease (an unreadable target
+  falls back to the slot's cached expiry). Coordination is not
   enabled by `sb remote service migrate`; enabling ships with the state
   conversion (T028). Until a remote is enabled, a coordination call refuses
   `lease_authority_unavailable`. Controller state for

@@ -53,6 +53,13 @@ class ClientTests(unittest.TestCase):
         self.assertIsNone(error.__cause__)  # transport detail is not chained
         return error
 
+    def test_busy_store_maps_to_unavailable_with_reason(self):
+        canned = _Canned('{"ok": true, "action": "admit", "now": 1, '
+                         '"refused": "lease_authority_unavailable", "reason": "store_busy"}')
+        busy = client.CoordinationClient(self.entry, canned)
+        error = self.assertUnavailable(lambda: busy.admit(KEY, holder()))
+        self.assertEqual(error.reason, "store_busy")
+
     def test_every_call_is_bounded_to_fifteen_seconds(self):
         canned = _Canned('{"ok": true, "action": "capability", "now": 1, "enabled": true}')
         client.CoordinationClient(self.entry, canned).capability()

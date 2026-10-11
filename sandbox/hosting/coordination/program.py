@@ -226,17 +226,32 @@ def normalize(record):
                              "phase_id": phase.get("phase_id") if phase else None})
     return record
 
-def read_target(key, create):
+def parse_target(key):
+    """The normalized record, None when absent, False when unreadable or malformed."""
     value = load(target_file(key))
-    if value is False or (value is not None and value.get("state_key") != key):
+    if value is None or value is False or value.get("state_key") != key:
+        return None if value is None else False
+    try:
+        record = normalize(value)
+        lease = record.get("lease")
+        if lease is not None and not (isinstance(lease.get("lease_id"), str)
+                                      and isinstance(lease.get("expires_at"), int)):
+            return False
+        return record
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return False
+
+def read_target(key, create):
+    value = parse_target(key)
+    if value is False:
         out({"refused": "lease_authority_unavailable", "reason": "target_record_unreadable",
              "target": key})
     if value is None:
         if not create:
             return None
-        value = {"state_key": key, "fencing_token": 0, "lease": None, "hold": None,
-                 "phase": None, "fence": "none", "queue": [], "history": []}
-    return normalize(value)
+        value = normalize({"state_key": key, "fencing_token": 0, "lease": None, "hold": None,
+                           "phase": None, "fence": "none", "queue": [], "history": []})
+    return value
 
 def write_target(record):
     os.makedirs(targets_dir, mode=0o700, exist_ok=True)
@@ -259,12 +274,11 @@ def read_remote(create):
         # without touching this record; never expire it on the cached time.
         # An unreadable target falls back to the cached time so one corrupt
         # record cannot hold a slot, or refuse every other target, forever.
-        raw = load(target_file(slot["state_key"]))
-        if raw is False or (raw is not None and raw.get("state_key") != slot["state_key"]):
+        record = parse_target(slot["state_key"])
+        if record is False:
             if slot["expires_at"] > now:
                 live.append(slot)
             continue
-        record = normalize(raw) if raw is not None else None
         lease = record.get("lease") if record else None
         if lease and lease["lease_id"] == slot["lease_id"]:
             slot["expires_at"] = lease["expires_at"]

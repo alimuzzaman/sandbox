@@ -1820,6 +1820,10 @@
    "<:PROGRAM>owned_lease:read[fencing_token]",
    "<:PROGRAM>owned_lease:read[lease]",
    "<:PROGRAM>owned_lease:read[lease_id]",
+   "<:PROGRAM>parse_target:read[expires_at]",
+   "<:PROGRAM>parse_target:read[lease]",
+   "<:PROGRAM>parse_target:read[lease_id]",
+   "<:PROGRAM>parse_target:read[state_key]",
    "<:PROGRAM>read_remote:out(0)={reason,refused}",
    "<:PROGRAM>read_remote:read[build_slots]",
    "<:PROGRAM>read_remote:read[expires_at]",
@@ -1831,9 +1835,8 @@
    "<:PROGRAM>read_remote:value={build_cap,build_slots,cap_history,controllers,shared_lease}",
    "<:PROGRAM>read_remote:value[build_slots]=",
    "<:PROGRAM>read_remote:value[shared_lease]=",
+   "<:PROGRAM>read_target:normalize(0)={fence,fencing_token,history,hold,lease,phase,queue,state_key}",
    "<:PROGRAM>read_target:out(0)={reason,refused,target}",
-   "<:PROGRAM>read_target:read[state_key]",
-   "<:PROGRAM>read_target:value={fence,fencing_token,history,hold,lease,phase,queue,state_key}",
    "<:PROGRAM>write_target:read[state_key]",
    "acquired",
    "acquired_at",
@@ -4106,5 +4109,5 @@
    "stage"
   ]
  },
- "spoken": 5
+ "spoken": 6
 }

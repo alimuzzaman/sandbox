@@ -361,6 +361,42 @@ class ProgramTests(unittest.TestCase):
         self.assertTrue(self.call("build-acquire", state_key=OTHER,
                                   lease_id=other["lease_id"])["acquired"])
 
+    def test_malformed_or_foreign_target_slot_expires_on_cached_time(self):
+        def broken_lease(record):
+            record["lease"]["expires_at"] = "broken"
+            return json.dumps(record)
+
+        def foreign_key(record):
+            record["state_key"] = OTHER
+            record["lease"]["expires_at"] = 2 ** 40  # must not be inherited
+            return json.dumps(record)
+
+        for name, corrupt in (("broken_lease", broken_lease), ("foreign_key", foreign_key)):
+            with self.subTest(name):
+                self.env = TwoControllers()
+                self.addCleanup(self.env.cleanup)
+                self.store = self.env.remote_home / "runtime" / "hosting-leases"
+                self.enable()
+                lease = self.admit(ttl=2)["lease"]
+                self.assertTrue(self.call("build-acquire", state_key=KEY,
+                                          lease_id=lease["lease_id"])["acquired"])
+                (path,) = (self.store / "targets").glob("*.json")
+                path.write_text(corrupt(json.loads(path.read_text())))
+                other = self.admit(OTHER)["lease"]
+                self.call("cap-set", value=1, controller_id=CONTROLLER_A)
+                time.sleep(2.2)
+                self.assertTrue(self.call("build-acquire", state_key=OTHER,
+                                          lease_id=other["lease_id"])["acquired"])
+                remote = json.loads((self.store / "remote.json").read_text())
+                self.assertEqual([s["state_key"] for s in remote["build_slots"]], [OTHER])
+                self.assertIn("shared_lease", self.call("shared-acquire", state_key=OTHER,
+                                                        step="edge"))
+                owner = self.raw({"action": "renew", "state_key": KEY,
+                                  "lease_id": lease["lease_id"], "fencing_token": 1})
+                if name == "broken_lease":
+                    self.assertEqual(json.loads(owner.stdout)["reason"],
+                                     "target_record_unreadable")
+
     def test_busy_store_lock_refuses_within_its_bound(self):
         self.enable()
         import fcntl

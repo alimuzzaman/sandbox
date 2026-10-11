@@ -543,5 +543,36 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(refused.get("refused"), "lease_authority_unavailable", refused)
         self.assertEqual(refused.get("reason"), "remote_record_unreadable")
 
+    def test_live_build_slot_recovers_missing_cached_expiry(self):
+        self.enable()
+        lease = self.admit()["lease"]
+        other = self.admit(OTHER)["lease"]
+        self.call("cap-set", value=1, controller_id=CONTROLLER_A)
+        self.assertTrue(self.call("build-acquire", state_key=KEY,
+                                  lease_id=lease["lease_id"])["acquired"])
+        remote_file = self.store / "remote.json"
+        for broken in (None, "soon"):
+            with self.subTest(broken=broken):
+                remote = json.loads(remote_file.read_text())
+                if broken is None:
+                    remote["build_slots"][0].pop("expires_at", None)
+                else:
+                    remote["build_slots"][0]["expires_at"] = broken
+                remote_file.write_text(json.dumps(remote))
+                # The live target lease still owns the slot, so the cap holds.
+                busy = self.call("build-acquire", state_key=OTHER,
+                                 lease_id=other["lease_id"])
+                self.assertEqual(busy.get("refused"), "build_cap_reached", busy)
+
+    def test_incomplete_shared_lease_past_expiry_is_cleared(self):
+        self.enable()
+        self.admit()
+        self.call("cap-set", value=2, controller_id=CONTROLLER_A)
+        remote_file = self.store / "remote.json"
+        remote = json.loads(remote_file.read_text())
+        remote["shared_lease"] = {"step": "build", "expires_at": 1}
+        remote_file.write_text(json.dumps(remote))
+        self.assertIsNone(self.call("list")["shared_lease"])
+
 if __name__ == "__main__":
     unittest.main()

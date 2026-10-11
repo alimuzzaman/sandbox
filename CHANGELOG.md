@@ -23,8 +23,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `runtime/host-targets/<sha16>.json`; only changed targets are written, and
   a corrupt file affects only its own target, and the coordination listing
   reports a malformed or foreign record as unreadable. A malformed build slot
-  lives until its cached expiry (or is dropped without one), a malformed
-  shared lease refuses `remote_record_unreadable`, and a recorded pid too large
+  still follows a live matching target lease, otherwise lives until its cached
+  expiry (or is dropped without one); an unexpired malformed shared lease
+  refuses `remote_record_unreadable`, and a recorded pid too large
   to probe keeps its fence. Remotes that are not converted keep using
   `hosts.json` unchanged. The control protocol is now 8.
 - Docker-pool plan digest (spec 063 US4). `sb remote docker-pool` plans list

@@ -270,21 +270,22 @@ def read_remote(create):
         value = {"build_cap": CAP_DEFAULT, "cap_history": [], "build_slots": [],
                  "shared_lease": None, "controllers": []}
     shared = value.get("shared_lease")
+    if isinstance(shared, dict) and isinstance(shared.get("expires_at"), int) \
+            and shared["expires_at"] <= now:
+        shared = value["shared_lease"] = None  # expired, whatever else it lacks
     if shared is not None and not (isinstance(shared, dict)
                                    and isinstance(shared.get("expires_at"), int)
                                    and all(k in shared for k in SHARED_FIELDS)):
         # The shared lease serializes remote-wide steps; never guess it free.
         out({"refused": "lease_authority_unavailable", "reason": "remote_record_unreadable"})
-    if shared and shared["expires_at"] <= now:
-        value["shared_lease"] = None
     live = []
     for slot in value.get("build_slots") or []:
         # The slot lives as long as its target lease, which renewals extend
         # without touching this record; never expire it on the cached time.
-        # An unreadable target or malformed slot falls back to the cached time
-        # (or is dropped without one) so it cannot hold a slot, or refuse
-        # every other target, forever.
-        if not isinstance(slot, dict) or not isinstance(slot.get("expires_at"), int):
+        # When the target cannot say (unreadable record, malformed slot) the
+        # slot falls back to its cached time, or is dropped without one, so it
+        # cannot hold a slot, or refuse every other target, forever.
+        if not isinstance(slot, dict):
             continue
         key = slot.get("state_key")
         try:
@@ -293,7 +294,7 @@ def read_remote(create):
         except UnicodeError:
             record = False
         if record is False:
-            if slot["expires_at"] > now:
+            if isinstance(slot.get("expires_at"), int) and slot["expires_at"] > now:
                 live.append(slot)
             continue
         lease = record.get("lease") if record else None

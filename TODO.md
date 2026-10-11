@@ -265,6 +265,28 @@ not close the external or human gates listed below.
 
 ## P2 — protected recovery, hosting, and product gates
 
+- [ ] **Spec 060 coordination: tests the 2026-10-11 merge-gate review asked
+  for.** No known defect behind them; they pin behaviour shipped in `0239e1e`
+  (protocol 8) in `tests/test_hosting_coordination_program.py`:
+  kept malformed slots (missing `started_at`/`lease_id`, non-string or
+  surrogate keys) across list, cap-get/cap-set, controller registration,
+  shared acquire/release, build acquire/release and target release;
+  a recovered slot without `started_at` persists its restored expiry after a
+  writing action; absent, mismatched, expired and unreadable targets each
+  drop or keep a slot whose cached expiry is still in the future;
+  every action a malformed shared lease refuses leaves `remote.json`
+  byte-identical, while target admit/renew/phase/hold stay available;
+  an expired incomplete shared lease can be reacquired and the replacement is
+  complete; an oversized pid at lease expiry still creates the fence.
+
+- [ ] **Spec 060 coordination: repair path for `remote.json`.** A corrupt
+  remote record, or an unexpired malformed shared lease, refuses
+  `remote_record_unreadable` on list, cap, registration, shared, build and
+  target-release actions until someone edits the file by hand on the host.
+  Add a confirmed, operator-run repair (quarantine the bad file, rebuild
+  from the target records, hold the shared lease for one lease bound) through
+  `speckit-converge` on spec 060; never repair automatically on read.
+
 - [ ] **Evaluate an opt-in rsync transport for bounded remote source updates.**
   Keep `git push` plus reset/diff-overlay as the default exact-revision deploy
   path. Specify and prototype rsync only as an explicit capability-gated

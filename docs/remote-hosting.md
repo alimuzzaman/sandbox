@@ -1177,6 +1177,55 @@ app by hostname through Caddy. Sandbox's control endpoint should get its own hos
 `domains setup` unless you intend sandbox to add public hostname routes for those sites
 too.
 
+### Removing a hosted target
+
+A hosted stack is not a Sandbox instance, so `sb instance delete` does not see it.
+`sb host destroy` removes one target from its recorded state, with no manifest or
+project checkout needed:
+
+```bash
+./sb host destroy --remote myvps --target my-site/sandbox            # dry run
+./sb host destroy --remote myvps --target my-site/sandbox --confirm
+```
+
+It supports targets on the nginx front door; a Caddy target refuses with
+`front_door_capability_unavailable`. It removes the Compose stack's containers,
+volumes and networks, the images built for it (by its own `<project>-<service>`
+tags, never forced, so a shared image survives), the edge route and its
+certificates (including a Certbot lineage), the remote runtime
+directory (where generated passwords live), the Cloudflare DNS records Sandbox
+created (a record that existed before is restored to its captured value instead),
+the Origin CA certificate, and finally the local state entry. The project's deploy
+source is shared by its environments and a first apply of another environment
+could be writing it, so destroy never removes it; delete
+`<home>/deploy-src/hosts/<project>` by hand once no environment of the project is
+left. Containers, volumes and networks are selected by the Compose project label,
+never through `docker compose down`, so a Compose file elsewhere on the host cannot
+widen what is removed. Destroy refuses while the state file of the target, or of
+any target sharing its Compose name, cannot be read.
+
+Any failed step keeps the state entry, so the command can be re-run; Cloudflare
+objects that are already gone count as removed. It refuses when another recorded
+target maps to the same Compose project name (`site-blue/sandbox` and
+`site/blue-sandbox`), and holds the target lock of every such name while it runs, so
+a first apply of a colliding target waits. It also refuses when the target is fenced by an apply or recovery record
+until you confirm nothing is running and pass `--clear-fenced`. Before its first remote
+step destroy records its own fence on the target and on every name sharing its
+Compose project, so a run that fails or is interrupted (the remote
+shell may still be working) keeps apply, recovery and a second destroy out; re-run
+with `--clear-fenced` once the earlier run has ended. `host retire-delivery` refuses
+while a destroy owns the target. Certificate cleanup also
+reloads nginx, so a retry after an interrupted route removal cannot leave the old
+route loaded. Destroy waits up to
+`--lock-wait` seconds for the shared host state lock, like apply, and never holds
+that lock across an SSH call.
+
+Two gaps come from what apply records. A target applied more than once records
+its own DNS record as the "previous" one, so destroy restores it rather than
+deleting it; remove that record in Cloudflare by hand. On nginx, a re-apply that
+reuses the certificate records no Origin CA id, so destroy cannot revoke it; it
+expires on its own.
+
 ### Disposable remote previews
 
 `./sb preview` creates a separate, public WordPress Sandbox instance for a

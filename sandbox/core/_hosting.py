@@ -38,6 +38,7 @@ TARGET_MUTATION_CAPABILITIES = {
     "rollback": "hosting.image-rollback.v1",
     "image-recover": "hosting.image-recover.v1",
     "image-settle": "hosting.image-settle.v1",
+    "destroy": "hosting.destroy.v1",
 }
 
 

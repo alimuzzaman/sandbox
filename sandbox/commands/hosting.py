@@ -2548,6 +2548,13 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
     return operation
 
 
+def _destroy_owns(state: dict, key: str) -> bool:
+    """True when an unfinished `host destroy` fences this target."""
+    record = (state.get("hosts") or {}).get(key)
+    active = record.get("active_operation") if isinstance(record, dict) else None
+    return isinstance(active, dict) and active.get("action") == "destroy"
+
+
 def _assert_no_active_host_operation(state: dict, key: str) -> None:
     record = state.setdefault("hosts", {}).setdefault(key, {})
     if record.get("active_operation") is not None:
@@ -3191,32 +3198,41 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
     if not getattr(args, "confirm", False):
         die("host retire-delivery is protected; review `./sb delivery inspect` "
             "then pass --confirm")
+    if _destroy_owns(hosting.load_host_state(), hosting.state_key(remote_name, validated)):
+        die("host destroy owns this target; finish or re-run it with --clear-fenced first; "
+            "no record was changed")
     try:
         summary = retire_interrupted_operation(
             validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup)
         target_key = hosting.state_key(remote_name, validated)
-        state = hosting.load_host_state()
-        record = (state.get("hosts") or {}).get(target_key)
-        if record:
-            record["active_operation"] = None
-            record["recovery_uncertainty"] = None
-            activation = record.get("image_activation")
-            if isinstance(activation, dict) and activation.get("active") is not None:
-                activation["active"] = None
-            # A staged revision the retired attempt never proved would fence
-            # every retry with unproven_staged_revision; drop the claim so the
-            # next apply does a full recreate.
-            if record.get("staged_revision") and \
-                    record.get("staged_revision") != record.get("recorded_revision"):
-                record["staged_revision"] = None
-            # The same holds when staged equals recorded but nothing observed
-            # that revision running: an environment without a declared source
-            # revision can never prove it, so the same commit refused forever.
-            # Retire is the operator's consent to converge from scratch once.
-            revision = record.get("recorded_revision") or record.get("commit")
-            if revision and record.get("observed_runtime_revision") != revision:
-                record["retired_unproven_runtime"] = True
-            hosting.save_host_state(state)
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        # Under the state lock, so a destroy fence written after this read
+        # cannot be overwritten by this save.
+        with RecoveryRepository().state_lock(timeout_seconds=_host_apply_lock_wait(args)):
+            state = hosting.load_host_state()
+            record = (state.get("hosts") or {}).get(target_key)
+            if record and _destroy_owns(state, target_key):
+                die("host destroy took this target during retirement; its fence was kept")
+            if record:
+                record["active_operation"] = None
+                record["recovery_uncertainty"] = None
+                activation = record.get("image_activation")
+                if isinstance(activation, dict) and activation.get("active") is not None:
+                    activation["active"] = None
+                # A staged revision the retired attempt never proved would fence
+                # every retry with unproven_staged_revision; drop the claim so the
+                # next apply does a full recreate.
+                if record.get("staged_revision") and \
+                        record.get("staged_revision") != record.get("recorded_revision"):
+                    record["staged_revision"] = None
+                # The same holds when staged equals recorded but nothing observed
+                # that revision running: an environment without a declared source
+                # revision can never prove it, so the same commit refused forever.
+                # Retire is the operator's consent to converge from scratch once.
+                revision = record.get("recorded_revision") or record.get("commit")
+                if revision and record.get("observed_runtime_revision") != revision:
+                    record["retired_unproven_runtime"] = True
+                hosting.save_host_state(state)
     except DeliveryError as exc:
         payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
                    "original_request_id": original.strip()}
@@ -6559,6 +6575,36 @@ def _host_apply_lock_wait(args) -> int:
     return value
 
 
+def _cmd_host_destroy(args) -> None:
+    """Remove one hosted target from recorded state; dry run without --confirm."""
+    from sandbox.hosting import destroy
+    if not getattr(args, "remote", None):
+        die("host destroy requires --remote and --target <project>/<environment>")
+    try:
+        project, environment = destroy.parse_target(getattr(args, "target", None) or "")
+        entry = remote.get_remote(args.remote)
+        if not entry:
+            die(f"no remote named '{args.remote}'")
+        if args.confirm:
+            result = destroy.execute(entry, args.remote, project, environment,
+                                     clear_fenced=bool(getattr(args, "clear_fenced", False)),
+                                     lock_wait=_host_apply_lock_wait(args))
+        else:
+            result = destroy.plan(hosting.load_host_state(), entry, args.remote, project, environment)
+    except TimeoutError:
+        die("another host operation owns this target")
+    except (hosting.HostingError, cloudflare.CloudflareError) as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "code": getattr(exc, "code", "host_destroy_failed"),
+                              "error": str(exc)}, sort_keys=True))
+            raise SystemExit(1)
+        die(str(exc))
+    if args.json:
+        print(json.dumps({"ok": True, "confirmed": bool(args.confirm), **result}, sort_keys=True))
+    else:
+        print(destroy.render(result, confirmed=bool(args.confirm)))
+
+
 def cmd_host(cfg, args) -> None:
     if getattr(args, "initializer", None) is not None and args.action != "diagnose":
         die("--initializer is only available with `host diagnose`")
@@ -6567,6 +6613,9 @@ def cmd_host(cfg, args) -> None:
         return
     if args.action == "stage":
         _cmd_host_stage(args)
+        return
+    if args.action == "destroy":
+        _cmd_host_destroy(args)
         return
     if args.action == "image":
         required = {

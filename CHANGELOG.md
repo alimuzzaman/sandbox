@@ -8,6 +8,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- `sb host destroy --remote R --target PROJECT/ENV [--confirm]` removes one hosted
+  target on the nginx front door: Compose containers, volumes, networks and its own
+  image tags, edge route and certificates, remote
+  runtime directory and generated secrets, the Cloudflare DNS records Sandbox
+  created, the Origin CA certificate, and the local state entry; the deploy source, shared by the
+  project's environments, is kept. It works from recorded state alone, dry-runs without
+  `--confirm`, keeps state when any step fails, and refuses a Compose name shared
+  with another recorded target. New target mutation capability `destroy`.
 - Per-target hosting foundations (spec 060 Phase 1-2). A remote coordination
   program under `<remote SANDBOX_HOME>/runtime/hosting-leases` (one flock,
   owner-only files) keeps per-target leases with fencing tokens, a FIFO wait

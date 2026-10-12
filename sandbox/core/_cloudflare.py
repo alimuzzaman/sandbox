@@ -170,6 +170,10 @@ class Client:
         result = self._request("GET", f"/zones/{zone_id}/settings/ssl").get("result") or {}
         return result.get("value")
 
+    def revoke_origin_certificate(self, certificate_id: str) -> None:
+        """Revoke one Origin CA certificate Sandbox issued, by its recorded id."""
+        self._request("DELETE", f"/certificates/{urllib.parse.quote(str(certificate_id))}")
+
     def create_origin_certificate(self, csr: str, hostnames: list[str], validity_days: int = 365) -> dict:
         body = {"csr": csr, "hostnames": hostnames, "requested_validity": validity_days,
                 "request_type": "origin-ecc"}

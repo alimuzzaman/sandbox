@@ -1004,8 +1004,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, or destroy a hosted target")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy"])
     host_p.add_argument("image_action", nargs="?",
         choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
@@ -1015,6 +1015,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
+    host_p.add_argument("--target", default=None, metavar="PROJECT/ENVIRONMENT",
+                        help="host destroy: the recorded target to remove (no manifest needed)")
+    host_p.add_argument("--clear-fenced", action="store_true",
+                        help="host destroy: remove a target still fenced by a stale apply or recovery record")
     host_p.add_argument("--confirm", action="store_true",
         help="allow protected host apply or separately confirmed edge continuation")
     host_p.add_argument("--purge-edge-cache", action="store_true",

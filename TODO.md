@@ -265,6 +265,16 @@ not close the external or human gates listed below.
 
 ## P2 — protected recovery, hosting, and product gates
 
+- Host apply: keep first-adoption DNS provenance across re-applies (today the second
+  apply records Sandbox's own record as `previous`, so `host destroy` restores
+  instead of deleting it), and keep the Origin CA id when nginx reuses a certificate
+  (recorded as `id: null`, so destroy cannot revoke it). Found in the 2026-10-12
+  `host destroy` review.
+- Host destroy tests the review asked for: an interrupted destroy on a real
+  two-key namesake pair (`site-blue/sandbox` + `site/blue-sandbox`) followed by
+  apply and image activation refusing through the placeholder; a retire-delivery
+  vs destroy fence race in both lock orders; public-path v1/v2 activation,
+  rollback, recovery and containment refusing with zero effects under a destroy fence.
 - [ ] **Spec 060 coordination: tests the 2026-10-11 merge-gate review asked
   for.** No known defect behind them; they pin behaviour shipped in `0239e1e`
   (protocol 8) in `tests/test_hosting_coordination_program.py`:

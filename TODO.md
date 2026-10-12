@@ -270,6 +270,12 @@ not close the external or human gates listed below.
   instead of deleting it), and keep the Origin CA id when nginx reuses a certificate
   (recorded as `id: null`, so destroy cannot revoke it). Found in the 2026-10-12
   `host destroy` review.
+- Host destroy leaves explicitly named images (`image: xspeed-sandbox/wordpress:<env>`
+  in the project's compose file): teardown only removes `<compose-name>-*` tags, while
+  the probe counts every project-labelled image, so the target never reads "nothing to
+  remove". Seen on 7 xspeed targets on xcloud-london 2026-10-12; removed by hand with a
+  non-forced `rmi` of the labelled tags no container used. Remove labelled images no
+  container references (non-forced), and make probe and teardown agree.
 - Host destroy tests the review asked for: an interrupted destroy on a real
   two-key namesake pair (`site-blue/sandbox` + `site/blue-sandbox`) followed by
   apply and image activation refusing through the placeholder; a retire-delivery

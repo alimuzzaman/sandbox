@@ -120,6 +120,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a validated project-relative path.
 
 ### Changed
+- Remote control requests survive a control host that stops resolving: they connect
+  to the recorded `origin_ipv4` with TLS still verified for the control hostname and
+  warn, and without an origin the error names the unresolvable host (2026-10-12: the
+  `.bd` registry dropped the `asb.bd` delegation and `sb-xcloud-london.asb.bd` went
+  NXDOMAIN, failing lenzora deploy preflight with `recovery_target_identity_unavailable`).
 - The local remote-registration lock is per remote: work holding one remote no
   longer blocks registration changes or listing of another, and a busy lock
   reports its holder (pid, command, start time). Mismatch refusals name the

@@ -270,6 +270,12 @@ not close the external or human gates listed below.
   instead of deleting it), and keep the Origin CA id when nginx reuses a certificate
   (recorded as `id: null`, so destroy cannot revoke it). Found in the 2026-10-12
   `host destroy` review.
+- Control DNS fallback (`_control_urlopen`) tests the review asked for: a real-opener
+  POST keeping Host, Authorization and one Content-Length; HTTPS and HTTP redirects
+  refused with no second request; a mismatched or untrusted certificate failing before
+  any header is sent; `verify_remote` 400/405/406 vs 401 through the fallback; the DNS
+  reason visible from `remote_diagnostics` and `verify_remote`. Also give the
+  `sb doctor` MCP probe the same fallback.
 - Host destroy leaves explicitly named images (`image: xspeed-sandbox/wordpress:<env>`
   in the project's compose file): teardown only removes `<compose-name>-*` tags, while
   the probe counts every project-labelled image, so the target never reads "nothing to

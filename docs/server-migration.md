@@ -118,6 +118,15 @@ The control host must be a **DNS-only** (grey cloud) A record that points at the
 When the record is proxied, Cloudflare blocks the control client with **403, error
 1010**. An unauthenticated request to the control URL returns 401, which is expected.
 
+If the control host stops resolving (a deleted record, or a zone whose delegation lapsed
+at the registrar), control clients connect to the remote's recorded `origin_ipv4`
+instead and print a warning naming the host. TLS is still verified for the control
+hostname, so the fallback cannot reach another server. Without a recorded origin the
+error says which host failed to resolve. The fallback is one TLS hop with no proxy and
+no redirects, so the bearer token cannot follow a redirect elsewhere; it covers
+resource, diagnostics and `remote verify` requests, not the `sb doctor` MCP probe, and
+only IPv4 origins. Restore the record either way.
+
 ## Phase 3: runtime revision
 
 `sb host apply` refuses with **`remote_runtime_revision_mismatch`** whenever the local

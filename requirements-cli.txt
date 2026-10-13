@@ -1,0 +1,6 @@
+# Shared pinned Python dependencies for the Sandbox CLI and MCP server.
+PyYAML==6.0.2
+keyring==25.7.0
+SecretStorage==3.5.0; python_version >= "3.10"
+SecretStorage==3.3.3; python_version < "3.10"
+jeepney==0.9.0

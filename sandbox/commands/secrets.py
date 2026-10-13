@@ -21,7 +21,8 @@ from sandbox.secrets.models import (
 )
 
 
-ACTIONS = ("source-info", "inspect", "validate", "run", "set", "organize", "reveal", "migrate-zshrc")
+ACTIONS = ("source-info", "inspect", "validate", "use-profile", "credential-set",
+           "run", "set", "organize", "reveal", "migrate-zshrc")
 _DISPLAY_ENTRY_FIELDS = (
     "key", "state", "kind", "length_bucket", "exact_length",
     "public_prefix", "last4", "masked", "disclosed_material",
@@ -29,6 +30,9 @@ _DISPLAY_ENTRY_FIELDS = (
 _DISPLAY_SOURCE_FIELDS = (
     "source", "scope", "format", "exists", "file_type", "content_state",
     "size_bucket", "size_bytes", "broker_readable", "safety",
+    "source_type", "configured_modes", "provider_authorization_scope",
+    "sandbox_selection_policy", "credential_backend", "credential_state",
+    "reachability", "provider_state", "provider_error_code",
 )
 
 
@@ -57,6 +61,28 @@ def configure_parser(parser) -> None:
     validate.add_argument("--profile", required=True)
     validate.add_argument("--json", action="store_true")
     validate.add_argument("--project-dir", default=".")
+
+    use_profile = actions.add_parser(
+        "use-profile", help="run one registered fixed secret-use profile",
+    )
+    use_profile.add_argument("--profile", required=True)
+    use_profile.add_argument("--json", action="store_true")
+    use_profile.add_argument("--project-dir", default=".")
+
+    credential = actions.add_parser(
+        "credential-set", help="place a provider credential in the local OS credential store",
+    )
+    credential.add_argument("--source", required=True)
+    credential_input = credential.add_mutually_exclusive_group()
+    credential_input.add_argument("--stdin", action="store_true",
+                                  help="read one protected line from stdin")
+    credential_intent = credential.add_mutually_exclusive_group(required=True)
+    credential_intent.add_argument("--create-only", action="store_true",
+                                   help="create the local credential only if absent")
+    credential_intent.add_argument("--replace-only", action="store_true",
+                                   help="replace the local credential only if present")
+    credential.add_argument("--json", action="store_true")
+    credential.add_argument("--project-dir", default=".")
 
     run = actions.add_parser(
         "run", help="inject one or more secrets into one direct-argv child",
@@ -463,6 +489,17 @@ def cmd_secrets(cfg, args) -> None:
             _emit(payload, args.json)
         elif args.action == "validate":
             _emit(service.validate(args.source, args.key, args.profile), args.json)
+        elif args.action == "use-profile":
+            _emit(service.use_profile(args.profile, surface="cli"), args.json)
+        elif args.action == "credential-set":
+            intent = "create" if args.create_only else "replace"
+            value = _stdin_secret() if args.stdin else _tty_secret(
+                f"Provider credential for {args.source}: ",
+            )
+            _emit(service.set_provider_credential(
+                args.source, value, intent=intent,
+                input_channel="stdin" if args.stdin else "tty",
+            ), args.json)
         elif args.action == "run":
             command = list(args.command)
             if command and command[0] == "--":
@@ -514,11 +551,31 @@ def cmd_secrets(cfg, args) -> None:
             except OSError as exc:
                 raise SecretBrokerError("tty_required", "a controlling TTY is required for reveal") from exc
     except SecretBrokerError as exc:
+        if getattr(args, "json", False):
+            payload = redact_structure({
+                "ok": False,
+                "operation": args.action.replace("-", "_"),
+                "error": exc.as_dict(),
+            })
+            print(json.dumps(payload, sort_keys=True))
+            raise SystemExit(1) from None
         from sandbox.core import die
-        die(f"{exc.code}: {exc.message}")
+        remedy = f"; remedy: {exc.remedy}" if exc.remedy else ""
+        die(f"{exc.code}: {exc.message}{remedy}")
     except Exception:
         # Do not render, repr, or chain unknown failures. Parser and backend
         # exceptions may retain secret-bearing source buffers or stderr.
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "ok": False,
+                "operation": args.action.replace("-", "_"),
+                "error": {
+                    "code": "operation_failed",
+                    "message": "secret operation failed",
+                    "retryable": False,
+                },
+            }, sort_keys=True))
+            raise SystemExit(1) from None
         from sandbox.core import die
         die("operation_failed: secret operation failed")
 

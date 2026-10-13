@@ -17,6 +17,228 @@ from sandbox.secrets.models import SecretBrokerError, UseProfile
 from sandbox.secrets.runner import minimal_environment, run_with_secret, run_with_secrets
 from sandbox.secrets.service import SecretService
 from sandbox.secrets.sources import SourceRegistry
+from sandbox.secrets.context import build_secret_service
+
+
+class TestProviderSecretService(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.value = "SB_SYNTHETIC_PROVIDER_VALUE_8c42"
+        self.credential = "SB_SYNTHETIC_BOOTSTRAP_4a12"
+        self.order = []
+        self.provider = mock.Mock()
+        self.store = mock.Mock()
+        self.store.get.side_effect = lambda policy: self._observe("credential", self.credential)
+        self.provider.resolve_exact.side_effect = lambda policy, credential: self._observe(
+            "provider", self.value)
+        self.store.status.return_value = "present"
+        self.provider.status.return_value = {
+            "state": "available", "endpoint_reachable": True,
+            "token": self.credential, "value": self.value,
+        }
+        self.descriptor = {
+            "type": "infisical", "endpoint": "https://vault.example.invalid",
+            "projectId": "synthetic-project", "environment": "dev", "path": "/sandbox",
+            "key": "API_TOKEN", "clientId": "controller-one",
+            "mcpModes": ["source_info", "keys", "metadata", "validate", "use"],
+        }
+        self.config = {"secrets": {"sources": {"vault": self.descriptor}, "useProfiles": {
+            "fixed": {"source": "vault", "key": "API_TOKEN", "destination": "API_TOKEN",
+                      "argv": [sys.executable, "-c", "import os; print(os.environ['API_TOKEN'])"],
+                      "timeoutSeconds": 2, "mcp": True},
+        }}}
+        self.service = self.build()
+
+    def build(self, **kwargs):
+        return build_secret_service(
+            project_root=self.root, config=self.config, personal_path=self.root / "personal",
+            runtime_root=self.root / "runtime", provider_adapter=self.provider,
+            credential_store=self.store, **kwargs,
+        )
+
+    def _observe(self, phase, result):
+        events = self.events()
+        self.assertEqual(events[-1]["phase"], "intent")
+        self.order.append(phase)
+        return result
+
+    def events(self):
+        path = self.root / "runtime/secrets/audit.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def assert_value_free(self, payload):
+        rendered = repr(payload) + repr(self.events())
+        self.assertNotIn(self.value, rendered)
+        self.assertNotIn(self.credential, rendered)
+
+    def test_registration_neither_reads_files_nor_calls_provider_or_store(self):
+        with mock.patch.object(SourceRegistry, "read", side_effect=AssertionError("read")), \
+             mock.patch.object(SecretAudit, "intent", side_effect=AssertionError("audit")):
+            service = self.build()
+        self.assertEqual(service.registry.policy("vault")["projectId"], "synthetic-project")
+        self.assertEqual(self.provider.mock_calls, [])
+        self.assertEqual(self.store.mock_calls, [])
+        self.assertFalse((self.root / "runtime").exists())
+
+    def test_keys_are_registered_singleton_without_credential_or_provider_read(self):
+        payload = self.service.inspect("vault", surface="mcp")
+        self.assertEqual(payload["keys"], ["API_TOKEN"])
+        self.assertEqual(payload["count"], 1)
+        self.store.get.assert_not_called()
+        self.provider.resolve_exact.assert_not_called()
+        self.assert_value_free(payload)
+
+    def test_source_info_reports_scope_and_status_without_value_resolution(self):
+        payload = self.service.source_info("vault", surface="mcp")
+        self.assertEqual(payload["credential_state"], "present")
+        self.assertEqual(payload["reachability"], "reachable")
+        self.assertEqual(payload["provider_authorization_scope"], "configured_project")
+        self.assertEqual(payload["sandbox_selection_policy"], "exact_item")
+        self.store.get.assert_not_called()
+        self.provider.resolve_exact.assert_not_called()
+        self.assert_value_free(payload)
+
+    def test_metadata_resolves_one_exact_item_after_durable_audit_intent(self):
+        payload = self.service.inspect("vault", mode="metadata")
+        self.assertEqual(self.order, ["credential", "provider"])
+        policy = self.store.get.call_args.args[0]
+        self.assertEqual({name: policy[name] for name in self.descriptor}, self.descriptor)
+        self.provider.resolve_exact.assert_called_once_with(policy, self.credential)
+        self.assertEqual(payload["entries"][0]["key"], "API_TOKEN")
+        self.assertNotIn("exact_length", payload["entries"][0])
+        self.assertEqual([event["phase"] for event in self.events()], ["intent", "outcome"])
+        self.assert_value_free(payload)
+
+    def test_fixed_profile_child_receives_value_and_only_redacted_output_is_retained(self):
+        payload = self.service.use_profile("fixed", surface="cli")
+        self.assertEqual(payload["result"]["exit_code"], 0)
+        self.assertIn("[REDACTED]", payload["result"]["output"])
+        self.assertEqual(self.order, ["credential", "provider"])
+        self.assert_value_free(payload)
+
+    def test_provider_refusals_do_not_read_credentials_provider_or_files(self):
+        calls = (
+            ("selection_invalid", lambda: self.service.inspect("vault", keys=["OTHER_TOKEN"])),
+            ("mode_invalid", lambda: self.service.inspect("vault", keys=["API_TOKEN"], mode="masked")),
+            ("exact_length_denied", lambda: self.service.inspect(
+                "vault", keys=["API_TOKEN"], mode="metadata", exact_length=True)),
+            ("command_denied", lambda: self.service.run_many(
+                "vault", [("API_TOKEN", "API_TOKEN")], [sys.executable, "-c", "print(1)"])),
+            ("command_denied", lambda: self.service.run_session(
+                "vault", [("API_TOKEN", "API_TOKEN")], ["child"], display=lambda _: None)),
+            ("update_denied", lambda: self.service.set("vault", "API_TOKEN", "synthetic")),
+            ("reveal_denied", lambda: self.service.reveal(
+                "vault", "API_TOKEN", lambda _: self.fail("reveal"), confirmed=True)),
+            ("organize_denied", lambda: self.service.organize("vault")),
+            ("update_denied", lambda: self.service.generate("vault", "API_TOKEN", "random")),
+            ("update_denied", lambda: self.service.copy_reference("vault", "API_TOKEN", "vault", "API_TOKEN")),
+        )
+        with mock.patch.object(self.service.registry, "read", side_effect=AssertionError("read")):
+            for code, invoke in calls:
+                with self.subTest(code=code), self.assertRaises(SecretBrokerError) as raised:
+                    invoke()
+                self.assertEqual(raised.exception.code, code)
+        self.store.get.assert_not_called()
+        self.provider.resolve_exact.assert_not_called()
+        self.assertEqual(self.events(), [])
+
+    def test_credential_missing_refuses_before_provider_and_has_no_fallback(self):
+        self.store.get.side_effect = SecretBrokerError(
+            "credential_missing", "local credential is absent", remedy="Place a local credential.")
+        with mock.patch.object(self.service.registry, "read", side_effect=AssertionError("fallback")), \
+             self.assertRaises(SecretBrokerError) as raised:
+            self.service.use_profile("fixed", surface="cli")
+        self.assertEqual(raised.exception.code, "credential_missing")
+        self.assertEqual(raised.exception.remedy, "Place a local credential.")
+        self.provider.resolve_exact.assert_not_called()
+        self.assertEqual(self.events()[-1]["reason_code"], "credential_missing")
+        self.assert_value_free(raised.exception.as_dict())
+
+    def test_unrecordable_intent_precedes_all_credential_and_provider_access(self):
+        with mock.patch.object(self.service.audit, "intent", side_effect=SecretBrokerError(
+                "audit_unavailable", "audit journal unavailable")), \
+             self.assertRaises(SecretBrokerError) as raised:
+            self.service.use_profile("fixed", surface="cli")
+        self.assertEqual(raised.exception.code, "audit_unavailable")
+        self.store.get.assert_not_called()
+        self.provider.resolve_exact.assert_not_called()
+        self.assertEqual(self.events(), [])
+
+    def test_unknown_provider_error_is_bounded_and_does_not_retry(self):
+        self.provider.resolve_exact.side_effect = RuntimeError(self.value + self.credential)
+        with self.assertRaises(SecretBrokerError) as raised:
+            self.service.inspect("vault", mode="metadata")
+        self.assertEqual(raised.exception.code, "operation_failed")
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+        self.store.get.assert_called_once()
+        self.provider.resolve_exact.assert_called_once()
+        self.assert_value_free(raised.exception.as_dict())
+
+    def test_cross_project_scope_refuses_before_adapters_or_audit(self):
+        with self.assertRaises(SecretBrokerError) as raised:
+            self.build(project_scope=self.root / "other-project")
+        self.assertEqual(raised.exception.code, "source_scope_denied")
+        self.assertEqual(self.provider.mock_calls, [])
+        self.assertEqual(self.store.mock_calls, [])
+        self.assertEqual(self.events(), [])
+
+    def test_credential_placement_is_local_explicit_audited_and_value_free(self):
+        for intent in ("create", "replace"):
+            with self.subTest(intent=intent):
+                self.store.put.side_effect = lambda *args, **kwargs: self._observe("store", None)
+                payload = self.service.set_provider_credential(
+                    "vault", self.credential, intent=intent, input_channel="stdin")
+                self.assertEqual(payload["action"], intent)
+                self.assertEqual(self.events()[-1]["input_channel"], "stdin")
+                self.assert_value_free(payload)
+        self.provider.resolve_exact.assert_not_called()
+        for kwargs, code in (({"intent": "either"}, "credential_intent_required"),
+                             ({"intent": "create", "surface": "mcp"}, "credential_write_denied")):
+            with self.subTest(kwargs=kwargs), self.assertRaises(SecretBrokerError) as raised:
+                self.service.set_provider_credential("vault", self.credential, **kwargs)
+            self.assertEqual(raised.exception.code, code)
+
+    def test_file_only_context_never_imports_provider_or_keyring_backends(self):
+        import builtins
+
+        real_import = builtins.__import__
+        def guarded_import(name, *args, **kwargs):
+            if any(part in name for part in ("providers", "credentials", "keyring", "secretstorage")):
+                raise AssertionError("file context imported optional backend")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=guarded_import):
+            service = build_secret_service(
+                project_root=self.root, config={"secrets": {"sources": {
+                    "file": {"type": "file", "path": ".env.synthetic"},
+                }}}, personal_path=self.root / "personal", runtime_root=self.root / "file-runtime")
+        self.assertIsNone(service.provider_adapter)
+        self.assertIsNone(service.credential_store)
+        self.assertFalse((self.root / "file-runtime").exists())
+
+    def test_file_source_operations_remain_identical_with_provider_adapters_present(self):
+        source = self.root / ".env.synthetic"
+        source.write_text("API_TOKEN=SB_SYNTHETIC_FILE_TOKEN_92ad\n")
+        source.chmod(0o600)
+        descriptor = {"path": source.name, "mcpModes": ["keys", "metadata", "masked"]}
+        results = []
+        for explicit in (False, True):
+            item = {**descriptor, **({"type": "file"} if explicit else {})}
+            registry = SourceRegistry(self.root, {"file": item}, personal_path=self.root / "personal")
+            service = SecretService(registry, SecretAudit(self.root / "file-audit.jsonl"),
+                                    revision_key_path=self.root / "file-revision.key",
+                                    provider_adapter=self.provider, credential_store=self.store)
+            outputs = [service.inspect("file"), service.inspect("file", mode="metadata"),
+                       service.inspect("file", mode="masked", keys=["API_TOKEN"]),
+                       service.source_info("file")]
+            results.append([{k: v for k, v in payload.items() if k != "correlation_id"}
+                            for payload in outputs])
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(self.provider.mock_calls, [])
+        self.assertEqual(self.store.mock_calls, [])
 
 
 class TestSecretSources(unittest.TestCase):

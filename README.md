@@ -427,7 +427,14 @@ without you switching tabs.
 
 Use the registered-source secret broker to list key names or structured key
 paths across dotenv, JSON, INI, properties, TOML, YAML, XML, PEM, opaque-token,
-and binary-container sources. Before parsing, `secrets source-info` can report
+binary-container, and opt-in Infisical sources. An Infisical source names one
+exact project/environment/path/key, keeps each controller's distinct bootstrap
+credential in macOS Keychain or an existing unlocked Linux Secret Service, and
+permits only exact inspection/validation and a registered fixed child. Tailscale
+provides the private route; verified HTTPS and Infisical identity still provide
+endpoint authentication and authorization. Sandbox never falls back to a public
+endpoint, plaintext credential, shared controller credential, or general vault
+browsing. Before parsing, `secrets source-info` can report
 whether the registered file exists, whether it is empty, its type, a size
 bucket, and whether the broker can safely open it—without reading its contents
 or returning its path. It can validate or apply a fixed mask to an

@@ -56,6 +56,81 @@ owner-controlled, and inaccessible to group and other users. The built-in
 `personal` source cannot be overridden by project config and grants no MCP mode
 by default.
 
+### Infisical sources over Tailscale
+
+An opt-in `type: "infisical"` source uses an operator-provided community
+self-hosted Infisical service as the shared source of truth:
+
+```jsonc
+{
+  "secrets": {
+    "sources": {
+      "deploy-api": {
+        "type": "infisical",
+        "endpoint": "https://infisical.private.example",
+        "projectId": "project-id-placeholder",
+        "environment": "dev",
+        "path": "/",
+        "key": "API_TOKEN",
+        "clientId": "client-id-placeholder",
+        "timeoutSeconds": 10,
+        "mcpModes": ["source_info", "keys", "metadata", "validate", "use"]
+      }
+    }
+  }
+}
+```
+
+These are placeholders and non-secret metadata only. Registration has no field
+for a client secret, access token, or item value; unknown fields fail closed.
+Do not disguise secret material as an endpoint, project ID, environment, path,
+key, client ID, label, or query attribute. A same-user operator can edit the
+authoritative config or bypass Sandbox and remains inside that trust boundary.
+
+Provision one Infisical identity with the built-in Viewer role per Sandbox
+project. The provider role covers the whole provider project; the narrower
+environment/path/key restriction is Sandbox selection policy, not provider
+RBAC. Give Linux and macOS distinct Universal Auth client secrets so either
+controller can be revoked independently. Store each through the protected local
+credential action documented by `./sb secrets --help`: macOS uses the approved
+Keychain backend, while Linux requires an already-running, unlocked user Secret
+Service. Sandbox never discovers alternate keyring backends, starts a daemon,
+unlocks a store, copies credentials, or administers Infisical identities/roles.
+
+Place the controller-local bootstrap credential through a hidden controlling-TTY
+prompt. Intent is mandatory so an existing credential is never silently replaced:
+
+```bash
+./sb secrets credential-set --source deploy-api --create-only \
+  --project-dir PROJECT_DIR
+```
+
+Use `--replace-only` for an intentional replacement. A trusted producer may use
+`--stdin`, subject to the same single-line 64 KiB bound; never pass the value in
+argv or an environment variable. Consume the registered value only through its
+fixed profile:
+
+```bash
+./sb secrets use-profile --profile PROFILE_NAME --project-dir PROJECT_DIR
+```
+
+The endpoint must be operator-provided over the Tailscale/private route with a
+certificate trusted by the OS. Sandbox verifies HTTPS, refuses redirects,
+ignores ambient proxy settings, and never tries another or public endpoint.
+Tailscale reachability alone grants nothing: the local credential and Infisical
+role are still required. Deployment, upgrades, backup, restore, migration,
+rotation, and disaster recovery remain operator responsibilities.
+
+For provider sources, `keys` returns only the configured singleton name without
+network access. Source status may probe availability but never logs in or reads
+a value. Because macOS Keychain has no value-free existence query, macOS reports
+credential presence as `unknown` until an authorized operation uses it. Metadata,
+validation, and fixed-profile use perform one bounded login
+and one exact item read with reference expansion/imports disabled; the access
+token is not cached across operations. Provider sources refuse mask, reveal,
+arbitrary run/session, set, organize, copy, generation, list, search, wildcard,
+export, write, delete, rotate, migration, and identity administration.
+
 Enabling the MCP secrets tool group does not grant source access. Each source
 must separately grant the required `mcpModes`; a use profile must also set
 `mcp: true`. Keep the grant list minimal. The secrets group is absent from all

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .adapter_manifest import source_kind
 from .models import MAX_SOURCE_BYTES, SafeSource, SecretBrokerError, SourcePolicy
 
 
@@ -58,15 +60,35 @@ class SourceRegistry:
             raise SecretBrokerError("source_scope_denied", "project is outside the MCP secret scope")
         self._sources = dict(sources or {})
 
-    def policy(self, alias: str) -> SourcePolicy:
+    @staticmethod
+    def _field(value: object, name: str, default=None):
+        if isinstance(value, Mapping):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    @classmethod
+    def _kind(cls, value: object) -> str:
+        return source_kind(value)
+
+    def policy(self, alias: str) -> Any:
         if alias == "personal":
             return SourcePolicy(
                 alias="personal", scope="personal", path=self.personal_path, format="dotenv",
             )
         item = self._sources.get(alias)
-        if not isinstance(item, dict):
+        if not isinstance(item, Mapping) and not hasattr(item, "kind") and not hasattr(item, "type"):
             raise SecretBrokerError("source_unknown", "secret source alias is not registered")
-        relative = item.get("path")
+        # Provider policies are immutable, non-file registrations. Return the
+        # validated descriptor as-is so the injected provider adapter receives
+        # its typed policy without a second parsing layer.
+        if self._kind(item) != "file":
+            if isinstance(item, Mapping):
+                descriptor = dict(item)
+                descriptor.setdefault("alias", alias)
+                descriptor.setdefault("kind", self._kind(item))
+                return descriptor
+            return item
+        relative = self._field(item, "path")
         if not isinstance(relative, str):
             raise SecretBrokerError("source_unknown", "secret source alias is invalid")
         path = self.project_root / relative
@@ -74,12 +96,12 @@ class SourceRegistry:
             path.resolve(strict=False).relative_to(self.project_root)
         except (OSError, ValueError) as exc:
             raise SecretBrokerError("source_unsafe", "secret source escapes the project") from exc
-        modes = item.get("mcp_modes", item.get("mcpModes", ()))
+        modes = self._field(item, "mcp_modes", self._field(item, "mcpModes", ()))
         return SourcePolicy(
             alias=alias,
             scope="project",
             path=path,
-            format=item.get("format", "dotenv"),
+            format=self._field(item, "format", "dotenv"),
             mcp_modes=frozenset(modes or ()),
         )
 
@@ -180,6 +202,10 @@ class SourceRegistry:
 
     def read(self, alias: str) -> SafeSource:
         policy = self.policy(alias)
+        if self._kind(policy) != "file":
+            raise SecretBrokerError(
+                "provider_unsupported", "provider sources cannot be read as local files",
+            )
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW

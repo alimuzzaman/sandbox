@@ -36,6 +36,7 @@ of WordPress catalogs. `SANDBOX_MCP_GROUPS` remains an explicit operator overrid
 | `activate_plugin` / `deactivate_plugin` | toggle plugins by slug |
 | `import_content` | import a WXR XML from `runtime/seeds/` |
 | `resource_cleanup_plan` / `resource_cleanup_apply` | review a legacy cache/stale scope or manually plan/apply one `safe`, `tmp`, or `all` reclaim tier; tier application requires `confirm: true` |
+| `secret_source_info` / `secret_inspect` / `secret_validate` / `secret_use_profile` | inspect an authorized registered source or run one fixed profile; never reveal, browse, mutate, or accept provider selectors |
 
 The resource tools require exactly one selector: `scope` (`cache` or `stale`)
 for the legacy planner, or `tier` (`safe`, `tmp`, or `all`) for tiered
@@ -59,7 +60,9 @@ make mcp-install
 ```
 
 This creates `mcp/wp-server/.venv` and installs the pinned MCP 1.25.0 SDK plus
-`httpx`. The pin preserves the `FastMCP.streamable_http_app()` transport used by
+the shared pinned credential-store dependencies. Provider support uses the same
+broker as the CLI; no Infisical SDK or general provider CLI is installed. The
+MCP pin preserves the `FastMCP.streamable_http_app()` transport used by
 remote VPS hosting; do not upgrade it independently of `server.py` and its
 fresh-venv transport test.
 

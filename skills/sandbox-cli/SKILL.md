@@ -18,6 +18,23 @@ the selected workspace, it reports that state and points to
 `sb instances --remote NAME --json` for the remote inventory. It does not
 create or register an instance.
 
+## Shared secrets across Linux and macOS
+
+Use only `sb secrets`. An opt-in Infisical source may reach an operator-provided
+self-hosted origin over Tailscale, but Tailscale is only the private route:
+verified HTTPS authenticates the endpoint, Infisical authenticates the
+controller credential, and the registered exact selector plus fixed profile
+constrain Sandbox. Each project uses a distinct Viewer identity; each controller
+keeps its own credential in macOS Keychain or an existing unlocked Linux Secret
+Service.
+
+Never place provider credentials in config, argv, environment, output, feedback,
+or chat. Never browse, reveal, export, mutate, migrate, or administer Infisical
+through Sandbox, and never start or unlock a Linux keyring service. On keyring,
+route, TLS, provider, or authorization failure, stop on the broker's bounded
+result; do not use a plaintext, public, shared-credential, or raw-CLI fallback.
+See `docs/secret-inspection.md`.
+
 ## Host storage monitoring and cleanup
 
 Use the global `resources` command before raw host, Docker, or filesystem

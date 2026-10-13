@@ -856,15 +856,12 @@ class TestResolutionGate(unittest.TestCase):
             calls = []
 
             with mock.patch.object(config, "CLI_VENV", incomplete), \
-                    mock.patch.dict(sys.modules, {"yaml": None}), \
                     mock.patch.object(config.subprocess, "check_call",
-                                      side_effect=lambda argv: calls.append(argv)), \
-                    mock.patch.object(config.sys, "prefix", str(incomplete)):
-                config.ensure_pyyaml()
+                                      side_effect=lambda argv: calls.append(argv)):
+                config._create_cli_venv()
 
             self.assertFalse(incomplete.exists())
             self.assertEqual(calls[0][1:3], ["-m", "venv"])
-            self.assertEqual(calls[1][1:3], ["install", "--quiet"])
 
     def test_global_label_before_subcommand_is_preserved(self):
         import sandbox.cli as cli
@@ -902,6 +899,20 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("PyYAML", err.getvalue())
         self.assertEqual(raised.exception.code, 1)
 
+    def test_cli_shaped_argv_does_not_replace_an_embedded_process(self):
+        import sandbox.core._config as config
+
+        with tempfile.TemporaryDirectory() as directory:
+            entry = Path(directory) / "sb"
+            entry.write_text("#!/bin/sh\n")
+            host = SimpleNamespace(__file__=str(Path(directory) / "host.py"))
+            with mock.patch.object(config, "ENTRY", entry), \
+                    mock.patch.object(config.sys, "argv", [str(entry), "status"]), \
+                    mock.patch.dict(config.sys.modules, {"__main__": host}), \
+                    mock.patch.object(config.os, "execv") as execv:
+                self.assertFalse(config._is_cli_process())
+            execv.assert_not_called()
+
     def test_ensure_pyyaml_still_replays_a_genuine_cli_invocation(self):
         import sandbox.core._config as config
 
@@ -914,14 +925,19 @@ class TestResolutionGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             entry = Path(directory) / "sb"
             entry.write_text("#!/bin/sh\n")
+            venv = Path(directory) / ".cli-venv"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").write_text("#!/bin/sh\n")
+            cli_main = SimpleNamespace(__file__=str(entry))
             with mock.patch.dict(sys.modules, {"yaml": None}), \
                     mock.patch.object(config.sys, "prefix", "/nonexistent-prefix"), \
                     mock.patch.object(config.sys, "argv",
                                       [str(entry), "status", "--json"]), \
+                    mock.patch.dict(config.sys.modules, {"__main__": cli_main}), \
                     mock.patch.object(config.os, "execv", side_effect=_fake_execv), \
                     mock.patch.object(config, "ENTRY", entry), \
-                    mock.patch.object(config, "CLI_VENV",
-                                      Path(directory) / ".cli-venv"), \
+                    mock.patch.object(config, "CLI_VENV", venv), \
+                    mock.patch.object(config, "_ensure_cli_requirements"), \
                     mock.patch.object(config, "die",
                                       lambda *a, **k: (_ for _ in ()).throw(
                                           AssertionError("must exec, not die"))):
@@ -932,6 +948,26 @@ class TestResolutionGate(unittest.TestCase):
         path, argv = replayed[0]
         self.assertTrue(path.endswith("python"))
         self.assertEqual(argv[1:], [str(entry), "status", "--json"])
+
+    def test_failed_cli_venv_creation_removes_partial_directory(self):
+        import sandbox.core._config as config
+
+        with tempfile.TemporaryDirectory() as directory:
+            venv = Path(directory) / ".cli-venv"
+
+            def fail_after_partial_creation(argv):
+                (venv / "bin").mkdir(parents=True)
+                (venv / "bin" / "python").write_text("partial")
+                raise subprocess.CalledProcessError(1, argv)
+
+            with mock.patch.object(config, "CLI_VENV", venv), \
+                    mock.patch.object(config.subprocess, "check_call",
+                                      side_effect=fail_after_partial_creation), \
+                    mock.patch.object(config, "die", side_effect=SystemExit(1)), \
+                    self.assertRaises(SystemExit):
+                config._create_cli_venv()
+
+            self.assertFalse(venv.exists())
 
     def test_restore_help_exposes_explicit_noninteractive_confirmation(self):
         r = run_sb("restore", "--help")

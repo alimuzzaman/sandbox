@@ -13,6 +13,42 @@ MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /
 
 There is **no central catalog**; each plugin self-describes here.
 
+## Registered secret sources
+
+`secrets.sources` is a strict opt-in catalog. Existing descriptors without
+`type` remain file sources; `type: "file"` is equivalent. An Infisical source
+registers one exact item:
+
+```jsonc
+{
+  "secrets": {"sources": {"deploy-api": {
+    "type": "infisical",
+    "endpoint": "https://infisical.private.example",
+    "projectId": "project-id-placeholder",
+    "environment": "dev",
+    "path": "/",
+    "key": "API_TOKEN",
+    "clientId": "client-id-placeholder",
+    "timeoutSeconds": 10,
+    "mcpModes": ["source_info", "keys", "metadata", "validate", "use"]
+  }}}
+}
+```
+
+Every field is non-secret. The endpoint is an HTTPS origin only; userinfo,
+query, fragment, redirects, alternate origins, and public fallback are refused.
+Selectors cannot be overridden by CLI or MCP. `mcpModes` is the automation
+ceiling; provider sources have no mask/reveal, general listing, arbitrary child,
+write, delete, rotation, migration, or provider-admin operation.
+
+The Universal Auth client secret lives in the current controller's approved OS
+credential store, with a distinct independently revocable credential on each
+Linux/macOS controller. Linux requires an existing unlocked Secret Service;
+Sandbox never starts or unlocks it. Registration is local validation only.
+Provider role, capacity, project exclusivity, and the Tailscale-private route
+are operator-provisioned and require the separate live acceptance in
+`docs/secret-inspection.md`.
+
 ## Optional immutable OCI project intent
 
 Feature 049 adds one kind-neutral, untrusted project channel. It applies to both

@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from dataclasses import replace
 import hashlib
+import json
 import sys
 import time
 from types import ModuleType
@@ -63,32 +64,53 @@ class CredentialTests(unittest.TestCase):
 
 class CredentialLocatorTests(CredentialTests):
     def test_locator_is_versioned_stable_and_shared_across_store_adapters(self):
-        payload = b'{"client":"fixture-client","project":"fixture-project","source":"fixture-provider","version":1}'
-        expected_account = "v1-" + hashlib.sha256(payload).hexdigest()
+        source_payload = json.dumps({
+            "client": "fixture-client", "endpoint": "https://fixture.invalid",
+            "environment": "development", "key": "FIXTURE_KEY", "mcp_modes": [],
+            "path": "/fixture", "project": "fixture-project", "timeout": 10,
+        }, sort_keys=True, separators=(",", ":")).encode("ascii")
+        authority = "a1-" + hashlib.sha256(source_payload).hexdigest()
+        payload = json.dumps({
+            "authority": authority, "client": "fixture-client",
+            "endpoint": "https://fixture.invalid", "project": "fixture-project",
+            "source": "fixture-provider", "version": 2,
+        }, sort_keys=True, separators=(",", ":")).encode("ascii")
+        expected_account = "v2-" + hashlib.sha256(payload).hexdigest()
         locator = locator_for_policy(POLICY)
         self.assertEqual(locator.service, "sandbox.secret-manager.v1")
         self.assertEqual(locator.account, expected_account)
         self.assertEqual(locator, locator_for_policy({
-            "alias": POLICY.alias, "projectId": POLICY.project_id, "clientId": POLICY.client_id,
+            "alias": POLICY.alias, "endpoint": POLICY.endpoint,
+            "projectId": POLICY.project_id, "clientId": POLICY.client_id,
+            "environment": POLICY.environment, "path": POLICY.path, "key": POLICY.key,
+            "mcpModes": [], "timeoutSeconds": POLICY.timeout_seconds,
         }))
         self.assertEqual(locator, locator_for_policy({
-            "alias": POLICY.alias, "project_id": POLICY.project_id, "client_id": POLICY.client_id,
+            "alias": POLICY.alias, "endpoint": POLICY.endpoint,
+            "project_id": POLICY.project_id, "client_id": POLICY.client_id,
+            "environment": POLICY.environment, "path": POLICY.path, "key": POLICY.key,
+            "mcp_modes": (), "timeout_seconds": POLICY.timeout_seconds,
         }))
         self.assertEqual(MacOSKeychainCredentialStore().get(POLICY).locator, locator)
         self.assertEqual(LinuxSecretServiceCredentialStore().get(POLICY).locator, locator)
 
-    def test_only_source_project_and_client_identity_change_locator(self):
+    def test_every_source_authority_field_changes_locator(self):
         locator = locator_for_policy(POLICY)
-        for field in ("alias", "project_id", "client_id"):
+        changes = {
+            "alias": "other", "endpoint": "https://other.invalid",
+            "project_id": "other", "client_id": "other", "environment": "production",
+            "path": "/other", "key": "OTHER_KEY", "timeout_seconds": 20,
+            "mcp_modes": frozenset({"use"}),
+        }
+        for field, value in changes.items():
             with self.subTest(field=field):
-                self.assertNotEqual(locator, locator_for_policy(replace(POLICY, **{field: "other"})))
+                self.assertNotEqual(locator, locator_for_policy(replace(POLICY, **{field: value})))
         self.assertEqual(locator, locator_for_policy(replace(
-            POLICY, endpoint="https://other.invalid", environment="production", path="/other",
-            key="OTHER_KEY", timeout_seconds=20, mcp_modes=frozenset({"use"}),
+            POLICY, endpoint="HTTPS://FIXTURE.INVALID:443/",
         )))
 
     def test_incomplete_locator_identity_fails_before_store_access(self):
-        for field in ("alias", "project_id", "client_id"):
+        for field in ("alias", "endpoint", "project_id", "client_id"):
             for value in ("", None, 12):
                 with self.subTest(field=field, value=value):
                     self.assert_code("credential_store_failed", lambda: locator_for_policy(

@@ -8,10 +8,12 @@ import socket
 import ssl
 import urllib.error
 import urllib.parse
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
 from ..models import SecretBrokerError
+from ..provider_identity import canonical_https_origin
 from .base import (
     CapabilityStatus,
     CredentialHandle,
@@ -101,29 +103,10 @@ def _string_field(value: object, *, max_bytes: int, allow_empty: bool = False) -
 
 def _origin(endpoint: object) -> str:
     endpoint = _string_field(endpoint, max_bytes=2_048)
-    invalid_url = False
-    parsed = None
-    port = None
     try:
-        parsed = urllib.parse.urlsplit(endpoint)
-        port = parsed.port
+        return canonical_https_origin(endpoint)
     except ValueError:
-        invalid_url = True
-    if invalid_url or parsed is None:
         raise ProviderError("provider_unsupported")
-    if (
-        parsed.scheme.lower() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-        or (parsed.netloc.endswith(":") and port is None)
-        or (port is not None and not 1 <= port <= 65_535)
-    ):
-        raise ProviderError("provider_unsupported")
-    return urllib.parse.urlunsplit(("https", parsed.netloc, "", "", ""))
 
 
 def _normalized_policy(descriptor: object) -> tuple[ProviderPolicy, str]:
@@ -293,6 +276,12 @@ def _parse_exact_item(response: HttpResponse, policy: ProviderPolicy) -> bytes:
     value = record.get("secretValue")
     if not isinstance(value, str):
         raise ProviderError("response_invalid")
+    if any(unicodedata.category(char) in {"Cc", "Cf"} and char not in "\t\n\r"
+           for char in value):
+        # Public output filtering removes these code points. Accepting them in
+        # an exact redaction needle could therefore expose the transformed
+        # value. Fail closed at the provider boundary.
+        raise ProviderError("response_invalid")
     encoded: bytes | None = None
     invalid_encoding = False
     try:
@@ -341,12 +330,14 @@ class InfisicalProvider:
     def __init__(self, transport: ProviderTransport | None = None) -> None:
         self._transport = transport or BoundedHTTPTransport()
 
-    def status(self, descriptor: object) -> CapabilityStatus:
+    def status(self, descriptor: object, *, timeout_seconds: float | None = None) -> CapabilityStatus:
         """Check unauthenticated availability only; never inspect credentials or values."""
 
         try:
             policy, origin = _normalized_policy(descriptor)
-            deadline = Deadline(policy.timeout_seconds)
+            deadline = Deadline(
+                policy.timeout_seconds if timeout_seconds is None else timeout_seconds,
+            )
             response = _safe_call(
                 lambda: self._transport.request(
                     "GET",

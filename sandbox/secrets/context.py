@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .adapter_manifest import source_kind
+from .authority import bind_provider_authorities
 from .audit import SecretAudit
 from .models import UseProfile
 from .service import SecretService
@@ -14,9 +15,13 @@ def build_secret_service(*, project_root, config, personal_path, runtime_root,
                          project_scope=None, provider_adapter=None,
                          credential_store=None) -> SecretService:
     secret_config = (config or {}).get("secrets", {})
-    sources = secret_config.get("sources", {})
+    raw_sources = secret_config.get("sources", {})
+    raw_profiles = secret_config.get("useProfiles", {})
+    sources = bind_provider_authorities(
+        raw_sources, raw_profiles, project_root=project_root,
+    )
     profiles = {}
-    for name, item in secret_config.get("useProfiles", {}).items():
+    for name, item in raw_profiles.items():
         profiles[name] = UseProfile(
             name=name, source=item["source"], key=item["key"], argv=tuple(item["argv"]),
             destination=item["destination"], timeout_seconds=item.get("timeoutSeconds", 300),
@@ -41,6 +46,9 @@ def build_secret_service(*, project_root, config, personal_path, runtime_root,
                 try:
                     from .credentials.manifest import create_credential_store
                     credential_store = create_credential_store()
+                    prepare = getattr(credential_store, "prepare", None)
+                    if callable(prepare):
+                        prepare()
                 except (ImportError, RuntimeError):
                     credential_store = None
     return SecretService(

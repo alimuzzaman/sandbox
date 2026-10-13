@@ -23,8 +23,8 @@ secrets:
     deploy-api-check:
       source: deploy-api
       key: API_TOKEN
-      command: [python3, tools/check_api.py]
-      env: DEPLOY_API_TOKEN
+      argv: [python3, tools/check_api.py]
+      destination: DEPLOY_API_TOKEN
       timeoutSeconds: 30
 ```
 
@@ -62,13 +62,21 @@ All example identifiers are placeholders, not working credentials.
 
 ## Credential locator
 
-The credential-store service name is a fixed Sandbox constant. The account name is derived
-from a versioned digest of stable non-secret source/project/client identity. It never embeds
-the provider secret, item value, endpoint query data, or user-supplied display label.
+The credential-store service name is a fixed Sandbox constant. The version-2 account name is
+derived from a digest of the canonical project root, source alias, canonical endpoint, exact selector, client identity,
+MCP modes, timeout, and every fixed use profile that consumes the source. It never embeds the
+provider secret, item value, endpoint query data, or user-supplied display label. Changing any
+bound authority makes the prior item unreachable and requires explicit placement after review;
+Sandbox does not read or auto-migrate version-1 items. After authority re-approval, the
+operator rotates the provider client secret and removes obsolete Sandbox entries through
+the approved native credential-store UI; agent surfaces never list or delete them.
 
 Credential placement requires a TTY-hidden value or an equivalently protected input
 channel plus explicit create/replace intent. It does not modify provider state. No
 credential value or backend object identifier appears in JSON or text output.
+All real provider credential reads/status, DNS, and HTTPS work runs in one disposable helper process under
+the registered total deadline. Dependency preparation finishes before the audited operation;
+the helper never installs packages or starts/unlocks a credential service.
 
 Provider identities and credentials are provisioned outside Sandbox. A configured
 `clientId` and a present local credential are prerequisites, not proof of provider role,

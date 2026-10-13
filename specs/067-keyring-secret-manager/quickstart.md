@@ -61,6 +61,22 @@ the final-suite gate.
 These observations are local synthetic evidence only. They do not establish Infisical,
 Tailscale, Linux Secret Service, or macOS Keychain behavior.
 
+### Hardening observation (2026-10-14)
+
+After authority binding and process isolation were added, an isolated supported CLI
+`secrets inspect --mode keys --json` run returned only the configured synthetic singleton
+in 0.915 seconds. It did not contact an OS credential store or provider endpoint.
+
+Focused gates passed 239 tests across `tests.test_secret_config`,
+`tests.test_secret_credentials`, `tests.test_secret_infisical`,
+`tests.test_secret_provider_broker`, `tests.test_secret_service`,
+`tests.test_secret_session`, `tests.test_secret_commands`, and
+`tests.test_secret_mcp`. The slowest case was the synthetic unreachable-group cleanup at
+4.024 seconds; no focused test reached five seconds. The first observation of that case was
+5.537 seconds under the old session cleanup bound, so the bound was reduced and the module
+was rerun successfully. The repository-wide suite was not repeated because the one allowed
+attempt described above had already been consumed.
+
 ## 2. Separately authorized provider acceptance
 
 Prerequisites supplied by the operator:

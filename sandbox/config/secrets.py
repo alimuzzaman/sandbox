@@ -6,9 +6,9 @@ from collections.abc import Mapping
 import copy
 from pathlib import Path, PurePosixPath
 import re
-from urllib.parse import urlsplit
 
 from sandbox.secrets.formats import SUPPORTED_FORMATS
+from sandbox.secrets.provider_identity import canonical_https_origin
 
 
 _SAFE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -143,33 +143,10 @@ def _provider_metadata(value: object, label: str, pattern: re.Pattern[str]) -> s
 
 
 def _provider_endpoint(value: object) -> str:
-    if (not isinstance(value, str) or not value or len(value) > 2048
-            or any(ord(char) <= 32 or ord(char) == 127 for char in value)
-            or "\\" in value):
-        raise ValueError("Infisical endpoint must be a canonical HTTPS origin")
     try:
-        parsed = urlsplit(value)
-        port = parsed.port
+        return canonical_https_origin(value)
     except ValueError:
         raise ValueError("Infisical endpoint must be a canonical HTTPS origin") from None
-    if (parsed.scheme.lower() != "https" or not parsed.netloc or parsed.username is not None
-            or parsed.password is not None or parsed.path not in ("", "/")
-            or parsed.query or parsed.fragment or "%" in parsed.netloc
-            or parsed.netloc.endswith(":")):
-        raise ValueError("Infisical endpoint must be a canonical HTTPS origin")
-    hostname = parsed.hostname
-    if not hostname or hostname.endswith("."):
-        raise ValueError("Infisical endpoint must be a canonical HTTPS origin")
-    try:
-        host = hostname.encode("idna").decode("ascii").lower()
-    except UnicodeError:
-        raise ValueError("Infisical endpoint must be a canonical HTTPS origin") from None
-    if not re.fullmatch(r"[a-z0-9.-]+", host):
-        raise ValueError("Infisical endpoint must be a canonical HTTPS origin")
-    if ":" in host:
-        host = f"[{host}]"
-    authority = host if port in (None, 443) else f"{host}:{port}"
-    return f"https://{authority}"
 
 
 def _provider_path(value: object) -> str:

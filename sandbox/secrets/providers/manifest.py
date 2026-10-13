@@ -17,8 +17,8 @@ class ProviderAdapterSpec:
 PROVIDER_MANIFEST_VERSION = 1
 PROVIDER_ADAPTERS: dict[str, ProviderAdapterSpec] = {
     "infisical": ProviderAdapterSpec(
-        module="sandbox.secrets.providers.infisical",
-        symbol="InfisicalProvider",
+        module="sandbox.secrets.providers.broker",
+        symbol="BoundedProviderBroker",
     ),
 }
 

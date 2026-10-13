@@ -14,6 +14,7 @@ from sandbox.secrets.models import (
     InfisicalSourcePolicy,
     SecretBrokerError,
 )
+from sandbox.secrets.provider_identity import canonical_https_origin
 
 
 CREDENTIAL_SERVICE = "sandbox.secret-manager.v1"
@@ -40,17 +41,59 @@ def _policy_field(policy: object, attribute: str, config_key: str) -> object:
 
 
 def locator_for_policy(policy: InfisicalSourcePolicy | Mapping[str, object] | object) -> CredentialLocator:
-    """Derive one stable locator from the source/project/client identity only."""
+    """Derive a v2 locator bound to endpoint and complete config authority.
+
+    There is intentionally no fallback to the old v1 locator.  Reusing it after
+    an endpoint or profile change would turn migration into the exfiltration
+    path this binding is meant to close.
+    """
     alias = _policy_field(policy, "alias", "alias")
+    endpoint = _policy_field(policy, "endpoint", "endpoint")
     project_id = _policy_field(policy, "project_id", "projectId")
     client_id = _policy_field(policy, "client_id", "clientId")
-    if any(not isinstance(item, str) or not item for item in (alias, project_id, client_id)):
+    if any(not isinstance(item, str) or not item for item in (alias, endpoint, project_id, client_id)):
+        raise CredentialStoreError("credential_store_failed")
+    try:
+        endpoint = canonical_https_origin(endpoint)
+    except ValueError:
+        raise CredentialStoreError("credential_store_failed") from None
+    authority = _policy_field(policy, "authority_digest", "authorityDigest")
+    if authority is None:
+        # Typed policies used outside the composition root still bind every
+        # source selector. Production descriptors carry a stronger digest that
+        # also covers MCP grants and fixed profiles.
+        source_payload = {
+            "endpoint": endpoint,
+            "project": project_id,
+            "environment": _policy_field(policy, "environment", "environment"),
+            "path": _policy_field(policy, "path", "path"),
+            "key": _policy_field(policy, "key", "key"),
+            "client": client_id,
+            "mcp_modes": sorted(_policy_field(policy, "mcp_modes", "mcpModes") or ()),
+            "timeout": _policy_field(policy, "timeout_seconds", "timeoutSeconds"),
+        }
+        try:
+            encoded_source = json.dumps(
+                source_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+            ).encode("ascii")
+        except (TypeError, UnicodeEncodeError):
+            raise CredentialStoreError("credential_store_failed") from None
+        authority = "a1-" + hashlib.sha256(encoded_source).hexdigest()
+    if (
+        not isinstance(authority, str)
+        or len(authority) != 67
+        or not authority.startswith("a1-")
+        or any(char not in "0123456789abcdef" for char in authority[3:])
+    ):
         raise CredentialStoreError("credential_store_failed")
     payload = json.dumps(
-        {"version": 1, "source": alias, "project": project_id, "client": client_id},
+        {
+            "version": 2, "source": alias, "endpoint": endpoint,
+            "project": project_id, "client": client_id, "authority": authority,
+        },
         ensure_ascii=True, sort_keys=True, separators=(",", ":"),
     ).encode("ascii")
-    account = "v1-" + hashlib.sha256(payload).hexdigest()
+    account = "v2-" + hashlib.sha256(payload).hexdigest()
     return CredentialLocator(service=CREDENTIAL_SERVICE, account=account)
 
 

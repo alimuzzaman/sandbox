@@ -23,8 +23,10 @@ _COLLECTION_PATH = "/org/freedesktop/secrets/aliases/default"
 class LinuxSecretServiceCredentialStore:
     """Use only the current session's already-running Secret Service."""
 
-    @staticmethod
-    def _modules():
+    def __init__(self, *, bootstrap_dependencies: bool = True) -> None:
+        self._bootstrap_dependencies = bootstrap_dependencies
+
+    def _modules(self):
         if not sys.platform.startswith("linux"):
             raise CredentialStoreError("credential_backend_unavailable")
         try:
@@ -39,6 +41,8 @@ class LinuxSecretServiceCredentialStore:
             return (secretstorage, message_bus, Proxy, ItemNotFoundException,
                     LockedException, SecretServiceNotAvailableException)
         except ImportError:
+            if not self._bootstrap_dependencies:
+                raise CredentialStoreError("credential_backend_unavailable") from None
             from sandbox.core._config import bootstrap_cli_dependencies
             if bootstrap_cli_dependencies():
                 try:
@@ -57,6 +61,10 @@ class LinuxSecretServiceCredentialStore:
             raise CredentialStoreError("credential_backend_unavailable") from None
         except Exception:
             raise CredentialStoreError("credential_backend_unavailable") from None
+
+    def prepare(self) -> None:
+        """Install/import optional dependencies before any audited deadline."""
+        self._modules()
 
     def _open(self):
         (secretstorage, message_bus, Proxy, item_not_found, _locked,

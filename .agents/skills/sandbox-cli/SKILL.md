@@ -8,6 +8,18 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 CLI progress masks credential option values. Treat command output as sensitive until
 you check it; do not copy credential material into feedback or chat.
 
+For an Infisical source, `sb secrets credential-set --create-only` (or the
+explicit replacement form) is also approval of the canonical project root and endpoint, exact
+selector, MCP grants, and fixed consuming profiles. A change to any of them
+must yield `credential_missing` until an operator reviews the config and places
+the controller-local credential again; never work around that refusal or copy
+an old keyring item. After re-approval, the operator rotates the provider client
+secret and removes obsolete items through the native credential-store UI.
+Agents never list or delete keyring entries. Use `secrets keys` for non-network inspection and a fixed
+profile for consumption. Do not substitute raw keyring, D-Bus, HTTP, Tailscale,
+or provider commands. Brokered children may not detach daemons or escalate
+through a wrapper, symlink, set-id executable, shell string, or script.
+
 For read-only PostgreSQL restore inspection, check `data.inspection_diagnostic`
 with `data.all_match`. The bounded phase and code identify what was observed;
 `status=complete` alone does not mean the target matches. Keep the original

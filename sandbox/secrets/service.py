@@ -13,8 +13,8 @@ from .models import (
 )
 from .parser import SecretParseError, parse_document
 from .policy import fixed_mask, length_bucket, metadata, validate, validate_key
-from .runner import run_with_secret, run_with_secrets
-from .session import refuse_escalation, run_session, validate_lifetime
+from .runner import refuse_escalation, run_with_secret, run_with_secrets
+from .session import run_session, validate_lifetime
 from .sources import SourceRegistry
 from .organizer import organize as organize_document
 from .writer import load_revision_key, opaque_revision, rewrite_source, update_source
@@ -147,6 +147,9 @@ class SecretService:
         resolver = getattr(self.provider_adapter, "resolve_exact", None)
         if not callable(resolver):
             raise SecretBrokerError("provider_unsupported", "provider source is not available")
+        if getattr(self.provider_adapter, "isolates_credential_store", False) is True:
+            raw = resolver(policy, None)
+            return self._provider_value(raw)
         # Resolve an opaque, source-specific handle only after _operate has
         # persisted intent. The adapter alone can read the local bootstrap value.
         getter = getattr(self.credential_store, "get", None)
@@ -156,6 +159,11 @@ class SecretService:
             )
         credential = getter(policy)
         raw = resolver(policy, credential)
+        return self._provider_value(raw)
+
+    @staticmethod
+    def _provider_value(raw) -> str:
+        """Validate the one exact value returned by a provider boundary."""
         if isinstance(raw, bytes):
             if len(raw) > MAX_VALUE_BYTES:
                 raise SecretBrokerError("response_too_large", "provider value exceeds the supported limit")
@@ -203,6 +211,35 @@ class SecretService:
             "credential_state": "unknown",
             "reachability": "unknown",
         }
+        combined_status = (
+            getattr(self.provider_adapter, "source_status", None)
+            if callable(getattr(type(self.provider_adapter), "source_status", None))
+            else None
+        )
+        if self.credential_store is not None and callable(combined_status):
+            observed = combined_status(policy)
+            credential_state = self._field(observed, "credential_state")
+            if credential_state in {
+                "unknown", "missing", "locked", "unavailable", "present", "failed",
+            }:
+                details["credential_state"] = credential_state
+            credential_backend = self._field(observed, "credential_backend")
+            if credential_backend in {
+                "macos_keychain", "linux_secret_service", "injected", "unknown",
+            }:
+                details["credential_backend"] = credential_backend
+            state = self._field(observed, "state")
+            if isinstance(state, str) and len(state) <= 64:
+                details["provider_state"] = state
+            reachable = self._field(observed, "endpoint_reachable")
+            details["reachability"] = (
+                "reachable" if reachable is True else
+                "unreachable" if reachable is False else "unknown"
+            )
+            error_code = self._field(observed, "error_code")
+            if isinstance(error_code, str) and len(error_code) <= 64:
+                details["provider_error_code"] = error_code
+            return details
         if self.credential_store is not None:
             inspector = getattr(self.credential_store, "status", None)
             if callable(inspector):
@@ -567,10 +604,9 @@ class SecretService:
         if profile is None:
             raise SecretBrokerError("profile_unknown", "secret use profile is not registered")
         policy = self.registry.policy(profile.source)
-        if self._source_kind(policy) != "file":
-            # Reject privilege-escalating provider consumers before audit or
-            # credential/provider access.
-            refuse_escalation(profile.argv)
+        # Refuse privilege-escalating consumers for every source before audit
+        # or any secret, credential-store, provider, or subprocess access.
+        refuse_escalation(profile.argv)
         def perform(correlation):
             if surface == "mcp":
                 if not profile.mcp:

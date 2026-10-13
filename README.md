@@ -434,7 +434,11 @@ permits only exact inspection/validation and a registered fixed child. Tailscale
 provides the private route; verified HTTPS and Infisical identity still provide
 endpoint authentication and authorization. Sandbox never falls back to a public
 endpoint, plaintext credential, shared controller credential, or general vault
-browsing. Before parsing, `secrets source-info` can report
+browsing. Placing a controller credential approves the canonical project root and endpoint,
+exact selector, MCP grants, and every fixed consuming profile as one versioned
+authority; changing any of them requires the operator to place the credential
+again. Provider credential reads/status, DNS, and HTTPS work runs in a disposable helper under
+one total deadline. Before parsing, `secrets source-info` can report
 whether the registered file exists, whether it is empty, its type, a size
 bucket, and whether the broker can safely open it—without reading its contents
 or returning its path. It can validate or apply a fixed mask to an

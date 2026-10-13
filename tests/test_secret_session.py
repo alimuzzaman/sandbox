@@ -488,7 +488,19 @@ class SessionBoundTests(unittest.TestCase):
         with mock.patch.object(self.session.subprocess, "Popen",
                                side_effect=lambda *a, **k: calls.append(a) or real(*a, **k)):
             for argv in (["sudo", "true"], ["/usr/bin/doas", "true"], ["su", "-c", "true"],
-                         ["pkexec", "true"], ["run0", "true"], ["sudoedit", "f"]):
+                         ["pkexec", "true"], ["run0", "true"], ["sudo-rs", "true"],
+                         ["sudoedit", "f"], ["env", "sudo", "true"],
+                         ["env", "-iu", "HOME", "sudo", "true"],
+                         ["env", "-Ssudo", "true"],
+                         ["env", "-P", "/usr/bin", "sudo", "true"],
+                         ["env", "--argv0", "synthetic", "sudo", "true"],
+                         ["timeout", "1", "sudo", "true"],
+                         ["timeout", "-vk", "5", "10", "sudo", "true"],
+                         ["ionice", "-tc", "2", "sudo", "true"],
+                         ["stdbuf", "--output", "L", "sudo", "true"],
+                         ["chrt", "--sched-runtime", "1", "99", "sudo", "true"],
+                         ["systemd-run", "--pty", "true"],
+                         ["machinectl", "shell"]):
                 with self.subTest(argv=argv):
                     with self.assertRaises(SecretBrokerError) as raised:
                         self.session.run_session(
@@ -496,10 +508,23 @@ class SessionBoundTests(unittest.TestCase):
                             display=Sink())
                     self.assertEqual(raised.exception.code, "escalation_unsupported")
         self.assertEqual(calls, [])
-        # Only the executable is inspected: "sudo" as an argument is fine.
+        # A non-wrapper's ordinary argument is not interpreted as a command.
         result, _sink = self.run_child("import sys; print(sys.argv)")
         self.assertEqual(result.end_reason, "child_exited")
         self.assertTrue(result.group_ended)
+
+    def test_invoked_wrapper_symlink_and_setid_executable_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invoked_wrapper = root / "env"
+            invoked_wrapper.symlink_to(sys.executable)
+            setid = root / "synthetic-tool"
+            setid.write_text("#!/bin/sh\nexit 0\n")
+            setid.chmod(0o4755)
+            for argv in ([str(invoked_wrapper), "sudo", "id"], [str(setid)]):
+                with self.subTest(argv=argv), self.assertRaises(SecretBrokerError) as raised:
+                    self.session.refuse_escalation(argv)
+                self.assertEqual(raised.exception.code, "escalation_unsupported")
 
     def test_unreachable_group_member_is_reported_not_claimed_ended(self):
         # A member the broker may not signal (privilege escalation inside the

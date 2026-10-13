@@ -10,9 +10,11 @@ directly:
 - `resolve_exact(policy, credential) -> secret bytes`: exactly one authentication exchange
   and one exact item read.
 
-Provider adapters receive an injected transport and credential handle. They cannot inspect
-the parent environment, discover endpoints, list store objects, choose a child command, or
-write audit records.
+Production resolution runs the approved credential adapter and provider transport inside one
+short-lived helper. Only the registered non-secret descriptor enters it; only a stable error,
+bounded status, or one length-framed exact value leaves it. Injected test adapters retain the
+in-process transport/credential-handle boundary. Neither path may discover endpoints, list
+store objects, choose a child command, or write audit records.
 
 ## Infisical request sequence
 
@@ -38,11 +40,14 @@ export, write, delete, rotate, administer identities, or infer a moved item.
 - Redirects are errors. Environment proxies are disabled. No alternate/public origin is
   attempted.
 - A single finite deadline covers credential lookup, login, exact read, parsing, and
-  cleanup. Socket bounds cannot exceed the remaining deadline.
+  cleanup. The parent kills the helper process group when the deadline expires, including a
+  blocked OS-store, DNS, or socket call.
 - Response bodies are streamed into a capped 1 MiB buffer and are never logged or returned
   in error detail.
 - No automatic retry occurs for connection failure, timeout, 401/403, 404, 429, 5xx, or
   malformed responses.
+- Exact values containing Cc/Cf control or format characters other than tab/newline/carriage
+  return are invalid because output normalization could otherwise defeat exact redaction.
 
 ## Stable outcome mapping
 

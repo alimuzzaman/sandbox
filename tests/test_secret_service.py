@@ -13,7 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 from sandbox.secrets.audit import SecretAudit
+from sandbox.secrets.credentials.base import locator_for_policy
 from sandbox.secrets.models import SecretBrokerError, UseProfile
+from sandbox.secrets.providers.base import ProviderError
+from sandbox.secrets.providers.broker import BoundedProviderBroker
 from sandbox.secrets.runner import minimal_environment, run_with_secret, run_with_secrets
 from sandbox.secrets.service import SecretService
 from sandbox.secrets.sources import SourceRegistry
@@ -82,6 +85,50 @@ class TestProviderSecretService(unittest.TestCase):
         self.assertEqual(self.store.mock_calls, [])
         self.assertFalse((self.root / "runtime").exists())
 
+    def test_credential_authority_binds_project_root_grants_and_fixed_profiles(self):
+        baseline = locator_for_policy(self.service.registry.policy("vault"))
+        variants = []
+        other_root = self.root / "other-project"
+        other_root.mkdir()
+        variants.append(build_secret_service(
+            project_root=other_root, config=self.config, personal_path=other_root / "personal",
+            runtime_root=other_root / "runtime", provider_adapter=self.provider,
+            credential_store=self.store,
+        ))
+        changed_modes = json.loads(json.dumps(self.config))
+        changed_modes["secrets"]["sources"]["vault"]["mcpModes"] = ["keys"]
+        variants.append(build_secret_service(
+            project_root=self.root, config=changed_modes, personal_path=self.root / "personal",
+            runtime_root=self.root / "runtime", provider_adapter=self.provider,
+            credential_store=self.store,
+        ))
+        changed_profile = json.loads(json.dumps(self.config))
+        changed_profile["secrets"]["useProfiles"]["fixed"]["argv"].append("--synthetic-change")
+        variants.append(build_secret_service(
+            project_root=self.root, config=changed_profile, personal_path=self.root / "personal",
+            runtime_root=self.root / "runtime", provider_adapter=self.provider,
+            credential_store=self.store,
+        ))
+        for service in variants:
+            with self.subTest(policy=service.registry.policy("vault")):
+                self.assertNotEqual(baseline, locator_for_policy(service.registry.policy("vault")))
+        self.store.get.assert_not_called()
+        self.provider.resolve_exact.assert_not_called()
+
+    def test_isolated_provider_reads_credential_only_inside_adapter(self):
+        isolated = mock.Mock(isolates_credential_store=True)
+        isolated.resolve_exact.return_value = self.value.encode()
+        service = build_secret_service(
+            project_root=self.root, config=self.config, personal_path=self.root / "personal",
+            runtime_root=self.root / "runtime", provider_adapter=isolated,
+            credential_store=self.store,
+        )
+        payload = service.inspect("vault", mode="metadata")
+        isolated.resolve_exact.assert_called_once()
+        self.assertIsNone(isolated.resolve_exact.call_args.args[1])
+        self.store.get.assert_not_called()
+        self.assertEqual(payload["entries"][0]["key"], "API_TOKEN")
+
     def test_keys_are_registered_singleton_without_credential_or_provider_read(self):
         payload = self.service.inspect("vault", surface="mcp")
         self.assertEqual(payload["keys"], ["API_TOKEN"])
@@ -99,6 +146,46 @@ class TestProviderSecretService(unittest.TestCase):
         self.store.get.assert_not_called()
         self.provider.resolve_exact.assert_not_called()
         self.assert_value_free(payload)
+
+    def test_isolated_source_status_replaces_parent_store_probe_and_projects_safe_fields(self):
+        value = self.value
+        credential = self.credential
+
+        class CombinedAdapter:
+            def source_status(self, _policy):
+                return {
+                    "state": "available", "endpoint_reachable": True,
+                    "credential_state": "present", "credential_backend": "linux_secret_service",
+                    "token": credential, "value": value,
+                }
+
+        service = build_secret_service(
+            project_root=self.root, config=self.config, personal_path=self.root / "personal",
+            runtime_root=self.root / "runtime", provider_adapter=CombinedAdapter(),
+            credential_store=self.store,
+        )
+        payload = service.source_info("vault", surface="cli")
+        self.assertEqual(payload["credential_state"], "present")
+        self.assertEqual(payload["credential_backend"], "linux_secret_service")
+        self.assertEqual(payload["reachability"], "reachable")
+        self.assertNotIn("token", payload)
+        self.assertNotIn("value", payload)
+        self.store.status.assert_not_called()
+
+    def test_source_info_degrades_safely_when_isolated_status_times_out(self):
+        broker = BoundedProviderBroker()
+        service = build_secret_service(
+            project_root=self.root, config=self.config, personal_path=self.root / "personal",
+            runtime_root=self.root / "runtime", provider_adapter=broker,
+            credential_store=self.store,
+        )
+        with mock.patch.object(broker, "_call", side_effect=ProviderError("operation_timeout")):
+            payload = service.source_info("vault", surface="cli")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["provider_state"], "timed_out")
+        self.assertEqual(payload["reachability"], "unreachable")
+        self.assertEqual(payload["credential_state"], "unknown")
+        self.store.status.assert_not_called()
 
     def test_metadata_resolves_one_exact_item_after_durable_audit_intent(self):
         payload = self.service.inspect("vault", mode="metadata")
@@ -746,6 +833,17 @@ if __name__ == "__main__":
 
 
 class RunWithSecretsArgvTests(unittest.TestCase):
+    @staticmethod
+    def assert_pid_gone(pid):
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"synthetic child {pid} survived process-group cleanup")
+
     def test_empty_argument_is_allowed_but_empty_executable_is_not(self):
         from sandbox.secrets.runner import run_with_secrets
         from sandbox.secrets.models import SecretBrokerError
@@ -756,6 +854,37 @@ class RunWithSecretsArgvTests(unittest.TestCase):
             with self.assertRaises(SecretBrokerError):
                 run_with_secrets(argv, secrets={"PROBE_VALUE": "fixture-value"},
                                  timeout_seconds=30)
+
+    def test_descendant_holding_stdout_gets_bounded_post_exit_drain(self):
+        program = (
+            "import subprocess,sys;"
+            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+            "print(p.pid,flush=True)"
+        )
+        started = time.monotonic()
+        result = run_with_secrets(
+            [sys.executable, "-c", program], secrets={"PROBE_VALUE": "fixture-value"},
+            timeout_seconds=1,
+        )
+        self.assertEqual(result.termination, "exited")
+        self.assertEqual(result.exit_code, 0)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assert_pid_gone(int(result.output.strip()))
+
+    def test_normal_leader_exit_still_ends_redirected_background_descendant(self):
+        program = (
+            "import subprocess,sys;"
+            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+            "print(p.pid,flush=True)"
+        )
+        result = run_with_secrets(
+            [sys.executable, "-c", program], secrets={"PROBE_VALUE": "fixture-value"},
+            timeout_seconds=3,
+        )
+        self.assertEqual(result.termination, "exited")
+        self.assertEqual(result.exit_code, 0)
+        self.assert_pid_gone(int(result.output.strip()))
 
 
 class SessionServiceTests(unittest.TestCase):
@@ -805,12 +934,22 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(self.events(), [])
 
     def test_run_refuses_escalating_command_before_audit(self):
-        for argv in (["sudo", "true"], ["/usr/bin/doas", "true"]):
+        for argv in (["sudo", "true"], ["/usr/bin/doas", "true"],
+                     ["env", "sudo-rs", "true"], ["timeout", "1", "sudo", "true"]):
             with self.subTest(argv=argv):
                 with self.assertRaises(SecretBrokerError) as raised:
                     self.service.run("fixture", "API_TOKEN", argv, destination="API_TOKEN")
                 self.assertEqual(raised.exception.code, "escalation_unsupported")
-                self.assertIn("without sudo", raised.exception.message)
+        self.assertEqual(self.events(), [])
+
+    def test_file_fixed_profile_refuses_wrapped_escalation_before_audit(self):
+        self.service.use_profiles["unsafe"] = UseProfile(
+            name="unsafe", source="fixture", key="API_TOKEN",
+            argv=("env", "sudo", "true"), destination="API_TOKEN",
+        )
+        with self.assertRaises(SecretBrokerError) as raised:
+            self.service.use_profile("unsafe", surface="cli")
+        self.assertEqual(raised.exception.code, "escalation_unsupported")
         self.assertEqual(self.events(), [])
 
     def test_normalize_bindings_refuses_without_audit(self):

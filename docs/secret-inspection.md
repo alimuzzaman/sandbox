@@ -114,6 +114,17 @@ fixed profile:
 ./sb secrets use-profile --profile PROFILE_NAME --project-dir PROJECT_DIR
 ```
 
+Credential placement is also the operator's approval receipt. Its version-2
+locator binds the canonical project root and endpoint, complete exact selector, `mcpModes`, and
+all fixed profiles that consume the source. Any change to that authority makes
+the prior item unreachable and returns `credential_missing` until the operator
+reviews the new configuration and places the credential again. Sandbox never
+silently reads or migrates the earlier version-1 item. After re-approval,
+rotate the Infisical client secret and place the replacement under the current
+authority. An operator should then remove obsolete Sandbox items through the
+approved native credential-store UI; agents must not list, export, or delete
+keyring items with raw commands.
+
 The endpoint must be operator-provided over the Tailscale/private route with a
 certificate trusted by the OS. Sandbox verifies HTTPS, refuses redirects,
 ignores ambient proxy settings, and never tries another or public endpoint.
@@ -127,7 +138,11 @@ a value. Because macOS Keychain has no value-free existence query, macOS reports
 credential presence as `unknown` until an authorized operation uses it. Metadata,
 validation, and fixed-profile use perform one bounded login
 and one exact item read with reference expansion/imports disabled; the access
-token is not cached across operations. Provider sources refuse mask, reveal,
+token is not cached across operations. Provider OS-store reads/status, DNS, and HTTPS
+exchange share one monotonic deadline in a disposable helper process; timeout
+ends its whole process group. Provider values containing display-changing
+control or format characters are refused before they become redaction needles.
+Provider sources refuse mask, reveal,
 arbitrary run/session, set, organize, copy, generation, list, search, wildcard,
 export, write, delete, rotate, migration, and identity administration.
 
@@ -289,10 +304,12 @@ runs longer). Combined redacted output is bounded to
 `sb secrets run` exit nonzero after the bounded result is printed; the child
 exit code is preserved when it is safe for the shell to represent it.
 
-A command that is itself `sudo`, `sudoedit`, `doas`, `su`, `pkexec` or `run0`
-is refused with `escalation_unsupported` before any secret is read. Those tools
-drop the environment, so the secret would not arrive anyway, and `sb` could not
-stop a privileged child at its timeout. Run the command without them.
+A command that is `sudo`, `sudo-rs`, `sudoedit`, `doas`, `su`, `pkexec`,
+`run0`, `systemd-run`, or `machinectl`—directly, through a supported exec wrapper, by a renamed symlink, or as
+a set-id executable—is refused with `escalation_unsupported` before any secret
+is read. Those tools may drop the environment, and `sb` could not reliably stop
+a privileged child at its timeout. Shell/interpreter command strings are not
+parsed; do not hide an escalation inside `sh -c`, a script, or similar code.
 
 For paired credentials, repeat `--secret KEY=DEST` so both brokered values enter
 one child process, for example:
@@ -319,6 +336,11 @@ Before using it:
    command capable of uploading files or environment state.
 5. Verify the operation through non-secret evidence: exit status, a bounded
    health/status response, or an already-public resource identity.
+
+On success, failure, and timeout, Sandbox ends the command's entire process
+group. Profiles that intentionally detach a background daemon are unsupported;
+start such software through a separately reviewed supervisor that does not
+retain the brokered environment.
 
 The trusted child is an intentional secret recipient. It can print, transform,
 persist, pass to descendants, or exfiltrate the value. Sandbox registers
@@ -355,10 +377,8 @@ sb secrets run --session [--lifetime-seconds N]
 - Standard output must be a terminal, `/dev/tty` must open as a terminal, and
   `sb` must be that terminal's foreground job. Otherwise the start is refused
   with `tty_required`. This keeps CI, MCP, durable jobs and captured remote
-  paths out. A command that is itself `sudo`, `sudoedit`, `doas`, `su`,
-  `pkexec` or `run0` is refused with `escalation_unsupported`, as in ordinary
-  `run`, because `sb` could not end the privileged child. All of these
-  refusals happen before any secret is read.
+  paths out. The wrapper-aware privileged/set-id command refusal is the same as
+  ordinary `run`. It happens before any secret is read.
 - A start line shows the source, key names, the lifetime and the local end
   time. Redacted output is shown live; an end line shows the end reason, the
   child's exit status, an elapsed-time class and the number of dropped chunks.
@@ -373,7 +393,7 @@ The session ends on the first of these:
 | `hangup` | the terminal closed (`SIGHUP`) or a write to it failed | 129 |
 
 On every end, `sb` sends `SIGTERM` to the child's whole process group, then
-`SIGKILL` to anything left after 3 seconds; the group is gone within 5
+`SIGKILL` to anything left after 2 seconds; the group is gone within 4
 seconds. A crashed child is never restarted.
 
 Behavior to know:
@@ -402,12 +422,12 @@ Risks that remain:
   is defense in depth.
 - `SIGKILL` or `SIGSTOP` sent to `sb` cannot be handled. A broker killed that
   way leaves its child running with the secret until something else ends it.
-- A child that escalates privileges inside (a script that calls `sudo`, for
-  example) puts the privileged part out of `sb`'s reach: the polite request
+- A child that escalates privileges inside an opaque shell/interpreter string
+  or script puts the privileged part out of `sb`'s reach: the polite request
   is relayed by `sudo`, but nothing can force it. When that happens the end
   line is followed by a warning and the audited result records
-  `group_ended=false`; check for the leftover process yourself. Only the
-  direct `sudo ...` form is refused up front.
+  `group_ended=false`; check for the leftover process yourself. Direct,
+  supported-wrapper, symlinked, and set-id forms are refused up front.
 - An agent harness that allocates a pseudo-terminal passes the terminal check.
   The skill tells agents never to start a session; the check is not an
   exclusive security boundary.
@@ -580,11 +600,12 @@ unintended:
 
 ## Limitations
 
-- V1 covers the built-in personal assignment source and explicitly registered
+- V1 covers the built-in personal assignment source, opt-in exact-item
+  Infisical sources, and explicitly registered
   dotenv, JSON, INI, properties, TOML, YAML, XML, PEM, opaque-token, and binary
   project sources. It never scans for files or auto-detects a format from
-  content, does not enumerate the process environment, and does not connect to
-  external secret managers.
+  content and does not enumerate the process environment. Infisical is the
+  only external provider adapter; it does not expose general vault browsing.
 - Targeted updates currently remain dotenv-only. Structured round-trip writers
   require separate syntax-preservation and atomicity evidence.
 - Shape validation is offline and always reports `live_checked=false`.

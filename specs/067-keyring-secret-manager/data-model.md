@@ -39,8 +39,9 @@ registration refusal, not permission to share an identity.
 
 A controller-local Universal Auth client secret.
 
-- Locator: fixed Sandbox service label plus an account derived from stable, non-secret
-  source/project/client identity.
+- Locator: fixed Sandbox service label plus a version-2 account derived from the canonical
+  project root and endpoint, exact source selector, client identity, MCP grants, timeout, and all fixed
+  consuming profiles. There is no automatic version-1 migration.
 - Material: client secret, accessible only inside the credential adapter and authentication
   request builder.
 - Backend: explicitly approved macOS Keychain or Linux Secret Service adapter.
@@ -48,7 +49,8 @@ A controller-local Universal Auth client secret.
 
 Each Linux or macOS controller has a distinct credential. Credential creation and
 replacement are explicit local actions. Sandbox never synchronizes or deletes one as a
-registration side effect.
+registration side effect. A bound-authority change intentionally presents as `missing`
+until an operator places the credential for the reviewed configuration.
 
 ## ProviderSession
 
@@ -63,11 +65,18 @@ not_created -> authenticated -> exact_read_started -> discarded
             -> authentication_denied -> discarded
 ```
 
+Credential lookup, DNS, login, and exact read occur in one disposable helper process under
+one parent-enforced deadline. The helper returns no traceback or backend/provider diagnostic.
+
 ## FixedUseProfile
 
 Existing broker policy that binds a source to a fixed executable, fixed arguments, timeout,
 minimal environment, and output bounds. Provider sources may deliver a value only through
 this entity. Callers cannot replace the child or selector at request time.
+The consuming process group is ended after every outcome; intentional detached daemons are
+unsupported. Direct and supported-wrapper privilege escalation, renamed escalation tools,
+and set-id executables fail before the secret read. Opaque shell/script escalation remains a
+documented same-user limit.
 
 ## CapabilityStatus
 

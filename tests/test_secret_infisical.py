@@ -322,6 +322,8 @@ class InfisicalTests(TimedCase):
             (item(secretValueHidden="false"), "provider_denied"),
             (item(value=None), "response_invalid"),
             (item(value="\ud800"), "response_invalid"),
+            (item(value="prefix\x1bsuffix"), "response_invalid"),
+            (item(value="prefix\u200bsuffix"), "response_invalid"),
         ]
         for data, code in cases:
             with self.subTest(code=code, fields=tuple(data)):
@@ -330,7 +332,8 @@ class InfisicalTests(TimedCase):
                 self.assertEqual(len(transport.calls), 2)
 
     def test_value_limit_is_bytes_and_empty_value_is_distinct_from_missing(self):
-        for value in ("", "x" * MAX_PROVIDER_VALUE_BYTES, "é" * (MAX_PROVIDER_VALUE_BYTES // 2)):
+        for value in ("", "line\tvalue\nnext\rline", "x" * MAX_PROVIDER_VALUE_BYTES,
+                      "é" * (MAX_PROVIDER_VALUE_BYTES // 2)):
             with self.subTest(size=len(value)):
                 transport = FakeTransport(response(LOGIN), response(item(value)))
                 self.assertEqual(InfisicalProvider(transport).resolve_exact(POLICY, FakeCredential()), value.encode())

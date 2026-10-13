@@ -57,6 +57,18 @@ Structured key results are selectors, not values. JSON/YAML/TOML use JSON
 Pointer-style paths, INI uses `/section/key`, XML may include `@attribute` or
 `#text`, PEM lists block labels, and binary containers expose only `/file`.
 
+For an Infisical source, placing the controller-local credential is also the
+operator's approval of the canonical project root and endpoint, exact selector,
+MCP grants, and fixed consuming profiles. Any change must return
+`credential_missing` until an operator reviews the configuration and uses
+`credential-set` again. Never copy or migrate an older keyring item, and never
+replace the supported broker with raw keyring, D-Bus, HTTP, provider, or
+Tailscale commands. The approved path keeps provider OS-store reads/status, DNS, and HTTPS work under
+one killable total deadline.
+After re-approval, ask the operator to rotate the provider client secret and
+remove obsolete items through the native credential-store UI. Do not list,
+export, or delete keyring entries yourself.
+
 ## 2. Inspect one key without characters
 
 ```bash
@@ -148,8 +160,12 @@ Each `--secret KEY=DEST` is resolved through the same broker and injected into
 the same minimal child environment. Destinations must be unique and safe; the
 key names and destination names are recorded, never the values.
 
-A command that is itself `sudo`, `doas`, `su`, `pkexec` or `run0` is refused
-with `escalation_unsupported` before any read: run it without escalation.
+A direct, supported-wrapper, symlinked, or set-id escalation command—including
+`sudo`, `sudo-rs`, `sudoedit`, `doas`, `su`, `pkexec`, `run0`, `systemd-run`,
+or `machinectl`—is refused
+with `escalation_unsupported` before any read. Shell/script contents are opaque;
+never hide escalation there. Every outcome ends the whole child process group,
+so fixed profiles and bounded runs must not intentionally detach daemons.
 
 MCP may inspect or validate only explicitly authorized source modes. MCP use is
 limited to a registered reviewed use profile; it never accepts arbitrary
@@ -176,7 +192,7 @@ or another termination request (`interrupted`), the terminal closing
 (`hangup`), or the child's own exit (`child_exited`). A broker killed with
 `SIGKILL` cannot end its child, so the child can outlive it, and a child that
 escalates privileges (`sudo` and friends) cannot be force-ended either: the
-direct form is refused (`escalation_unsupported`), anything deeper is reported
+direct/wrapper/symlink/set-id forms are refused (`escalation_unsupported`), anything deeper is reported
 as a warning with `group_ended=false`. Keep using the bounded `secrets run`
 above for every agent-run check.
 

@@ -27,12 +27,15 @@ from .models import (
     SecretBrokerError,
     SessionResult,
 )
-from .runner import SessionDisplayFilter, minimal_environment_values, validate_child_request
+from .runner import (
+    ESCALATION_COMMANDS, SessionDisplayFilter, minimal_environment_values,
+    refuse_escalation, validate_child_request,
+)
 
 
 POLL_SECONDS = 0.25
-GRACE_SECONDS = 3.0
-KILL_WAIT_SECONDS = 1.5
+GRACE_SECONDS = 2.0
+KILL_WAIT_SECONDS = 1.0
 DRAIN_IDLE_SECONDS = 0.5
 DRAIN_CAP_SECONDS = 5.0
 _READ_BYTES = 65_536
@@ -116,30 +119,6 @@ class SessionSignals:
             signal.signal(signum, previous)
 
 
-# Commands whose whole purpose is to run their argument with other
-# privileges. A privileged member of the child's group cannot be signalled by
-# the unprivileged broker, so neither the run timeout nor the session end
-# bound (FR-011) could hold. Refused for `secrets run` and session mode alike.
-ESCALATION_COMMANDS = frozenset({"sudo", "sudoedit", "doas", "su", "pkexec", "run0"})
-
-
-def refuse_escalation(argv: Sequence[str]) -> None:
-    """Refuse a session whose direct command escalates privileges.
-
-    Only the executable itself is inspected: escalation deeper inside the
-    child is not detectable before launch and is a documented limit, reported
-    after the fact through ``SessionResult.group_ended``.
-    """
-    executable = argv[0] if isinstance(argv, (list, tuple)) and argv else ""
-    if isinstance(executable, str) and os.path.basename(executable) in ESCALATION_COMMANDS:
-        raise SecretBrokerError(
-            "escalation_unsupported",
-            "a brokered secret cannot go to a privileged command: sudo and similar "
-            "tools drop the environment and sb cannot stop a privileged child; run "
-            "the command without sudo, sudoedit, doas, su, pkexec or run0",
-        )
-
-
 def validate_lifetime(lifetime_seconds: object) -> int:
     if not isinstance(lifetime_seconds, int) or isinstance(lifetime_seconds, bool) \
             or not 1 <= lifetime_seconds <= MAX_SESSION_SECONDS:
@@ -190,7 +169,7 @@ def _wait_group(process: subprocess.Popen, pgid: int, seconds: float) -> bool:
 
 
 def end_process_group(process: subprocess.Popen) -> bool:
-    """Polite then forced termination of the child's whole group, under 5 s.
+    """Polite then forced termination of the child's whole group, under 4 s.
 
     Returns ``True`` when the group is gone. ``False`` means a member survived
     the bound: in practice one the broker may not signal (a privileged

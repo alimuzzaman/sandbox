@@ -17,6 +17,9 @@ from .base import (
 class MacOSKeychainCredentialStore:
     """Use keyring's Keychain backend by direct construction, never get_keyring()."""
 
+    def __init__(self, *, bootstrap_dependencies: bool = True) -> None:
+        self._bootstrap_dependencies = bootstrap_dependencies
+
     def _backend(self):
         if sys.platform != "darwin":
             raise CredentialStoreError("credential_backend_unavailable")
@@ -24,6 +27,8 @@ class MacOSKeychainCredentialStore:
             from keyring.backends.macOS import Keyring
             return Keyring()
         except ImportError:
+            if not self._bootstrap_dependencies:
+                raise CredentialStoreError("credential_backend_unavailable") from None
             from sandbox.core._config import bootstrap_cli_dependencies
             if bootstrap_cli_dependencies():
                 try:
@@ -32,6 +37,25 @@ class MacOSKeychainCredentialStore:
                 except Exception:
                     pass
             raise CredentialStoreError("credential_backend_unavailable") from None
+        except Exception:
+            raise CredentialStoreError("credential_backend_unavailable") from None
+
+    def prepare(self) -> None:
+        """Import the explicit backend before any audited provider deadline."""
+        if sys.platform != "darwin":
+            raise CredentialStoreError("credential_backend_unavailable")
+        try:
+            from keyring.backends.macOS import Keyring  # noqa: F401
+        except ImportError:
+            if not self._bootstrap_dependencies:
+                raise CredentialStoreError("credential_backend_unavailable") from None
+            from sandbox.core._config import bootstrap_cli_dependencies
+            if not bootstrap_cli_dependencies():
+                raise CredentialStoreError("credential_backend_unavailable") from None
+            try:
+                from keyring.backends.macOS import Keyring  # noqa: F401
+            except Exception:
+                raise CredentialStoreError("credential_backend_unavailable") from None
         except Exception:
             raise CredentialStoreError("credential_backend_unavailable") from None
 

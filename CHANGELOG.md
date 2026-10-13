@@ -8,6 +8,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Secret-manager hardening binds each controller credential to the canonical
+  project root and Infisical endpoint, exact selector, MCP grants and fixed consuming profiles;
+  authority changes require explicit credential placement with no legacy-item
+  migration. Provider OS-store reads/status, DNS and HTTPS work now shares one killable helper
+  deadline, unsafe provider control characters fail closed, and brokered child
+  groups are ended on every exit with wrapper/symlink/set-id escalation refused;
+  supervised-session group cleanup is bounded below four seconds.
 - Remote storage floor (spec 066). `sb remote set-storage-floor R --gb N` records free
   space that remote test/job work must leave for hosted sites; every remote deploy
   then refuses before any upload with `remote_storage_floor` (free, reserved,

@@ -307,10 +307,17 @@ def _run_host_observer_fixture(services, rows, inspections, *, deadline=10,
             " else: print('null')\n"
         )
         docker.chmod(0o755)
+        source = root / "source"
+        source.mkdir()
+        (source / "file").write_text("fixture")
+        for args in (("init", "-q"), ("add", "file"),
+                     ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                      "commit", "-qm", "fixture")):
+            run_test_process(["git", *args], cwd=source, capture_output=True, check=True)
         prefix = shlex.join([sys.executable, str(compose), str(fixture)])
         command = hosting_cmd._host_observation_command(
             prefix, services, ["LENZORA_SOURCE_REVISION"], deadline,
-            source_dir=str(ROOT),
+            source_dir=str(source),
         )
         from tests.subprocess_support import synthetic_environment
 
@@ -2271,7 +2278,7 @@ class TestHostingManifest(unittest.TestCase):
             ["timeout"],
         )
 
-    def test_observer_revision_batch_refuses_inexact_container_evidence(self):
+    def _observer_revision_batch_refuses_inexact_container_evidence(self, label):
         revision = "b" * 40
         cases = {
             "missing": (
@@ -2316,7 +2323,7 @@ class TestHostingManifest(unittest.TestCase):
              "observed": None}
             for service in ("web", "worker")
         ]
-        for label, (rows, inspections) in cases.items():
+        for label, (rows, inspections) in [(label, cases[label])]:
             with self.subTest(label=label):
                 receipt, inspect_count, _elapsed = _run_host_observer_fixture(
                     ["web", "worker"], rows, inspections,
@@ -2324,6 +2331,21 @@ class TestHostingManifest(unittest.TestCase):
                 self.assertEqual(receipt["revision_checks"], expected)
                 self.assertNotIn(revision, json.dumps(receipt))
                 self.assertLessEqual(inspect_count, 1)
+
+    def test_observer_revision_batch_refuses_missing(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("missing")
+
+    def test_observer_revision_batch_refuses_duplicate(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("duplicate")
+
+    def test_observer_revision_batch_refuses_unexpected(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("unexpected")
+
+    def test_observer_revision_batch_refuses_swapped_identity(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("swapped_identity")
+
+    def test_observer_revision_batch_refuses_malformed(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("malformed")
 
     def test_observer_revision_batch_drops_malformed_value_without_leaking_it(self):
         secret = "token-like-value-that-must-not-survive"

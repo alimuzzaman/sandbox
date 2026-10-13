@@ -498,15 +498,36 @@ deletion manifest before each removal so "what happened to X" stays answerable:
 ./sb workspace release <name> --remote scaleway-sandbox    # done with it
 ./sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox
 ./sb workspace reap --remote scaleway-sandbox --dry-run
+# keep 30 GB free for hosted sites: remote test/job submissions that would
+# cross it are refused before any upload (remote_storage_floor, spec 066)
+./sb remote set-storage-floor scaleway-sandbox --gb 30
+# hosted services that exhausted their on-failure restarts (e.g. after a full
+# disk): list, then start them once free space is above the floor
+./sb host heal --remote scaleway-sandbox
+./sb host heal --remote scaleway-sandbox --confirm
 # let the remote reap its own safe tier on a systemd timer (spec 057)
 ./sb resources routine --remote scaleway-sandbox --enable --confirm --exclude 'lenzora*'
 ./sb resources routine --remote scaleway-sandbox --status
 ./sb resources routine --remote scaleway-sandbox --disable --confirm
 ```
 
-Only workspace-scoped `node_modules`-style volumes are ever eligible — every
-other volume is protected at every tier, including ones the engine reports as
-unused — hosted sites are untouchable, a partial delete is reported as a
+As standalone candidates, only workspace-scoped `node_modules`-style volumes are
+eligible — every other volume is protected at every tier, including ones the
+engine reports as unused. Reclaiming a workspace (spec 066) removes its whole
+`sandbox-<workspace>` Compose project first: every container (also ones that
+never bind the checkout, such as a job database), the project's volumes no
+other container uses, and its networks; the checkout is deleted only after that
+succeeds. Authorized CI job cleanup applies the same stack teardown after its
+existing identity checks and before broker source removal. A failed teardown
+keeps source and retained cleanup state; workspace reap reports
+`stack_teardown_incomplete` and a later run finishes it. A workspace whose jobs all finished more than 6 hours ago
+(`SANDBOX_FINISHED_JOB_IDLE_HOURS` on the host) is a `safe`-tier
+`finished_job_idle` candidate even if its stack still runs; a queued or running
+job, an unreadable job registry, a live source-family reservation, or an active lease keeps it.
+Admission and reclaim share the host reclaim guard; the largest of the three
+most recent repository footprints supplies the estimate, or a stated 5 GB default.
+`remote list`, `remote readiness`, and `resources status` show the configured floor. Hosted sites are
+untouchable, a partial delete is reported as a
 failure rather than success, and the default retention window is 7 days.
 `resources routine` installs one `systemd --user` timer on the remote that plans
 and executes the same safe-tier selection as `workspace reap` on a cadence

@@ -6605,6 +6605,32 @@ def _cmd_host_destroy(args) -> None:
         print(destroy.render(result, confirmed=bool(args.confirm)))
 
 
+def _cmd_host_heal(args) -> None:
+    """Spec 066: list, and with --confirm start, restart-exhausted hosted services."""
+    from sandbox.hosting import heal
+    if not getattr(args, "remote", None):
+        die("host heal requires --remote")
+    entry = remote.get_remote(args.remote)
+    if not entry:
+        die(f"no remote named '{args.remote}'")
+    project = getattr(args, "project", None)
+    environment = getattr(args, "environment", None)
+    if getattr(args, "target", None):
+        from sandbox.hosting import destroy
+        try:
+            project, environment = destroy.parse_target(args.target)
+        except hosting.HostingError as exc:
+            die(str(exc))
+    result = heal.run(entry, project=project, environment=environment,
+                      confirm=bool(args.confirm))
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(heal.render(result))
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+
 def cmd_host(cfg, args) -> None:
     if getattr(args, "initializer", None) is not None and args.action != "diagnose":
         die("--initializer is only available with `host diagnose`")
@@ -6616,6 +6642,9 @@ def cmd_host(cfg, args) -> None:
         return
     if args.action == "destroy":
         _cmd_host_destroy(args)
+        return
+    if args.action == "heal":
+        _cmd_host_heal(args)
         return
     if args.action == "image":
         required = {

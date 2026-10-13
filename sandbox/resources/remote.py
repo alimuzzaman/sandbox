@@ -1741,6 +1741,14 @@ def deep_attribution(capacity, managed_roots=()):
 
 __JOB_LIST_PARSER__
 
+__WORKSPACE_TEARDOWN__
+
+try:
+    FINISHED_JOB_IDLE_SECONDS = max(
+        float(os.environ.get("SANDBOX_FINISHED_JOB_IDLE_HOURS") or 6), 0) * 3600
+except ValueError:
+    FINISHED_JOB_IDLE_SECONDS = 6 * 3600
+
 
 def lifecycle_evidence():
     protected_paths = {}
@@ -1836,27 +1844,49 @@ def lifecycle_evidence():
             "status": "complete" if jobs_ok else "partial",
         })
 
-    terminal = {
-        "succeeded", "failed", "timed_out", "cancelled", "interrupted",
-    }
-    for job in jobs:
-        root = job.get("project_root")
-        # A terminal job whose retained-data cleanup completed holds nothing
-        # in its workspace any more; its retain policy no longer protects it.
-        protect = (
-            job.get("lifecycle") not in terminal
-            or job.get("cleanup_state") == "retained"
-            or (job.get("cleanup_policy") == "retain"
-                and job.get("cleanup_state") != "completed")
-        )
-        if protect and isinstance(root, str) and root:
-            canonical = str(Path(root).resolve(strict=False))
-            protected_paths.setdefault(canonical, []).append("retained_job")
+    # A terminal job whose retained-data cleanup completed holds nothing in
+    # its workspace any more. A retained terminal job protects its workspace
+    # only until it has been finished for the idle threshold (spec 066).
+    references = job_workspace_references(
+        jobs, now=time.time(), idle_seconds=FINISHED_JOB_IDLE_SECONDS)
+    for canonical, refs in references.items():
+        protected_paths.setdefault(canonical, []).extend(refs)
+        if "retained_job" in refs:
             workspace_project = Path(canonical).name
             if workspace_project:
                 protected_projects.update((
                     workspace_project, "sandbox-" + workspace_project,
                 ))
+    # In-flight admissions protect their source family until jobs are durably
+    # visible. Missing/old reservation targets are unknown, never permission.
+    try:
+        ledger = RUNTIME / "storage" / "reservations.json"
+        try:
+            reservations = json.loads(ledger.read_text())
+        except FileNotFoundError:
+            reservations = []
+        if not isinstance(reservations, list):
+            raise ValueError("invalid reservations")
+        children = list(DEPLOY.iterdir()) if reservations else []
+        for reservation in reservations:
+            if not isinstance(reservation, dict):
+                raise ValueError("invalid reservation")
+            expiry = reservation.get("expires_at")
+            if type(expiry) not in (int, float):
+                raise ValueError("unknown reservation expiry")
+            if expiry <= time.time():
+                continue
+            target = reservation.get("target")
+            if not isinstance(target, str) or not target:
+                raise ValueError("unknown reservation target")
+            for child in children:
+                canonical = str(child.resolve(strict=False))
+                if canonical == target or canonical.startswith(target + "-workspace-"):
+                    protected_paths.setdefault(canonical, []).append("retained_job")
+                    protected_projects.add("sandbox-" + child.name)
+    except (OSError, ValueError):
+        jobs_ok = False
+        outcomes.append({"category": "storage_reservations", "status": "unavailable"})
     return (
         {key: tuple(sorted(set(refs))) for key, refs in protected_paths.items()},
         protected_projects,
@@ -2206,6 +2236,7 @@ def reclaim_inventory(inventory, protected_paths, projection, engine_complete):
             if source:
                 binds.setdefault(source, []).append({
                     "id": identity, "name": display, "running": running,
+                    "project": owner(container.get("Config", {}).get("Labels")),
                 })
     block = {
         "deployment_root": str(DEPLOY),
@@ -2283,9 +2314,29 @@ def reclaim_inventory(inventory, protected_paths, projection, engine_complete):
             "containers": containers,
             "registry": "instance_registry" in references,
             "active_job": "retained_job" in references,
+            "finished_job_idle": "finished_job_idle" in references
+            and "retained_job" not in references,
             "indexed": child.name in index_names,
-            "hosted": child.name in hosted or child.name == "hosts",
+            "hosted": child.name in hosted or child.name == "hosts"
+            or child.name.startswith("sandbox-host-")
+            or any(str(c.get("project") or "").startswith("sandbox-host-") for c in containers),
             "protections": [],
+        })
+    # Retained terminal jobs also identify source checkouts already removed
+    # by a previous partial cleanup. Keep their remaining stack reapable.
+    present = {entry["path"] for entry in block["entries"]}
+    for canonical, references in protected_paths.items():
+        path = Path(canonical)
+        if (canonical in present or path.exists() or path.parent != DEPLOY
+                or "finished_job_idle" not in references or "retained_job" in references):
+            continue
+        block["entries"].append({
+            "name": path.name, "path": canonical, "size_bytes": 0,
+            "size_state": "measured", "mtime": None, "is_workspace": True,
+            "is_symlink": False, "containers": [],
+            "registry": "instance_registry" in references, "active_job": False,
+            "finished_job_idle": True, "indexed": path.name in index_names,
+            "hosted": path.name.startswith("sandbox-host-"), "protections": [],
         })
     for volume in inventory.get("volumes") or ():
         name = volume.get("Name")
@@ -2343,6 +2394,8 @@ def refuse_target(kind, locator):
             marker in match.group("workspace") for marker in WORKSPACE_MARKERS
         ):
             return "volume_not_workspace_scoped"
+        if locator.startswith("sandbox-host-"):
+            return "hosted_site"
         return None
     if kind not in {"worktree", "runtime", "download_cache", "job_artifact"}:
         return "unsupported_resource_kind"
@@ -2361,6 +2414,8 @@ def refuse_target(kind, locator):
     for name in hosted_site_names():
         if resolved.name == name or inside(resolved, (DEPLOY / name).resolve(strict=False)):
             return "hosted_site"
+    if resolved.name.startswith("sandbox-host-"):
+        return "hosted_site"
     if path.is_symlink():
         return "symlink"
     return None
@@ -2503,7 +2558,7 @@ def reclaim_run():
             expected = None
         else:
             path = Path(locator)
-            if not (path.exists() or path.is_symlink()):
+            if kind != "worktree" and not (path.exists() or path.is_symlink()):
                 outcomes.append({
                     "seq": seq, "locator": locator, "status": "already_absent",
                     "reason": "already_absent", "bytes": 0,
@@ -2518,7 +2573,7 @@ def reclaim_run():
                 })
                 continue
             expected = candidate.get("expected_mtime")
-            if expected is not None:
+            if expected is not None and path.exists():
                 observed = entry_mtime(path)
                 if observed is None or abs(float(observed) - float(expected)) > 1.0:
                     reason = "candidate_modified_since_plan"
@@ -2541,6 +2596,8 @@ def reclaim_run():
             "class": candidate.get("class"), "tier": candidate.get("tier"),
             "reason": candidate.get("reason"), "trigger": trigger, "at": now,
         })
+        teardown = None
+        source_missing = kind != "volume" and not Path(locator).exists()
         if kind == "volume":
             for container in candidate.get("stop_containers") or ():
                 if isinstance(container, str) and container and container not in stopped:
@@ -2557,14 +2614,89 @@ def reclaim_run():
                 status, reason, absent = "failed", "cleanup_failed", False
             elevated = False
         else:
-            for container in candidate.get("stop_containers") or ():
-                if isinstance(container, str) and container and container not in stopped:
-                    run(["docker", "stop", "-t", "5", container], 30)
-                    run(["docker", "rm", "-f", container], 30)
-                    stopped.add(container)
-            absent, elevated, failure = remove_path(Path(locator))
-            if absent:
-                status, reason = "removed", "removed"
+            if kind == "worktree":
+                # Spec 066: a job may have been submitted to this workspace
+                # since the plan; re-read the registry and keep it if so, or
+                # if the registry cannot be read.
+                try:
+                    from sandbox.jobs.registry import read_resource_index
+                    current = read_resource_index(RUNTIME / "jobs" / "registry.sqlite3")
+                    fresh = job_workspace_references(
+                        current.get("jobs") or (), now=time.time(),
+                        idle_seconds=FINISHED_JOB_IDLE_SECONDS)
+                    canonical = str(Path(locator).resolve(strict=False))
+                    busy = "retained_job" in fresh.get(canonical, ())
+                    if candidate.get("reason") == "finished_job_idle":
+                        busy = busy or "finished_job_idle" not in fresh.get(canonical, ())
+                    # Admission writes its source-family reservation while
+                    # holding the same reclaim-host guard as this entire run.
+                    reservation_path = RUNTIME / "storage" / "reservations.json"
+                    try:
+                        reservations = json.loads(reservation_path.read_text())
+                    except FileNotFoundError:
+                        reservations = []
+                    if not isinstance(reservations, list):
+                        raise ValueError("invalid reservations")
+                    for reservation in reservations:
+                        if not isinstance(reservation, dict):
+                            raise ValueError("invalid reservation")
+                        expiry = reservation.get("expires_at")
+                        if type(expiry) not in (int, float):
+                            raise ValueError("unknown reservation expiry")
+                        if expiry <= time.time():
+                            continue
+                        target = reservation.get("target")
+                        if not isinstance(target, str) or not target:
+                            raise ValueError("unknown reservation target")
+                        busy = busy or canonical == target or canonical.startswith(target + "-workspace-")
+                except Exception:
+                    busy = True
+                if busy:
+                    outcomes.append({
+                        "seq": seq, "locator": locator, "status": "skipped",
+                        "reason": "job_active_since_plan", "bytes": planned_bytes,
+                        "elevated": False, "verified_absent": False,
+                    })
+                    manifest_append(manifest, {
+                        "schema": 1, "run_id": run_id, "seq": seq,
+                        "phase": "outcome", "path": locator, "status": "skipped",
+                        "reason": "job_active_since_plan", "elevated": False,
+                        "verified_absent": False, "bytes": None, "at": now,
+                    })
+                    continue
+            if kind == "worktree":
+                # Spec 066: remove the workspace's whole compose project
+                # (containers that never bound the directory, its volumes and
+                # networks) before the source; keep the source on failure.
+                teardown = teardown_workspace_stack(
+                    run, Path(locator).name,
+                    [c for c in candidate.get("stop_containers") or ()
+                     if isinstance(c, str) and c],
+                    record=lambda resource_kind, resource_id: manifest_append(manifest, {
+                        "schema": 1, "run_id": run_id, "seq": seq, "phase": "intent",
+                        "path": resource_id, "kind": resource_kind,
+                        "workspace": locator, "at": now,
+                    }))
+            # Worktree containers are handled exclusively by the ownership
+            # checked helper. Never fall back to removing arbitrary bind users.
+            if kind != "worktree":
+                for container in candidate.get("stop_containers") or ():
+                    if isinstance(container, str) and container and container not in stopped:
+                        manifest_append(manifest, {
+                            "schema": 1, "run_id": run_id, "seq": seq, "phase": "intent",
+                            "path": container, "kind": "container", "at": now,
+                        })
+                        run(["docker", "stop", "-t", "5", container], 30)
+                        run(["docker", "rm", "-f", container], 30)
+                        stopped.add(container)
+            if teardown is not None and not teardown.get("ok"):
+                absent, elevated, failure = False, False, None
+            else:
+                absent, elevated, failure = remove_path(Path(locator))
+            if teardown is not None and not teardown.get("ok"):
+                status, reason = "failed", "stack_teardown_incomplete"
+            elif absent:
+                status, reason = ("already_absent", "already_absent") if source_missing else ("removed", "removed")
             elif failure is not None and isinstance(failure, PermissionError):
                 status, reason = "failed", "partial_removal_detected"
             else:
@@ -2578,12 +2710,14 @@ def reclaim_run():
             "seq": seq, "locator": locator, "status": status, "reason": reason,
             "bytes": planned_bytes if status == "removed" else 0,
             "elevated": elevated, "verified_absent": bool(absent),
+            "teardown": teardown,
         })
         manifest_append(manifest, {
             "schema": 1, "run_id": run_id, "seq": seq, "phase": "outcome",
             "path": locator, "status": status, "reason": reason,
             "elevated": elevated, "verified_absent": bool(absent),
             "bytes": planned_bytes if status == "removed" else 0,
+            "teardown": teardown,
             "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         })
     removed_paths = {
@@ -3568,7 +3702,13 @@ def _program(request: dict) -> str:
 
     encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
     parser_source = inspect.getsource(parse_job_list_payload)
+    from . import workspace_teardown
+    teardown_source = "\n\n".join((
+        inspect.getsource(workspace_teardown.job_workspace_references),
+        inspect.getsource(workspace_teardown.teardown_workspace_stack),
+    ))
     return _REMOTE_PROGRAM.replace("__JOB_LIST_PARSER__", parser_source).replace(
+        "__WORKSPACE_TEARDOWN__", teardown_source).replace(
         "__REQUEST__", repr(encoded),
     )
 

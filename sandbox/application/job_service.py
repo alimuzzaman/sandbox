@@ -1261,6 +1261,7 @@ class JobService:
             raise RuntimeError("active_job_protected")
         directory = self.storage.job_dir(job_id)
         removed = []
+        workspace_cleanup_pending = False
         if logs:
             output = directory / "output"
             if output.exists(): shutil.rmtree(output); removed.append("logs")
@@ -1278,8 +1279,10 @@ class JobService:
                     rel_res = self.workspace_registry.release_terminal_job(state, self.repository)
                     if rel_res.get("ok"):
                         removed.append("workspace_cleanup")
+                    from sandbox.resources.ci_teardown import cleanup_completed
+                    workspace_cleanup_pending = not cleanup_completed(rel_res)
                 except Exception:
-                    pass
+                    workspace_cleanup_pending = True
 
         if metrics:
             metric_file = directory / "metrics.jsonl"
@@ -1300,7 +1303,7 @@ class JobService:
                 hasattr(self.workspace_registry, "has_retained_materialization")):
             remaining = (remaining or
                          self.workspace_registry.has_retained_materialization(state))
-        cleanup_state = "retained" if remaining else "completed"
+        cleanup_state = "retained" if remaining or workspace_cleanup_pending else "completed"
         self.repository.set_cleanup_state(job_id, cleanup_state)
         return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
 

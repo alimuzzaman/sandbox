@@ -1959,6 +1959,12 @@ def cmd_resources(_cfg, args) -> None:
             )
         else:
             payload = service.cleanup(args.plan_id, confirm=bool(args.confirm))
+    if action == "status" and getattr(args, "remote", None):
+        from sandbox.core._remote import get_remote
+        registration = get_remote(args.remote) or {}
+        payload.setdefault("data", {})["storage_floor_gb"] = registration.get("storage_floor_gb", 0)
+        if not args.json:
+            print(f"storage floor: {registration.get('storage_floor_gb', 0)} GB")
     _emit(payload, bool(args.json))
     if not payload.get("ok"):
         raise SystemExit(1)

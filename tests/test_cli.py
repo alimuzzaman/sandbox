@@ -1353,7 +1353,7 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(help_output.returncode, 0, help_output.stderr)
         self.assertIn("--token-stdin", help_output.stdout)
 
-    def test_hermes_v1_command_contracts_are_json_safe(self):
+    def _hermes_v1_command_contracts_are_json_safe(self, selected):
         remote = "missing-remote-for-v1-contract"
         cases = [
             (("install", "--version", "main"), "invalid_release"),
@@ -1363,7 +1363,7 @@ class TestResolutionGate(unittest.TestCase):
             (("chat",), "missing_repo"),
             (("run",), "missing_run_input"),
         ]
-        for command, expected_code in cases:
+        for command, expected_code in [cases[selected]]:
             with self.subTest(command=command):
                 r = run_sb("hermes", *command, "--remote", remote, "--json")
                 self.assertNotEqual(r.returncode, 0)
@@ -1371,6 +1371,24 @@ class TestResolutionGate(unittest.TestCase):
                 self.assertFalse(payload["ok"])
                 self.assertEqual(payload["remote"], remote)
                 self.assertEqual(payload["error"]["code"], expected_code)
+
+    def test_hermes_v1_install_contract_is_json_safe(self):
+        self._hermes_v1_command_contracts_are_json_safe(0)
+
+    def test_hermes_v1_setup_contract_is_json_safe(self):
+        self._hermes_v1_command_contracts_are_json_safe(1)
+
+    def test_hermes_v1_doctor_contract_is_json_safe(self):
+        self._hermes_v1_command_contracts_are_json_safe(2)
+
+    def test_hermes_v1_status_contract_is_json_safe(self):
+        self._hermes_v1_command_contracts_are_json_safe(3)
+
+    def test_hermes_v1_chat_contract_is_json_safe(self):
+        self._hermes_v1_command_contracts_are_json_safe(4)
+
+    def test_hermes_v1_run_contract_is_json_safe(self):
+        self._hermes_v1_command_contracts_are_json_safe(5)
 
     def test_no_main_in_help_command_list(self):
         # The phantom `main` instance is gone; it must not appear as guidance.

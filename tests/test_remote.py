@@ -156,10 +156,10 @@ class TestFeature022FinalRemoteRegression(unittest.TestCase):
             "remotes": [
                 {"name": "alpha", "ssh_configured": True, "reachable": True,
                  "reachability": {"state": "reachable", "latency_ms": 10},
-                 "provisioned": False, "provider": "unknown"},
+                 "provisioned": False, "provider": "unknown", "storage_floor_gb": 0},
                 {"name": "zeta", "ssh_configured": True, "reachable": False,
                  "reachability": {"state": "timeout", "latency_ms": 20_000},
-                 "provisioned": True, "provider": "unknown"},
+                 "provisioned": True, "provider": "unknown", "storage_floor_gb": 0},
             ],
             "error": None,
         })
@@ -1721,7 +1721,7 @@ class TestCmdRemoteAdd(unittest.TestCase):
     def test_add_registers_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
-                args = MagicMock()
+                args = MagicMock(storage_floor_gb=None)
                 args.name = "myvps"
                 args.ssh_url = "ssh://ubuntu@1.2.3.4"
                 remote_cmd._cmd_add(args, as_json=False)
@@ -1732,7 +1732,7 @@ class TestCmdRemoteAdd(unittest.TestCase):
     def test_add_preserves_custom_ssh_port_in_normalized_form(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
-                args = MagicMock()
+                args = MagicMock(storage_floor_gb=None)
                 args.name = "myvps"
                 args.ssh_url = "ssh://ubuntu@1.2.3.4:2222"
                 remote_cmd._cmd_add(args, as_json=False)
@@ -1741,7 +1741,7 @@ class TestCmdRemoteAdd(unittest.TestCase):
     def test_add_json_does_not_return_ssh_target(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
-                args = MagicMock(ssh_url="ssh://ubuntu@1.2.3.4", json=True)
+                args = MagicMock(ssh_url="ssh://ubuntu@1.2.3.4", json=True, storage_floor_gb=None)
                 args.name = "myvps"
                 with patch("builtins.print") as mock_print:
                     remote_cmd._cmd_add(args, as_json=True)
@@ -1753,7 +1753,7 @@ class TestCmdRemoteAdd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 args = MagicMock(ssh_url="ssh://ubuntu@1.2.3.4", json=True,
-                                 ipv4="203.0.113.7", ipv6="2001:db8::7", front_door=None)
+                                 ipv4="203.0.113.7", ipv6="2001:db8::7", front_door=None, storage_floor_gb=None)
                 args.name = "myvps"
                 with patch("builtins.print") as mock_print:
                     remote_cmd._cmd_add(args, as_json=True)

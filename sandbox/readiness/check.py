@@ -234,6 +234,7 @@ def run(project_dir: str, remote: str | None, *, probes: Probes | None = None,
         evaluated[aspect] for aspect in rows.ASPECTS[1:5]] + [
         rows.handoff(handoff_record, revision, remote, target.project_root)]
     result["installed_runtime_revision"] = revision
+    result["storage_floor_gb"] = registration.get("storage_floor_gb", 0)
     if proposed is not None:
         result["proposed_range"] = proposed
     proof = {**result, "project": identity, "generation": token}

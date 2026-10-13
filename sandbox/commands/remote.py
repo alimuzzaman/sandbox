@@ -253,6 +253,7 @@ def cmd_remote(cfg, args) -> None:
         "down": _cmd_down,
         "remove": _cmd_remove,
         "set-origin": _cmd_set_origin,
+        "set-storage-floor": _cmd_set_storage_floor,
         "docker-pool": _cmd_docker_pool,
         "domains": _cmd_domains,
         "service": _cmd_service,
@@ -648,6 +649,8 @@ def _cmd_readiness(args, as_json: bool) -> None:
     else:
         print(f"remote: {data.get('remote') or '(local)'}"
               f"  selection: {data.get('remote_selection') or '-'}")
+        if "storage_floor_gb" in data:
+            print(f"  storage floor: {data['storage_floor_gb']} GB")
         for item in data.get("rows") or []:
             detail = item.get("reason") or item.get("probe_state") or ""
             line = f"  {item['aspect']:<22} {item['state']:<15} {detail}"
@@ -1005,6 +1008,12 @@ def _cmd_add(args, as_json: bool) -> None:
         fields["origin_ipv4"] = ipv4
     if ipv6:
         fields["origin_ipv6"] = ipv6
+    floor = getattr(args, "storage_floor_gb", None)
+    if floor is not None:
+        from sandbox.resources.storage_floor import MAX_FLOOR_GB
+        if type(floor) is not int or not 0 <= floor <= MAX_FLOOR_GB:
+            die(f"--storage-floor-gb must be between 0 and {MAX_FLOOR_GB}")
+        fields["storage_floor_gb"] = floor
     entry = sr.put_remote(name, **fields)
     result = {"ok": True, "name": name, "ssh_configured": bool(entry.get("ssh")), "error": None}
     if ipv4 or ipv6:
@@ -1130,6 +1139,7 @@ def _cmd_list(args, as_json: bool) -> None:
             },
             "provisioned": bool(entry.get("provisioned")),
             "provider": _provider_label(entry),
+            "storage_floor_gb": entry.get("storage_floor_gb", 0),
         })
         if project_dir:
             rows[-1]["selected"] = name == selected_name
@@ -1152,7 +1162,7 @@ def _cmd_list(args, as_json: bool) -> None:
         state = r["reachability"]["state"]
         marker = "* " if r.get("selected") else "  "
         suffix = " [selected by project]" if r.get("selected") else ""
-        print(f"{marker}{r['name']}  {reach} ({state}), {prov}, provider {r['provider']}{suffix}")
+        print(f"{marker}{r['name']}  {reach} ({state}), {prov}, provider {r['provider']}, storage floor {r['storage_floor_gb']} GB{suffix}")
     if project_dir:
         if selected_name and selected_name not in remotes:
             info(f"project selects remote '{selected_name}', which is not registered")
@@ -1176,6 +1186,30 @@ def _cmd_set_origin(args, as_json: bool) -> None:
         print(json.dumps(result))
     else:
         ok(f"stored public origin address for '{name}'")
+
+
+def _cmd_set_storage_floor(args, as_json: bool) -> None:
+    """Spec 066: record the free space remote test/job work must leave."""
+    from sandbox.resources.storage_floor import MAX_FLOOR_GB
+    name = _require_name(args)
+    if not sr.get_remote(name):
+        die(f"no remote named '{name}'")
+    value = getattr(args, "storage_floor_gb", None)
+    if isinstance(value, bool) or not isinstance(value, int) \
+            or value < 0 or value > MAX_FLOOR_GB:
+        die(f"remote set-storage-floor requires --gb between 0 and {MAX_FLOOR_GB}")
+    _invalidate_readiness(name, before=True)
+    entry = sr.put_remote(name, storage_floor_gb=value)
+    _invalidate_readiness(name)
+    result = {"ok": True, "name": name,
+              "storage_floor_gb": entry.get("storage_floor_gb") or 0, "error": None}
+    if as_json:
+        print(json.dumps(result))
+    elif value:
+        ok(f"remote '{name}' keeps {value} GB free: remote test/job submissions "
+           "that would cross it are refused")
+    else:
+        ok(f"cleared the storage floor for '{name}'")
 
 
 def _cmd_remove(args, as_json: bool) -> None:

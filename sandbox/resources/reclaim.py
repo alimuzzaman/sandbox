@@ -188,6 +188,7 @@ class ClassifiedEntry:
     containers: tuple[dict, ...] = ()
     indexed: bool = False
     registry: bool = False
+    finished_job_idle: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -225,7 +226,7 @@ def _protection_for(entry: Mapping[str, Any],
     reasons: list[str] = []
     name = str(entry.get("name") or "")
     path = str(entry.get("path") or "")
-    if (entry.get("hosted") is True or name == HOSTS_ENTRY
+    if (entry.get("hosted") is True or name.startswith("sandbox-host-") or name == HOSTS_ENTRY
             or name in hosted_sites
             or f"/{HOSTS_ENTRY}/" in path
             or path.endswith(f"/{HOSTS_ENTRY}")):
@@ -332,6 +333,8 @@ def classify_entry(
         containers=containers,
         indexed=bool(entry.get("indexed")),
         registry=bool(entry.get("registry")),
+        finished_job_idle=(entry.get("finished_job_idle") is True
+                           and entry.get("active_job") is not True),
     )
 
 
@@ -402,6 +405,8 @@ def classify_volume(
         raise ReclaimPolicyError("volume requires a name")
     size = volume.get("size_bytes")
     mounted = volume.get("mounted_running") is True
+    if name.startswith("sandbox-host-") or str(volume.get("project") or "").startswith("sandbox-host-"):
+        return ClassifiedVolume(name, None, size, mounted, False, "hosted_site")
     match = WORKSPACE_VOLUME_PATTERN.fullmatch(name)
     if match is None:
         return ClassifiedVolume(name, None, size, mounted, False,
@@ -556,6 +561,13 @@ def _entry_tier(entry: ClassifiedEntry) -> tuple[str, str] | None:
         # running container still forces the broad tier: reclaiming it means
         # stopping something that is currently up.
         return ("all" if running else "safe"), "lease_released"
+    if entry.finished_job_idle and entry.in_use_reason in {
+            None, "recent_activity", "activity_unknown"}:
+        # Spec 066: every job that used this workspace finished longer ago
+        # than the idle threshold. That affirmative evidence outranks the
+        # directory-mtime window, never an explicit lease; the scheduled
+        # routine (safe tier) may then remove the whole stack.
+        return "safe", "finished_job_idle"
     if entry.in_use:
         return None
     if entry.lifecycle_class == "ORPHAN":

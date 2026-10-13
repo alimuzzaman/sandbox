@@ -26,7 +26,7 @@ change on refusal.
 
 **Acceptance Scenarios**:
 
-1. **Given** 80 GB free, floor 30 GB, estimate 3 GB, no in-flight work, **When** a run is submitted, **Then** it is admitted and its 3 GB estimate is reserved until the run ends.
+1. **Given** 80 GB free, floor 30 GB, estimate 3 GB, no in-flight work, **When** a run is submitted, **Then** it is admitted and its 3 GB estimate is reserved for the reservation window.
 2. **Given** 32 GB free, floor 30 GB, estimate 3 GB, **When** a run is submitted, **Then** it is refused with `remote_storage_floor` showing free, reserved, floor and estimate, and nothing is transferred or created remotely.
 3. **Given** 35 GB free, floor 30 GB, one admitted 3 GB run in flight, **When** a second 3 GB run is submitted, **Then** it is refused (35 - 3 - 3 < 30).
 4. **Given** free space cannot be measured, **When** a run is submitted, **Then** it is refused with `remote_storage_floor` stating the measurement failed.
@@ -116,7 +116,7 @@ and its approval point.
 
 - Floor configured larger than the disk: every submission refused; status shows the misconfiguration.
 - Estimate history contains a huge outlier: estimate uses recent same-repository workspaces; the outlier raises the estimate (conservative), never lowers it.
-- In-flight reservation for a run that crashed without reporting completion: the reservation is released when the run is known ended (job terminal state), not held forever.
+- Reservation for a run that crashed: it expires with its window, never held forever.
 - Remote runtime not yet migrated to a version that knows the floor: the controller reports the remote lacks the capability rather than skipping the check silently.
 - Reap of a workspace whose source is already gone but stack remains: the stack is still removed.
 
@@ -129,7 +129,7 @@ and its approval point.
 - **FR-003**: Admission MUST refuse when free - reserved - estimate < floor, with error code `remote_storage_floor` and the four numbers in the refusal.
 - **FR-004**: Admission MUST refuse with `remote_storage_floor` when free space cannot be measured.
 - **FR-005**: The estimate MUST derive from recent workspaces of the same repository on that remote, falling back to a stated conservative default with no history.
-- **FR-006**: Each admitted run's estimate MUST be reserved until the run reaches a terminal state.
+- **FR-006**: Each admitted run's estimate MUST be reserved until its footprint has materialized on disk, bounded by a fixed window (default 45 minutes), so concurrent admissions cannot jointly breach the floor and real usage is not double-counted afterwards.
 - **FR-007**: Refusal MUST leave no remote state change (no upload, workspace, stack or reservation).
 - **FR-008**: A workspace MUST be reap-eligible only when it is idle beyond the threshold (default 6 h, configurable) AND there is affirmative evidence of no running or queued job; unknown or conflicting evidence MUST keep it.
 - **FR-009**: Reap and job cleanup MUST remove an eligible workspace's containers, then its exclusively owned volumes and networks, then its source.
@@ -149,7 +149,7 @@ and its approval point.
 
 - **Storage floor**: per-remote reserved free space (GB).
 - **Footprint estimate**: expected disk use of one submission, with its source (history or default).
-- **Reservation**: an admitted run's estimate, held until the run is terminal.
+- **Reservation**: an admitted run's estimate, held for a bounded window after admission.
 - **Workspace**: remote test workspace (source + service stack + owned volumes/networks), with job state and idle age.
 - **Deletion record**: append-only list of resources to delete, written before deletion.
 - **Heal candidate**: hosted service exited after exhausting restarts.

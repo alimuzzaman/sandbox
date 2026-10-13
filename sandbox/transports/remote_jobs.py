@@ -263,6 +263,24 @@ class RemoteJobAdmissionError(RemoteJobTransportError):
         return payload
 
 
+class RemoteJobStorageFloorError(RemoteJobAdmissionError):
+    """Spec 066: refused because the remote's storage floor would be crossed."""
+
+    _ERROR = "remote job submission blocked by the remote storage floor"
+    _GUIDANCE = ("Reclaim space with ./sb workspace reap --remote REMOTE_NAME "
+                 "--dry-run, then --confirm, before retrying.")
+
+    def __init__(self, decision: object) -> None:
+        super().__init__(decision)
+        from sandbox.resources.storage_floor import describe
+        self.args = (describe(self._decision),)
+
+    def to_payload(self, *, remote: str | None = None,
+                   operation: str | None = None) -> dict:
+        from sandbox.resources.storage_floor import refusal_payload
+        return refusal_payload(self._decision, remote=remote, detail=str(self))
+
+
 _RANGE_OWNER_KINDS = frozenset({"workspace", "job", "instance"})
 _RANGE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _RANGE_RELEASE_COMMAND = re.compile(
@@ -616,7 +634,10 @@ class RemoteJobTransport:
             remote_push_timeout_for_deadline,
         )
 
+        from sandbox.resources.storage_floor import StorageFloorAdmissionError
+
         caught = False
+        floor_decision = None
         timed_out = False
         timeout_seconds = None
         decision = None
@@ -630,6 +651,8 @@ class RemoteJobTransport:
         except NetworkCapacityAdmissionError as exc:
             caught = True
             decision = getattr(exc, "decision", None)
+        except StorageFloorAdmissionError as exc:
+            floor_decision = getattr(exc, "decision", None) or {}
         except subprocess.TimeoutExpired:
             # A source push can time out before the durable job exists. Keep
             # the transport boundary typed and actionable instead of leaking
@@ -651,6 +674,8 @@ class RemoteJobTransport:
                 f"{suffix} before job acceptance; "
                 "retry with --local or inspect the remote deployment state before replaying"
             ) from None
+        if floor_decision is not None:
+            raise RemoteJobStorageFloorError(floor_decision) from None
         if caught:
             # Raising outside the except block keeps both __cause__ and
             # __context__ empty while still making the translation explicit.

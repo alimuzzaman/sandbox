@@ -1438,6 +1438,31 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             self.assertIsInstance(
                 _observe_mount_references(Path(temporary)), int)
 
+    def test_terminal_stack_failure_prevents_broker_source_deletion(self):
+        checkout = self._checkout("proj-workspace-0123456789abcd")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="terminal-stack-failure-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "failed", exit_code=1)
+        with patch("sandbox.resources.ci_teardown.complete_terminal_stack", side_effect=RuntimeError("stack_teardown_incomplete")) as teardown:
+            result = service.get(accepted["job_id"])
+        teardown.assert_called_once()
+        self.assertTrue(checkout.exists())
+        self.assertEqual(result["cleanup_state"], "failed")
+
+    def test_manual_cleanup_failure_keeps_retained_state(self):
+        checkout = self._checkout("manual-release-failure")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="manual-release-failure-request"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "failed", exit_code=1)
+        with patch.object(self.workspaces, "retire_terminal_materialization", return_value=True), \
+                patch.object(self.workspaces, "has_retained_materialization", return_value=False), \
+                patch.object(self.workspaces, "release_terminal_job", side_effect=RuntimeError("stack_teardown_incomplete")):
+            result = service.cleanup(accepted["job_id"])
+        self.assertEqual(result["cleanup_state"], "retained")
+        self.assertTrue(checkout.exists())
+
     def test_non_ci_mode_and_policy_cannot_self_authorize_checkout_deletion(self):
         checkout = self._checkout("non-ci")
         service = self._service(lambda _descriptor: None)

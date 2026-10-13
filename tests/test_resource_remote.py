@@ -29,7 +29,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
             "action": "observe", "thorough": True, "deep": True,
             "budget_seconds": 300, "managed_host": True,
             "remote_name": "remote-a",
-        }).split("\ntry:\n    output = remove()", 1)[0]
+        }).split("\nACTIONS = {", 1)[0]
         namespace = {}
         exec(source, namespace)
         return namespace
@@ -757,7 +757,7 @@ class TestRemoteProbeResilience(unittest.TestCase):
             "action": "observe", "thorough": True, "deep": True,
             "budget_seconds": 300, "managed_host": True,
             "remote_name": "remote-a",
-        }).split("\ntry:\n    output = remove()", 1)[0]
+        }).split("\nACTIONS = {", 1)[0]
         namespace = {}
         exec(source, namespace)
         return namespace
@@ -1069,7 +1069,7 @@ class TestThoroughProbeBudget(unittest.TestCase):
                 script.chmod(0o755)
             program = _program({
                 "action": "observe", "thorough": True, "deep": False,
-                "budget_seconds": 14, "managed_host": True,
+                "budget_seconds": 3.5, "managed_host": True,
                 "remote_name": "remote-a",
             })
             env = synthetic_environment({
@@ -1085,7 +1085,7 @@ class TestThoroughProbeBudget(unittest.TestCase):
             elapsed = time.monotonic() - started
         final = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(final.get("stage"), "final")
-        self.assertLess(elapsed, 30)
+        self.assertLess(elapsed, 5)
         outcomes = {item["category"]: item for item in final["category_outcomes"]}
         self.assertEqual(outcomes["deploy_worktrees"]["status"], "complete")
         self.assertEqual(outcomes["sandbox_runtime"]["status"], "complete")

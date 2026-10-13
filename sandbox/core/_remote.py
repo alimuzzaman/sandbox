@@ -562,6 +562,17 @@ def deploy_exact_working_tree(
         )
         if network_capacity.get("ok") is not True:
             raise NetworkCapacityAdmissionError(network_capacity)
+    # Spec 066: the storage floor is the second admission, still before any
+    # remote write. It is a no-op unless the remote declares a floor.
+    storage_floor = None
+    if isinstance(remote, dict) and remote.get("storage_floor_gb") is not None:
+        from sandbox.resources.storage_floor import (
+            StorageFloorAdmissionError, remote_storage_floor_admission,
+        )
+        storage_floor = remote_storage_floor_admission(
+            remote, deploy_target_path(remote, root, home_timeout=push_timeout))
+        if storage_floor is not None and storage_floor.get("ok") is not True:
+            raise StorageFloorAdmissionError(storage_floor)
     target = ensure_deploy_repo(remote, root, home_timeout=push_timeout)
     # A detached HEAD (the normal PR-review checkout) is pushed to an
     # immutable sandbox-source-<sha> ref; only a named branch is pushed by name.
@@ -584,6 +595,7 @@ def deploy_exact_working_tree(
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
             "uncommitted_files_applied": applied,
             "network_capacity": network_capacity,
+            "storage_floor": storage_floor,
             "source_ref": source_ref,
             # For a nested immutable deploy the pushed commit is the
             # source-root subtree artifact; retain the user's resolved ref as

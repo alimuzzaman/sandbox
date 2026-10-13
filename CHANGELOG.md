@@ -8,6 +8,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Remote storage floor (spec 066). `sb remote set-storage-floor R --gb N` records free
+  space that remote test/job work must leave for hosted sites; every remote deploy
+  then refuses before any upload with `remote_storage_floor` (free, reserved,
+  estimate and floor in the message) when it would cross it, or when free space
+  cannot be measured. Concurrent submissions reserve their estimate for 45 minutes.
+- `sb host heal --remote R [--target P/E] [--confirm]` lists hosted containers that
+  exited after exhausting their on-failure restarts and starts exactly those, only
+  while free space is strictly above the floor.
+- Workspace reclaim removes the workspace's whole Compose project (containers,
+  unshared volumes, networks) before its checkout, and treats a workspace whose
+  retained jobs all finished more than 6 hours ago as a safe-tier
+  `finished_job_idle` candidate (needs `sb remote service migrate`). CI job-cleanup
+  uses the same stack teardown behind its identity checks and retains source and
+  cleanup state if teardown fails.
 - `sb host destroy --remote R --target PROJECT/ENV [--confirm]` removes one hosted
   target on the nginx front door: Compose containers, volumes, networks and its own
   image tags, edge route and certificates, remote

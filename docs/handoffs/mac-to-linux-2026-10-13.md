@@ -4,6 +4,11 @@ Created 2026-10-13 for `alim@alim-predator-ph315-51`.
 Source T3 thread: `mcp:6516bb28-9920-4cc8-b21a-7392961b245d`,
 "Resolve Sandbox Feedback Backlog", on `WPDev-Mac-Alim`.
 
+The remaining research reports are now published on topic branch
+`codex/secrets-research-handoff-20261013`. Read the
+[dedicated secrets handoff](2026-10-13-linux/secrets.md) for the files and
+current preservation limits.
+
 ## Start here
 
 1. Use the Linux Sandbox checkout on `latest`. Check its branch, upstream,
@@ -63,9 +68,10 @@ Do not carry forward these earlier assurances without evidence:
 
 Earlier research covered envchain/GitHub CLI, aws-vault/99designs-keyring,
 SOPS/age/age-plugin-se, and pass/docker-credential-helpers. All four reports
-were partial. They were saved only under the Mac scratch directory
-`/Users/alim/Sites/git/.scratch/sandbox/secrets-research/`; they are not
-included in this commit and must not be treated as complete proof. The claim
+were partial. They were originally saved only under the Mac scratch directory
+`/Users/alim/Sites/git/.scratch/sandbox/secrets-research/`. Copies are now
+committed under `docs/handoffs/2026-10-13-linux/secrets-research/`, retaining
+their partial status, and must not be treated as complete proof. The claim
 that every tool uses OS keyring storage was too broad. Research the chosen
 backend rather than relying on that comparison.
 
@@ -117,9 +123,11 @@ Keep these task-specific limits:
 
 The source checkout was
 `/Users/alim/.codex/worktrees/branch-consolidation/sandbox`, on `latest` tracking
-`origin/latest`, at `3b818a8c4d600c30e9d122c920497877d394ef6d` before this
-handoff commit. Its only dirty file was `.specify/feature.json`, an unrelated
-edit left untouched and excluded from the commit.
+`origin/latest`, at `3b818a8c4d600c30e9d122c920497877d394ef6d` before the
+original handoff commit `084a622`. Its only dirty file was
+`.specify/feature.json`, an unrelated edit left untouched and excluded from
+that commit. The user subsequently authorized committing that pointer edit
+alongside the research on the topic branch named above.
 
 Recent existing commits provide orientation, not fresh runtime acceptance:
 

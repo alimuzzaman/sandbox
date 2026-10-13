@@ -1,0 +1,74 @@
+RESEARCH: pass and docker-credential-helpers (read-only web research)
+Tool calls used: 14 of 15 budget. Status: PARTIAL (osxkeychain and secretservice internals not verified; see section 3 and 5).
+
+Sources (short labels used below):
+[S1] https://www.passwordstore.org/
+[S2] https://github.com/docker/docker-credential-helpers (README, repo root)
+[S3] https://raw.githubusercontent.com/docker/docker-credential-helpers/master/credentials/credentials.go
+[S4] https://raw.githubusercontent.com/docker/docker-credential-helpers/master/pass/pass.go
+[S5] https://docs.docker.com/reference/cli/docker/login/
+[S6] https://github.com/docker/docker-credential-helpers/tree/master/osxkeychain (directory listing)
+[S7] WebSearch results, aggregated (not a single page):
+     - https://github.com/docker/secrets-engine/issues/5
+     - https://torgeir.dev/2024/05/colima-dont-keep-docker-credentials-in-the-clear/
+     - https://dzone.com/articles/what-a-mysterious-bug-taught-us-about-how-docker-s
+     - https://github.com/docker/docker-credential-helpers/issues/319
+     - https://github.com/orbstack/orbstack/issues/1167
+     - https://slack-archive.rancher.com/t/2924492/docker-credential-osxkeychain-is-really-annoying
+
+----------------------------------------------------------------
+1. STORAGE FORMAT AND PLAINTEXT LEAKS
+
+pass [S1]
+- Each entry is a separate GPG-encrypted file under ~/.password-store (overridable via PASSWORD_STORE_DIR per [S4]).
+- Encryption key ID is set at `pass init`; folders can use different keys (`-p`).
+- Decrypted content is free-form text; a common convention is password on line 1, extra fields below.
+- If the store is a git repo, a commit is created on each manipulation [S1].
+- Plaintext visible on disk: entry file names (with .gpg suffix) and directory names (e.g. "Email/", "France/") [S1]. Terminal output and clipboard messages echo the entry name [S1].
+- The page does NOT say whether GPG key IDs are visible in the file headers, nor what git commits contain. Treat both as unverified.
+
+docker-credential-pass backend [S4]
+- Entry path: <PASS_FOLDER>/<base64-url(serverURL)>/<username>.gpg. The server URL is base64-URL encoded so "/" does not create nested folders [S4].
+- So plaintext on disk reveals: the base64 of the registry URL (decodable to the registry host) and the username as the file name [S4]. This is derived from the code, not a stated doc claim.
+- The secret is stored raw (no JSON wrapper), passed on stdin to `pass insert -f -m` [S4].
+
+docker's own file fallback [S5]
+- Without a store, credentials go into ~/.docker/config.json as base64. Docs say this is "less secure" than a credential store and give no further detail [S5].
+
+2. HELPER PROTOCOL (how a tool fetches a secret without it being in config)
+
+[S2], [S3], [S5]
+- A helper is a standalone binary named docker-credential-<name>, on $PATH. The first argument selects the operation: store | get | erase | list [S2].
+- Docker config selects it: "credsStore": "<name>" (one global helper) or "credHelpers": {"<registry>": "<name>"} (per registry). For registries in credHelpers the default store is not used [S5].
+- store: stdin is JSON {ServerURL, Username, Secret} [S3, S5]. For identity tokens Username is "<token>" [S5].
+- get: stdin is the raw ServerURL string. stdout is one JSON object {"ServerURL","Username","Secret"} with a trailing newline, encoded by json.Encoder [S3]. Docs describe the output as Username and Secret [S5].
+- erase: stdin is the raw ServerURL [S2, S5].
+- list: no stdin; lists stored credentials [S2].
+- store and erase may write messages to stdout that Docker displays [S5].
+- Net effect: config holds only the helper name and the registry key. The secret lives in the store and is fetched on demand; the CLI never writes it to config.json when a helper is set [S5].
+- Docs advise `docker logout` before changing credsStore/credHelpers so old credentials are removed from the old store [S5].
+
+3. macOS AND LINUX COVERAGE
+
+[S2] lists the helpers: osxkeychain (macOS keychain), secretservice (D-Bus Secret Service), wincred (Windows Credential Manager), pass (uses pass, requires gpg2 key in gpg2 keyring) [S2].
+- Install: release binary on PATH, or `make <name>` from source, or `docker buildx bake` [S2].
+- osxkeychain: README gives a one-line description only [S2]. The directory listing shows osxkeychain.go and osxkeychain_test.go plus cmd/ [S6]. The C source with the exact Security API calls was NOT retrieved (raw and blob URLs returned 404). Which SecItem* calls and attributes it uses is UNVERIFIED.
+- secretservice: source at the path I tried returned 404 (both master and main branches). Its libsecret/D-Bus details are UNVERIFIED from primary source.
+- Linux default (from S7, aggregated search, not an official doc): docker falls back to pass, then secretservice, then the base64 file, when no helper is configured. Treat as low confidence.
+
+4. KNOWN WEAKNESSES (sourced)
+
+- Plaintext fallback: without a store, config.json holds base64 credentials. Base64 is encoding, not encryption [S5, S7 DZone].
+- Keychain ACL: macOS lets only the binary that wrote an item read it back, so Docker CLI reads only what the CLI stored [S7 docker/secrets-engine #5, informal]. Repeated keychain prompts after "Always Allow" are reported [S7 #319, orbstack #1167]. These are usability issues.
+- pass backend needs gpg2 and a configured key; the secrets-engine issue calls the pass fallback Linux-only and gpg-dependent [S2, S7 secrets-engine #5]. Reported breakage after rotating the GPG key [S7, docker-credential-helpers #299, not opened; unverified].
+- Metadata leak in pass backend: base64 of registry URL and username appear as file names [S4] (derived from code).
+- Informal report: setting credsStore to "none" writes credentials to ~/.docker/plaintext-credentials.config.json, mode 0600, base64 [S7 Rancher Slack, informal user comment, not official].
+- No formal security advisory was found in the search results [S7].
+
+5. ITEMS LEFT (PARTIAL)
+- osxkeychain Security API calls and item attributes: not verified (404 on the guessed source path; the directory listing confirmed osxkeychain.go exists at [S6], which was not fetched).
+- secretservice libsecret usage and attributes: not verified (404).
+- Whether pass or gpg store key IDs or git commit contents in plaintext: not stated by [S1].
+- Linux helper auto-selection order: only from a search summary, not an official page.
+- Could not check docker-credential-helpers issues #299 or #319 directly.
+Next step if needed: fetch https://github.com/docker/docker-credential-helpers/blob/master/osxkeychain/osxkeychain.go and the secretservice file found via the tree listing of secretservice/, using the exact paths.

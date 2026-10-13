@@ -1,0 +1,66 @@
+Secret storage in envchain and GitHub CLI (gh): read-only web research
+Date: 2026-10-13. Method: WebFetch only, no code run, no files touched besides this note.
+Status: PARTIAL for gh internals (see gaps). Sources are cited per claim.
+
+=== envchain (github.com/sorah/envchain) ===
+Sources: https://github.com/sorah/envchain (README page), https://raw.githubusercontent.com/sorah/envchain/master/README.md
+
+(1) Storage
+- macOS: the macOS Keychain. Each namespace is stored as an application password named "envchain-NAMESPACE". [README, both fetches]
+- Linux: a D-Bus Secret Service, such as gnome-keyring (Seahorse) or KeePassXC. Requires libsecret. [README, both fetches]
+- No plaintext file storage is mentioned. Variables are grouped by namespace, e.g. aws.AWS_ACCESS_KEY_ID.
+
+(2) Reaching a process
+- "envchain NAMESPACE COMMAND" sets the stored variables for that one child command only. Multiple namespaces can be combined with commas (envchain aws,hubot). [README]
+- The page does not say whether the child is exec'd directly or launched via a shell. [README]
+- No direct read API is described.
+
+(3) Fallback without a keyring
+- No fallback is described. On Linux, a missing Secret Service means the tool cannot store secrets. [inferred from "Requires libsecret and a D-Bus Secret Service", README]
+- The README warns against the alternative: plaintext secrets in shell init files are a "grave risk". [README]
+- Whether the code ever writes plaintext: not verified (source not read).
+
+(4) Access control
+- Flags: --require-passphrase (always prompt for the Keychain passphrase), --no-require-passphrase (don't prompt), --noecho (hide input when setting values). [README]
+- No Keychain ACL details, no Touch ID mention. The page gives no further access-control detail. [README]
+
+(5) Limitations
+- macOS: requires 10.7 or later; only 10.11 and 10.12 are listed as confirmed. [README]
+- Linux: requires readline, libsecret and a D-Bus Secret Service. [README]
+- Warning: "Don't give any credentials implicitly!" [README]
+- No threat model or audit is described. [README]
+
+=== GitHub CLI gh (github.com/cli/cli) ===
+Sources: https://cli.github.com/manual/gh_auth_login, https://github.com/cli/cli/blob/trunk/internal/keyring/keyring.go, https://github.com/zalando/go-keyring, https://cli.github.com/manual/gh_auth_token
+
+(1) Storage
+- Default: the token goes to the system credential store (keyring). [gh_auth_login]
+- go-keyring backend: macOS uses Keychain via the /usr/bin/security CLI binary; Linux/BSD uses the Secret Service over D-Bus (GNOME Keyring, libsecret for CLI use). [zalando/go-keyring]
+- gh's keyring wrapper (internal/keyring/keyring.go) passes caller-supplied service and user strings straight to go-keyring. The exact service/user key format used by gh was NOT found in this file. [keyring.go] UNVERIFIED: the service name gh uses.
+- Linux: go-keyring expects a "login" collection to exist; creating it requires a frontend such as Seahorse. [zalando/go-keyring]
+- The linux install doc does not discuss token storage (it only covers apt signing keys). [install_linux.md]
+
+(2) Reaching a process
+- gh reads the token itself through its own API (direct read, no env injection). The gh_auth_token page says it "outputs the authentication token for an account on a given GitHub host." [gh_auth_token]
+- Whether GH_TOKEN/GITHUB_TOKEN take precedence over the stored token: NOT stated in the fetched pages. UNVERIFIED.
+
+(3) Fallback without a keyring
+- If no credential store is found or it fails, gh falls back to a plain-text file; its location is shown by "gh auth status". [gh_auth_login] So YES, it writes plaintext on fallback. The fallback file is the config hosts file (exact name not confirmed in the fetched pages; UNVERIFIED).
+- --insecure-storage: saves credentials in plain text instead of the credential store, explicitly. [gh_auth_login]
+- keyring.go itself has NO plaintext fallback; Set/Get/Delete return the go-keyring error, or a TimeoutError after 60s ("timeout while trying to set/get/delete secret ... keyring"). ErrNotFound is returned when the secret is absent. [keyring.go]
+- Note: keyring_fallback.go exists in go-keyring, contents not read. [zalando/go-keyring]
+
+(4) Access control
+- go-keyring: ACL and prompting behaviour NOT stated. [zalando/go-keyring]
+- gh: no Touch ID or Keychain ACL details in the fetched pages. [gh_auth_login, keyring.go]
+
+(5) Limitations
+- go-keyring: macOS depends on /usr/bin/security; Linux needs a "login" collection; MockInit() is in-memory, test only. [zalando/go-keyring]
+- gh: silent plaintext fallback when the keyring is missing or fails (documented in gh_auth_login). [gh_auth_login]
+- Timeouts of 60s on keyring operations. [keyring.go]
+
+=== Gaps (PARTIAL) ===
+- gh service/user key naming and exact fallback file name: not confirmed. Needs the gh source for internal/config or internal/authflow.
+- gh GH_TOKEN precedence: not confirmed.
+- envchain exec vs shell and any Keychain ACL: not confirmed from source (only README read).
+- go-keyring keyring_fallback.go contents: not read.

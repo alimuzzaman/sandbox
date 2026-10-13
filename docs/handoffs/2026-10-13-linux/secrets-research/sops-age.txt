@@ -1,0 +1,61 @@
+SOPS + age + age-plugin-se: encrypted-file secret storage research
+Date: 2026-10-13
+Method: WebFetch only, 11 tool calls, no sub-agents. Each claim cites the page it came from. WebFetch answers come from a small model summarizing the page, so exact wording is paraphrase unless quoted.
+Status: PARTIAL. The SOPS docs pages fetched did not answer the plaintext-layout or age-recipient questions in full; see "Gaps".
+
+Sources
+S1 https://github.com/getsops/sops (repo landing page)
+S2 https://raw.githubusercontent.com/getsops/sops/main/README.rst (did not answer the questions)
+S3 https://getsops.io/docs/ (landing page; points to sub-pages)
+S4 https://getsops.io/docs/usage/advanced/ (exec-env, exec-file, decrypt)
+S5 https://getsops.io/docs/usage/identities/age/ (age recipients and identity lookup)
+S6 https://github.com/FiloSottile/age (age tool README)
+S7 https://github.com/remko/age-plugin-se (age-plugin-se README)
+S8 https://raw.githubusercontent.com/remko/age-plugin-se/main/README.md (keygen/decrypt commands, backup warning)
+
+(1) At-rest format and what stays plaintext
+
+- SOPS is "an editor of encrypted files" supporting YAML, JSON, ENV, INI and BINARY formats. Backends listed: AWS KMS, GCP KMS, Azure Key Vault, HuaweiCloud KMS, age, PGP. [S1, S3]
+- age format: a file has a header followed by the encrypted payload; `age-inspect` reports header and overhead. ASCII armor is `-a/--armor`. Format spec at age-encryption.org/v1. [S6]
+- SOPS: which parts stay plaintext (key names, the sops metadata block, the MAC) was NOT answered by any fetched page. [S1, S2, S3, S4 all silent]. Not verified here. From general knowledge of SOPS (unverified in this run): for YAML/JSON, keys are left readable and values are encrypted, with a `sops:` block holding recipients and a MAC. Confirm against getsops.io before relying on it.
+
+(2) How secrets reach a process; plaintext on disk?
+
+- `sops exec-env`: decrypted contents go into the environment of a child process; described as "available only to this process and never written to disk." [S4]
+- `sops exec-file`: places output in a temp file; default is a FIFO, so secrets are "only passed in memory" and readable once. `--no-fifo` uses a regular temp file removed after the process exits. [S4]
+- `sops decrypt`: writes to stdout by default; redirect or pipe it. With no filename, it uses the binary store (expects JSON input). [S4]
+- Caveats from S4: the child process holds the secrets in its environment, so anything it runs can read them. FIFO is unavailable on Windows (use `--no-fifo`). `--user` privilege dropping is Unix-only. Stdout from `decrypt` is plaintext: redirecting it to a file puts plaintext on disk.
+
+(3) Key management
+
+- age identity lookup (SOPS): default `keys.txt` in a `sops/age` dir. Linux: `$XDG_CONFIG_HOME/sops/age/keys.txt` else `$HOME/.config/sops/age/keys.txt`. macOS: same XDG path, falling back to `$HOME/Library/Application Support/sops/age/keys.txt`. Windows: `%AppData%\sops\age\keys.txt`. [S5]
+- Overrides: `SOPS_AGE_KEY_FILE` (path), `SOPS_AGE_KEY` (key value), `SOPS_AGE_KEY_CMD` (command that prints keys; can read `SOPS_AGE_RECIPIENT`). Key file: one X25519 identity per line, `#` comments. [S5]
+- SOPS can also decrypt with SSH private keys (`SOPS_AGE_SSH_PRIVATE_KEY_FILE`, `_CMD`, `~/.ssh/id_ed25519`, `~/.ssh/id_rsa`; only ssh-ed25519 and ssh-rsa; the CMD key must not be passphrase-protected). [S5]
+- Recipients: `--age` flag or `SOPS_AGE_RECIPIENTS` (comma-separated), or an `age:` list under `creation_rules` in `.sops.yaml`. SSH public keys also accepted. [S5]
+- age recipients and identities: `-r` (repeatable), `-R FILE` for a recipients file, recipients starting `age1`, or `ssh-ed25519`/`ssh-rsa` keys. Identity via `-i PATH` (repeatable), one `AGE-SECRET-KEY-1...` per line. [S6]
+- Passphrase mode: `-p`. age can also use a passphrase-encrypted file as an identity. [S6]
+- Plugins: age plugins such as age-plugin-yubikey (PIV hardware) and age-plugin-pq (post-quantum). [S6]
+- age-plugin-se (Secure Enclave): `age-plugin-se keygen --access-control=any-biometry -o key.txt`. Recipients start `age1se1` (plugin type `se`) or `age1tag1` (type `tag`, which native age v1.3.0+ supports without the plugin for encryption). [S7, S8]
+  - The private key is "bound to the secure enclave of your machine, so it cannot be transferred to another machine." [S7]
+  - Decrypt: `age --decrypt -i key.txt -o out age-file`. The identity file on disk holds a metadata-commented `AGE-PLUGIN-SE-1...` line, not the raw key. [S7, S8]
+  - Touch ID: decrypt "will now require Touch ID". [S8] Access-control options: none, passcode, any-biometry, any-biometry-and-passcode, any-biometry-or-passcode (default), current-biometry, current-biometry-and-passcode. With current-biometry, adding or removing a fingerprint disables the key. [S7]
+  - Platform: generating identities and decrypting need a Mac with macOS 14 and a Secure Enclave. Encrypting works on macOS 14+, Linux or Windows without an enclave. A Linux machine cannot use the SE key to decrypt. [S7, S8]
+  - Multi-machine (macOS + Linux): Linux can ENCRYPT to an `age1se1`/`age1tag1` recipient (the `tag` type needs no plugin for encryption, but the plugin is required for `se`). Linux cannot DECRYPT an SE-bound key. So the Linux box needs its own identity or a backup recipient. [S7, S8] Implication: give each machine its own age recipient (plain X25519 or SSH key) plus the Mac SE recipient, and encrypt to all of them.
+  - Loss of device: the page says keep a backup recipient, such as a regular age key, and encrypt long-term data to both. [S7, S8]
+
+(4) Known weaknesses and footguns
+
+- `exec-env` gives the child all secrets in its environment; they show up to anything it spawns and to same-user process inspection. [S4]
+- `sops decrypt` to stdout or a file writes plaintext wherever you redirect it. [S4]
+- `exec-file --no-fifo` leaves a regular temp file on disk for the child's lifetime. [S4]
+- Key service connections (SOPS's key-service mode) have no authentication or encryption by default; the page advises an SSH tunnel. Audit logging to PostgreSQL needs `/etc/sops/audit.yaml`, and the page notes the default `sops` role password is `sops` and should be changed. [S4]
+- age SSH keys: the page says SSH recipients are traceable (embed a key tag) and that SSH keys used only for authentication are "revokable" and may not be protected long-term. [S6]
+- SE keys are machine-bound: losing the Mac without a backup recipient means losing the data. `current-biometry` ties access to the fingerprint set. Pre-built macOS binaries need manual trust (Control-click, Open). [S7]
+- `se` recipients need the plugin on every machine that encrypts to them; the project says the default will change to `tag`. [S7]
+- Linux cannot decrypt SE-bound files. [S7, S8]
+
+Gaps (items left, not answered)
+- SOPS file layout: which keys/values/metadata stay plaintext, and MAC behavior. Fetch the getsops.io "Usage" / file-format pages (not reached in this run).
+- SOPS exec-env temp behavior on macOS specifically.
+- age-plugin-se: whether `tag` recipients can be used by SOPS (SOPS wraps age via its own library; plugin support not confirmed for SOPS).
+- Whether SOPS supports `age1se1`/`age1tag1` plugin recipients at all: S5 does not mention plugins. Unverified.

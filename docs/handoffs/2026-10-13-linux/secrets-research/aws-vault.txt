@@ -1,0 +1,54 @@
+aws-vault and 99designs/keyring: secret storage research (read-only web research)
+Date: 2026-10-13. Method: WebFetch of README and raw source files; 7 tool calls, no sub-agents. Claims are from fetched text, not from running code.
+
+SOURCES
+S1 https://github.com/99designs/aws-vault (README)
+S2 https://github.com/99designs/keyring (README)
+S3 https://raw.githubusercontent.com/99designs/aws-vault/master/cli/global.go
+S4 https://raw.githubusercontent.com/99designs/keyring/master/file.go
+S5 https://raw.githubusercontent.com/99designs/keyring/master/keyring.go
+S6 https://raw.githubusercontent.com/99designs/aws-vault/master/README.md
+
+(1) STORAGE BACKENDS AND DEFAULTS
+- Supported in aws-vault: macOS Keychain, Windows Credential Manager, Secret Service (GNOME Keyring, KWallet), KWallet, Pass, encrypted file. Select with --backend or AWS_VAULT_BACKEND. [S1]
+- Library backend names: secret-service, keychain, keyctl, kwallet, wincred, file, pass. [S5]
+- aws-vault default: the first entry of the runtime list, Default(backendsAvailable[0]). [S3]
+- Library default order when none configured: WinCred, Keychain, SecretService, KWallet, KeyCtl, Pass, File. Open tries each, skips failures, returns the first that opens; none opens gives ErrNoAvailImpl. [S5]
+- Per-OS default in aws-vault therefore follows that order; on macOS the Keychain is first (inference from the order, not an explicit doc statement). [S5]
+- Linux Secret Service collection default "awsvault"; KWallet AppID and folder "aws-vault". [S3]
+- Gap: the README does not state the default backend. [S1]
+
+(2) HOW SECRETS REACH A CHILD PROCESS
+- Default: env injection. aws-vault exec writes AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_CREDENTIAL_EXPIRATION into the subprocess environment. [S1]
+- Opt-in: aws-vault exec --server starts a local metadata server and sets AWS_CONTAINER_CREDENTIALS_FULL_URI and AWS_CONTAINER_AUTHORIZATION_TOKEN; SDKs refresh automatically. [S1][S6]
+- credential_process: not mentioned in the README. [S1]
+- Credentials come from STS GetSessionToken or AssumeRole. [S1]
+
+(3) AT-REST PROTECTION
+- Keychain: release builds are code-signed "to avoid extra prompts in Keychain"; users can verify with codesign --verify. No access-control-list details. [S1][S6]
+- Library file backend: JOSE encryption via jose2go; key management PBES2_HS256_A128KW, content A256GCM. [S4]
+- File backend passphrase: passed directly as the password to jose Encrypt/Decode; no explicit salt or iteration parameters set in the code. [S4]
+- Passphrase source: AWS_VAULT_FILE_PASSPHRASE if set, otherwise a no-echo terminal prompt ("Enter passphrase to unlock" plus the directory). [S3][S4]
+- Passphrase is cached in memory for the keyring instance lifetime, never written to disk; an empty passphrase is not rejected. [S4]
+- File permissions: directory 0700, each item file 0600. [S4]
+- Default file dir: ~/.awsvault/keys/ (AWS_VAULT_FILE_DIR). [S3]
+- Session lifetime: short-lived STS credentials; --duration=2h is the only duration flag shown; sessions cached for MFA and --duration roles; no --session-ttl. [S1][S6]
+- Lock or idle timeout: not documented. [S1][S6]
+
+(4) SECURITY DESIGN CHOICES AND WEAKNESSES
+- Project status: README says "This project has been abandoned and it's not receiving any more updates", pointing to the ByteNess/aws-vault fork. [S1][S6]
+- Env-var delivery exposes credentials to every process the child spawns and to /proc environment readers of that process; the README does not discuss this. (Analysis, not a source claim.)
+- The file backend's no-salt, no-iteration-count key derivation and the lack of an empty-passphrase check are observations from the source fetched; they are not stated in the docs. [S4] Whether they count as weaknesses needs a human review.
+- The library's file backend is last in the default order, so it is used only when OS backends fail. [S5]
+- Positive: short-lived credentials; no long-term keys written to disk by the default path (README claim). [S1]
+
+(5) LINUX WITHOUT A KEYRING
+- Library: tries Secret Service, KWallet, KeyCtl, Pass in order, then File. The file backend is the implicit fallback. [S5]
+- If nothing opens: ErrNoAvailImpl ("Specified keyring backend not available"). [S5]
+- Whether file is actually registered on a given Linux build is not shown in the fetched content. [S5]
+- aws-vault README: no description of the no-keyring fallback or prompt behaviour. [S1]
+
+ITEMS LEFT / LIMITS
+- Default backend per OS not stated in docs; inferred from source order only.
+- Keychain access-control details, lock/timeout behaviour, and aws-vault's exec/credential_process specifics beyond README were not fetched from source (exec.go/keychain.go not read).
+- Result: PARTIAL against the full question list; the core answers above are from fetched text.

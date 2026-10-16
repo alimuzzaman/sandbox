@@ -1099,6 +1099,29 @@ plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a rem
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
 — see [`docs/remote-hosting.md`](docs/remote-hosting.md).
 
+CPU-heavy hosted application images can be built on a faster Linux controller:
+
+```bash
+./sb host image build-local --project-dir /path/to/app --environment development --revision "$COMMIT" --json
+./sb host image push-local --remote xcloud-london --receipt /path/from/previous/result/receipt.json --confirm --json
+./sb host apply --project-dir /path/to/app --environment development --remote xcloud-london --local-images sha256:REMOTE_RECEIPT_DIGEST --confirm --json
+```
+
+The first command creates artifacts, the second only stages and verifies them,
+and only `host apply` can claim deployment. The environment must declare
+`compose.build: false`; Sandbox never falls back to a remote build or pull.
+Transfer gates readiness against the locked registered target, honors one
+aggregate deadline and the configured remote storage floor before its first write, and
+holds a dedicated remote-engine lock through image load and receipt publication;
+receipt-bound apply takes the same engine-wide lock before delivery admission
+and holds it through runtime convergence. A busy engine refuses; lock loss or
+interruption remains unknown until the
+same receipt is freshly observed. A remote worker fence blocks new owners until
+an interrupted image load exits. Apply verifies the remote Compose render using
+its actual environment and override against receipt references and exact image
+IDs. Local rendering refuses image references dependent on Docker client
+selection variables; receipt target paths require safe hosted slugs.
+
 Immutable multi-image activation prepares private candidate configuration without
 overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)
 for source binding, replay limits and required initializer execution proof.

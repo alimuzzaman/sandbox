@@ -60,6 +60,7 @@ RUNTIME_PRODUCERS = (
 # Controller-side transports plus the programs they execute on the remote,
 # then the runtime-side response producers.
 SHAPE_SOURCES = (
+    "sandbox/transports/remote_local_images.py",
     "sandbox/transports/remote_hosting_activation.py",
     "sandbox/transports/remote_hosting_images.py",
     "sandbox/transports/remote_jobs.py",

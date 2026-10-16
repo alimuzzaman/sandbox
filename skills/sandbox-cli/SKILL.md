@@ -423,6 +423,29 @@ reports that state directly.
 
 ### Failed hosting apply recovery
 
+For a declared `compose.build: false` environment, a faster Linux controller
+can run `sb host image build-local --project-dir DIR --environment ENV
+--revision SHA --json`, followed by confirmation-gated `sb host image
+push-local --remote NAME --receipt PATH --confirm --json`. Pass the returned
+remote receipt digest to ordinary `sb host apply ... --local-images DIGEST
+--confirm`. Transfer is not deployment. Do not replace this path with raw
+Docker/SSH, copy secret-bearing files between controllers, or treat an empty or
+interrupted transfer response as success. Transfer runs the configured remote
+storage-floor admission before writing and holds a dedicated remote-engine lock
+through load and receipt publication. The lock is held by its SSH connection;
+it does not enable or use the separately gated hosting coordination store.
+Receipt-bound apply takes the same engine-wide lock before
+delivery admission and holds it through runtime convergence; engine contention
+or lock loss never degrades to an uncoordinated transfer. A load-worker fence
+also blocks new owners while an import survives its SSH lease. Push pins the
+named registration and gates readiness before reservations or locks. Every
+transfer step shares `--timeout`; expiry before any remote write is
+`local_images_transfer_timeout`, after a possible write is
+`local_images_transfer_unknown`. Apply compares the actual remote Compose
+render (environment, files, override) and exact portable image IDs before Compose.
+Local rendering refuses service image references dependent on Docker client
+selection variables. Receipt target names must be safe hosted slugs.
+
 Use recovery when the first safe step must be observation. Do not substitute ordinary
 `host apply`, because apply may stage source before deciding replay safety.
 

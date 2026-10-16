@@ -1,0 +1,347 @@
+"""Focused fixed-transport regressions for hosted local images."""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from contextlib import ExitStack, contextmanager
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import ANY, MagicMock, patch
+
+from sandbox.hosting import local_images
+from sandbox.transports import remote_local_images
+from tests.test_hosting_local_images import _receipt
+from tests.subprocess_support import run_test_process
+
+
+class RemoteLocalImageTests(unittest.TestCase):
+    @staticmethod
+    def _write_receipt(directory: str) -> Path:
+        path = Path(directory, "receipt.json")
+        path.write_text(json.dumps(_receipt()))
+        path.chmod(0o600)
+        return path
+
+    @staticmethod
+    def _matching_observation() -> dict:
+        return {"schema": 1, "engine": "linux/amd64", "services": {},
+                "images": {"app:test": {"present": True,
+                    "id": "sha256:" + "1" * 64, "platform": "linux/amd64",
+                    "layers_digest": "sha256:" + "4" * 64,
+                    "repo_digests": []}}, "config_error": None,
+                "remote_receipt": None}
+
+    def test_observe_uses_registered_remote_and_closed_probe(self):
+        receipt = _receipt()
+        frame = {"schema": 1, "engine": "linux/amd64", "services": {},
+                 "images": {}, "config_error": None, "remote_receipt": None}
+        entry = {"provisioned": True, "ssh": "example.test"}
+        with patch.object(remote_local_images._remote, "get_remote", return_value=entry), \
+             patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                 returncode=0, stdout=json.dumps(frame))):
+            self.assertEqual(remote_local_images.observe("target", receipt), frame)
+
+    def test_load_refuses_changed_archive_before_ssh(self):
+        receipt = _receipt()
+        artifact = receipt["artifacts"]["image-1"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "image-1.tar")
+            path.write_bytes(b"changed")
+            path.chmod(0o600)
+            with patch.object(remote_local_images._remote, "get_remote",
+                              return_value={"provisioned": True}) as lookup:
+                with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,
+                                            "archive_changed"):
+                    remote_local_images.load_archive(
+                        "target", path, artifact, timeout=1)
+            lookup.assert_called_once()
+
+    def test_read_receipt_requires_requested_self_digest(self):
+        receipt = _receipt()
+        document = local_images.remote_receipt_document(
+            receipt, {"app:test": {"id": "sha256:" + "1" * 64,
+                                    "artifact": "image-1"}},
+            verified_at="2026-10-16T00:00:00Z")
+        document.update({"machine_identity": "machine", "registered_host_digest": "host",
+                         "daemon_identity": "daemon"})
+        digest = local_images.canonical_digest(document)
+        document["remote_receipt_digest"] = digest
+        entry = {"provisioned": True, "ssh": "example.test"}
+        with patch.object(remote_local_images._remote, "get_remote", return_value=entry), \
+             patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                          return_value="/srv/sandbox"), \
+             patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                 returncode=0, stdout=json.dumps(document))):
+            self.assertEqual(remote_local_images.read_receipt("target", digest), document)
+
+    def test_storage_floor_refusal_precedes_coordination_and_remote_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_receipt(directory)
+            entry = {"provisioned": True, "storage_floor_gb": 30}
+            refusal = remote_local_images.RemoteLocalImageError("remote_storage_floor")
+            with patch.object(remote_local_images, "observe",
+                              return_value=self._matching_observation()), \
+                 patch.object(remote_local_images, "_entry", return_value=entry), \
+                 patch.object(remote_local_images, "_storage_admission",
+                              side_effect=refusal) as admission, \
+                 patch.object(remote_local_images, "_TransferLease") as lease:
+                with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,
+                                            "remote_storage_floor"):
+                    remote_local_images.push_receipt(
+                        "target", path, timeout=60, artifact_timeout=30,
+                        machine_identity="machine", registered_host_digest="host")
+            admission.assert_called_once_with(
+                entry, _receipt(), self._matching_observation(),
+                timeout=ANY, before_write=ANY)
+            lease.assert_not_called()
+
+    def test_transfer_lock_is_held_by_registered_ssh_process_until_exit(self):
+        process = MagicMock()
+        process.stdin = MagicMock()
+        process.stdout = MagicMock()
+        process.stdout.readline.return_value = b'{"schema":1,"acquired":true}\n'
+        process.poll.return_value = None
+        selector = MagicMock()
+        selector.select.return_value = [(process.stdout, 1)]
+        entry = {"provisioned": True, "ssh": "example.test"}
+        with patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                          return_value="/srv/sandbox"), \
+             patch.object(remote_local_images._remote, "ssh_command_args",
+                          return_value=["ssh", "fixed"]), \
+             patch.object(remote_local_images.subprocess, "Popen",
+                          return_value=process), \
+             patch.object(remote_local_images.selectors, "DefaultSelector",
+                          return_value=selector):
+            with remote_local_images._TransferLease(entry, timeout=0.25) as lease:
+                lease.require()
+        selector.select.assert_called_once_with(0.25)
+        process.stdin.close.assert_called_once()
+        process.wait.assert_called_once_with(timeout=10)
+
+    def test_orphan_load_fence_refuses_new_engine_owner_without_waiting(self):
+        harness = """
+import fcntl,os,sys,tempfile
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as root:
+    fence=os.open(root+'/load-fence.lock',os.O_CREAT|os.O_RDWR,0o600)
+    fcntl.flock(fence,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    # engine.lock is free, as after loss of the original lease's SSH process.
+    with patch.object(sys,'argv',['worker',root]):
+        try: exec(PROGRAM)
+        except SystemExit as exc: assert exc.code==75
+        else: raise AssertionError('admitted over orphaned load')
+""".replace("PROGRAM", repr(remote_local_images._ENGINE_LOCK_PROGRAM))
+        result = run_test_process([sys.executable, "-c", harness],
+                                  capture_output=True, text=True, timeout=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"schema": 1, "acquired": False})
+
+    def test_stage_worker_holds_fence_during_upload_and_docker_load(self):
+        harness = """
+import fcntl,hashlib,json,os,sys,tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as sandbox_root:
+    uploads=sandbox_root+'/uploads'
+    data=b'fake-archive'
+    def assert_fenced():
+        with open(sandbox_root+'/load-fence.lock','rb') as other:
+            try: fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError: pass
+            else: raise AssertionError('worker lost fence')
+    def read(fd,size):
+        assert fd==0
+        assert_fenced()
+        return chunks.pop(0)
+    def load(argv,**kwargs):
+        assert argv[:3]==['docker','image','load']
+        assert_fenced()
+        assert len(kwargs['pass_fds'])==1
+        assert os.fstat(kwargs['pass_fds'][0])
+        return SimpleNamespace(returncode=0)
+    chunks=[data,b'']
+    args=['worker',uploads,'image-1.tar','sha256:'+hashlib.sha256(data).hexdigest(),str(len(data))]
+    with patch.object(sys,'argv',args), patch('os.read',read), patch('subprocess.run',load):
+        exec(PROGRAM)
+""".replace("PROGRAM", repr(remote_local_images._STAGE_PROGRAM))
+        result = run_test_process([sys.executable, "-c", harness],
+                                  capture_output=True, text=True, timeout=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["state"], "loaded")
+
+    def test_storage_admission_rejects_traversal_before_remote_probe(self):
+        receipt = _receipt()
+        receipt["project"] = "../../victim/deploy-src/app"
+        receipt = local_images.seal_receipt(receipt)
+        with patch("sandbox.resources.storage_floor.remote_storage_floor_admission") as probe:
+            with self.assertRaises(local_images.LocalImageError):
+                remote_local_images._storage_admission(
+                    {"storage_floor_gb": 30}, receipt, self._matching_observation())
+        probe.assert_not_called()
+
+    def test_storage_admission_uses_contained_target_and_budget(self):
+        entry = {"storage_floor_gb": 30}
+        with patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                          return_value="/srv/sandbox/"), \
+             patch("sandbox.resources.storage_floor.remote_storage_floor_admission",
+                   return_value={"ok": True}) as probe:
+            remote_local_images._storage_admission(
+                entry, _receipt(), self._matching_observation(), timeout=0.25)
+        self.assertEqual(probe.call_args.args, (entry, "/srv/sandbox/deploy-src/app"))
+        self.assertEqual(probe.call_args.kwargs["timeout"], 0.25)
+
+    @contextmanager
+    def _push_steps(self, *, elapsed=None, floor=False, initial_delay=0):
+        elapsed = elapsed or {}
+        clock = [0.0]
+        calls = []
+        entry = {"provisioned": True, "host": "original"}
+        if floor:
+            entry["storage_floor_gb"] = 30
+        good = self._matching_observation()
+        absent = {**good, "images": {}}
+        counts = {"observe": 0, "daemon": 0}
+        def step(name, kwargs):
+            budget = kwargs["timeout"]
+            self.assertGreater(budget, 0)
+            self.assertLessEqual(budget, 60 - clock[0])
+            calls.append((name, budget))
+            clock[0] += elapsed.get(name, 0)
+        def observe(_remote, _receipt, **kwargs):
+            name = ("initial_observe", "reobserve", "post_load_observe")[counts["observe"]]
+            counts["observe"] += 1
+            self.assertIs(kwargs["entry"], entry)
+            step(name, kwargs)
+            return good if name == "post_load_observe" else absent
+        def admission(_entry, _receipt, _observation, **kwargs):
+            self.assertIs(_entry, entry)
+            if floor:
+                kwargs["before_write"]()
+            step("admission", kwargs)
+        lease = MagicMock()
+        def acquire(*_args, **kwargs):
+            self.assertIs(kwargs["entry"], entry)
+            step("lease", kwargs)
+            return lease
+        def daemon(_entry, _command, **kwargs):
+            self.assertIs(_entry, entry)
+            name = ("daemon_before", "daemon_after")[counts["daemon"]]
+            counts["daemon"] += 1
+            step(name, kwargs)
+            return "daemon"
+        def upload(*_args, **kwargs):
+            self.assertIs(kwargs["entry"], entry)
+            step("load", kwargs)
+        def publish(*_args, **kwargs):
+            self.assertIs(kwargs["entry"], entry)
+            step("publish", kwargs)
+            return "sha256:" + "f" * 64
+        with ExitStack() as stack:
+            for name, function in (("observe", observe), ("_storage_admission", admission),
+                                   ("target_image_lease", acquire), ("_checked", daemon),
+                                   ("load_archive", upload), ("publish", publish)):
+                stack.enter_context(patch.object(remote_local_images, name, side_effect=function))
+            lookup = stack.enter_context(patch.object(remote_local_images, "_entry", return_value=entry))
+            stack.enter_context(patch.object(remote_local_images.time, "monotonic", side_effect=lambda: clock[0]))
+            def load_receipt(_path):
+                clock[0] += initial_delay
+                return _receipt(), Path("/synthetic/receipt.json")
+            stack.enter_context(patch.object(local_images, "load_receipt", side_effect=load_receipt))
+            yield calls, lookup, entry
+
+    def _push(self, **kwargs):
+        return remote_local_images.push_receipt(
+            "target", "/synthetic/receipt.json", timeout=60, artifact_timeout=30,
+            machine_identity="machine", registered_host_digest="host", **kwargs)
+
+    def test_transfer_resolves_registration_once_and_pins_every_step(self):
+        with self._push_steps() as (calls, lookup, _entry):
+            result = self._push()
+        lookup.assert_called_once_with("target")
+        self.assertEqual(result["loaded"], ["image-1"])
+        self.assertEqual([name for name, _budget in calls], [
+            "initial_observe", "admission", "lease", "reobserve", "daemon_before",
+            "load", "post_load_observe", "daemon_after", "publish"])
+
+    def test_transfer_with_explicit_entry_never_resolves_registration(self):
+        with self._push_steps() as (_calls, lookup, entry):
+            self._push(entry=entry)
+        lookup.assert_not_called()
+
+    def test_every_step_recomputes_and_caps_remaining_deadline(self):
+        elapsed = dict(zip(("initial_observe", "admission", "lease", "reobserve",
+                            "daemon_before", "load", "post_load_observe", "daemon_after",
+                            "publish"), (2, 3, 4, 5, 6, 10, 2, 3, 1)))
+        with self._push_steps(elapsed=elapsed) as (calls, _lookup, _entry):
+            self._push()
+        self.assertEqual(calls, [
+            ("initial_observe", 60), ("admission", 58), ("lease", 30),
+            ("reobserve", 51), ("daemon_before", 30), ("load", 30),
+            ("post_load_observe", 30), ("daemon_after", 28), ("publish", 25)])
+
+    def test_deadline_exhaustion_at_every_step_never_runs_next_step(self):
+        for name in ("initial_observe", "admission", "lease", "reobserve",
+                     "daemon_before", "load", "post_load_observe", "daemon_after", "publish"):
+            with self.subTest(step=name), self._push_steps(elapsed={name: 61}) as (calls, _, _entry):
+                expected = "transfer_timeout" if name in ("initial_observe", "admission") else "transfer_unknown"
+                with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError, expected):
+                    self._push()
+                self.assertEqual(calls[-1][0], name)
+
+    def test_deadline_before_initial_probe_is_clean_timeout(self):
+        with self._push_steps(initial_delay=61) as (calls, _lookup, _entry):
+            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError, "transfer_timeout"):
+                self._push()
+            self.assertEqual(calls, [])
+
+    def test_storage_reservation_deadline_is_unknown_after_possible_write(self):
+        with self._push_steps(elapsed={"admission": 61}, floor=True) as (calls, _, _entry):
+            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError, "transfer_unknown"):
+                self._push()
+        self.assertEqual(calls[-1][0], "admission")
+
+    def test_probe_timeout_before_any_write_is_clean_refusal(self):
+        with self._push_steps(), patch.object(remote_local_images, "observe",
+                side_effect=subprocess.TimeoutExpired("fake-probe", 1)):
+            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError, "transfer_timeout"):
+                self._push()
+
+    def test_explicit_entry_is_reused_by_actual_observe_load_and_publish(self):
+        entry = {"provisioned": True, "host": "original"}
+        good = self._matching_observation()
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            lookup = stack.enter_context(patch.object(remote_local_images, "_entry",
+                side_effect=AssertionError("registration was resolved again")))
+            stack.enter_context(patch.object(remote_local_images._remote,
+                "resolve_sandbox_home", return_value="/srv/sandbox"))
+            ssh = stack.enter_context(patch.object(remote_local_images._remote, "ssh_run",
+                return_value=SimpleNamespace(returncode=0, stdout=json.dumps(good))))
+            remote_local_images.observe("target", _receipt(), entry=entry)
+            self.assertIs(ssh.call_args.args[0], entry)
+            archive = Path(directory, "image-1.tar")
+            archive.write_bytes(b"archive")
+            archive.chmod(0o600)
+            digest, size = local_images.file_sha256(archive)
+            artifact = {**_receipt()["artifacts"]["image-1"],
+                        "archive_sha256": digest, "archive_bytes": size}
+            args = stack.enter_context(patch.object(remote_local_images._remote,
+                "ssh_command_args", return_value=["fake-ssh"]))
+            stack.enter_context(patch.object(local_images, "stream_archive", return_value={
+                "timed_out": False, "cancelled": False, "broken_pipe": False,
+                "returncode": 0, "sha256": digest, "output_tail": json.dumps({
+                    "schema": 1, "state": "loaded", "bytes": size})}))
+            remote_local_images.load_archive("target", archive, artifact, timeout=1, entry=entry)
+            self.assertIs(args.call_args.args[0], entry)
+            document = {"synthetic": "document"}
+            want = local_images.canonical_digest(document)
+            ssh.return_value.stdout = json.dumps({"schema": 1, "remote_receipt_digest": want})
+            self.assertEqual(remote_local_images.publish("target", document, entry=entry), want)
+            self.assertIs(ssh.call_args.args[0], entry)
+            lookup.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

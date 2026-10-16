@@ -54,8 +54,13 @@ def evaluate_storage_floor(payload, *, floor_gb: int) -> dict:
     if free is None or reserved is None:
         return {**base, "ok": False, "reason": "measurement_unavailable"}
     history = _count(payload.get("history_bytes"))
-    estimate = history if history else DEFAULT_ESTIMATE_BYTES
-    source = "history" if history else "default"
+    reported_estimate = _count(payload.get("estimate_bytes"))
+    reported_source = payload.get("estimate_source")
+    if reported_estimate is not None and reported_source in ("history", "default", "minimum"):
+        estimate, source = reported_estimate, reported_source
+    else:
+        estimate = history if history else DEFAULT_ESTIMATE_BYTES
+        source = "history" if history else "default"
     fits = free - reserved - estimate >= floor
     if payload.get("admitted") is False:
         fits = False
@@ -99,7 +104,7 @@ def refusal_payload(decision: dict, *, remote=None, detail=None) -> dict:
                    and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", remote) else None},
         "storage": {"free_bytes": count("free_bytes"), "reserved_bytes": count("reserved_bytes"),
                     "estimate_bytes": count("estimate_bytes"), "floor_bytes": count("floor_bytes"),
-                    "estimate_source": source if source in ("history", "default") else None,
+                    "estimate_source": source if source in ("history", "default", "minimum") else None,
                     "reason": reason if reason in ("below_floor", "measurement_unavailable")
                     else "measurement_unavailable"},
         "recovery": {"automatic_cleanup": False, "automatic_retry": False,
@@ -132,7 +137,8 @@ def _run_probe(remote: dict, request: dict, *, timeout: int) -> dict | None:
 
 
 def remote_storage_floor_admission(remote: dict, target: str, *,
-                                   timeout: int = PROBE_TIMEOUT_SECONDS) -> dict | None:
+                                   timeout: int = PROBE_TIMEOUT_SECONDS,
+                                   minimum_estimate_bytes: int = 0) -> dict | None:
     """Probe, decide and (when admitted) reserve. None when no floor is set."""
     value = remote.get("storage_floor_gb")
     if value is None or (type(value) is int and value == 0):
@@ -140,8 +146,11 @@ def remote_storage_floor_admission(remote: dict, target: str, *,
     floor = floor_bytes(remote)
     if floor is None or value > MAX_FLOOR_GB:
         return evaluate_storage_floor(None, floor_gb=0)
+    if type(minimum_estimate_bytes) is not int or minimum_estimate_bytes < 0:
+        return evaluate_storage_floor(None, floor_gb=floor // GB)
     request = {"target": str(target), "floor_bytes": floor,
                "default_estimate": DEFAULT_ESTIMATE_BYTES,
+               "minimum_estimate": minimum_estimate_bytes,
                "window_seconds": RESERVATION_WINDOW_SECONDS,
                "reservations": None}
     payload = _run_probe(remote, request, timeout=timeout)
@@ -237,7 +246,12 @@ def main():
                 continue
         if sizes:
             history = max(sizes)
-    estimate = history or int(REQUEST.get("default_estimate") or 0)
+    default_estimate = int(REQUEST.get("default_estimate") or 0)
+    minimum_estimate = int(REQUEST.get("minimum_estimate") or 0)
+    ordinary_estimate = history or default_estimate
+    estimate = max(ordinary_estimate, minimum_estimate)
+    estimate_source = ("minimum" if minimum_estimate > ordinary_estimate
+                       else "history" if history else "default")
     lock = os.open(str(store / "reservations.lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -278,7 +292,8 @@ def main():
             tmp.write_text(json.dumps(live))
             os.replace(tmp, path)
         emit({"status": "complete", "free_bytes": free, "reserved_bytes": reserved,
-              "history_bytes": history, "admitted": admitted})
+              "history_bytes": history, "estimate_bytes": estimate,
+              "estimate_source": estimate_source, "admitted": admitted})
     finally:
         os.close(lock)
 

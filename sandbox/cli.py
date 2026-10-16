@@ -1013,7 +1013,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, or heal hosted services that exhausted their restarts")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
@@ -1028,6 +1028,16 @@ Per-project (each plugin carries its own sandbox.config.json):
                         help="host destroy: remove a target still fenced by a stale apply or recovery record")
     host_p.add_argument("--confirm", action="store_true",
         help="allow protected host apply or separately confirmed edge continuation")
+    host_p.add_argument("--revision", default=None,
+        help="exact Git revision for `host image build-local` (default: HEAD)")
+    host_p.add_argument("--receipt", default=None, metavar="PATH",
+        help="local build receipt for `host image push-local`")
+    host_p.add_argument("--local-images", default=None, metavar="DIGEST",
+        help="immutable remote local-image receipt for `host apply`")
+    host_p.add_argument("--timeout", type=int, default=None, metavar="SECONDS",
+        help="bounded local image build or aggregate transfer timeout")
+    host_p.add_argument("--artifact-timeout", type=int, default=None, metavar="SECONDS",
+        help="per-artifact local image transfer timeout")
     host_p.add_argument("--purge-edge-cache", action="store_true",
         help="with an approved manifest policy, purge all Cloudflare edge cache zones")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",

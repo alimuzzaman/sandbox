@@ -826,6 +826,66 @@ Compose output, Compose model larger than the bounded 1 MiB preflight input, or 
 preflight refuses the apply. Every subsequent Compose `up`/`run` command carries
 `--no-build`; there is no build or development fallback. New application code ships only
 after those explicit images are produced separately.
+
+For CPU-heavy application builds, produce those images on a faster Linux
+controller and transfer them through Sandbox:
+
+```bash
+./sb host image build-local --project-dir /absolute/app \
+  --environment development --revision 0123456789abcdef0123456789abcdef01234567 --json
+./sb host image push-local --remote xcloud-london \
+  --receipt /absolute/receipt.json --confirm --json
+./sb host apply --project-dir /absolute/app --environment development \
+  --remote xcloud-london --local-images sha256:<remote-receipt-digest> \
+  --confirm --json
+```
+
+`build-local` requires a clean checkout, materializes that exact revision,
+targets only `linux/amd64`, and stores owner-only archives plus a bounded
+non-secret receipt under `$SANDBOX_HOME/runtime/hosting/local-images`. Approved
+secret values remain private build inputs; receipts contain only their declared
+bindings. Local rendering refuses service image references that change when
+Docker client selection variables (`DOCKER_CONTEXT`, `DOCKER_HOST`,
+`DOCKER_CONFIG`, `DOCKER_CERT_PATH`, `DOCKER_TLS_VERIFY`) are removed.
+`push-local` holds the named registration lock from target resolution through
+publication and passes that same target to the readiness gate before any
+reservation, lock creation, or upload. Typed readiness refusals retain their
+structured admission error. It validates each complete archive before loading
+it and runs the configured remote storage-floor admission before its first remote write,
+and holds a dedicated remote-engine lock while loading and publishing.
+Receipt-bound apply takes that same engine-wide lock before delivery admission
+or source staging and holds it through verification and runtime convergence.
+The SSH connection owns the engine lock; the remote upload/load worker also
+holds a load fence for its entire lifetime, inherited by its Docker child.
+A new transfer or apply refuses as busy while an orphaned load holds that fence.
+Disconnect or lock loss makes the outcome unknown. This engine-wide scope prevents a tag shared by two hosted environments
+from changing between verification and Compose. Transfer skips only a fresh
+exact configuration/platform/layer match and publishes an immutable remote
+receipt bound to the registered machine and Docker daemon.
+Digest-pinned external images are verified in place and never pulled.
+
+The receipt records the builder engine's observed store ID separately from the
+portable image ID extracted from the saved archive configuration. Remote
+verification requires the remote reference's Docker `.Id` to equal that exact
+portable ID; the builder-only store ID, a tag, or a manifest digest is never an
+accepted substitute. This supports Docker 29 containerd-store builders without
+silently weakening the destination comparison.
+
+This remote receipt digest is the Linux-to-Mac handoff: the applying controller
+does not need the archives. `--local-images` is valid only with
+`compose.build: false`; apply re-reads the receipt and images, then renders
+Compose remotely with the actual apply environment, files, and generated override
+and verifies each service reference plus its exact image identity before Compose,
+adds `--pull never`, and never falls back to a remote build. Transfer is staging
+evidence, not deployment success. Interrupted transfer is unknown until a fresh
+observation. One aggregate transfer deadline caps every observation, storage
+admission, lease acquisition, daemon probe, upload, and publication. Expiry before
+any remote write returns `local_images_transfer_timeout`; expiry after a possible
+write returns `local_images_transfer_unknown`. Receipt target components must be
+safe hosted slugs with the matching Compose namespace before path construction.
+Environments declaring `hostingImages` use a separate signed
+machine authority and cannot use this workflow.
+
 Targeted/no-build Compose convergence is guarded by exact source identity, configuration
 digest, topology, and health proof, and never runs migration/setup initializers. Host apply uses
 an even narrower replay rule: an exact same-source `edge: pending` receipt resumes only

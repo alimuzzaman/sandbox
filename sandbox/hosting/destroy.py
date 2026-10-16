@@ -24,7 +24,7 @@ import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
 from sandbox.hosting.state_partition.layout import target_unreadable
 
-_PART_RE = re.compile(r"[a-z0-9][a-z0-9-]*$")
+from sandbox.hosting.names import TARGET_PART_RE as _PART_RE
 _PROBE_KEYS = ("containers", "volumes", "networks", "images", "runtime_kb", "source_kb", "route", "certs")
 
 

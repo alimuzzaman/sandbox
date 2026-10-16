@@ -8,6 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Hosted local images (spec 068). `sb host image build-local` builds an exact
+  clean revision for `linux/amd64` with hosted Compose inputs and writes a
+  bounded non-secret receipt; `host image push-local` confirmation-gates a
+  registered-transport upload, skips exact remote images and publishes an
+  immutable remote receipt. `host apply --local-images DIGEST` revalidates the
+  source, target, Docker daemon and exact config/platform/layer identities
+  before the existing hard no-build/no-pull lifecycle. A dedicated SSH-held
+  remote-engine lock serializes load, verification and receipt-bound apply
+  before delivery admission. Receipts retain a builder store ID separately from
+  the portable archive configuration ID required on the destination, supporting
+  Docker 29 containerd-store builders without digest aliases. The control
+  protocol is now 13. Apply also verifies the actual remote Compose render;
+  local rendering refuses Docker-client-dependent image interpolation. Transfer
+  pins registration, gates readiness before writes, validates target path slugs,
+  caps every step with the aggregate timeout, and fences surviving load workers
+  from subsequent transfer/apply owners.
 - Secret-manager hardening binds each controller credential to the canonical
   project root and Infisical endpoint, exact selector, MCP grants and fixed consuming profiles;
   authority changes require explicit credential placement with no legacy-item

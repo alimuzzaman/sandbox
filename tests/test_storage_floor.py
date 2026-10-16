@@ -45,6 +45,14 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(decision["estimate_source"], "default")
         self.assertEqual(decision["estimate_bytes"], sf.DEFAULT_ESTIMATE_BYTES)
 
+    def test_explicit_minimum_estimate_is_authoritative(self):
+        payload = probe(80 * GB, 0, 3 * GB)
+        payload.update(estimate_bytes=12 * GB, estimate_source="minimum")
+        decision = sf.evaluate_storage_floor(payload, floor_gb=30)
+        self.assertTrue(decision["ok"])
+        self.assertEqual(decision["estimate_bytes"], 12 * GB)
+        self.assertEqual(decision["estimate_source"], "minimum")
+
     def test_unknown_measurement_refuses(self):
         for payload in ({"status": "unavailable"}, None, {"status": "complete"},
                         probe(-1, 0, 1), probe(True, 0, 1)):

@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Local-image transfer now strictly decodes byte acknowledgements after remote
+  receipt publication instead of crashing without JSON. Malformed replies stay
+  publication-unknown; unexpected transfer exceptions emit the closed
+  `local_images_transfer_unknown` envelope without exposing exception text.
+  Protocol 13 and receipt shapes are unchanged; the source-derived runtime
+  revision changes, so exact-match consumers still require supported migration.
+
 ### Added
 - Hosted local images (spec 068). `sb host image build-local` builds an exact
   clean revision for `linux/amd64` with hosted Compose inputs and writes a

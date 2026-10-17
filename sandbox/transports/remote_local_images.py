@@ -240,11 +240,17 @@ def publish(remote_name: str, document: dict, *, timeout: int = 60,
     if result.returncode != 0:
         raise RemoteLocalImageError("local_images_receipt_publish_unknown")
     output = result.stdout or ""
-    if len(output.encode("utf-8")) > local_images.MAX_CONFIG_BYTES:
-        raise RemoteLocalImageError("local_images_receipt_publish_unknown")
     try:
+        # Byte stdin makes ssh_run capture byte stdout as well. Validate the
+        # acknowledgement without replacing malformed UTF-8 or echoing it.
+        if isinstance(output, bytes):
+            if len(output) > local_images.MAX_CONFIG_BYTES:
+                raise RemoteLocalImageError("local_images_receipt_publish_unknown")
+            output = output.decode("utf-8", errors="strict")
+        if len(output.encode("utf-8")) > local_images.MAX_CONFIG_BYTES:
+            raise RemoteLocalImageError("local_images_receipt_publish_unknown")
         frame = json.loads(output)
-    except ValueError:
+    except (ValueError, UnicodeError):
         raise RemoteLocalImageError("local_images_receipt_publish_unknown") from None
     if frame != {"schema": 1, "remote_receipt_digest": digest}:
         raise RemoteLocalImageError("local_images_receipt_publish_unknown")

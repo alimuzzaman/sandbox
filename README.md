@@ -1141,6 +1141,11 @@ an interrupted image load exits. Apply verifies the remote Compose render using
 its actual environment and override against receipt references and exact image
 IDs. Local rendering refuses image references dependent on Docker client
 selection variables; receipt target paths require safe hosted slugs.
+Unexpected transfer exceptions return a nonzero JSON envelope with
+`local_images_transfer_unknown`, without exception text. Publication may already
+have completed; retrying the same local receipt freshly verifies and skips exact
+remote images rather than resuming archive bytes. Do not delete remote locks or
+receipts manually. See the [transfer contract](docs/remote-hosting.md).
 
 Immutable multi-image activation prepares private candidate configuration without
 overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)

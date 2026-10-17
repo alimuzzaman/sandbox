@@ -544,10 +544,18 @@ def _cmd_host_image_push_local(args) -> None:
                              sort_keys=True))
             raise SystemExit(1)
         die(str(exc))
-    except (local_images.LocalImageError, remote_local_images.RemoteLocalImageError,
-            RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        payload = {"ok": False, "code": getattr(exc, "code", "local_images_transfer_failed"),
+    except (local_images.LocalImageError, remote_local_images.RemoteLocalImageError) as exc:
+        payload = {"ok": False, "code": exc.code,
                    "message": remote.redact_text(str(exc).split(": ", 1)[-1])[:500]}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+            raise SystemExit(1)
+        die(payload["message"])
+    except Exception:
+        # An unexpected client failure may occur after remote writes. Never
+        # claim a clean failure or expose exception text containing inputs.
+        payload = {"ok": False, "code": "local_images_transfer_unknown",
+                   "message": "Local image transfer outcome is unknown; re-observe the same receipt."}
         if args.json:
             print(json.dumps(payload, sort_keys=True))
             raise SystemExit(1)

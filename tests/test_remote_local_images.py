@@ -1,10 +1,11 @@
 """Focused fixed-transport regressions for hosted local images."""
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,12 +13,76 @@ from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 from sandbox.hosting import local_images
+from sandbox.commands import hosting as hosting_cmd
 from sandbox.transports import remote_local_images
 from tests.test_hosting_local_images import _receipt
 from tests.subprocess_support import run_test_process
 
 
 class RemoteLocalImageTests(unittest.TestCase):
+    def test_publish_accepts_byte_and_text_acknowledgements(self):
+        document = {"synthetic": "document"}
+        want = local_images.canonical_digest(document)
+        frame = json.dumps({"schema": 1, "remote_receipt_digest": want})
+        for output in (frame.encode("utf-8"), frame):
+            with self.subTest(output_type=type(output).__name__), \
+                 patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                              return_value="/srv/sandbox"), \
+                 patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                     returncode=0, stdout=output)) as ssh:
+                self.assertEqual(remote_local_images.publish("target", document, entry={}), want)
+                self.assertIsInstance(ssh.call_args.kwargs["input_data"], bytes)
+                self.assertEqual(json.loads(ssh.call_args.kwargs["input_data"]),
+                                 {**document, "remote_receipt_digest": want})
+
+    def test_publish_bad_acknowledgements_remain_unknown_without_echo(self):
+        for output in (b"\xff", b"not-json", b"{}", b"[]", b"",
+                       b"x" * (local_images.MAX_CONFIG_BYTES + 1),
+                       "x" * (local_images.MAX_CONFIG_BYTES + 1)):
+            with self.subTest(output_type=type(output).__name__, size=len(output)), \
+                 patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                              return_value="/srv/sandbox"), \
+                 patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                     returncode=0, stdout=output)):
+                with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                    remote_local_images.publish("target", {"synthetic": "document"}, entry={})
+                self.assertEqual(raised.exception.code, "local_images_receipt_publish_unknown")
+                self.assertEqual(str(raised.exception),
+                    "local_images_receipt_publish_unknown: local image transport failed")
+
+    def test_push_cli_unexpected_exceptions_emit_unknown_json_without_details(self):
+        args = SimpleNamespace(confirm=True, remote="target", receipt="/synthetic/receipt.json",
+                               timeout=60, artifact_timeout=30, json=True)
+        failures = (AttributeError("private-input"), ValueError("private-input"),
+                    RuntimeError("private-input"), OSError("private-input"),
+                    remote_local_images.RemoteLocalImageError("local_images_receipt_publish_unknown"))
+        for failure in failures:
+            with self.subTest(exception=type(failure).__name__), ExitStack() as stack:
+                stack.enter_context(patch.object(hosting_cmd.remote, "registered_remote_lock"))
+                stack.enter_context(patch.object(hosting_cmd.remote, "registration_lock_name",
+                                                return_value="synthetic-lock"))
+                stack.enter_context(patch.object(remote_local_images, "_entry", return_value={}))
+                stack.enter_context(patch("sandbox.readiness.gate.require_ready"))
+                stack.enter_context(patch.object(hosting_cmd.remote, "resolve_sandbox_home",
+                                                return_value="/srv/sandbox"))
+                stack.enter_context(patch.object(hosting_cmd, "_authenticated_machine_identity",
+                                                return_value="synthetic-machine"))
+                stack.enter_context(patch("sandbox.delivery.context.registered_host_digest",
+                                         return_value="synthetic-host"))
+                stack.enter_context(patch.object(remote_local_images, "push_receipt",
+                                                side_effect=failure))
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr), \
+                     self.assertRaises(SystemExit) as raised:
+                    hosting_cmd._cmd_host_image_push_local(args)
+                self.assertEqual(raised.exception.code, 1)
+                payload = json.loads(stdout.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["code"], getattr(
+                    failure, "code", "local_images_transfer_unknown"))
+                self.assertNotIn("private-input", stdout.getvalue() + stderr.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
+
     @staticmethod
     def _write_receipt(directory: str) -> Path:
         path = Path(directory, "receipt.json")

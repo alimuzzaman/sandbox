@@ -883,6 +883,14 @@ admission, lease acquisition, daemon probe, upload, and publication. Expiry befo
 any remote write returns `local_images_transfer_timeout`; expiry after a possible
 write returns `local_images_transfer_unknown`. Receipt target components must be
 safe hosted slugs with the matching Compose namespace before path construction.
+Publication accepts a bounded, strictly UTF-8 acknowledgement in either bytes
+or text form; malformed replies return `local_images_receipt_publish_unknown`.
+Unexpected client exceptions return `local_images_transfer_unknown` in the
+nonzero `--json` envelope without exposing exception text. An unknown result may
+follow a complete atomic remote receipt publication. A caller-initiated retry
+of the same local receipt freshly observes and skips exact remote images, then
+publishes a receipt with the new verification timestamp; it does not resume a
+partial archive. Retained receipts and lock files are not cleanup targets.
 Environments declaring `hostingImages` use a separate signed
 machine authority and cannot use this workflow.
 

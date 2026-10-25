@@ -517,6 +517,10 @@ def cmd_secrets(cfg, args) -> None:
             result = payload.get("result") or {}
             if result.get("termination") == "exited":
                 _child_failed(result.get("exit_code"))
+            elif result.get("termination") == "timed_out":
+                from sandbox.core import die
+                sys.stdout.flush()
+                die("child_timed_out: the command exceeded its timeout", code=124)
         elif args.action == "set":
             intent = "create" if args.create_only else "replace" if args.replace_only else "either"
             kwargs = dict(intent=intent, expected_revision=args.if_revision,

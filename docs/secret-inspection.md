@@ -303,6 +303,10 @@ runs longer). Combined redacted output is bounded to
 1 MiB and reports truncation. A child that exits unsuccessfully makes
 `sb secrets run` exit nonzero after the bounded result is printed; the child
 exit code is preserved when it is safe for the shell to represent it.
+An ordinary run that reports `termination=timed_out` exits with status 124 after
+printing the bounded result, even though its child `exit_code` is null. A timeout
+does not prove that the child completed its intended operation. Operator session
+lifetime expiry retains the separate exit-status contract in section 5b.
 
 A command that is `sudo`, `sudo-rs`, `sudoedit`, `doas`, `su`, `pkexec`,
 `run0`, `systemd-run`, or `machinectl`—directly, through a supported exec wrapper, by a renamed symlink, or as

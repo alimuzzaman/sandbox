@@ -29,6 +29,35 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_explicit_home_preserves_shared_legacy_env_while_default_writes_it(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+        from sandbox.core import _docker
+
+        for explicit_home in (False, True):
+            with self.subTest(explicit_home=explicit_home), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                environment = synthetic_environment({
+                    "SANDBOX_HOME": str(root / "isolated-state") if explicit_home else "",
+                })
+                handler = mock.Mock()
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                     mock.patch.object(sys, "argv", ["sb", "up", "--instance", "fixture"]), \
+                     mock.patch.object(cli, "COMMANDS", {"up": handler}), \
+                     mock.patch.object(cli, "load_config", return_value={}), \
+                     mock.patch.object(cli, "resolve_instances", return_value={"fixture": {}}), \
+                     mock.patch.object(cli, "_core", return_value=SimpleNamespace(registry_all=lambda: {})), \
+                     mock.patch.object(cli, "preflight_instance_capability", return_value=None), \
+                     mock.patch.object(cli, "write_compose_files") as compose, \
+                     mock.patch.object(migrate, "maybe_auto_migrate"), \
+                     mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                     mock.patch.object(_docker, "ROOT", root), \
+                     mock.patch.object(_docker, "_plugins_home", return_value=root / "plugins"):
+                    cli.main()
+                self.assertEqual((root / ".env").exists(), not explicit_home)
+                handler.assert_called_once()
+                compose.assert_called_once()
+
     def test_test_routing_normalizer_does_not_rewrite_ci_job_named_test(self):
         import sandbox.cli as cli
 

@@ -1937,7 +1937,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         # Keep the legacy `.env` populated so anyone still invoking the
         # checked-in docker-compose.yml directly (out-of-tree scripts, older
         # skills) doesn't break. New flow ignores this file.
-        write_env_for_compose(cfg)
+        # An explicit state home must not rewrite compatibility state in the
+        # shared source checkout. Default invocations retain the legacy path.
+        if not os.environ.get("SANDBOX_HOME"):
+            write_env_for_compose(cfg)
 
     # Dispatch via the command registry (populated by sandbox.commands.* imports).
     # `apply --project-dir` → in-place reconcile; bare `apply` → setup alias.

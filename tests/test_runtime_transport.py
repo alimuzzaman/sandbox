@@ -3,7 +3,9 @@ import unittest
 import contextlib
 import io
 import json
+import os
 from unittest import mock
+from tests.subprocess_support import synthetic_environment
 
 from sandbox.runtimes.base import OperationError, OperationResult
 
@@ -24,6 +26,11 @@ class RejectingService:
 
 class TestRuntimeTransportPreflight(unittest.TestCase):
     def setUp(self):
+        # These direct CLI fixtures model ordinary calls. A durable test job's
+        # own identity must not silently change their credential policy.
+        environment = mock.patch.dict(os.environ, synthetic_environment(), clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         # The readiness gate (spec 063) has its own tests; these fixtures
         # resolve fake targets that must never reach live probes.
         for target in ("sandbox.readiness.gate.require_ready",
@@ -439,6 +446,14 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         self.assertEqual(payload["password"], "[REDACTED]")
         for secret in ("raw-token", "raw-password"):
             self.assertNotIn(secret, serialized)
+
+    def test_cli_ensure_json_reveal_login_stays_redacted_in_durable_job(self):
+        login_url = "https://fixture.tst/?sandbox_autologin=durable-fixture-token"
+        with mock.patch.dict(os.environ, {"SANDBOX_DURABLE_JOB_ID": "synthetic-job"}), \
+             mock.patch("socket.gethostbyname", return_value="127.0.0.42"):
+            serialized, payload = self._ensure_json_payload(login_url, reveal_login=True)
+        self.assertTrue(payload["login_url_redacted"])
+        self.assertNotIn("durable-fixture-token", serialized)
 
     def test_cli_ensure_json_reveal_login_returns_remote_autologin_url(self):
         """A remote ensure record qualifies too: E2E runners need a usable login.

@@ -369,6 +369,10 @@ all other machine-state. `config.yml` / `.yaml` also work. Backward-compat: unti
 (honoring `$XDG_CONFIG_HOME`) is still read as a fallback.
 
 `SANDBOX_HOME` is the explicit, highest-priority location selector when it is non-empty.
+With this explicit selector, CLI startup skips the legacy checkout-root `.env`
+rewrite. Instance Compose files still use the selected state home. Invocations
+without a non-empty `SANDBOX_HOME` retain the legacy compatibility write, and
+explicit callers of `write_env_for_compose` keep their existing behavior.
 Without it, both the CLI and MCP read the last verified **absolute** path from the
 non-secret, owner-only bootstrap hint `~/.config/sandbox/home` written by
 `./sb home <dir>`; a relative, blank, missing, or unreadable hint falls back to

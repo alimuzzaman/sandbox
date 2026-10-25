@@ -234,17 +234,37 @@ def publish(remote_name: str, document: dict, *, timeout: int = 60,
     raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     if len(raw) > local_images.MAX_RECEIPT_BYTES:
         raise RemoteLocalImageError("local_images_receipt_invalid")
-    result = _remote.ssh_run(entry, shlex.join([
-        "python3", "-c", _PUBLISH_PROGRAM, _receipt_root(entry), digest]),
-        timeout=timeout, input_data=raw)
+    command = shlex.join([
+        "python3", "-c", _PUBLISH_PROGRAM, _receipt_root(entry), digest])
+    try:
+        result = _remote.ssh_run(entry, command, timeout=timeout, input_data=raw)
+    except (OSError, subprocess.SubprocessError):
+        # Losing the controller's reply does not prove publication failed.
+        raise RemoteLocalImageError("local_images_receipt_publish_unknown") from None
     if result.returncode != 0:
         raise RemoteLocalImageError("local_images_receipt_publish_unknown")
-    output = result.stdout or ""
-    if len(output.encode("utf-8")) > local_images.MAX_CONFIG_BYTES:
-        raise RemoteLocalImageError("local_images_receipt_publish_unknown")
+
+    def closed(pairs):
+        frame = {}
+        for key, value in pairs:
+            if key in frame:
+                raise ValueError("duplicate acknowledgement key")
+            if key == "schema" and type(value) is not int:
+                raise ValueError("invalid acknowledgement schema type")
+            frame[key] = value
+        return frame
+
     try:
-        frame = json.loads(output)
-    except ValueError:
+        # ssh_process returns binary stdout when stdin is bytes. Bound the
+        # encoded reply before parsing without changing that shared contract.
+        output = result.stdout or b""
+        if isinstance(output, str):
+            output = output.encode("utf-8")
+        if not isinstance(output, bytes) or len(output) > local_images.MAX_CONFIG_BYTES:
+            raise RemoteLocalImageError("local_images_receipt_publish_unknown")
+        output = output.decode("utf-8")
+        frame = json.loads(output, object_pairs_hook=closed)
+    except (ValueError, RecursionError):
         raise RemoteLocalImageError("local_images_receipt_publish_unknown") from None
     if frame != {"schema": 1, "remote_receipt_digest": digest}:
         raise RemoteLocalImageError("local_images_receipt_publish_unknown")

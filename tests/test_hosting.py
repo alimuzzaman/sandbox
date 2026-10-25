@@ -4846,6 +4846,40 @@ class TestLocalImageReviewFixes(unittest.TestCase):
         get_remote.assert_called_once_with("target")
         self.assertFalse(active[0])
 
+    def test_push_local_publication_failure_preserves_unknown_json(self):
+        from sandbox.transports import remote_local_images
+
+        def transfer(*_args, **kwargs):
+            return remote_local_images.publish(
+                "target", {"synthetic": "publication"}, entry=kwargs["entry"])
+
+        for failure in (OSError("synthetic private detail"),
+                        types.SimpleNamespace(returncode=0, stdout=b"[" * 2000)):
+            output = io.StringIO()
+
+            def reply(*_args, **_kwargs):
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+
+            with self.subTest(failure=type(failure).__name__), \
+                 patch.object(remote, "registered_remote_lock"), \
+                 patch.object(remote, "get_remote", return_value={"provisioned": True}), \
+                 patch("sandbox.readiness.gate.require_ready"), \
+                 patch.object(remote, "resolve_sandbox_home", return_value="/synthetic"), \
+                 patch.object(hosting_cmd, "_authenticated_machine_identity", return_value="machine"), \
+                 patch("sandbox.delivery.context.registered_host_digest", return_value="host"), \
+                 patch.object(remote_local_images, "push_receipt", side_effect=transfer), \
+                 patch.object(remote, "ssh_run", side_effect=reply) as ssh, \
+                 redirect_stdout(output):
+                with self.assertRaises(SystemExit) as caught:
+                    hosting_cmd._cmd_host_image_push_local(self._push_args())
+            self.assertEqual(caught.exception.code, 1)
+            self.assertEqual(json.loads(output.getvalue()), {
+                "ok": False, "code": "local_images_receipt_publish_unknown",
+                "message": "local image transport failed"})
+            ssh.assert_called_once()
+
     def test_push_local_readiness_refusal_preserves_typed_json_before_any_transfer(self):
         from sandbox.readiness.errors import RemoteNotReadyError
         from sandbox.transports import remote_local_images

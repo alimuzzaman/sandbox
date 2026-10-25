@@ -883,6 +883,15 @@ admission, lease acquisition, daemon probe, upload, and publication. Expiry befo
 any remote write returns `local_images_transfer_timeout`; expiry after a possible
 write returns `local_images_transfer_unknown`. Receipt target components must be
 safe hosted slugs with the matching Compose namespace before path construction.
+The controller accepts the publisher's bounded UTF-8 acknowledgement as binary
+or text stdout. A lost connection, subprocess timeout, nonzero exit, or invalid
+acknowledgement returns `local_images_receipt_publish_unknown` unless the aggregate
+deadline has expired after a possible write, which returns
+`local_images_transfer_unknown`. Either result may follow successful receipt
+publication. Preserve existing images, archives, and receipts; do not infer receipt
+absence or repeat the transfer to recover a missing acknowledgement. This
+controller correction is based on source revision `75927990119754efef9033d456a3bdd77c47cd9d`;
+it does not change the remote receipt schema or authorize a runtime update.
 Environments declaring `hostingImages` use a separate signed
 machine authority and cannot use this workflow.
 

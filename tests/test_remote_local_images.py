@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from contextlib import ExitStack, contextmanager
@@ -18,6 +19,120 @@ from tests.subprocess_support import run_test_process
 
 
 class RemoteLocalImageTests(unittest.TestCase):
+    def test_publish_accepts_real_binary_subprocess_acknowledgement(self):
+        document = {"synthetic": "publication"}
+        want = local_images.canonical_digest(document)
+        with tempfile.TemporaryDirectory() as directory:
+            entry = {"provisioned": True}
+
+            def local_command(_entry, command, **_kwargs):
+                argv = shlex.split(command)
+                self.assertEqual(argv[0], "python3")
+                return [sys.executable, *argv[1:]]
+
+            with patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                              return_value=directory), \
+                 patch.object(remote_local_images._remote, "_ensure_ssh_control_dir"), \
+                 patch.object(remote_local_images._remote, "ssh_command_args",
+                              side_effect=local_command), \
+                 patch.object(remote_local_images._remote, "subprocess",
+                              SimpleNamespace(run=run_test_process)):
+                for _ in range(2):
+                    self.assertEqual(remote_local_images.publish(
+                        "target", document, entry=entry), want)
+            path = Path(directory, "runtime/host-local-images/receipts",
+                        want.split(":", 1)[1] + ".json")
+            self.assertEqual(json.loads(path.read_bytes()), {
+                **document, "remote_receipt_digest": want})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_publish_invalid_acknowledgement_can_follow_receipt_write(self):
+        document = {"synthetic": "publication"}
+        want = local_images.canonical_digest(document)
+        with tempfile.TemporaryDirectory() as directory:
+            program = remote_local_images._PUBLISH_PROGRAM + "\nsys.stdout.buffer.write(b'\\xff')"
+            with patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                              return_value=directory), \
+                 patch.object(remote_local_images, "_PUBLISH_PROGRAM", program), \
+                 patch.object(remote_local_images._remote, "_ensure_ssh_control_dir"), \
+                 patch.object(remote_local_images._remote, "ssh_command_args",
+                              side_effect=lambda _entry, command, **_kwargs:
+                                  [sys.executable, *shlex.split(command)[1:]]), \
+                 patch.object(remote_local_images._remote, "subprocess",
+                              SimpleNamespace(run=run_test_process)):
+                with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,
+                                            "local_images_receipt_publish_unknown"):
+                    remote_local_images.publish("target", document,
+                                                entry={"provisioned": True})
+            path = Path(directory, "runtime/host-local-images/receipts",
+                        want.split(":", 1)[1] + ".json")
+            self.assertEqual(json.loads(path.read_bytes()), {
+                **document, "remote_receipt_digest": want})
+
+    def test_publish_reply_validation_accepts_text_and_refuses_invalid_replies(self):
+        document = {"synthetic": "publication"}
+        want = local_images.canonical_digest(document)
+        frame = json.dumps({"schema": 1, "remote_receipt_digest": want})
+        replies = [None, b"", b"not-json", b"\xff", b"[]",
+                   b"[" * 2000 + b"0" + b"]" * 2000,
+                   json.dumps({"schema": 1, "remote_receipt_digest": want, "extra": True}).encode(),
+                   json.dumps({"schema": 1}).encode(),
+                   json.dumps({"schema": 2, "remote_receipt_digest": want}).encode(),
+                   json.dumps({"schema": True, "remote_receipt_digest": want}).encode(),
+                   json.dumps({"schema": 1.0, "remote_receipt_digest": want}).encode(),
+                   ('{"schema":1,"schema":1,"remote_receipt_digest":"' + want + '"}').encode(),
+                   ('{"schema":2,"schema":1,"remote_receipt_digest":"' + want + '"}').encode(),
+                   ('{"schema":1,"remote_receipt_digest":"' + want +
+                    '","remote_receipt_digest":"' + want + '"}').encode(),
+                   ('{"schema":1,"remote_receipt_digest":"wrong",'
+                    '"remote_receipt_digest":"' + want + '"}').encode(),
+                   json.dumps({"schema": 1, "remote_receipt_digest": "wrong"}).encode(),
+                   b" " * (local_images.MAX_CONFIG_BYTES + 1), "\ud800", bytearray(b"{}")]
+        replies += [reply.decode("utf-8") for reply in replies
+                    if isinstance(reply, bytes) and reply != b"\xff"]
+        padded = frame + " " * (local_images.MAX_CONFIG_BYTES - len(frame.encode()))
+        with patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                          return_value="/synthetic"), \
+             patch.object(remote_local_images._remote, "ssh_run") as ssh:
+            for output in [frame, frame.encode(), padded, padded.encode()]:
+                ssh.return_value = SimpleNamespace(returncode=0, stdout=output)
+                self.assertEqual(remote_local_images.publish(
+                    "target", document, entry={"provisioned": True}), want)
+                self.assertIsInstance(ssh.call_args.kwargs["input_data"], bytes)
+            for output in replies:
+                with self.subTest(output_type=type(output).__name__):
+                    ssh.reset_mock()
+                    ssh.return_value = SimpleNamespace(returncode=0, stdout=output)
+                    with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,
+                                                "local_images_receipt_publish_unknown") as caught:
+                        remote_local_images.publish("target", document,
+                                                    entry={"provisioned": True})
+                    self.assertEqual(str(caught.exception),
+                                     "local_images_receipt_publish_unknown: local image transport failed")
+                    self.assertTrue(caught.exception.__suppress_context__ or
+                                    caught.exception.__context__ is None)
+                    ssh.assert_called_once()
+            ssh.return_value = SimpleNamespace(returncode=1, stdout=frame.encode())
+            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,
+                                        "local_images_receipt_publish_unknown"):
+                remote_local_images.publish("target", document, entry={"provisioned": True})
+
+    def test_publish_transport_failure_is_unknown_without_exception_disclosure(self):
+        for error in [OSError("synthetic private detail"),
+                      subprocess.TimeoutExpired("synthetic private detail", 1),
+                      subprocess.CalledProcessError(1, "synthetic private detail")]:
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                              return_value="/synthetic"), \
+                 patch.object(remote_local_images._remote, "ssh_run", side_effect=error) as ssh:
+                with self.assertRaises(remote_local_images.RemoteLocalImageError) as caught:
+                    remote_local_images.publish("target", {"synthetic": "publication"},
+                                                entry={"provisioned": True})
+                self.assertEqual(caught.exception.code, "local_images_receipt_publish_unknown")
+                self.assertNotIn("synthetic private detail", str(caught.exception))
+                self.assertTrue(caught.exception.__suppress_context__)
+                ssh.assert_called_once()
+
     @staticmethod
     def _write_receipt(directory: str) -> Path:
         path = Path(directory, "receipt.json")
@@ -308,6 +423,30 @@ with tempfile.TemporaryDirectory() as sandbox_root:
                 side_effect=subprocess.TimeoutExpired("fake-probe", 1)):
             with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError, "transfer_timeout"):
                 self._push()
+
+    def test_publication_transport_failure_respects_aggregate_deadline(self):
+        publisher = remote_local_images.publish
+        for elapsed in (0, 61):
+            for error in (OSError("synthetic"), subprocess.TimeoutExpired("synthetic", 1)):
+                with self.subTest(elapsed=elapsed, error=type(error).__name__), \
+                     self._push_steps(elapsed={"publish": elapsed}) as (calls, _, _entry):
+                    advance = remote_local_images.publish
+
+                    def attempt(*args, **kwargs):
+                        advance(*args, **kwargs)
+                        return publisher(*args, **kwargs)
+
+                    with patch.object(remote_local_images, "publish", side_effect=attempt), \
+                         patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                                      return_value="/synthetic"), \
+                         patch.object(remote_local_images._remote, "ssh_run", side_effect=error) as ssh:
+                        expected = ("local_images_transfer_unknown" if elapsed else
+                                    "local_images_receipt_publish_unknown")
+                        with self.assertRaises(remote_local_images.RemoteLocalImageError) as caught:
+                            self._push()
+                        self.assertEqual(caught.exception.code, expected)
+                        ssh.assert_called_once()
+                        self.assertEqual(calls[-1][0], "publish")
 
     def test_explicit_entry_is_reused_by_actual_observe_load_and_publish(self):
         entry = {"provisioned": True, "host": "original"}

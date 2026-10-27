@@ -25,6 +25,7 @@ from .journal import (
     _unique_pairs, _reject_constant,
 )
 from .models import Approval, OwnershipConfig, SourceContinuity, StorageAdmission, canonical_json
+from .source_view import read_names
 
 MAX_APPROVAL_SECONDS = 3600
 _APPROVAL_KEYS = frozenset(Approval.__dataclass_fields__)

@@ -313,3 +313,44 @@ class TestSecretOwnershipApproval(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInteractiveGrant(unittest.TestCase):
+    """The operator prompt path itself, with only the foreground-TTY check seamed."""
+
+    def _grant(self, typed: str):
+        import io
+        from sandbox.secrets.ownership import approval as approval_module
+        from sandbox.secrets.ownership import migrate
+        from tests.secret_ownership_support import SyntheticOwnership
+
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = SyntheticOwnership(Path(raw))
+            ctx = fixture.context()
+            destination = ctx.config.profiles["personal"].destination
+            now = time.time()
+            admission = StorageAdmission("0" * 64, destination.endpoint, destination.project_id,
+                                         now - 1, now + 600, "operator_attested")
+            store = ApprovalStore(ctx.runtime_root)
+            prompt = io.StringIO()
+            with patch.object(approval_module, "require_human_terminal", lambda *_streams: None):
+                approval = store.grant_interactive(
+                    operation="migrate", profile="personal", config=ctx.config,
+                    registry=ctx.registry, destination_sha256=destination_sha256(destination),
+                    authority_digest=migrate.authority_for(ctx, "personal", "create"),
+                    admission=admission, minutes=5,
+                    tty_in=io.StringIO(typed), tty_out=prompt)
+            loaded = store.load(approval.approval_id)
+            fixture.no_disclosure(prompt.getvalue(), ownership=False)
+            return approval, loaded
+
+    def test_typed_approve_stores_a_loadable_migrate_approval(self) -> None:
+        approval, loaded = self._grant("approve\n")
+        self.assertEqual(loaded, approval)
+        self.assertEqual(approval.operation, "migrate")
+        self.assertEqual([item.alias for item in approval.sources], ["synthetic-file"])
+
+    def test_anything_else_typed_declines(self) -> None:
+        with self.assertRaises(SecretBrokerError) as caught:
+            self._grant("yes\n")
+        self.assertEqual(caught.exception.code, "approval_required")

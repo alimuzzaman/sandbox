@@ -626,3 +626,326 @@ unintended:
 
 For the concise agent decision tree, load the `secret-inspection` skill with
 `./sb skill show secret-inspection`.
+
+## Ownership profiles and create-only migration
+
+<a id="ownership-profiles-and-create-only-migration"></a>
+
+Secret ownership profiles establish an explicit, metadata-only mapping from
+local secret sources into remote provider vaults (such as Infisical) under strict
+`office` or `personal` domain isolation.
+
+There is no blind retry, overwrite, update, destination deletion, list, search,
+export, or administration operation. A foreign controller must resume from
+its own journal; controller-qualified approval and run IDs provide owner guidance
+but grant no authority. Missing foreign journals are never reconstructed from
+values or silently adopted.
+
+### Core principles and trust boundary
+
+1. **Explicit human cleanup**:
+   Cleanup removes only source keys whose mapped names are journaled as
+   `verified` or `reconciled`. Durable per-name cleanup progress (`cleanup.json`)
+   tracks `prepared` intent before atomic replacement (recording the staged file's
+   device and inode alongside expected remaining key names) and checkpoints
+   `removed` state after replacement and directory fsync. On crash recovery under
+   a fresh human approval with an unchanged map, matching staged inode metadata
+   safely promotes prepared removals without re-executing or adopting untracked
+   removals; unexpected missing keys remain refused. Every remaining key receives
+   a fresh read-grant RAM comparison immediately before its continuity-guarded
+   atomic removal. A changed, missing, pending, or unverifiable destination leaves
+   that key in the source and stops cleanup. A stale approval or any initially
+   ineligible name causes zero source mutation. The final comparison is an
+   observation, not a transaction across systems; the operator must keep the
+   destinations quiescent. Migration never deletes a source key by default.
+
+2. **Writer atomicity and continuity semantics (R10, R11)**:
+   - In `writer.remove_keys`, atomic replacement writes the staged file to a temporary
+     descriptor (`temporary_fd`) and captures `staged_continuity` via `os.fstat(temporary_fd)`.
+   - The `before_replace` callback verifies that current continuities across all
+     approved sources match expected continuities across previous removals.
+   - **Deadline check after final observation (R10)**: Fresh current-source nofollow
+     metadata is recaptured after the callback and validated against expected continuity.
+     Immediately after this final validation and immediately before `os.replace`, the
+     effective deadline is rechecked. If authority has expired, `approval_expired` is
+     raised with zero replacement and zero source modification.
+   - **Post-rename baseline derivation (R11)**: Following `os.replace`, `renamed`
+     continuity is captured from the open staged descriptor. Permitted continuity is
+     derived strictly from `staged_continuity`, allowing only legitimate `ctime` changes
+     while validating all other metadata against the staged write.
+   - **Directory fsync and drift refusal (R11)**: The `renamed` observation establishes the
+     verified baseline before `os.fsync(directory_fd)`. After directory fsync, current
+     path metadata is captured via nofollow stat and must match `renamed` exactly
+     (`same_as(renamed)`). If an external editor modified or replaced the file during
+     directory fsync, `source_changed` is raised, and Sandbox never adopts an external
+     editor's state as the continuation for subsequent removals. If replacement
+     succeeded before drift was detected, prepared recovery evidence is safely retained
+     in `cleanup.json`; resuming requires a fresh human approval. No claim of atomicity
+     against the unavoidable last-instruction race is made.
+
+3. **Clamped worker session deadlines**:
+   Worker session deadlines in reconciliation and migration are clamped to
+   persisted token expiry sidecar values before opening workers (`worker_deadline
+   = min(deadline, persisted_exp)`). Active protected operations are bounded by
+   `min(deadline, effective_exp, token_exp)`. Clock checks before `exists` and
+   each `readback_equals` enforce this bound, ensuring expired credentials fail
+   closed with `approval_expired` while preserving all prior journal receipts.
+
+4. **Scoped runs**:
+   Scoped runs repeat `--ownership-key NAME` for the required mapped destination
+   names and inject only their declared `consumer` variables. Selection,
+   consumer names, argv, escalation, and bounds are checked before value reads.
+   Ownership selectors cannot be mixed with `--source`, `--key`, `--secret`,
+   `--destination`, `--session`, or session lifetime options. Without ownership
+   selectors, the existing run path is preserved. Output redaction has the same
+   limits as existing bounded runs; the trusted child remains an intentional
+   recipient and must not print or encode secrets.
+
+5. **Private runtime state and persistence failures**:
+   Runtime state lives under `$SANDBOX_HOME/runtime/secret-ownership/`, with
+   owner-only 0700 directories and 0600 files, no symlinks. Approvals, admitted
+   evidence, JSONL journals, completion records, and the random controller ID
+   contain only metadata. A torn final journal fragment is truncated only under
+   the exclusive lock; surviving attempts remain unknown. Earlier corruption
+   refuses. `status` reports journal names/states and the latest completion's qualified
+   run ID, names/counts, and revocation state. Retention is dry-run by default, preserves corrupt or
+   uncertain state, and removes only completed settled metadata on `--confirm`.
+   Stable lock files remain to prevent concurrent runs from using different lock
+   inodes. Retention never lists or deletes native-store entries.
+   If writing a completion record fails upon operation finish, the payload reports
+   `persistence="persistence_failed"` and `completion_record="persistence_failed"`
+   while preserving all known operation state and revocation guidance without re-throwing.
+   An otherwise successful operation then returns `provider_failed` with exit 4,
+   retaining its original result in `operation_code`. Existing failures keep their
+   primary code and exit status.
+
+6. **Derived token lifecycle and revocation guidance**:
+   Derived access-token revocation is attempted on session exit. Only the exact
+   provider acknowledgment means `revoked`. Unsupported routes, malformed
+   responses, killed workers, and uncertain shutdown report `cleanup_unknown`.
+   Derived token follow-up is preserved and formatted across all operations
+   (migration, cleanup, scoped runs, and destination-checked classification),
+   aggregating uncertain sessions (`cleanup_unknown`) only, specifying the
+   remaining token lifetime (`expires at <timestamp>` using the latest uncertain
+   finite expiry, or `expiry unknown` if any uncertain session has an unknown
+   expiry) and clarifying that native bootstrap entries and Cloudflare credentials
+   remain operator-managed. Primary failure codes are preserved while including
+   derived token follow-up guidance. An otherwise successful operation with
+   uncertain revocation exits 6. A scoped destination read refuses to launch
+   the consumer if derived-token revocation is uncertain.
+
+7. **Exit codes**:
+   Ownership exit codes are:
+   - `0`: Success or safe plan.
+   - `2`: `ownership_not_configured`, `profile_unknown`, `classification_blocked`, `source_unregistered`, `source_unsupported`, `other_domain`, `ownership_keys_required`, `selection_invalid`, `input_invalid`, `option_conflict`, `command_invalid`, `consumer_collision`, `source_key_missing`, `duplicate_key`, `syntax_unsupported`, `source_missing`, `source_too_large`, `escalation_unsupported`, `audit_unavailable`.
+   - `3`: `approval_required`, `approval_expired`, `approval_mismatch`, `approval_human_only`, `authority_mismatch`, `evidence_required`, `evidence_inadmissible`, `evidence_expired`, `source_changed`, `continuity_unreliable`, `credential_missing`, `credential_scope_invalid`, `journal_locked`, `journal_foreign_controller`, `journal_missing_owner_elsewhere`, `journal_corrupt`, `cleanup_ineligible`, `tty_required`, `key_missing`, `source_scope_denied`, `source_unsafe`.
+   - `4`: `provider_contract_unconfirmed`, `provider_policy_requires_approval`, `existence_unknown`, `pre_existing`, `provider_failed`, `response_invalid`, `value_unsupported`, `operation_timeout`.
+   - `5`: `run_stopped`.
+   - `6`: `cleanup_unknown`.
+   Unmapped refusal codes fall back to exit 1. Primary operation failures keep their status when audit or revocation also fails.
+   Scoped runs propagate the child command's exit code on success.
+
+8. **Audit behavior and failure handling**:
+   Ownership output never includes values, value fingerprints, lengths, masks, or
+   legacy revisions. The audit schema remains version 1 and records ownership
+   operation names (`ownership_classify`, `ownership_approve`, `ownership_migrate`,
+   `ownership_cleanup`, `ownership_run`), key names, counts, and fixed outcomes only.
+   If audit outcome logging fails in CLI ownership dispatch, the primary operation
+   payload is preserved, `audit="audit_unavailable"` is attached, and an otherwise
+   successful operation fails with `code="audit_unavailable"` and exit 2.
+
+9. **Filesystem and test root portability**:
+   Temporary testing and fixture paths use canonical `Path('/tmp').resolve(strict=True)`
+   across Linux and macOS, avoiding host-dependent `/private/tmp` assumptions or
+   parent-environment fallbacks.
+
+### Configuration (metadata only)
+
+Ownership is configured in `sandbox.config.json` (project layer) or
+`$SANDBOX_HOME/sandbox.local.yml` (machine override) under the `secrets` section.
+It contains non-secret metadata only: no secret values, passwords, tokens, or
+bootstrap credentials.
+
+`office` and `personal` domains must use distinct project identities: they must
+not share provider `projectId` or client identities (`readClientId`, `createClientId`).
+Endpoints must be canonical HTTPS origins (`https://...` without paths, trailing
+slashes, or query components); unencrypted HTTP endpoints are refused.
+
+```jsonc
+{
+  "secrets": {
+    "sources": {
+      "personal-file": {
+        "path": ".secrets/personal.env",
+        "format": "dotenv",
+        "mcpModes": ["keys"]
+      },
+      "office-file": {
+        "path": ".secrets/office.env",
+        "format": "dotenv",
+        "mcpModes": ["keys"]
+      }
+    },
+    "ownership": {
+      "profiles": {
+        "office": {
+          "domain": "office",
+          "destination": {
+            "endpoint": "https://manager.example.org",
+            "projectId": "<office-project-id>",
+            "environment": "prod",
+            "path": "/",
+            "readClientId": "<office-read-client-id>",
+            "createClientId": "<office-create-client-id>",
+            "timeoutSeconds": 30,
+            "gateway": "none"
+          }
+        },
+        "personal": {
+          "domain": "personal",
+          "destination": {
+            "endpoint": "https://manager.example.org",
+            "projectId": "<personal-project-id>",
+            "environment": "personal-dev",
+            "path": "/",
+            "readClientId": "<personal-read-client-id>",
+            "createClientId": "<personal-create-client-id>",
+            "timeoutSeconds": 30,
+            "gateway": "none"
+          }
+        }
+      },
+      "entries": [
+        {
+          "source": "office-file",
+          "key": "STRIPE_API_KEY",
+          "profile": "office",
+          "name": "STRIPE_API_KEY",
+          "consumer": "STRIPE_API_KEY",
+          "origin": "source"
+        },
+        {
+          "source": "personal-file",
+          "key": "OPENAI_API_KEY",
+          "profile": "personal",
+          "name": "OPENAI_API_KEY",
+          "consumer": "OPENAI_API_KEY",
+          "origin": "source"
+        },
+        {
+          "source": "office-file",
+          "key": "LEGACY_REPORT_TOKEN",
+          "profile": "undecided",
+          "name": "LEGACY_REPORT_TOKEN",
+          "consumer": "LEGACY_REPORT_TOKEN",
+          "origin": "source"
+        }
+      ]
+    }
+  }
+}
+```
+
+### Operational CLI workflow
+
+All ownership commands operate through `./sb secrets ownership <action>` or
+scoped execution through `./sb secrets run --ownership-profile ...`.
+
+#### 1. Classify secret mapping and destinations
+Inspect the mapping state of a profile to verify that all source keys exist,
+domain separation is valid, and entries are unambiguous:
+
+```bash
+# Offline classification of mapped keys
+./sb secrets ownership classify --profile office
+
+# Online classification verifying destination preflight status
+./sb secrets ownership classify --profile office --check-destination
+```
+
+#### 2. Validate storage admission evidence
+Verify compliance evidence for remote storage before migration approval:
+
+```bash
+./sb secrets ownership evidence-check --profile office --evidence /path/to/storage-evidence.json
+```
+
+#### 3. Place provider credentials into local secure store
+Store client credentials into the local OS credential store (macOS Keychain, Linux Secret Service).
+Credentials are provided interactively or piped via `--stdin` to keep secrets out of shell history
+and command-line arguments:
+
+```bash
+# Read capability credential
+./sb secrets ownership credential-set --profile office --capability read --stdin --create-only < /path/to/read-token.txt
+
+# Create capability credential
+./sb secrets ownership credential-set --profile office --capability create --stdin --create-only < /path/to/create-token.txt
+```
+
+#### 4. Request human operator approval
+Approvals require an interactive foreground TTY and can never be granted by background processes or automated agents:
+
+```bash
+# Request migration approval (valid for 15 minutes, requires admitted evidence)
+./sb secrets ownership approve --profile office --operation migrate --evidence /path/to/storage-evidence.json --minutes 15
+```
+
+The operator reviews the prompt and types `approve` to create the signed approval record (`ap_<controller_id>_<hex16>`).
+
+#### 5. Execute create-only migration
+Migration is create-only: it writes new entries to the destination but never overwrites existing secrets or mutates the source:
+
+```bash
+# Dry run: preview planned migration actions without contacting provider
+./sb secrets ownership migrate --profile office --approval ap_<controller_id>_<hex16>
+
+# Confirmed migration: creates destination secrets and journals verified state
+./sb secrets ownership migrate --profile office --approval ap_<controller_id>_<hex16> --confirm
+```
+
+#### 6. Inspect ownership status
+Review migration journals and completion records:
+
+```bash
+./sb secrets ownership status --profile office
+```
+
+#### 7. Perform source cleanup under separate approval
+Source cleanup is a separate, destructive human operation. It requires a dedicated cleanup approval
+and only removes keys that have been verified or reconciled at the destination:
+
+```bash
+# 1. Request dedicated cleanup approval
+./sb secrets ownership approve --profile office --operation cleanup --minutes 15
+
+# 2. Dry run cleanup to verify eligible keys and expected source state
+./sb secrets ownership cleanup --profile office --approval ap_<controller_id>_<hex16>
+
+# 3. Confirmed cleanup: safely removes keys using atomic staged replacement
+./sb secrets ownership cleanup --profile office --approval ap_<controller_id>_<hex16> --confirm
+```
+
+#### 8. Bounded scoped runs
+Inject mapped secrets into child commands using exact `--ownership-key` flags. The child receives
+only the declared `consumer` environment variables:
+
+```bash
+./sb secrets run --ownership-profile office --ownership-key STRIPE_API_KEY -- npm run sync-payments
+```
+
+#### 9. Manage retention of settled metadata
+Remove settled journal and run metadata while preserving active locks and uncompleted operations:
+
+```bash
+# Dry run retention
+./sb secrets ownership retention --profile office
+
+# Confirmed retention
+./sb secrets ownership retention --profile office --confirm
+```
+
+### Credential placement and human security gate
+
+- **Placeholder stdin / human workflow**: Credential placement uses interactive prompts or `--stdin`. Never configure real secret tokens, passwords, or client secrets in configuration files or command arguments.
+- **Human security and disposable provider gate**: Real production migration remains strictly gated on explicit human security sign-off (covering authority, continuity, lifetime, revocation, gateway bundle, and security policy) and disposable provider verification. Do not perform operational migration without verified proof artifacts.

@@ -41,11 +41,30 @@ keeps its own credential in macOS Keychain or an existing unlocked Linux Secret
 Service.
 
 Never place provider credentials in config, argv, environment, output, feedback,
-or chat. Never browse, reveal, export, mutate, migrate, or administer Infisical
-through Sandbox, and never start or unlock a Linux keyring service. On keyring,
+or chat. The spec 067 read-only source path never browses, reveals, exports, mutates,
+migrates, or administers Infisical. Never start or unlock a Linux keyring service. On keyring,
 route, TLS, provider, or authorization failure, stop on the broker's bounded
 result; do not use a plaintext, public, shared-credential, or raw-CLI fallback.
 See `docs/secret-inspection.md`.
+
+## Ownership profiles
+
+Spec 069's separate CLI-only `secrets ownership` capability supports explicit
+ownership classification and create-only migration under a current human
+approval. Read [the ownership guide](../../docs/secret-inspection.md#ownership-profiles-and-create-only-migration)
+before credential placement, migration, cleanup, or scoped consumption. Agents
+never approve or manufacture a terminal for approval. Plain classification and
+unconfirmed plans need no provider credential. Ownership source reads initially
+support registered file/dotenv aliases only. Keep uncertain journals; resume
+checks exact names without blind retry. Cleanup is a separate human operation.
+
+Use `secrets run --ownership-profile PROFILE --ownership-key NAME -- argv` for an
+explicit mapped subset, with repeated keys as needed. No source/session selector
+may be mixed in. Grants bind full canonical metadata; a stale authority requires
+operator re-approval and credential placement. No list/search/export/admin or
+token persistence is added. Derived-token revocation uncertainty is explicit;
+bootstrap and Cloudflare cleanup remain operator-managed. Live provider and
+Linux/macOS proofs and human security review remain unverified release gates.
 
 ## Host storage monitoring and cleanup
 

@@ -26,6 +26,33 @@ Stop as soon as the task is satisfied:
 All examples below use placeholders. Replace identifiers such as `SOURCE_ALIAS`,
 `SECRET_KEY`, and `PROFILE_NAME`; never substitute a secret value into a command.
 
+## Ownership profiles
+
+For `secrets ownership` or `run --ownership-profile`, read the ownership section
+of [the secret guide](../../docs/secret-inspection.md). Plain `ownership classify`
+and unconfirmed migration plans are metadata-only. Use only registered aliases;
+the reserved `personal` alias still resolves through the registry. Initial
+ownership source reads support file/dotenv only.
+
+A human creates migration or cleanup approval in their own foreground terminal.
+Agents may execute approved actions only inside that unexpired, exactly bound
+approval. Never create, extend, renew, or simulate approval, including by
+allocating a pseudo-terminal. Cleanup is a separate human operation, never an
+automatic migration step. A mismatch or expiry requires the operator's decision.
+
+Scoped runs require `--ownership-profile PROFILE` and explicit repeated
+`--ownership-key NAME` selections. NAME is the mapped destination name; consumer
+variables and origins come from the map. Mixed source/destination origins within
+one profile are allowed. Do not combine these selectors with source/key/secret,
+destination, or session options. Never read source files or native credentials.
+
+Resume uses the existing journal and exact names, never blind create retries or
+journal copying. Keep unknown/unresolved state. Storage is `operator_attested`;
+revocation uncertainty is `cleanup_unknown`, exit 6 after otherwise successful
+work. Bootstrap/native-store and Cloudflare cleanup remain operator-managed.
+Real provider proofs, Linux/macOS acceptance, and human security review remain
+required before real migration. No ownership approval or action is exposed by MCP.
+
 ## 0. Check the source without reading it
 
 ```bash

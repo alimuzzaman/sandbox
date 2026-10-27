@@ -451,6 +451,12 @@ human-only local TTY exception and is never available through MCP. See
 [Safe secret inspection](docs/secret-inspection.md) or load the
 `secret-inspection` skill for the least-disclosure workflow and incident steps.
 
+Optional CLI-only ownership profiles add names-only classification, separately
+approved create-only migration, and scoped runs with explicit mapped keys.
+Source cleanup requires its own human approval. Storage remains operator-attested;
+live provider/controller proofs and human security review are still required
+before real migration. See [ownership profiles](docs/secret-inspection.md#ownership-profiles-and-create-only-migration).
+
 ### Host storage monitoring and safe cleanup
 
 Inspect local or named-remote storage without booting an instance:

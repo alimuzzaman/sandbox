@@ -318,7 +318,10 @@ class FakeAPI:
             if behavior == "lost":
                 raise _Uncertain("operation_timeout")
             # The create reply intentionally omits the value, as the frozen contract allows.
-            return self.response(200, {"secret": self.record(grant, name, hidden=False, include_value=False)})
+            # Live v0.166.5 create replies also omit secretPath (observed 2026-10-27).
+            record = self.record(grant, name, hidden=False, include_value=False)
+            del record["secretPath"]
+            return self.response(200, {"secret": record})
         require(method == "GET", "unexpected provider method")
         require(query == {"projectId": [grant.destination.project_id],
                           "environment": [grant.destination.environment],
@@ -337,7 +340,8 @@ class FakeAPI:
                   "environment": grant.destination.environment, "secretPath": grant.destination.path,
                   "type": "shared", "secretComment": self.comments.get(name, "")}
         if hidden:
-            record.update(secretValueHidden=True, secretValue=None)
+            # Live v0.166.5 returns its fixed mask, not null (observed 2026-10-27).
+            record.update(secretValueHidden=True, secretValue="<hidden-by-infisical>")
         elif include_value:
             record.update(secretValueHidden=False, secretValue=self.items[name].decode("utf-8"))
         return record

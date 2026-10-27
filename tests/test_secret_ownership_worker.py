@@ -366,6 +366,56 @@ class TestSecretOwnershipWorker(unittest.TestCase):
         finally:
             pipe.close()
 
+    def test_hidden_existence_reply_accepts_only_the_fixed_mask(self) -> None:
+        """A hidden reply with the provider mask is present; any other bytes stay unknown."""
+        grant = _sample_grant()
+        destination = grant.destination
+
+        def reply(value):
+            record = {"secretKey": "ALPHA", "workspace": destination.project_id,
+                      "environment": destination.environment, "secretPath": destination.path,
+                      "type": "shared", "secretComment": "", "secretValueHidden": True,
+                      "secretValue": value}
+            return lambda *args, **kwargs: (200, bytearray(json.dumps({"secret": record}).encode()))
+
+        for value, expected in (("<hidden-by-infisical>", "present"), (None, "present"),
+                                ("usable-bytes", "unknown")):
+            pipe = PipeChannel()
+            try:
+                worker = _Worker(pipe.child)
+                worker.grant = grant
+                worker._request = reply(value)
+                worker._exists(["ALPHA"])
+                message = pipe.parent.recv_json()
+                require(message["result"] == {"ALPHA": expected},
+                        f"hidden reply {value!r} must classify as {expected}")
+            finally:
+                pipe.close()
+
+    def test_create_reply_may_omit_the_path_but_never_name_another(self) -> None:
+        """v0.166.5 create replies omit secretPath; a different echoed path stays unknown."""
+        grant = _sample_grant()
+        destination = grant.destination
+        sent = bytearray(b"synthetic-create-bytes")
+        cases = ((None, ("created", None)), (destination.path, ("created", None)),
+                 ("/other", ("acceptance_unknown", "response_unrecognized")))
+        for path, expected in cases:
+            record = {"secretKey": "ALPHA", "workspace": destination.project_id,
+                      "environment": destination.environment, "type": "shared",
+                      "secretValue": sent.decode()}
+            if path is not None:
+                record["secretPath"] = path
+            pipe = PipeChannel()
+            try:
+                worker = _Worker(pipe.child)
+                worker.grant = grant
+                worker._request = lambda *args, _r=record, **kwargs: (
+                    200, bytearray(json.dumps({"secret": _r}).encode()))
+                outcome = worker._post_create("ALPHA", bytearray(b"{}"), bytearray(sent))
+                require(outcome == expected, f"create reply with path {path!r} must be {expected}")
+            finally:
+                pipe.close()
+
     def test_worker_ready_before_send_go_ordering_and_callback_failure(self) -> None:
         """Handshake ordering: worker sends ready, before_send runs; callback failure aborts."""
         pipe = PipeChannel()

@@ -48,6 +48,7 @@ SECRET_PREFIX = "/api/v4/secrets/"
 # by routes/v1/index.ts:105-124. This acknowledges derived-token revoke only.
 # https://github.com/Infisical/infisical/blob/v0.166.5/backend/src/server/routes/v1/identity-access-token-router.ts#L40-L65
 REVOKE_ACKNOWLEDGMENT = "Successfully revoked access token"
+HIDDEN_VALUE_MASK = "<hidden-by-infisical>"
 _REVOKE_SECONDS = 4.0
 _MAX_COMMENT = 256
 _GRANT_KEYS = frozenset((
@@ -204,8 +205,12 @@ class _Worker:
         )
         return f"{SECRET_PREFIX}{quoted}?{query}"
 
-    def _record(self, body: bytearray, name: str) -> dict | None:
-        """The exact secret record for ``name`` in a ``{"secret": …}`` body."""
+    def _record(self, body: bytearray, name: str, *, path_echoed: bool = True) -> dict | None:
+        """The exact secret record for ``name`` in a ``{"secret": …}`` body.
+
+        v0.166.5 create replies omit ``secretPath`` (observed live 2026-10-27);
+        ``path_echoed=False`` accepts that omission, never a different path.
+        """
         try:
             data = _decode_json(body)
         except SecretBrokerError:
@@ -218,7 +223,7 @@ class _Worker:
             record.get("secretKey") != name
             or record.get("workspace") != destination.project_id
             or record.get("environment") != destination.environment
-            or record.get("secretPath") != destination.path
+            or record.get("secretPath", None if path_echoed else destination.path) != destination.path
             or record.get("type") != "shared"
         ):
             return None
@@ -398,10 +403,11 @@ class _Worker:
                 status, body = self._request("GET", self._secret_target(name, view=False))
                 if status == 200:
                     record = self._record(body, name)
-                    # No nonempty hidden placeholder has yet been proven live.
-                    # Accept only an absent/null/empty value, never usable bytes.
+                    # A hidden reply carries v0.166.5's fixed mask
+                    # (secret-fns.ts:52, observed live 2026-10-27). Accept only
+                    # that, an absent/null or an empty value, never usable bytes.
                     if (record is not None and record.get("secretValueHidden") is True
-                            and (record.get("secretValue") is None or record.get("secretValue") == "")):
+                            and record.get("secretValue") in (None, "", HIDDEN_VALUE_MASK)):
                         state = "present"
                         comment = record.get("secretComment")
                         match = re.fullmatch(
@@ -484,7 +490,7 @@ class _Worker:
                 data = None
             if 200 <= status < 300 and type(data) is dict:
                 if set(data) == {"secret"}:
-                    record = self._record(response, name)
+                    record = self._record(response, name, path_echoed=False)
                     if record is not None:
                         if "secretValue" not in record:
                             return "created", None

@@ -156,12 +156,29 @@ that as our own child still present and lets the bounded wait reap it. EPERM
 counts as unreachable only once the leader is reaped. The spec 067 broker and the
 scoped runner share this helper.
 
+### Ownership migrate over HTTPS (2026-10-27)
+
+A human ran `ownership approve` at a foreground terminal with the admitted
+evidence. The first real `approve` failed: `grant_interactive` called
+`read_names` without importing it, and no test exercised the prompt. That was
+fixed with tests before the human approval.
+
+- First `migrate --confirm`: the create request for the first name reached the provider. Its reply was not recognized, so the run stopped with that name `acceptance_unknown` and the second `pending`. Revoke was confirmed. Stopping was the designed fail-closed result.
+- Two live wire shapes caused it, both fixed with tests that mirror them:
+  - R4: a hidden existence reply carries `secretValueHidden: true` and the fixed mask `<hidden-by-infisical>` (`secret-fns.ts:52`), not an empty value. Only that exact mask, null or empty is accepted as hidden.
+  - R5: a create reply echoes key, project, environment, type and the exact bytes sent, but omits `secretPath`. A create reply may omit the path; an echoed different path is still unrecognized.
+- Resumes under the same unexpired approval reconciled both names by exact-byte readback. The final run reported `migrated`, both names `reconciled`, revocation `revoked`, exit 0. A later existence check reports both `pre_existing`.
+- Scoped run `run --ownership-profile proof --ownership-key PROOF_ALPHA` delivered only that consumer to the child. Without `--ownership-key` it refused with `ownership_keys_required`.
+
+The direct `created` acknowledgment on first attempt is covered by tests built
+from the observed reply, not by a fresh live create. Adding a name changes the
+complete ownership authority, which needs new bootstrap credentials.
+
 ## Proofs still owed
 
-- R4: the exact hidden-value flag and placeholder shape were not captured (the output filter redacted the flag); confirm against the Sandbox client.
-- R5: approval-policy response, ambiguous-acceptance behavior and storage uniqueness under a race.
+- R5: approval-policy response and storage uniqueness under a race. A fresh live create acknowledged as `created` on first attempt.
 - R7: honest behavior on unsupported routes and killed workers.
-- HTTPS path: ownership create and readback through the Sandbox client after a human `approve`. Login, existence and revoke are observed above.
+- HTTPS path: ownership `cleanup` of the source under its own human approval.
 - Decide whether to pin `EXPECTED_INDEXDEF` to the Postgres 14 string above, given other provider Postgres versions.
 - Supported synthetic CLI acceptance, focused regressions, and Linux/macOS controller acceptance.
 - Human security review of create authority, approval, source continuity, scoped consumers, native credential lifetime, gateway bundle, revocation limits, and CLAUDE.md gotcha 32.

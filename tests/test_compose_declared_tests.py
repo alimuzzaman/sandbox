@@ -2,7 +2,7 @@ import json
 import hashlib
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,3 +118,71 @@ class ComposeDeclaredTests(unittest.TestCase):
 
         self.assertFalse(captured["request"].allow_inferred_remote)
         self.assertIsNone(captured["request"].required_capability)
+
+    def test_local_declared_mode_prints_complete_adapter_output(self):
+        import sandbox.commands.debug as debug
+        from sandbox.runtimes.base import OperationResult
+
+        args = SimpleNamespace(project_dir="/fixture", label=None, mode="fast",
+                               local=True, remote=None, workspace=[None],
+                               timeout=1200, json=False, passthrough=[])
+        stdout = "test-start\n" + "x" * 12000 + "\ntest-end\n"
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None):
+                return {"kind": "compose", "root": "/fixture",
+                        "tests": {"modes": {"fast": {"argv": ["pnpm", "test:fast"]}}}}
+
+        service = SimpleNamespace(invoke=lambda request: OperationResult(
+            True, request.operation, request.project_root, "compose", {"output": stdout}))
+        target = SimpleNamespace(kind="local", project_root="/fixture")
+        output = StringIO()
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch.object(debug, "_local_test_entry", return_value={"label": "default"}), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(resolve=lambda request: target),
+                }), \
+                patch("sandbox.application.context.runtime_service", return_value=service), \
+                redirect_stdout(output):
+            debug.cmd_test({}, args)
+        self.assertEqual(output.getvalue(), stdout)
+
+    def test_local_declared_mode_failure_preserves_streams_and_exit_status(self):
+        import sandbox.commands.debug as debug
+        from sandbox.runtimes.base import OperationResult
+
+        args = SimpleNamespace(project_dir="/fixture", label=None, mode="fast",
+                               local=True, remote=None, workspace=[None],
+                               timeout=1200, json=False, passthrough=[])
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None):
+                return {"kind": "compose", "root": "/fixture",
+                        "tests": {"modes": {"fast": {"argv": ["pnpm", "test:fast"]}}}}
+
+        target = SimpleNamespace(kind="local", project_root="/fixture")
+        for child_status, expected in ((7, 7), (124, 124), (0, 1), (-1, 1),
+                                       (True, 1), (None, 1), ("7", 1)):
+            with self.subTest(child_status=child_status):
+                service = SimpleNamespace(invoke=lambda request: OperationResult(
+                    False, request.operation, request.project_root, "compose",
+                    {"stdout": "test output\n", "stderr": "test error\n",
+                     "exit_code": child_status, "reason": {"code": "compose_exec_failed"}}))
+                stdout, stderr = StringIO(), StringIO()
+                with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                        patch.object(debug, "_local_test_entry", return_value={"label": "default"}), \
+                        patch("sandbox.application.context.durable_job_dependencies", return_value={
+                            "target_service": SimpleNamespace(resolve=lambda request: target),
+                        }), \
+                        patch("sandbox.application.context.runtime_service", return_value=service), \
+                        redirect_stdout(stdout), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as caught:
+                        debug.cmd_test({}, args)
+                self.assertEqual(caught.exception.code, expected)
+                self.assertEqual(stdout.getvalue(), "test output\n")
+                self.assertEqual(stderr.getvalue(), "test error\n")

@@ -725,4 +725,8 @@ class ComposeAdapter:
         else:
             stored = {key: value for key, value in data.items() if key != "root"}
             self.registry.registry_put(descriptor["root"], **stored)
+        if op == "exec":
+            # The registry retains its existing short diagnostic tail; callers
+            # need the bounded process output, including its beginning.
+            data["output"] = _bounded_exec_output(result.stdout)
         return OperationResult(True, op, descriptor["root"], "compose", data)

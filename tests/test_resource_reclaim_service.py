@@ -10,16 +10,19 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
 import unittest
 
+from sandbox.resources import reclaim
 from sandbox.resources.context import PlanStore
 from sandbox.resources.models import CleanupPlan, StorageTarget
 from sandbox.resources.reclaim_service import ReclaimService, _RemoteReclaimProvider
-from sandbox.resources.remote import LocalProbeAdapter
+from sandbox.resources.remote import LocalProbeAdapter, RemoteResourceAdapter, _program
 from sandbox.services.process import ProcessResult
+from tests.subprocess_support import run_test_process, synthetic_environment
 
 
 DAY = 86400
@@ -123,6 +126,22 @@ class ServiceCase(unittest.TestCase):
 
 
 class TestPlanning(ServiceCase):
+    def test_retained_terminal_guidance_survives_plan_and_reap(self):
+        job_id = "a" * 16
+        item = entry("p-workspace-12345678", retained_terminal=True,
+                     retained_terminal_jobs={"remote": "fixture", "job_ids": [job_id]})
+        provider = FakeProvider()
+        provider.block["entries"] = [item]
+        service = self.service(provider)
+        for payload in (service.plan("all"), service.reap(dry_run=True)):
+            self.assertTrue(payload["ok"])
+            skipped = payload["data"]["skipped"]
+            row = next(row for row in skipped if row["kind"] == "worktree")
+            self.assertEqual(row["reason"], "retained_terminal")
+            self.assertEqual(row["remedy"]["commands"], [
+                f"./sb job-cleanup {job_id} --remote fixture --confirm"])
+        self.assertFalse(any(call[0] == "reclaim" for call in provider.calls))
+
     def test_remote_reclaim_inventory_does_not_request_deep_attribution(self):
         class RecordingAdapter:
             def __init__(self):
@@ -398,6 +417,112 @@ class TestRetention(ServiceCase):
         self.assertNotIn("runtime", kinds)
 
 
+# Execute the shipped program, but replace only its external boundaries. The
+# child has no project import path and cannot spawn any command, including an
+# absolute executable. Job rows are typed API responses, not a real registry.
+_PROBE_CHILD = r"""
+import enum
+import json
+import os
+import socket
+import subprocess
+import sys
+import types
+
+fixture = json.loads(sys.stdin.read())
+for name in ("sandbox", "sandbox.jobs", "sandbox.jobs.registry", "sandbox.jobs.models"):
+    module = types.ModuleType(name)
+    module.__path__ = []
+    sys.modules[name] = module
+registry = sys.modules["sandbox.jobs.registry"]
+def read_index(_path):
+    if fixture["index_error"]:
+        raise OSError("synthetic unavailable index")
+    return fixture["index"]
+registry.read_resource_index = read_index
+class Lifecycle(enum.Enum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+sys.modules["sandbox.jobs.models"].TERMINAL_LIFECYCLES = set(Lifecycle)
+def deny_spawn(*args, **kwargs):
+    raise AssertionError("external process denied")
+subprocess.Popen = deny_spawn
+for name in ("system", "popen", "execl", "execle", "execlp", "execlpe",
+             "execv", "execve", "execvp", "execvpe", "spawnl", "spawnle",
+             "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe"):
+    if hasattr(os, name):
+        setattr(os, name, deny_spawn)
+socket.socket.connect = deny_spawn
+socket.socket.connect_ex = deny_spawn
+socket.create_connection = deny_spawn
+source, tail = fixture["program"].split("\nACTIONS = {", 1)
+namespace = {}
+exec(source, namespace)
+def fake_run(argv, timeout):
+    if argv == [str(namespace["SB"]), "job-list", "--limit", "50", "--json"]:
+        return 0, json.dumps(fixture["legacy"]), ""
+    if argv == ["docker", "volume", "ls", "-q"] and fixture["volumes"]:
+        return 0, "\n".join(fixture["volumes"]), ""
+    if argv[:3] == ["docker", "volume", "inspect"]:
+        return 0, json.dumps([{"Name": name} for name in argv[3:]]), ""
+    # Synthetic empty engine listings let the real teardown code continue
+    # without contacting an engine. All other commands are denied.
+    if argv in (["docker", "ps", "-aq"], ["docker", "volume", "ls", "-q"],
+                ["docker", "network", "ls", "-q"], ["docker", "image", "ls", "-q"],
+                ["docker", "buildx", "du", "--format=json"],
+                ["docker", "ps", "-a", "--format", '{{.Label "com.docker.compose.project"}}'],
+                ["docker", "volume", "ls", "--format", '{{.Label "com.docker.compose.project"}}']):
+        return 0, "", ""
+    if argv[:3] == ["du", "-sx", "-sk"] and len(argv) == 4:
+        path = namespace["Path"](argv[3]).resolve()
+        if path.is_relative_to(namespace["HOME"]):
+            return 0, "1\t" + str(path), ""
+    return 127, "", "synthetic command denied"
+namespace["run"] = fake_run
+namespace["load_workspace_projection"] = lambda: {"records": [], "counts": {}}
+namespace["APPLY_TRANSACTION_LOCKS"] = ()
+namespace["docker_storage_resources"] = lambda *_args: ([], [])
+namespace["host_capacity_resources"] = lambda *_args: ([], [])
+namespace["platform"].node = lambda: "synthetic-host"
+original_stat = namespace["os"].stat
+def isolated_stat(path, *args, **kwargs):
+    return original_stat(str(namespace["HOME"]) if str(path) == "/" else path, *args, **kwargs)
+namespace["os"].stat = isolated_stat
+original_disk_usage = namespace["shutil"].disk_usage
+namespace["shutil"].disk_usage = lambda _path: original_disk_usage(str(namespace["HOME"]))
+exec("\nACTIONS = {" + tail, namespace)
+"""
+
+
+class IsolatedProbeRunner:
+    def __init__(self, home):
+        self.home = home
+        self.index = {"jobs": [], "artifacts": []}
+        self.index_error = False
+        self.legacy = {"ok": True, "jobs": []}
+        self.volumes = []
+
+    def __call__(self, request, timeout):
+        fixture = {"program": _program(request), "index": self.index,
+                   "index_error": self.index_error, "legacy": self.legacy,
+                   "volumes": self.volumes}
+        # Override every compatibility key so no host paths, locale, or native
+        # environment values reach the child. No shell or project imports.
+        overrides = {key: "" for key in ("USERPROFILE", "LANG", "LC_ALL", "LC_CTYPE",
+                     "TZ", "TMP", "TEMP", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")}
+        overrides.update({"SANDBOX_HOME": str(self.home), "HOME": str(self.home),
+                          "TMPDIR": str(self.home), "PATH": str(self.home / "empty-bin")})
+        env = synthetic_environment(overrides)
+        completed = run_test_process([sys.executable, "-I", "-c", _PROBE_CHILD],
+            input=json.dumps(fixture), text=True, capture_output=True,
+            env=env, timeout=timeout)
+        return ProcessResult(("isolated-probe",), completed.returncode,
+                             completed.stdout, completed.stderr)
+
+
 class ProbeCase(unittest.TestCase):
     """Exercise the shipped probe program itself, in a subprocess."""
 
@@ -406,7 +531,8 @@ class ProbeCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         (self.home / "runtime").mkdir(parents=True)
         (self.home / "deploy-src").mkdir(parents=True)
-        self.probe = LocalProbeAdapter(home=str(self.home))
+        self.runner = IsolatedProbeRunner(self.home)
+        self.probe = LocalProbeAdapter(home=str(self.home), runner=self.runner)
 
     def workspace(self, name):
         path = self.home / "deploy-src" / name
@@ -568,6 +694,176 @@ class ProbeCase(unittest.TestCase):
         self.assertFalse(request["thorough"])
         self.assertEqual(request["directory_cache"], "cache_only")
         self.assertEqual(timeout, 17)
+
+
+class TestGeneratedJobEvidence(unittest.TestCase):
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        (self.home / "runtime").mkdir()
+        (self.home / "deploy-src").mkdir()
+        self.path = self.home / "deploy-src" / "project-workspace-12345678"
+        self.path.mkdir()
+        self.runner = IsolatedProbeRunner(self.home)
+        self.probe = LocalProbeAdapter(home=str(self.home), runner=self.runner)
+        self.candidate = {"seq": 1, "kind": "worktree", "locator": str(self.path),
+                          "bytes": 1, "class": "ORPHAN", "tier": "safe",
+                          "reason": "orphan_workspace"}
+
+    def job(self, lifecycle="running", finished_at=None, **extra):
+        return {"project_root": str(self.path), "job_id": "a" * 16,
+                "lifecycle": lifecycle, "cleanup_state": "retained",
+                "target_kind": "local", "remote_name": None,
+                "finished_at": finished_at, **extra}
+
+    def reclaim(self):
+        return self.probe.reclaim([self.candidate], run_id="b" * 32,
+                                  budget_seconds=30)["outcomes"][0]
+
+    def observe_block(self):
+        def service(_entry, _command, *, input_data, timeout):
+            return self.runner(json.loads(input_data), timeout)
+        adapter = RemoteResourceAdapter("fixture", remote_lookup=lambda _name:
+            {"ssh": "synthetic", "provisioned": True}, service_request=service)
+        return adapter.observe(thorough=False, budget_seconds=25).reclaim
+
+    def prepare_observe(self):
+        other = self.home / "deploy-src" / "other-workspace-12345678"
+        other.mkdir()
+        old = time.time() - 30 * DAY
+        os.utime(self.path, (old, old))
+        os.utime(other, (old, old))
+        volume = "sandbox-other-workspace-12345678_node-modules"
+        self.runner.volumes = [volume]
+        return other, volume
+
+    def assert_selection(self, block, other, volume, *, available):
+        for tier in reclaim.TIERS:
+            result = reclaim.tier_candidates(block, tier, now=time.time())
+            candidates = {(item.kind, item.locator) for item in result.candidates}
+            if available:
+                self.assertIn(("worktree", str(other)), candidates)
+                self.assertIn(("volume", volume), candidates)
+            else:
+                self.assertNotIn(("worktree", str(other)), candidates)
+                self.assertNotIn(("volume", volume), candidates)
+                self.assertTrue(any(row["kind"] == "volume" and row["locator"] == volume
+                                    and row["reason"] == "container_inventory_unavailable"
+                                    for row in result.skipped))
+
+    def test_observe_malformed_job_rows_preserves_known_protection_and_marks_unknown(self):
+        other, volume = self.prepare_observe()
+        self.runner.index = {"jobs": [self.job()], "artifacts": []}
+        clean = self.observe_block()
+        self.assertTrue(clean["engine_complete"])
+        self.assert_selection(clean, other, volume, available=True)
+        for bad in (None, {}, {"project_root": "relative", "lifecycle": "running"},
+                    self.job(lifecycle=[])):
+            with self.subTest(bad=bad):
+                rows = [bad] if isinstance(bad, dict) and bad.get("project_root") == str(self.path) else [self.job(), bad]
+                self.runner.index = {"jobs": rows, "artifacts": []}
+                block = self.observe_block()
+                known = next(row for row in block["entries"] if row["path"] == str(self.path))
+                self.assertTrue(known["active_job"])
+                self.assertFalse(block["engine_complete"])
+                self.assertEqual(block["reason"], "lifecycle_evidence_unavailable")
+                for tier in reclaim.TIERS:
+                    selected = reclaim.tier_candidates(block, tier, now=time.time())
+                    row = next(row for row in selected.skipped if row["locator"] == str(other))
+                    self.assertEqual(row["class"], "UNKNOWN")
+                self.assert_selection(block, other, volume, available=False)
+
+    def test_observe_job_index_cap_is_conservative_at_10000(self):
+        other, volume = self.prepare_observe()
+        terminal = self.job("succeeded", datetime.now(timezone.utc).isoformat())
+        # Completed jobs do not bind another workspace.
+        filler = {"project_root": str(other), "lifecycle": "succeeded",
+                  "cleanup_state": "completed"}
+        for count in (9999, 10000):
+            with self.subTest(count=count):
+                self.runner.index = {"jobs": [terminal] + [filler] * (count - 1), "artifacts": []}
+                block = self.observe_block()
+                known = next(row for row in block["entries"] if row["path"] == str(self.path))
+                self.assertEqual(block["engine_complete"], count < 10000)
+                self.assertEqual(known["retained_terminal"], count < 10000)
+                self.assertEqual(known["active_job"], count == 10000)
+                self.assertEqual(known["retained_terminal_jobs"] is not None, count < 10000)
+                for tier in reclaim.TIERS:
+                    selected = reclaim.tier_candidates(block, tier, now=time.time())
+                    row = next(row for row in selected.skipped if row["locator"] == str(self.path))
+                    if count < 10000:
+                        self.assertEqual(row["remedy"]["commands"],
+                                         ["./sb job-cleanup " + "a" * 16 + " --remote fixture --confirm"])
+                    else:
+                        self.assertNotIn("remedy", row)
+                self.assert_selection(block, other, volume, available=count < 10000)
+
+    def test_observe_legacy_job_list_fallback_below_and_at_limit(self):
+        other, volume = self.prepare_observe()
+        self.runner.index_error = True
+        active = self.job()
+        filler = {"project_root": str(other), "lifecycle": "succeeded",
+                  "cleanup_state": "completed"}
+        for count in (49, 50):
+            with self.subTest(count=count):
+                self.runner.legacy = {"ok": True, "jobs": [active] + [filler] * (count - 1)}
+                block = self.observe_block()
+                known = next(row for row in block["entries"] if row["path"] == str(self.path))
+                self.assertTrue(known["active_job"])
+                self.assertFalse(known["retained_terminal"])
+                self.assertIsNone(known["retained_terminal_jobs"])
+                self.assertEqual(block["engine_complete"], count < 50)
+                self.assert_selection(block, other, volume, available=count < 50)
+
+    def test_post_plan_active_and_recent_retained_terminal_refuse_removal(self):
+        for row in (self.job(), self.job("succeeded", datetime.now(timezone.utc).isoformat())):
+            with self.subTest(lifecycle=row["lifecycle"]):
+                self.runner.index = {"jobs": [row], "artifacts": []}
+                self.assertEqual(self.reclaim()["reason"], "job_active_since_plan")
+                self.assertTrue(self.path.exists())
+
+    def test_post_plan_reservation_refuses_removal(self):
+        ledger = self.home / "runtime" / "storage" / "reservations.json"
+        ledger.parent.mkdir()
+        ledger.write_text(json.dumps([{"target": str(self.home / "deploy-src" / "project"),
+                                       "expires_at": time.time() + 3600}]))
+        self.assertEqual(self.reclaim()["reason"], "job_active_since_plan")
+        self.assertTrue(self.path.exists())
+
+    def test_unreadable_malformed_and_truncated_index_refuse_removal(self):
+        cases = ((True, {}), (False, {"jobs": "bad"}),
+                 (False, {"jobs": [{}]}), (False, {"jobs": [self.job()] * 10000}))
+        for error, index in cases:
+            with self.subTest(error=error, index_type=type(index.get("jobs")).__name__,
+                              count=len(index.get("jobs", ()))):
+                self.runner.index_error, self.runner.index = error, index
+                self.assertEqual(self.reclaim()["reason"], "job_active_since_plan")
+                self.assertTrue(self.path.exists())
+
+    def test_complete_idle_evidence_allows_prechange_removal(self):
+        self.runner.index = {"jobs": [self.job("succeeded", "2000-01-01T00:00:00Z")],
+                             "artifacts": []}
+        self.candidate["reason"] = "finished_job_idle"
+        self.assertEqual(self.reclaim()["status"], "removed")
+        self.assertFalse(self.path.exists())
+
+    def test_selected_remote_reaches_generated_reporting_and_legacy_is_conservative(self):
+        def service(_entry, _command, *, input_data, timeout):
+            return self.runner(json.loads(input_data), timeout)
+        adapter = RemoteResourceAdapter("fixture", remote_lookup=lambda _name:
+            {"ssh": "synthetic", "provisioned": True}, service_request=service)
+        self.runner.index = {"jobs": [self.job("succeeded", datetime.now(timezone.utc).isoformat())],
+                             "artifacts": []}
+        snapshot = adapter.observe(thorough=False, budget_seconds=25)
+        row = next(item for item in snapshot.reclaim["entries"] if item["path"] == str(self.path))
+        self.assertTrue(row["retained_terminal"])
+        self.assertEqual(row["retained_terminal_jobs"], {"remote": "fixture", "job_ids": ["a" * 16]})
+        self.runner.index["jobs"][0].pop("target_kind")
+        snapshot = adapter.observe(thorough=False, budget_seconds=25)
+        row = next(item for item in snapshot.reclaim["entries"] if item["path"] == str(self.path))
+        self.assertFalse(row["retained_terminal"])
+        self.assertTrue(row["active_job"])
+        self.assertIsNone(row["retained_terminal_jobs"])
 
 
 class TestHostReclaimGuard(ProbeCase):

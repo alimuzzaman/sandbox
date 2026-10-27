@@ -636,13 +636,16 @@ memory. Changed, unsupported, or oversized captures remain partial. The
 capability and producer wiring passed isolated supported CLI/MCP exercises.
 Installed-controller and production verification remain separate gates.
 
-Generic Compose `exec` failures retain stdout and stderr independently, each
-bounded to the 1 MiB process-runner limit; when a stream overflows, the runner
-keeps both edges around an explicit truncation marker. Failures include the child `exit_code`. Human `sb exec`
-writes those streams to their matching local streams; `--json` returns one
-envelope containing both fields and exits with the child code. A nested remote
-controller uses the human path so the outer durable supervisor persists the
-same separate evidence.
+Generic Compose `exec` success returns stdout bounded to 1 MiB; overflow keeps
+both edges around an explicit truncation marker. Failures retain stdout and
+stderr independently, each bounded to the 1 MiB process-runner limit; when a
+stream overflows, the runner keeps both edges around an explicit truncation
+marker. Failures include the child `exit_code`. Human `sb exec` writes those
+streams to their matching local streams; `--json` returns one envelope containing
+both fields and exits with the child code. A local declared Compose `sb test`
+also writes failure stdout and stderr to their matching streams and exits with a
+positive child code, or 1 if the code is invalid. A nested remote controller uses
+the human path so the outer durable supervisor persists the same separate evidence.
 
 ```sh
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach \

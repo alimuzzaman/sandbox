@@ -132,6 +132,11 @@ def cmd_retention(args, cfg=None) -> None:
             for item in (data.get("candidates") or ())[:200]:
                 print(f"    {item.get('kind')} {item.get('display_name')} "
                       f"[{item.get('reason')}]")
+            for item in (data.get("skipped") or ())[:200]:
+                print(f"    skipped {item.get('kind')} {item.get('display_name')} "
+                      f"[{item.get('reason')}]")
+                for command in ((item.get("remedy") or {}).get("commands") or ())[:8]:
+                    print(f"      {command}")
             for item in (data.get("outcomes") or ())[:200]:
                 print(f"    {item.get('status')} {item.get('resource_id')} "
                       f"[{item.get('reason')}]")

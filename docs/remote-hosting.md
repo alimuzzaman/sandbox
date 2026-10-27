@@ -1094,6 +1094,11 @@ unbuffered streaming, unlimited body size and 3600s timeouts match the Caddy rou
 certificates expired, or with fewer than 25 days left, which means renewal at 30 days did not happen), and `sb remote domains`
 lists nginx routes.
 
+The remote MCP check connects directly, without an ambient proxy. If its HTTPS
+control hostname no longer resolves and a valid origin IPv4 is recorded, it
+uses that address while verifying TLS for the original hostname. Restore the
+DNS record; the fallback does not follow redirects.
+
 Moving every site from one remote to another: [server-migration.md](server-migration.md).
 
 **Limitations.** The nginx front door serves `sb host` routes and the HTTPS MCP control

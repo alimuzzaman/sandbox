@@ -54,6 +54,7 @@ PROTECTION_RULES = (
     "symlink",
     "instance_registry",
     "active_job",
+    "retained_terminal",
     "volume_not_workspace_scoped",
 )
 
@@ -189,6 +190,8 @@ class ClassifiedEntry:
     indexed: bool = False
     registry: bool = False
     finished_job_idle: bool = False
+    retained_terminal: bool = False
+    retained_terminal_jobs: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -207,6 +210,7 @@ class ClassifiedEntry:
             "in_use_reason": self.in_use_reason,
             "indexed": self.indexed,
             "registry": self.registry,
+            "retained_terminal": self.retained_terminal,
             "container_count": len(self.containers),
             "running_container_count": sum(
                 1 for item in self.containers if item.get("running")
@@ -241,6 +245,8 @@ def _protection_for(entry: Mapping[str, Any],
         reasons.append("instance_registry")
     if entry.get("active_job") is True:
         reasons.append("active_job")
+    if entry.get("retained_terminal") is True:
+        reasons.append("retained_terminal")
     for declared in entry.get("protections") or ():
         if isinstance(declared, str) and declared and declared not in reasons:
             reasons.append(declared)
@@ -334,7 +340,10 @@ def classify_entry(
         indexed=bool(entry.get("indexed")),
         registry=bool(entry.get("registry")),
         finished_job_idle=(entry.get("finished_job_idle") is True
-                           and entry.get("active_job") is not True),
+                           and entry.get("active_job") is not True
+                           and entry.get("retained_terminal") is not True),
+        retained_terminal=entry.get("retained_terminal") is True,
+        retained_terminal_jobs=entry.get("retained_terminal_jobs"),
     )
 
 
@@ -349,6 +358,8 @@ def _in_use(entry: Mapping[str, Any], lease: LeaseState, mtime: float | None,
     """
     if entry.get("active_job") is True:
         return True, "active_job"
+    if entry.get("retained_terminal") is True:
+        return True, "retained_terminal"
     if lease.state == "released":
         return False, None
     if lease.state == "active" and lease.source == "lease":
@@ -615,12 +626,24 @@ def tier_candidates(
     for entry in sorted(entries, key=lambda item: item.name):
         decision = _entry_tier(entry)
         if decision is None:
-            skipped.append({
+            row = {
                 "kind": "worktree", "locator": entry.path,
                 "display_name": entry.name, "class": entry.lifecycle_class,
                 "reason": entry.in_use_reason or entry.reason,
                 "bytes": entry.size_bytes,
-            })
+            }
+            binding = entry.retained_terminal_jobs
+            if entry.retained_terminal and row["reason"] == "retained_terminal" and isinstance(binding, Mapping):
+                remote, ids = binding.get("remote"), binding.get("job_ids")
+                if (isinstance(remote, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", remote)
+                        and isinstance(ids, list) and 0 < len(ids) <= 8
+                        and all(isinstance(job_id, str) and re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{32})", job_id) for job_id in ids)
+                        and len(set(ids)) == len(ids)):
+                    row["remedy"] = {"commands": [
+                        f"./sb job-cleanup {job_id} --remote {remote} --confirm"
+                        for job_id in ids
+                    ]}
+            skipped.append(row)
             continue
         entry_tier, reason = decision
         if tier_rank(entry_tier) > rank:

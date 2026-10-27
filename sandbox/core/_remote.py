@@ -1138,11 +1138,9 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
             "Authorization": f"Bearer {token}",
             "Accept": "application/json, text/event-stream",
         })
-        # Doctor must probe the VPS directly. A developer's ambient HTTP proxy
-        # can otherwise transform a healthy MCP response into a false negative.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
-            with opener.open(request, timeout=10) as response:
+            # Doctor probes directly, while sharing the verified DNS fallback.
+            with _control_urlopen(remote, request, timeout=10, direct=True) as response:
                 status = response.status
         except urllib.error.HTTPError as error:
             status = error.code
@@ -2776,7 +2774,7 @@ class _OriginHTTPSHandler(urllib.request.HTTPSHandler):
                             req, context=self._context)
 
 
-def _control_urlopen(remote: dict, request, timeout):
+def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
     """Open a control request; survive a control host that stops resolving.
 
     The control endpoint is reached by its DNS name. When that name does not
@@ -2787,6 +2785,9 @@ def _control_urlopen(remote: dict, request, timeout):
     """
     parsed = urlsplit(request.full_url)
     try:
+        if direct:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            return opener.open(request, timeout=timeout)
         return urllib.request.urlopen(request, timeout=timeout)
     except urllib.error.URLError as exc:
         if not isinstance(exc.reason, socket.gaierror):

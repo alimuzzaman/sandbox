@@ -782,7 +782,8 @@ def cmd_status(cfg, args) -> None:
 
 
 _STATUS_SENSITIVE_KEY = re.compile(
-    r"(?:login_url|token|password|passphrase|secret|credential|cookie|authorization)",
+    r"(?:^sandbox_autologin$|login_url|token|password|passphrase|secret|credential|"
+    r"cookie|authorization|api[_-]?key|private[_-]?key|basic[_-]?auth|access[_-]?key)",
     re.IGNORECASE,
 )
 _STATUS_AUTOLOGIN_VALUE = re.compile(
@@ -803,7 +804,7 @@ def _public_status_json(value):
     if isinstance(value, tuple):
         return tuple(_public_status_json(child) for child in value)
     if isinstance(value, str):
-        return _public_status_string(_STATUS_AUTOLOGIN_VALUE.sub(r"\1[REDACTED]", value))
+        return _public_status_string(value)
     return value
 
 
@@ -811,6 +812,7 @@ def _public_status_string(value: str) -> str:
     """Apply shared credential detection/redaction without rewriting safe URLs."""
     from sandbox.services.redaction import argv_contains_credentials, redact_text
 
+    value = _STATUS_AUTOLOGIN_VALUE.sub(r"\1[REDACTED]", value)
     return redact_text(value) if argv_contains_credentials([value]) else value
 
 

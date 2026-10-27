@@ -394,7 +394,8 @@ def cmd_test(cfg, args) -> None:
             label=entry.get("label", "default"), arguments=arguments))
         if isinstance(result, OperationError):
             die(result.message)
-        print(result.data.get("output", ""), end="")
+        from sandbox.commands.runtime import _emit_exec_result
+        _emit_exec_result({**dict(result.data), "ok": result.ok}, as_json=False)
         return
     # Resolve WordPress mode before target/capability selection.  In particular,
     # an invalid explicit mode must fail without consulting a remote target (and

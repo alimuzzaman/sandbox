@@ -23,6 +23,25 @@ Human form: `error: remote job submission blocked by the remote storage floor (r
 - outcome reason `stack_teardown_incomplete` (source kept)
 - outcome detail `teardown`: `{projects, containers_removed, volumes_removed, volumes_kept_shared, networks_removed, networks_kept}`
 
+## Retained terminal jobs in reclaim plans
+
+The host inventory adds `retained_terminal: true` for a workspace only when
+complete job evidence proves its protecting jobs are retained and terminal.
+Legacy controllers and incomplete, truncated, mixed, unknown or reservation
+bindings continue to report `active_job`. Both fields protect at every tier,
+including released workspaces; `finished_job_idle` keeps its existing behavior.
+A `retained_terminal` skipped row may include `remedy.commands`, bounded to eight
+validated job IDs and the selected remote, with `./sb job-cleanup ID --remote
+NAME --confirm` guidance. Reap and resource plan text show the same skipped
+reason and guidance as JSON. This is advice only, not cleanup authorization or
+an automatic action. IDs or remote bindings that cannot be validated yield no
+guidance. Old controller payloads remain valid and fall through to `active_job`.
+
+Revision evidence: this additive client/controller contract is introduced in the
+source revision containing this change; installed controller revision and live
+behavior must be verified independently before relying on it. No remote update is
+implied by this source change.
+
 ## sb host heal --remote R [--project P] [--environment E] [--confirm] [--json]
 ```json
 {"ok": true, "action": "heal", "dry_run": true,

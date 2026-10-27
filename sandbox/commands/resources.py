@@ -1249,6 +1249,8 @@ def _emit_reclaim_plan(data: dict) -> None:
             f"{item.get('display_name', item.get('locator'))} "
             f"[{item.get('reason')}]"
         )
+        for command in ((item.get("remedy") or {}).get("commands") or ())[:8]:
+            print(f"      {command}")
     totals = data.get("tier_totals") or {}
     if totals:
         print(

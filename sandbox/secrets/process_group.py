@@ -8,21 +8,29 @@ import subprocess
 import time
 
 
-def _group_state(pgid: int) -> str:
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return "gone"
-    except PermissionError:
-        return "unreachable"
-    return "alive"
+def _group_state(process: subprocess.Popen, pgid: int) -> str:
+    process.poll()
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return "gone"
+        except PermissionError:
+            # Darwin answers EPERM while the leader is exiting or an unreaped
+            # zombie. It is still our child: reap it and look again, or leave
+            # it to the bounded wait. Only a reaped leader's group is foreign.
+            if process.returncode is None:
+                if process.poll() is not None:
+                    continue
+                return "alive"
+            return "unreachable"
+        return "alive"
 
 
 def _wait_group(process: subprocess.Popen, pgid: int, seconds: float) -> bool:
     deadline = time.monotonic() + max(0.0, seconds)
     while True:
-        process.poll()
-        if _group_state(pgid) == "gone":
+        if _group_state(process, pgid) == "gone":
             return True
         if time.monotonic() >= deadline:
             return False
@@ -37,8 +45,7 @@ def terminate_process_group(
 ) -> bool:
     """End a ``start_new_session`` child group under a short fixed bound."""
     pgid = process.pid
-    process.poll()
-    state = _group_state(pgid)
+    state = _group_state(process, pgid)
     if state == "gone":
         return True
     if state == "unreachable":

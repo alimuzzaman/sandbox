@@ -136,13 +136,33 @@ apply fails and rolls back.
 This covers the spec 067 read path only. The ownership `migrate` path needs the
 human-only `approve` step and was not run.
 
+### Ownership worker over HTTPS (2026-10-27)
+
+The hosted instance was reset to a fresh database. A synthetic project got a
+Viewer read identity and a Member create identity; a Member can also edit and
+delete, so a create-only custom role was not exercised. Both client secrets went
+to the Keychain only through `ownership credential-set --create-only --stdin`.
+The source was a synthetic 0600 dotenv file with two entries.
+
+- `ownership classify --check-destination`: Universal Auth login, value-free existence over HTTPS, both names `would_create`, revocation `revoked`, exit 0 (three runs).
+- A read-only sidecar ran the fixed Q1 and Q2 against the provider database. `ownership evidence-check` admitted the resulting document as `operator_attested`.
+- Observed `pg_get_indexdef` on Postgres 14: `CREATE UNIQUE INDEX uq_secrets_v2_key_folder_id_shared ON public.secrets_v2 USING btree (key, "folderId") WHERE ((type)::text = 'shared'::text)`. It is not pinned as `EXPECTED_INDEXDEF`: the cast-tolerant parse admits it, and an exact pin from one Postgres version could refuse valid evidence from another.
+
+One defect was found on this path and fixed with tests. The revoke itself
+succeeded, but process-group cleanup reported the worker as not ended, so every
+session reported `cleanup_unknown`. Darwin answers `killpg(pgid, 0)` with EPERM
+while the group leader is exiting or is an unreaped zombie. Cleanup now treats
+that as our own child still present and lets the bounded wait reap it. EPERM
+counts as unreachable only once the leader is reaped. The spec 067 broker and the
+scoped runner share this helper.
+
 ## Proofs still owed
 
 - R4: the exact hidden-value flag and placeholder shape were not captured (the output filter redacted the flag); confirm against the Sandbox client.
 - R5: approval-policy response, ambiguous-acceptance behavior and storage uniqueness under a race.
 - R7: honest behavior on unsupported routes and killed workers.
-- HTTPS path: the ownership worker (create, readback, revoke) through the Sandbox client after a human `approve`. The read path is observed above.
-- Pin the actual catalog `pg_get_indexdef` result after disposable-instance proof.
+- HTTPS path: ownership create and readback through the Sandbox client after a human `approve`. Login, existence and revoke are observed above.
+- Decide whether to pin `EXPECTED_INDEXDEF` to the Postgres 14 string above, given other provider Postgres versions.
 - Supported synthetic CLI acceptance, focused regressions, and Linux/macOS controller acceptance.
 - Human security review of create authority, approval, source continuity, scoped consumers, native credential lifetime, gateway bundle, revocation limits, and CLAUDE.md gotcha 32.
 

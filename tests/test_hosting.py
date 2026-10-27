@@ -3728,6 +3728,42 @@ class TestHostingManifest(unittest.TestCase):
 
         self.assertEqual(build_opener.return_value.open.call_count, 1)
 
+    @patch("sandbox.commands.hosting.urllib.request.build_opener")
+    def test_edge_verification_waits_before_resolving_a_freshly_created_hostname(self, build_opener):
+        events = []
+        response = MagicMock(status=200)
+        response.__enter__.return_value = response
+        build_opener.return_value.open.side_effect = lambda *_a, **_k: events.append("open") or response
+        with patch("sandbox.commands.hosting.time.sleep",
+                   side_effect=lambda seconds: events.append(("sleep", seconds))):
+            hosting_cmd._verify_edge(
+                [{"hostname": "fresh.example.test", "mode": "serve"},
+                 {"hostname": "old.example.test", "mode": "serve"}],
+                fresh_hostnames=frozenset({"fresh.example.test"}),
+            )
+        self.assertEqual(events, [
+            ("sleep", hosting_cmd._NEW_DNS_RECORD_GRACE_SECONDS), "open", "open"])
+
+    @patch("sandbox.commands.hosting.time.sleep")
+    @patch("sandbox.commands.hosting.urllib.request.build_opener")
+    def test_edge_verification_has_no_dns_grace_for_existing_hostnames(self, build_opener, sleep):
+        response = MagicMock(status=200)
+        response.__enter__.return_value = response
+        build_opener.return_value.open.return_value = response
+        hosting_cmd._verify_edge([{"hostname": "old.example.test", "mode": "serve"}])
+        sleep.assert_not_called()
+
+    def test_apply_marks_only_newly_created_dns_hostnames_as_fresh(self):
+        fixture = _HostingOwnerFixture(self)
+        hostnames = [record["hostname"] for record in fixture.runtime["records"]]
+        existing = {"id": "record-0", "type": "A", "name": hostnames[0],
+                    "content": "192.0.2.1", "proxied": True, "ttl": 1}
+        fixture.client.records.side_effect = lambda _zone, hostname: (
+            [existing] if hostname == hostnames[0] else [])
+        fixture.apply()
+        self.assertEqual(fixture.edge.call_args.kwargs["fresh_hostnames"],
+                         frozenset(hostnames[1:]))
+
     def test_public_acme_apply_skips_origin_ca_and_creates_dns_only_records(self):
         fixture = _HostingOwnerFixture(self)
         origin_certificate = fixture.patch.object(hosting_cmd, "_origin_certificate")
@@ -3740,7 +3776,8 @@ class TestHostingManifest(unittest.TestCase):
                             for call in fixture.client.upsert_address.call_args_list))
         self.assertNotIn("    tls ", fixture.configure_edge.call_args.args[2])
         fixture.edge.assert_called_once_with(fixture.validated["routes"],
-            healthcheck_path="/", basic_auth_enabled=False)
+            healthcheck_path="/", basic_auth_enabled=False,
+            fresh_hostnames=frozenset(record["hostname"] for record in fixture.runtime["records"]))
         self.assertEqual(fixture.repository.load()["hosts"][fixture.key]["edge"]["state"], "ready")
 
     @patch("sandbox.commands.hosting.cloudflare.cloudflare_token", return_value="configured")

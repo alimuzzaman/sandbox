@@ -3859,12 +3859,19 @@ def _edge_failure_detail(error: BaseException) -> str:
         return "connection refused"
     return "route unavailable"
 
+# A recursive resolver that asks Cloudflare before a just-created record is
+# served caches NXDOMAIN for the zone's negative TTL (often 30 minutes), which
+# outlasts the whole verification loop. Wait once before the first lookup.
+_NEW_DNS_RECORD_GRACE_SECONDS = 20
+
+
 def _verify_edge(
     routes: list[dict],
     *,
     healthcheck_path: str = "/",
     basic_auth_enabled: bool = False,
     basic_auth_credentials: tuple[str, str] | None = None,
+    fresh_hostnames: frozenset[str] = frozenset(),
 ) -> None:
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
@@ -3877,6 +3884,8 @@ def _verify_edge(
             return None
 
     opener = urllib.request.build_opener(_NoRedirect)
+    if any(route["hostname"] in fresh_hostnames for route in routes):
+        time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS)
     for route in routes:
         if route["hostname"].startswith("*."):
             continue
@@ -4573,6 +4582,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             runtime["caddyfile"] = rendered
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
         zones: dict[str, dict] = {}
+        fresh_hostnames: set[str] = set()
         for wanted in runtime["records"]:
             hostname = wanted["hostname"]
             zone = zones.get(hostname)
@@ -4603,6 +4613,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     continue
                 raise RuntimeError(f"declared hostname {hostname} has a conflicting CNAME to {cname_target}")
             previous = next((record for record in all_records if record.get("type") == kind), None)
+            if previous is None:
+                fresh_hostnames.add(hostname)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
         certificate = edge.after_dns(
@@ -4616,6 +4628,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "healthcheck_path": runtime["healthcheck"]["path"],
             "basic_auth_enabled": bool(validated.get("basic_auth")),
         }
+        if fresh_hostnames:
+            verify_kwargs["fresh_hostnames"] = frozenset(fresh_hostnames)
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
         _verify_edge(validated["routes"], **verify_kwargs)

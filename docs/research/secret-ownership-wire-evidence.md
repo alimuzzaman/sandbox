@@ -96,12 +96,28 @@ parse of the exact index identity, btree columns, and shared predicate. A source
 constant being present is not live storage proof. Approval expiry is capped by
 the evidence window, which is at most one hour.
 
+## Disposable-provider observation (2026-10-27)
+
+Infisical v0.166.5 with synthetic Postgres and Redis ran as a throwaway Compose
+instance on the xcloud-london remote, with no host port and no public route. A
+script inside the container exercised it over plain HTTP on loopback with
+synthetic identities and one synthetic item. This shows wire shapes only. HTTPS,
+certificate trust and the Sandbox client path were not exercised.
+
+- R4 observed: existing item with `viewSecretValue=false` returned 200 with a `secret` object; the value was not the real value and not empty; the item with a missing name returned a JSON 404 `not found`.
+- R5 partly observed: create returned 200 with `secret`; a duplicate create returned 400 with an "already exists" message. The approval-policy response, ambiguous acceptance and the storage race were not exercised.
+- R6 observed: exact-name read with `viewSecretValue=true` and references and imports disabled returned the stored bytes unchanged.
+- R7 observed: `POST /api/v1/auth/token/revoke` returned 200 `Successfully revoked access token`; reuse of that token returned 401 "token has been revoked".
+- A Viewer-role identity could read the item with the value hidden.
+
+The instance was deleted afterwards; its leftover remote checkout is released for the regular reaper.
+
 ## Proofs still owed
 
-- R4: hidden-value placeholder and exact-name JSON 404 behavior on a disposable provider, with no usable value in existence responses.
-- R5: create success, duplicate conflict, approval response, and ambiguous-acceptance behavior, including storage uniqueness under a race.
-- R6: exact readback shape and byte equality without transformations or secret-reference expansion.
-- R7: derived-token revoke acknowledgment and inability to reuse the revoked token, plus honest behavior on unsupported routes and killed workers.
+- R4: the exact hidden-value flag and placeholder shape were not captured (the output filter redacted the flag); confirm against the Sandbox client.
+- R5: approval-policy response, ambiguous-acceptance behavior and storage uniqueness under a race.
+- R7: honest behavior on unsupported routes and killed workers.
+- HTTPS path: the Sandbox client against a trusted HTTPS origin.
 - Pin the actual catalog `pg_get_indexdef` result after disposable-instance proof.
 - Supported synthetic CLI acceptance, focused regressions, and Linux/macOS controller acceptance.
 - Human security review of create authority, approval, source continuity, scoped consumers, native credential lifetime, gateway bundle, revocation limits, and CLAUDE.md gotcha 32.

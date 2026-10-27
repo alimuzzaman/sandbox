@@ -17,9 +17,15 @@ def build_secret_service(*, project_root, config, personal_path, runtime_root,
     secret_config = (config or {}).get("secrets", {})
     raw_sources = secret_config.get("sources", {})
     raw_profiles = secret_config.get("useProfiles", {})
-    sources = bind_provider_authorities(
-        raw_sources, raw_profiles, project_root=project_root,
-    )
+    ownership = secret_config.get("ownership")
+    if ownership is None:
+        sources = bind_provider_authorities(
+            raw_sources, raw_profiles, project_root=project_root,
+        )
+    else:
+        sources = bind_provider_authorities(
+            raw_sources, raw_profiles, project_root=project_root, ownership=ownership,
+        )
     profiles = {}
     for name, item in raw_profiles.items():
         profiles[name] = UseProfile(
@@ -51,9 +57,50 @@ def build_secret_service(*, project_root, config, personal_path, runtime_root,
                         prepare()
                 except (ImportError, RuntimeError):
                     credential_store = None
-    return SecretService(
+    service = SecretService(
         SourceRegistry(project_root, sources, personal_path=personal_path, project_scope=project_scope),
         SecretAudit(root / "audit.jsonl"), revision_key_path=root / "revision.key",
         use_profiles=profiles, provider_adapter=provider_adapter,
         credential_store=credential_store,
+    )
+    if ownership is not None:
+        # Attribute only; absent without an ownership block (no behaviour change).
+        service.ownership = ownership
+    return service
+
+
+def build_ownership_context(project_dir: object):
+    """Compose the ownership context: config, source registry and runtime root.
+
+    Imports stay lazy so a plain secret service, and the ownership models,
+    never require the project loader or the journal module.
+    """
+    from sandbox.application.context import load_project_descriptor
+    from sandbox.core._paths import BASE
+    from sandbox.core._secrets import secret_file
+    from .models import SecretBrokerError
+    from .ownership.journal import load_controller_id
+    from .ownership.models import OwnershipConfig, OwnershipContext
+
+    project_root = Path(project_dir).expanduser().resolve()
+    config = load_project_descriptor(project_root)
+    secret_config = (config or {}).get("secrets", {})
+    ownership = secret_config.get("ownership")
+    if ownership is None:
+        raise SecretBrokerError(
+            "ownership_not_configured", "secret ownership is not configured for this project",
+        )
+    sources = bind_provider_authorities(
+        secret_config.get("sources", {}), secret_config.get("useProfiles", {}),
+        project_root=project_root, ownership=ownership,
+    )
+    runtime_root = Path(BASE) / "runtime" / "secret-ownership"
+    return OwnershipContext(
+        config=OwnershipConfig.from_normalized(ownership),
+        registry=SourceRegistry(project_root, sources, personal_path=secret_file()),
+        project_root=project_root,
+        runtime_root=runtime_root,
+        controller_id=load_controller_id(runtime_root),
+        read_only_broker=None,
+        credential_store=None,
     )

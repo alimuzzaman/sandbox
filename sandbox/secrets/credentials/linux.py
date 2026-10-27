@@ -96,7 +96,7 @@ class LinuxSecretServiceCredentialStore:
 
     @staticmethod
     def _attributes(locator: CredentialLocator) -> dict[str, str]:
-        return {"application": CREDENTIAL_SERVICE, "account": locator.account}
+        return {"application": locator.service, "account": locator.account}
 
     def _find(self, collection, locator: CredentialLocator):
         items = list(collection.search_items(self._attributes(locator)))
@@ -154,7 +154,7 @@ class LinuxSecretServiceCredentialStore:
             session = open_session(connection)
             secret = format_secret(session, value.encode("utf-8"), "text/plain")
             properties = {
-                f"{SS_PREFIX}Item.Label": ("s", CREDENTIAL_SERVICE),
+                f"{SS_PREFIX}Item.Label": ("s", locator.service),
                 f"{SS_PREFIX}Item.Attributes": ("a{ss}", self._attributes(locator)),
             }
             item_path, prompt = collection._collection.call(

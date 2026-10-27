@@ -15,7 +15,7 @@ _SAFE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _MCP_MODE_ORDER = ("source_info", "keys", "metadata", "validate", "masked", "use")
 _MCP_MODES = frozenset(_MCP_MODE_ORDER)
-_SECRET_KEYS = frozenset(("sources", "useProfiles"))
+_SECRET_KEYS = frozenset(("sources", "useProfiles", "ownership"))
 _FILE_SOURCE_KEYS = frozenset(("type", "path", "format", "mcpModes"))
 _INFISICAL_SOURCE_KEYS = frozenset((
     "type", "endpoint", "projectId", "environment", "path", "key",
@@ -377,4 +377,15 @@ def normalize_secret_config(result: Mapping | None) -> dict:
     for name, descriptor in (*project_profiles.items(), *machine_profiles.items()):
         normalized_name, normalized = _normalize_profile(name, descriptor, sources)
         profiles[normalized_name] = normalized
-    return {"sources": sources, "useProfiles": profiles}
+    secret_config = {"sources": sources, "useProfiles": profiles}
+    if "ownership" in project or "ownership" in machine:
+        # Lazy: configurations without an ownership block keep their exact
+        # previous import graph and return shape.
+        from sandbox.secrets.ownership.config import normalize_ownership
+        for layer in (project, machine):
+            if "ownership" in layer and not isinstance(layer["ownership"], Mapping):
+                raise ValueError("secret ownership configuration must be an object")
+        secret_config["ownership"] = normalize_ownership(
+            project.get("ownership"), machine.get("ownership"), sources, root,
+        )
+    return secret_config

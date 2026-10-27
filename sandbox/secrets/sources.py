@@ -239,6 +239,51 @@ class SourceRegistry:
         finally:
             os.close(fd)
 
+    def read_with_stat(self, alias: str) -> tuple[SafeSource, os.stat_result]:
+        """Read like :meth:`read` and also return the final ``fstat``.
+
+        The returned stat comes from the same descriptor the bytes were read
+        through, after the read, so callers can bind continuity metadata to
+        exactly the snapshot they parsed without reopening the path.
+        """
+        policy = self.policy(alias)
+        if self._kind(policy) != "file":
+            raise SecretBrokerError(
+                "provider_unsupported", "provider sources cannot be read as local files",
+            )
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(policy.path, flags)
+        except FileNotFoundError as exc:
+            raise SecretBrokerError("source_missing", "registered secret source does not exist") from exc
+        except OSError as exc:
+            raise SecretBrokerError("source_unsafe", "registered secret source could not be opened") from exc
+        try:
+            before = os.fstat(fd)
+            self._validate_stat(before)
+            if before.st_size > MAX_SOURCE_BYTES:
+                raise SecretBrokerError("source_too_large", "registered secret source exceeds 1 MiB")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(fd, min(65_536, MAX_SOURCE_BYTES + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_SOURCE_BYTES:
+                    raise SecretBrokerError("source_too_large", "registered secret source exceeds 1 MiB")
+            after = os.fstat(fd)
+            self._validate_stat(after)
+            after_sig = self._signature(after)
+            if self._signature(before) != after_sig:
+                raise SecretBrokerError("source_changed", "registered secret source changed during access")
+            return SafeSource(policy=policy, content=b"".join(chunks), signature=after_sig), after
+        finally:
+            os.close(fd)
+
     @staticmethod
     def _validate_stat(info: os.stat_result) -> None:
         if not stat.S_ISREG(info.st_mode):

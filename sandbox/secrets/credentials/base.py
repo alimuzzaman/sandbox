@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from sandbox.secrets.models import (
     CredentialLocator,
@@ -15,6 +15,9 @@ from sandbox.secrets.models import (
     SecretBrokerError,
 )
 from sandbox.secrets.provider_identity import canonical_https_origin
+
+if TYPE_CHECKING:
+    from sandbox.secrets.ownership.models import Grant
 
 
 CREDENTIAL_SERVICE = "sandbox.secret-manager.v1"
@@ -47,6 +50,11 @@ def locator_for_policy(policy: InfisicalSourcePolicy | Mapping[str, object] | ob
     an endpoint or profile change would turn migration into the exfiltration
     path this binding is meant to close.
     """
+    # Keep the legacy path lazy; ownership grants require their own recomputed
+    # authority and service namespace before any native backend access.
+    if (type(policy).__module__ == "sandbox.secrets.ownership.models"
+            and type(policy).__name__ == "Grant"):
+        return locator_for_ownership(policy)
     alias = _policy_field(policy, "alias", "alias")
     endpoint = _policy_field(policy, "endpoint", "endpoint")
     project_id = _policy_field(policy, "project_id", "projectId")
@@ -95,6 +103,42 @@ def locator_for_policy(policy: InfisicalSourcePolicy | Mapping[str, object] | ob
     ).encode("ascii")
     account = "v2-" + hashlib.sha256(payload).hexdigest()
     return CredentialLocator(service=CREDENTIAL_SERVICE, account=account)
+
+
+OWNERSHIP_CREDENTIAL_SERVICE = "sandbox-ownership"
+_OWNERSHIP_CAPABILITIES = ("read", "create")
+
+
+def locator_for_ownership(grant: Grant) -> CredentialLocator:
+    """Derive the ownership bootstrap locator from a validated grant.
+
+    The account is ``f"{profile}:{capability}:{authority_digest}"`` in its own
+    service namespace, so it never collides with a source-policy locator. The
+    grant's complete authority is recomputed first: a reused digest with an
+    altered endpoint, project, client or names is refused before any store
+    access. No listing or deletion helper exists for this namespace.
+    """
+    from ..authority import validate_ownership_grant
+    try:
+        validate_ownership_grant(grant)
+    except (TypeError, ValueError, OSError, RecursionError):
+        raise SecretBrokerError("authority_mismatch", "secret ownership grant does not match its authority") from None
+    profile = getattr(grant, "profile", None)
+    capability = getattr(grant, "capability", None)
+    digest = getattr(grant, "authority_digest", None)
+    if (
+        not isinstance(profile, str) or not profile or ":" in profile
+        or any(ord(char) < 0x21 or ord(char) > 0x7E for char in profile)
+        or capability not in _OWNERSHIP_CAPABILITIES
+        or not isinstance(digest, str) or len(digest) != 67
+        or not digest.startswith("o1-")
+        or any(char not in "0123456789abcdef" for char in digest[3:])
+    ):
+        raise CredentialStoreError("credential_store_failed")
+    return CredentialLocator(
+        service=OWNERSHIP_CREDENTIAL_SERVICE,
+        account=f"{profile}:{capability}:{digest}",
+    )
 
 
 @dataclass(frozen=True, repr=False)

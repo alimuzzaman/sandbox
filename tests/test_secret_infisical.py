@@ -404,6 +404,15 @@ class HTTPSBoundaryTests(TimedCase):
         return transport.request("GET", "https://provider.invalid/api/status", headers={}, body=None,
             deadline=deadline or Deadline(10, clock=lambda: 0.0), capture_body=capture_body)
 
+    def test_every_request_carries_the_fixed_sandbox_user_agent(self):
+        # Edge proxies such as Cloudflare refuse urllib's default agent with 403.
+        from sandbox.secrets.providers.http import USER_AGENT
+        transport, opener, _context, _handlers = self.transport(FakeResponse())
+        self.request(transport)
+        sent = opener.open.call_args.args[0]
+        self.assertEqual(sent.get_header("User-agent"), USER_AGENT)
+        self.assertNotIn("urllib", USER_AGENT.lower())
+
     def test_os_trust_hostname_verification_no_proxy_and_no_redirect_are_installed(self):
         transport, opener, context, handlers = self.transport(FakeResponse())
         self.assertTrue(context.check_hostname)

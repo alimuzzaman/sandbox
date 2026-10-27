@@ -106,6 +106,11 @@ def _set_socket_timeout(response: object, seconds: float) -> None:
         return
 
 
+# Fixed and non-identifying. Without it urllib sends its default agent, which
+# edge proxies such as Cloudflare's browser integrity check refuse with 403.
+USER_AGENT = "sandbox-secret-manager/1"
+
+
 class BoundedHTTPTransport:
     """HTTPS-only opener with OS trust, no proxy inheritance, and a 1 MiB cap."""
 
@@ -156,7 +161,9 @@ class BoundedHTTPTransport:
         if body is not None and not isinstance(body, (bytes, bytearray)):
             raise ProviderError("provider_unsupported")
 
-        req = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+        req = urllib.request.Request(
+            url, data=body, headers={**request_headers, "User-Agent": USER_AGENT}, method=method,
+        )
         response = None
         result: HttpResponse | None = None
         failure: str | None = None

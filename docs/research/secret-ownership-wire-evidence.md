@@ -112,12 +112,36 @@ certificate trust and the Sandbox client path were not exercised.
 
 The instance was deleted afterwards; its leftover remote checkout is released for the regular reaper.
 
+### Sandbox client over HTTPS (2026-10-27)
+
+The same release then ran as a hosted environment behind the xcloud-london nginx
+front door at a disposable proxied hostname, with Cloudflare strict TLS and an
+Origin CA certificate. A synthetic organization, project, Viewer identity and
+item were created over HTTPS. The Viewer client secret went to the macOS Keychain
+only through `secrets credential-set --create-only --stdin`.
+
+- `source-info`: `reachable`, `provider_state: available`, with no secret read.
+- `inspect --mode keys`: only the configured singleton.
+- Fixed `use-profile`: Universal Auth login, exact-item read and delivery to the fixed child (`present=true`), exit 0. No value appeared in output.
+- An arbitrary `secrets run` against the provider source was refused with `command_denied`.
+- Changing one source field made the credential unreachable (`credential_missing`); restoring the configuration restored it.
+
+Two defects found on this path were fixed with tests. First, the provider
+transport now sends a fixed `User-Agent`, because Cloudflare's browser integrity
+check refused urllib's default agent with 403, reported as `provider_denied`.
+Second, `host apply` now waits once before verifying a newly created DNS record.
+Otherwise a resolver can cache NXDOMAIN for the zone's negative TTL, and the
+apply fails and rolls back.
+
+This covers the spec 067 read path only. The ownership `migrate` path needs the
+human-only `approve` step and was not run.
+
 ## Proofs still owed
 
 - R4: the exact hidden-value flag and placeholder shape were not captured (the output filter redacted the flag); confirm against the Sandbox client.
 - R5: approval-policy response, ambiguous-acceptance behavior and storage uniqueness under a race.
 - R7: honest behavior on unsupported routes and killed workers.
-- HTTPS path: the Sandbox client against a trusted HTTPS origin.
+- HTTPS path: the ownership worker (create, readback, revoke) through the Sandbox client after a human `approve`. The read path is observed above.
 - Pin the actual catalog `pg_get_indexdef` result after disposable-instance proof.
 - Supported synthetic CLI acceptance, focused regressions, and Linux/macOS controller acceptance.
 - Human security review of create authority, approval, source continuity, scoped consumers, native credential lifetime, gateway bundle, revocation limits, and CLAUDE.md gotcha 32.

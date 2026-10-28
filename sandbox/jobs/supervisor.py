@@ -84,6 +84,7 @@ def run_descriptor(path: str | Path) -> int:
     command = None
     selector = None
     release_authority = True
+    observed_descendants: set[int] = set()
     try:
         current = repository.get(job_id)
         if current["lifecycle"] in {
@@ -127,7 +128,7 @@ def run_descriptor(path: str | Path) -> int:
             child_start_identity=child.start_identity)
         observed_at = _iso()
         repository.put_heartbeat(job_id, supervisor_at=observed_at, health_evidence={
-            "process_alive": True, "child_observed": True,
+            "process_alive": True, "child_observed": True, "owned_descendants": [],
         }, child_observed_at=observed_at, last_activity_at=observed_at,
             last_progress_at=observed_at)
         selector = selectors.DefaultSelector()
@@ -140,8 +141,25 @@ def run_descriptor(path: str | Path) -> int:
         last_metric_digest = None
         last_progress_monotonic = time.monotonic()
         last_progress_at = _iso()
-        while selector.get_map():
-            if time.monotonic() >= next_metric and _child_running(command):
+        last_state_probe = 0.0
+        leader_alive, group_running, active_descendants = True, True, []
+        streams_eof = False
+        stopped = True
+
+        while True:
+            now = time.monotonic()
+            if (now - last_state_probe >= 0.05) or (not selector.get_map()) or (now >= deadline):
+                leader_alive, group_running, active_descendants = _group_state(command)
+                for pid in active_descendants:
+                    observed_descendants.add(pid)
+                last_state_probe = now
+
+            if not group_running:
+                drained = _drain_selector(selector, output, max_duration=1.0)
+                streams_eof = drained and not bool(selector.get_map())
+                break
+
+            if time.monotonic() >= next_metric and group_running:
                 metric = append_metric(storage, repository, job_id, sample_metric(command.pid))
                 movement_digest = metric.get("movement_digest")
                 metric_movement = movement_digest is not None and movement_digest != last_metric_digest
@@ -151,51 +169,90 @@ def run_descriptor(path: str | Path) -> int:
                 last_metric_digest = movement_digest
                 repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
                     "process_alive": True, "metric_movement": metric_movement,
+                    "owned_descendants": sorted(active_descendants),
                 }, last_metric_at=_iso(), last_progress_at=last_progress_at,
                     metric_digest=str(movement_digest or ""))
                 next_metric = time.monotonic() + 1
+
             stall_seconds = int(descriptor.get("stall_seconds", 300))
-            stalled = _child_running(command) and time.monotonic() - last_progress_monotonic >= stall_seconds
+            stalled = group_running and (time.monotonic() - last_progress_monotonic >= stall_seconds)
             if stalled:
                 repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
                     "process_alive": True, "stalled": True,
                     "cancel_on_stall": bool(descriptor.get("cancel_on_stall", False)),
+                    "owned_descendants": sorted(active_descendants),
                 }, last_progress_at=last_progress_at)
             if stalled and not stall_cancelled and descriptor.get("cancel_on_stall", False):
                 stall_cancelled = True
                 repository.transition(job_id, Lifecycle.CANCELLING)
-                _signal_group(command.pid, 15)
-                grace_end = time.monotonic() + int(descriptor.get("cancel_grace_seconds", 20))
-                while _child_running(command) and time.monotonic() < grace_end:
-                    time.sleep(0.05)
-                if _child_running(command):
-                    _signal_group(command.pid, 9)
-            if time.monotonic() >= deadline and _child_running(command):
+                stopped = _stop_failed_child(command, int(descriptor.get("cancel_grace_seconds", 20)))
+                drained = _drain_selector(selector, output, max_duration=1.0)
+                streams_eof = drained and not bool(selector.get_map())
+                break
+
+            if time.monotonic() >= deadline and group_running:
                 timed_out = True
-                _signal_group(command.pid, 15)
-                grace_end = time.monotonic() + int(descriptor.get("cancel_grace_seconds", 20))
-                while _child_running(command) and time.monotonic() < grace_end:
-                    time.sleep(0.05)
-                if _child_running(command):
-                    _signal_group(command.pid, 9)
-            for key, _ in selector.select(timeout=0.1):
-                chunk = os.read(key.fileobj.fileno(), 65536)
-                if chunk:
-                    output.append(key.data, chunk)
-                    last_progress_monotonic = time.monotonic()
-                    last_progress_at = _iso()
-                    repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
-                        "process_alive": True, "progress": True,
-                    }, last_output_at=_iso(), last_activity_at=_iso(), last_progress_at=last_progress_at)
-                else:
-                    selector.unregister(key.fileobj)
-        return_code = command.wait()
-        release_authority = True
+                stopped = _stop_failed_child(command, int(descriptor.get("cancel_grace_seconds", 20)))
+                drained = _drain_selector(selector, output, max_duration=1.0)
+                streams_eof = drained and not bool(selector.get_map())
+                break
+
+            if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
+                stopped = _stop_failed_child(command, int(descriptor.get("cancel_grace_seconds", 20)))
+                drained = _drain_selector(selector, output, max_duration=1.0)
+                streams_eof = drained and not bool(selector.get_map())
+                break
+
+            if selector.get_map():
+                remaining_deadline = max(0.01, deadline - time.monotonic())
+                select_timeout = min(0.05, remaining_deadline)
+                events = selector.select(timeout=select_timeout)
+                for key, _ in events:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if chunk:
+                        output.append(key.data, chunk)
+                        last_progress_monotonic = time.monotonic()
+                        last_progress_at = _iso()
+                        repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
+                            "process_alive": True, "progress": True,
+                            "owned_descendants": sorted(active_descendants),
+                        }, last_output_at=_iso(), last_activity_at=_iso(), last_progress_at=last_progress_at)
+                    else:
+                        selector.unregister(key.fileobj)
+            else:
+                time.sleep(0.05)
+
+        if not stopped:
+            raise RuntimeError("owned job work cessation could not be proven")
+        return_code = command.wait(timeout=1)
+
+        release_authority = stopped
         selector.close()
         command.stdout.close()
         command.stderr.close()
-        output.finish("stdout"); output.finish("stderr")
+        output.finish("stdout")
+        output.finish("stderr")
         integrity = output.complete()
+        output_completeness = "complete" if streams_eof else "partial"
+
+        if timed_out:
+            terminal_exit_code = 124 if (return_code is None or return_code == 0) else return_code
+            repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=terminal_exit_code,
+                termination_reason="deadline_exceeded", output_completeness=output_completeness,
+                integrity_sha256=integrity)
+            return 124
+        if stall_cancelled:
+            terminal_exit_code = 130 if (return_code is None or return_code == 0) else return_code
+            repository.transition(job_id, Lifecycle.CANCELLED, exit_code=terminal_exit_code,
+                termination_reason="cancelled_on_stall", output_completeness=output_completeness,
+                integrity_sha256=integrity)
+            return 130
+        if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
+            terminal_exit_code = 130 if (return_code is None or return_code == 0) else return_code
+            repository.transition(job_id, Lifecycle.CANCELLED, exit_code=terminal_exit_code,
+                termination_reason="cancelled_by_request", output_completeness=output_completeness,
+                integrity_sha256=integrity)
+            return 130
         # Artifacts describe successful job output. Do not let a missing
         # artifact mask the child command's actual failure (for example a
         # remote CI host missing its execution engine); retained stderr and
@@ -203,23 +260,11 @@ def run_descriptor(path: str | Path) -> int:
         if return_code == 0 and descriptor.get("artifact_paths"):
             collect_artifacts(storage, repository, job_id, project_root=descriptor["cwd"],
                               declared_paths=tuple(descriptor["artifact_paths"]))
-        if timed_out:
-            repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=return_code,
-                termination_reason="deadline_exceeded", output_completeness="complete", integrity_sha256=integrity)
-            return 124
-        if stall_cancelled:
-            repository.transition(job_id, Lifecycle.CANCELLED, exit_code=return_code,
-                termination_reason="cancelled_on_stall", output_completeness="complete", integrity_sha256=integrity)
-            return 130
-        if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
-            repository.transition(job_id, Lifecycle.CANCELLED, exit_code=return_code,
-                termination_reason="cancelled_by_request", output_completeness="complete", integrity_sha256=integrity)
-            return 130
         target = Lifecycle.SUCCEEDED if return_code == 0 else Lifecycle.FAILED
         termination_reason = _child_termination_reason(return_code)
         repository.transition(job_id, target, exit_code=return_code,
             termination_reason=termination_reason,
-            output_completeness="complete", integrity_sha256=integrity)
+            output_completeness=output_completeness, integrity_sha256=integrity)
         return 0 if return_code == 0 else 1
     except BaseException as exc:
         release_authority = False
@@ -232,7 +277,8 @@ def run_descriptor(path: str | Path) -> int:
                     if output_error else "supervisor_error",
                 completeness=("storage_pressure" if pressure else "write_failed")
                     if output_error else "partial",
-                detail={"error": type(exc).__name__, "detail": str(exc)})
+                detail={"error": type(exc).__name__, "detail": str(exc)},
+                observed_descendants=observed_descendants)
         except Exception:
             pass
         return 1
@@ -262,6 +308,31 @@ def run_descriptor(path: str | Path) -> int:
         repository.close()
 
 
+def _drain_selector(selector: selectors.DefaultSelector, output: JobOutputStore, *, max_duration: float = 1.0) -> bool:
+    """Drain remaining output from registered selector streams up to a finite duration.
+
+    Returns True if all registered streams reached EOF, False if the drain deadline expired.
+    """
+    drain_deadline = time.monotonic() + max_duration
+    while selector.get_map():
+        remaining = drain_deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        timeout = min(0.05, max(0.005, remaining))
+        events = selector.select(timeout=timeout)
+        if not events:
+            if time.monotonic() >= drain_deadline:
+                return False
+            continue
+        for key, _ in events:
+            chunk = os.read(key.fileobj.fileno(), 65536)
+            if chunk:
+                output.append(key.data, chunk)
+            else:
+                selector.unregister(key.fileobj)
+    return True
+
+
 def _group_members(process_group_id: int) -> list[tuple[int, str]]:
     """Observe group membership without reaping its launch-owned PID anchor."""
     result = subprocess.run(
@@ -270,10 +341,26 @@ def _group_members(process_group_id: int) -> list[tuple[int, str]]:
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"})
     members = []
     for line in result.stdout.splitlines():
-        pid, pgid, state = line.split()
-        if int(pgid) == process_group_id:
-            members.append((int(pid), state))
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+            if int(parts[1]) == process_group_id:
+                members.append((int(parts[0]), parts[2]))
     return members
+
+
+def _group_state(command: subprocess.Popen) -> tuple[bool, bool, list[int]]:
+    """Return (leader_alive, any_group_running, active_descendants) for command's launch group."""
+    members = _group_members(command.pid)
+    leader_alive = False
+    active_descendants = []
+    for pid, state in members:
+        if state.startswith("Z"):
+            continue
+        if pid == command.pid:
+            leader_alive = True
+        else:
+            active_descendants.append(pid)
+    return leader_alive, (leader_alive or bool(active_descendants)), active_descendants
 
 
 def _child_running(command: subprocess.Popen) -> bool:
@@ -314,7 +401,8 @@ def _stop_failed_child(command: subprocess.Popen, grace_seconds: int) -> bool:
     return False
 
 
-def _finalize_failure(command, descriptor, repository, *, reason, completeness, detail) -> bool:
+def _finalize_failure(command, descriptor, repository, *, reason, completeness, detail,
+                      observed_descendants: set[int] | None = None) -> bool:
     stopped = command is None
     stop_error = None
     if command is not None:
@@ -323,8 +411,10 @@ def _finalize_failure(command, descriptor, repository, *, reason, completeness, 
         except BaseException as exc:
             stop_error = type(exc).__name__
     job_id = descriptor["job_id"]
+    descendants = sorted(observed_descendants) if observed_descendants is not None else []
     detail = redact_structure({**detail, "termination_reason": reason,
-                               "owned_work_stopped": stopped, "stop_error": stop_error})
+                               "owned_work_stopped": stopped, "stop_error": stop_error,
+                               "owned_descendants": descendants})
     if not stopped:
         # Immutable evidence also fences later startup reconciliation. Merely
         # losing this supervisor must not turn uncertain cessation into proof.

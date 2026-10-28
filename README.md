@@ -586,6 +586,17 @@ tree first, including uncommitted and untracked files; the remote supervisor
 persists process output and callers resume it by cursor rather than streaming
 child pipes over SSH.
 
+The supervisor tracks the entire launch-owned process group, decoupling job
+deadlines from pipe EOF. A child closing its standard streams while running, or
+background descendants holding pipes open after the leader exits, cannot bypass
+the configured deadline or stall the supervisor. When terminating or cancelling,
+the supervisor applies a bounded cancellation grace period and a bounded pipe
+drain to preserve final output from short-lived descendants before sealing logs.
+If process group cessation cannot be confirmed, the supervisor fails closed: the
+job remains in cancelling state and retains its workspace lease to keep durable
+exclusion intact. Clearing that uncertainty requires an explicit recovery procedure;
+a later status poll does not clear the fence.
+
 `job-output` transfers only bounded pages from those retained logs. Select a
 stream, tail, cursor, or bounded long-poll interval (0-20 whole seconds; zero
 disables a one-shot wait) to suit the agent's output verbosity; `--follow`

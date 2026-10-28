@@ -3372,6 +3372,14 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
     try:
         summary = retire_interrupted_operation(
             validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup)
+    except DeliveryError as exc:
+        payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
+                   "original_request_id": original.strip()}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+            raise SystemExit(1)
+        die(exc.code + "; inspect the retained delivery record before retrying")
+    try:
         target_key = hosting.state_key(remote_name, validated)
         from sandbox.hosting.recovery.repository import RecoveryRepository
         # Under the state lock, so a destroy fence written after this read
@@ -3401,13 +3409,16 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
                 if revision and record.get("observed_runtime_revision") != revision:
                     record["retired_unproven_runtime"] = True
                 hosting.save_host_state(state)
-    except DeliveryError as exc:
-        payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
-                   "original_request_id": original.strip()}
+    except TimeoutError:
+        guidance = ("delivery retirement was recorded, but host state cleanup is pending; "
+                    "inspect the retained delivery record and host state before any further action")
+        payload = {"ok": False, "code": "operation_busy", "operation": "retire-delivery",
+                   "original_request_id": original.strip(), "partial": True,
+                   "retired": summary, "host_state_cleanup": "pending", "guidance": guidance}
         if getattr(args, "json", False):
             print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
             raise SystemExit(1)
-        die(exc.code + "; inspect the retained delivery record before retrying")
+        die("operation_busy; " + guidance)
     payload = {"ok": True, "operation": "retire-delivery", "retired": summary}
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))

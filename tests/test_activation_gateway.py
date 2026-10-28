@@ -450,6 +450,127 @@ class ActivationSchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.service.coordinator.snapshot(
             catalog.routes()[0].route_id)["state"], "asleep")
 
+    def test_removed_due_route_releases_claim_and_reappears_with_new_generation(self):
+        from sandbox.activation.catalog import ActivationCatalog
+        from sandbox.activation.coordinator import DrainClaim
+
+        scheduler, route, calls = self.make_scheduler()
+        coordinator = scheduler.service.coordinator
+        before = coordinator.snapshot(route.route_id)
+        due = float(before["last_activity"]) + 1801
+        scheduler.refresh(ActivationCatalog(()))
+        result = scheduler.scan(now=due)
+        self.assertEqual([(r.action, r.reason) for r in result],
+                         [("pinned", "catalog_route_unavailable")])
+        self.assertEqual(calls, [])
+        pinned = coordinator.snapshot(route.route_id)
+        self.assertEqual(pinned["state"], "ready")
+        self.assertEqual(pinned["generation"], before["generation"] + 2)
+        stale = DrainClaim(route.route_id, before["generation"] + 1)
+        self.assertFalse(coordinator.run_if_drain_current(
+            stale, lambda: calls.append("stale"))[0])
+        self.assertFalse(coordinator.mark_asleep(route.route_id, generation=stale.generation))
+        self.assertEqual(scheduler.scan(now=due + 1), ())
+
+        scheduler.refresh(ActivationCatalog((route,)))
+        returned = coordinator.snapshot(route.route_id)
+        result = scheduler.scan(now=float(returned["last_activity"]) + 1801)
+        self.assertEqual(result[0].action, "suspended")
+        self.assertGreater(coordinator.snapshot(route.route_id)["generation"],
+                           pinned["generation"])
+        self.assertEqual(calls, [(route.route_id, 30)])
+
+    def test_missing_route_does_not_prevent_valid_route_suspension(self):
+        from dataclasses import replace
+        from sandbox.activation.catalog import ActivationCatalog
+
+        scheduler, missing, calls = self.make_scheduler()
+        valid = replace(missing, route_id="ar_abcdef0123456789abcdef0123456789",
+                        hostname="valid.tst")
+        scheduler.refresh(ActivationCatalog((missing, valid)))
+        coordinator = scheduler.service.coordinator
+        due = max(float(coordinator.snapshot(r.route_id)["last_activity"])
+                  for r in (missing, valid)) + 1801
+        scheduler.refresh(ActivationCatalog((valid,)))
+        results = scheduler.scan(now=due)
+        self.assertEqual([(r.route_id, r.action) for r in results],
+                         [(missing.route_id, "pinned"), (valid.route_id, "suspended")])
+        self.assertEqual(calls, [(valid.route_id, 30)])
+        self.assertEqual(coordinator.snapshot(missing.route_id)["state"], "ready")
+        self.assertEqual(coordinator.snapshot(valid.route_id)["state"], "asleep")
+
+    def test_missing_route_does_not_touch_activity_superseding_its_claim(self):
+        from sandbox.activation.catalog import ActivationCatalog
+
+        scheduler, route, calls = self.make_scheduler()
+        coordinator = scheduler.service.coordinator
+        due = float(coordinator.snapshot(route.route_id)["last_activity"]) + 1801
+        claim = coordinator.claim_due_for_suspend(now=due)[0]
+        coordinator.touch(route.route_id, now=due + 1)
+        current = coordinator.snapshot(route.route_id)
+        scheduler.refresh(ActivationCatalog(()))
+        with mock.patch.object(coordinator, "claim_due_for_suspend", return_value=(claim,)):
+            scheduler.scan(now=due + 2)
+        self.assertEqual(coordinator.snapshot(route.route_id), current)
+        self.assertEqual(calls, [])
+
+    def test_scheduler_thread_survives_catalog_failures_and_recovers(self):
+        from sandbox.activation import ActivationCoordinator, ActivationService
+        from sandbox.activation.catalog import ActivationCatalog
+        from sandbox.activation.scheduler import ActivationScheduler
+
+        _, route, _ = self.make_scheduler()
+        now = [1000.0]
+        coordinator = ActivationCoordinator(clock=lambda: now[0])
+        calls, scans, failures = [], [], []
+        catalog = ActivationCatalog((route,))
+        scheduler = ActivationScheduler(
+            catalog, ActivationService(coordinator), observe_state=lambda _: "ready",
+            activity_safe=lambda _: (True, "idle"),
+            suspend=lambda route, _: calls.append(route.route_id) or True,
+        )
+        scheduler.reconcile()
+
+        class Stop:
+            ticks = 0
+
+            def wait(self, interval):
+                self.ticks += 1
+                now[0] += 1801
+                return self.ticks > 4
+
+        stop = Stop()
+
+        def provider():
+            if stop.ticks < 3:
+                raise RuntimeError("synthetic catalog failure")
+            return catalog
+
+        def run():
+            try:
+                scheduler.run(interval_seconds=1, stop=stop, catalog_provider=provider)
+            except Exception as exc:
+                failures.append(exc)
+
+        scan = scheduler.scan
+
+        def record_scan():
+            result = scan()
+            scans.append(result)
+            return result
+
+        with mock.patch.object(scheduler, "scan", side_effect=record_scan):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(len(scans), 4)
+        self.assertEqual([[r.action for r in scan] for scan in scans],
+                         [["pinned"], ["pinned"], [], ["suspended"]])
+        self.assertEqual(calls, [route.route_id])
+        self.assertEqual(coordinator.snapshot(route.route_id)["state"], "asleep")
+
 
 class ActivationLeaseTests(unittest.TestCase):
     def test_instance_activity_is_visible_and_released(self):

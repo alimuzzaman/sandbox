@@ -9,10 +9,10 @@ import selectors
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
-from .models import Lifecycle
+from .models import Health, Lifecycle
 from .output import JobOutputStore, OutputError
 from .process import capture_process_identity
 from .registry import JobRepository
@@ -81,6 +81,9 @@ def run_descriptor(path: str | Path) -> int:
     job_id = descriptor["job_id"]
     repository = JobRepository(descriptor["registry_path"])
     storage = JobStorage(descriptor["runtime_dir"], free_disk_reserve=descriptor.get("free_disk_reserve", 0))
+    command = None
+    selector = None
+    release_authority = True
     try:
         current = repository.get(job_id)
         if current["lifecycle"] in {
@@ -106,6 +109,7 @@ def run_descriptor(path: str | Path) -> int:
                 env=descriptor.get("environment"), stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True, close_fds=True)
+        release_authority = False
         child = capture_process_identity(command.pid)
         if child is None:
             raise RuntimeError("could not capture child process identity")
@@ -137,7 +141,7 @@ def run_descriptor(path: str | Path) -> int:
         last_progress_monotonic = time.monotonic()
         last_progress_at = _iso()
         while selector.get_map():
-            if time.monotonic() >= next_metric and command.poll() is None:
+            if time.monotonic() >= next_metric and _child_running(command):
                 metric = append_metric(storage, repository, job_id, sample_metric(command.pid))
                 movement_digest = metric.get("movement_digest")
                 metric_movement = movement_digest is not None and movement_digest != last_metric_digest
@@ -151,7 +155,7 @@ def run_descriptor(path: str | Path) -> int:
                     metric_digest=str(movement_digest or ""))
                 next_metric = time.monotonic() + 1
             stall_seconds = int(descriptor.get("stall_seconds", 300))
-            stalled = command.poll() is None and time.monotonic() - last_progress_monotonic >= stall_seconds
+            stalled = _child_running(command) and time.monotonic() - last_progress_monotonic >= stall_seconds
             if stalled:
                 repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
                     "process_alive": True, "stalled": True,
@@ -162,17 +166,17 @@ def run_descriptor(path: str | Path) -> int:
                 repository.transition(job_id, Lifecycle.CANCELLING)
                 _signal_group(command.pid, 15)
                 grace_end = time.monotonic() + int(descriptor.get("cancel_grace_seconds", 20))
-                while command.poll() is None and time.monotonic() < grace_end:
+                while _child_running(command) and time.monotonic() < grace_end:
                     time.sleep(0.05)
-                if command.poll() is None:
+                if _child_running(command):
                     _signal_group(command.pid, 9)
-            if time.monotonic() >= deadline and command.poll() is None:
+            if time.monotonic() >= deadline and _child_running(command):
                 timed_out = True
                 _signal_group(command.pid, 15)
                 grace_end = time.monotonic() + int(descriptor.get("cancel_grace_seconds", 20))
-                while command.poll() is None and time.monotonic() < grace_end:
+                while _child_running(command) and time.monotonic() < grace_end:
                     time.sleep(0.05)
-                if command.poll() is None:
+                if _child_running(command):
                     _signal_group(command.pid, 9)
             for key, _ in selector.select(timeout=0.1):
                 chunk = os.read(key.fileobj.fileno(), 65536)
@@ -186,6 +190,7 @@ def run_descriptor(path: str | Path) -> int:
                 else:
                     selector.unregister(key.fileobj)
         return_code = command.wait()
+        release_authority = True
         selector.close()
         command.stdout.close()
         command.stderr.close()
@@ -216,35 +221,124 @@ def run_descriptor(path: str | Path) -> int:
             termination_reason=termination_reason,
             output_completeness="complete", integrity_sha256=integrity)
         return 0 if return_code == 0 else 1
-    except OutputError as exc:
-        pressure = "pressure" in str(exc)
-        repository.transition(job_id, Lifecycle.FAILED,
-            termination_reason="storage_pressure" if pressure else "output_storage_failed",
-            output_completeness="storage_pressure" if pressure else "write_failed",
-            result_json=json.dumps(redact_structure({"error": str(exc)})))
-        return 1
     except BaseException as exc:
+        release_authority = False
+        output_error = isinstance(exc, OutputError)
+        pressure = output_error and "pressure" in str(exc)
         try:
-            repository.transition(job_id, Lifecycle.FAILED, termination_reason="supervisor_error",
-                result_json=json.dumps(redact_structure(
-                    {"error": type(exc).__name__, "detail": str(exc)})))
+            release_authority = _finalize_failure(
+                command, descriptor, repository,
+                reason=("storage_pressure" if pressure else "output_storage_failed")
+                    if output_error else "supervisor_error",
+                completeness=("storage_pressure" if pressure else "write_failed")
+                    if output_error else "partial",
+                detail={"error": type(exc).__name__, "detail": str(exc)})
         except Exception:
             pass
         return 1
     finally:
+        if selector is not None:
+            with suppress(Exception):
+                selector.close()
+        if command is not None:
+            for stream in (command.stdout, command.stderr):
+                if stream is not None:
+                    with suppress(Exception):
+                        stream.close()
         try:
-            repository.release_leases(job_id)
+            if release_authority:
+                repository.release_leases(job_id)
         except Exception:
             pass
         try:
             from sandbox.application.workspace_service import finalize_terminal_workspace
-            finalize_terminal_workspace(
-                repository, job_id, descriptor.get("workspace_cleanup"))
+            if release_authority:
+                finalize_terminal_workspace(
+                    repository, job_id, descriptor.get("workspace_cleanup"))
         except Exception:
             # Terminal command truth is already durable. Cleanup failures are
             # recorded by the shared seam and must never rewrite that result.
             pass
         repository.close()
+
+
+def _group_members(process_group_id: int) -> list[tuple[int, str]]:
+    """Observe group membership without reaping its launch-owned PID anchor."""
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,pgid=,stat="], capture_output=True, text=True,
+        timeout=2, check=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"})
+    members = []
+    for line in result.stdout.splitlines():
+        pid, pgid, state = line.split()
+        if int(pgid) == process_group_id:
+            members.append((int(pid), state))
+    return members
+
+
+def _child_running(command: subprocess.Popen) -> bool:
+    # poll() reaps a fast-exiting leader, allowing its PID/group ID to be
+    # reused before an output failure can stop descendants. Keep the direct
+    # child waitable until the pipe loop finishes instead.
+    return any(pid == command.pid and not state.startswith("Z")
+               for pid, state in _group_members(command.pid))
+
+
+def _stop_failed_child(command: subprocess.Popen, grace_seconds: int) -> bool:
+    """Bound failure cleanup to the session created by this Popen only.
+
+    An unreaped direct child reserves its PID even after exit; consequently
+    killpg cannot target a reused group. Once reaped, only absence is safe to
+    establish: do not signal a group whose ownership we can no longer prove.
+    """
+    if command.returncode is not None:
+        try:
+            os.killpg(command.pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+    for signal_number, seconds in ((15, grace_seconds), (9, 2)):
+        if not any(not state.startswith("Z") for _, state in _group_members(command.pid)):
+            command.wait(timeout=1)
+            return True
+        _signal_group(command.pid, signal_number)
+        end = time.monotonic() + seconds
+        while True:
+            members = _group_members(command.pid)
+            if not any(not state.startswith("Z") for _, state in members):
+                command.wait(timeout=1)
+                return True
+            if time.monotonic() >= end:
+                break
+            time.sleep(0.05)
+    return False
+
+
+def _finalize_failure(command, descriptor, repository, *, reason, completeness, detail) -> bool:
+    stopped = command is None
+    stop_error = None
+    if command is not None:
+        try:
+            stopped = _stop_failed_child(command, int(descriptor.get("cancel_grace_seconds", 20)))
+        except BaseException as exc:
+            stop_error = type(exc).__name__
+    job_id = descriptor["job_id"]
+    detail = redact_structure({**detail, "termination_reason": reason,
+                               "owned_work_stopped": stopped, "stop_error": stop_error})
+    if not stopped:
+        # Immutable evidence also fences later startup reconciliation. Merely
+        # losing this supervisor must not turn uncertain cessation into proof.
+        repository.append_event(job_id, "supervisor_stop_uncertain", detail)
+        repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence=detail)
+        repository.set_health(job_id, Health.ORPHANED, detail)
+        if repository.get(job_id)["lifecycle"] == Lifecycle.RUNNING.value:
+            repository.transition(job_id, Lifecycle.CANCELLING,
+                termination_reason=reason, output_completeness=completeness,
+                result_json=json.dumps(detail))
+        return False
+    repository.transition(job_id, Lifecycle.FAILED, termination_reason=reason,
+        output_completeness=completeness, result_json=json.dumps(detail))
+    return True
 
 
 def _iso() -> str:

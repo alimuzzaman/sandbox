@@ -185,3 +185,174 @@ class SupervisorTests(unittest.TestCase):
             self.assertFalse(canary in result_json)
             self.assertIn("[REDACTED]", result_json)
             repository.close()
+
+
+class FailureCleanupTests(unittest.TestCase):
+    def _exercise_failure(self, mode):
+        import subprocess
+        from contextlib import ExitStack
+        from unittest.mock import Mock
+        from sandbox.jobs import supervisor
+        from sandbox.jobs.models import Lifecycle
+        from sandbox.jobs.output import JobOutputStore
+        from sandbox.jobs.scheduler import JobScheduler, WorkspaceBusy
+        from tests.subprocess_support import synthetic_environment
+
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            self.addCleanup(repo.close)
+            storage = JobStorage(temp, free_disk_reserve=0)
+            scheduler = JobScheduler(repo, min_free_memory_mb=0, min_free_disk_mb=0)
+            script = "sleep 30 & printf 'retained \\n'; sleep .2; printf trigger; wait"
+            if mode == "force":
+                script = "trap '' TERM; " + script
+            elif mode == "exited-leader":
+                script = "sleep 30 & printf trigger; exit 0"
+            elif mode == "fast":
+                script = "printf trigger"
+            argv = ["/bin/sh", "-c", script]
+            def accept():
+                return repo.accept(JobSubmission(
+                    "test", temp, "p", "local", "same", tuple(argv), 20,
+                    SourceIdentity("source")))[0]
+            row = accept()
+            competitor = accept()
+            scheduler.acquire(row)
+            job_dir = storage.job_dir(row["job_id"], create=True)
+            descriptor_path = job_dir / "descriptor.json"
+            descriptor_path.write_text(json.dumps({
+                "job_id": row["job_id"], "registry_path": str(repo.path),
+                "runtime_dir": temp, "argv": argv, "cwd": temp,
+                "deadline_seconds": 20, "cancel_grace_seconds": 1,
+                "nonce_hash": "0" * 64,
+                "environment": dict(synthetic_environment()), "execution_runtime": "host",
+            }))
+            popen = subprocess.Popen
+            append = JobOutputStore.append
+            persist = JobRepository.put_process_identity
+            release = JobRepository.release_leases
+            capture = supervisor.capture_process_identity
+            stop = supervisor._stop_failed_child
+            signal_group = supervisor._signal_group
+            commands, released, signals = [], [], []
+            cleanup = Mock()
+
+            def launch(*args, **kwargs):
+                command = popen(*args, **kwargs)
+                if kwargs.get("start_new_session"):
+                    commands.append(command)
+                return command
+
+            def failing_append(output, stream, chunk, **kwargs):
+                if b"trigger" not in chunk:
+                    return append(output, stream, chunk, **kwargs)
+                if mode == "generic":
+                    raise RuntimeError("synthetic post-spawn error")
+                if mode == "oserror":
+                    raise OSError("synthetic output write error")
+                raise OutputError("storage pressure" if mode == "pressure" else "synthetic output error")
+
+            def failing_persist(repository, job_id, **kwargs):
+                if mode == "persist" and kwargs.get("child_pid"):
+                    raise OSError("synthetic identity persistence error")
+                return persist(repository, job_id, **kwargs)
+
+            def failing_capture(pid, **kwargs):
+                if mode == "capture" and commands and pid == commands[0].pid:
+                    return None
+                return capture(pid, **kwargs)
+
+            def checked_signal(pgid, number):
+                self.assertEqual(pgid, commands[0].pid)
+                self.assertIsNone(commands[0].returncode)
+                with self.assertRaises(WorkspaceBusy):
+                    scheduler.acquire(competitor)
+                signals.append(number)
+                if mode == "uncertain":
+                    raise PermissionError("synthetic signal denial")
+                return signal_group(pgid, number)
+
+            def checked_release(repository, job_id):
+                self.assertIsNotNone(commands[0].returncode)
+                self.assertFalse(any(not state.startswith("Z") for _, state in
+                                     supervisor._group_members(commands[0].pid)))
+                released.append(job_id)
+                return release(repository, job_id)
+
+            try:
+                with ExitStack() as stack:
+                    for target, replacement in (
+                        ("sandbox.jobs.supervisor.subprocess.Popen", launch),
+                        ("sandbox.jobs.supervisor.JobOutputStore.append", failing_append),
+                        ("sandbox.jobs.supervisor.JobRepository.put_process_identity", failing_persist),
+                        ("sandbox.jobs.supervisor.JobRepository.release_leases", checked_release),
+                        ("sandbox.jobs.supervisor.capture_process_identity", failing_capture),
+                        ("sandbox.jobs.supervisor._signal_group", checked_signal),
+                        ("sandbox.application.workspace_service.finalize_terminal_workspace", cleanup),
+                    ):
+                        stack.enter_context(patch(target, replacement))
+                    self.assertEqual(run_descriptor(descriptor_path), 1)
+                self.assertEqual(len(commands), 1)
+                state = repo.snapshot(row["job_id"])
+                reason = ("supervisor_error" if mode in {"generic", "oserror", "capture", "persist"}
+                          else "storage_pressure" if mode == "pressure" else "output_storage_failed")
+                self.assertEqual(state["termination_reason"], reason)
+                self.assertNotEqual(state["output_completeness"], "complete")
+                self.assertTrue(commands[0].stdout.closed)
+                self.assertTrue(commands[0].stderr.closed)
+                if mode == "uncertain":
+                    self.assertEqual(state["lifecycle"], "cancelling")
+                    self.assertIsNone(state["finished_at"])
+                    self.assertFalse(json.loads(state["result_json"])["owned_work_stopped"])
+                    self.assertEqual(json.loads(state["result_json"])["stop_error"], "PermissionError")
+                    self.assertEqual(released, [])
+                    cleanup.assert_not_called()
+                    with self.assertRaises(ValueError):
+                        repo.transition(row["job_id"], Lifecycle.INTERRUPTED)
+                    with self.assertRaises(ValueError):
+                        release(repo, row["job_id"])
+                    # Simulate a later observer proving the supervisor lost.
+                    service = JobService(repo, storage, components=None, scheduler=scheduler)
+                    with patch("sandbox.application.job_service.capture_process_identity", return_value=None), \
+                         patch("sandbox.application.job_service.process_absence_proven", return_value=True):
+                        service.reconcile_startup()
+                    self.assertEqual(repo.get(row["job_id"])["lifecycle"], "cancelling")
+                    self.assertEqual(len(scheduler.active()), 1)
+                    with self.assertRaises(WorkspaceBusy):
+                        scheduler.acquire(competitor)
+                else:
+                    self.assertEqual(state["lifecycle"], "failed")
+                    self.assertTrue(json.loads(state["result_json"])["owned_work_stopped"])
+                    self.assertEqual(released, [row["job_id"]])
+                    cleanup.assert_called_once()
+                    self.assertEqual(scheduler.active(), [])
+                    scheduler.acquire(competitor)
+                    if mode == "force":
+                        self.assertEqual(signals, [15, 9])
+                if mode not in {"capture", "persist", "fast", "exited-leader"}:
+                    retained = b"".join(path.read_bytes() for path in
+                                         (job_dir / "output" / "stdout").glob("*.bin"))
+                    self.assertIn(b"retained", retained)
+                    self.assertFalse(any(item["complete"] for item in state["output"]))
+            finally:
+                if commands:
+                    self.assertTrue(stop(commands[0], 0), "fixture-owned group did not stop")
+
+    def test_failures_stop_owned_group_before_releasing_authority(self):
+        for mode in ("write", "pressure", "generic", "oserror", "capture", "persist",
+                     "force", "fast", "exited-leader"):
+            with self.subTest(mode=mode):
+                self._exercise_failure(mode)
+
+    def test_unproven_stop_retains_fences_across_reconciliation(self):
+        self._exercise_failure("uncertain")
+
+    def test_reaped_child_cannot_authorize_signalling_a_reused_group(self):
+        from unittest.mock import Mock
+        from sandbox.jobs.supervisor import _stop_failed_child
+        command = Mock(pid=12345, returncode=0)
+        with patch("sandbox.jobs.supervisor.os.killpg") as killpg:
+            self.assertFalse(_stop_failed_child(command, 0))
+            killpg.assert_called_once_with(12345, 0)
+        with patch("sandbox.jobs.supervisor.os.killpg", side_effect=ProcessLookupError):
+            self.assertTrue(_stop_failed_child(command, 0))

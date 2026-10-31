@@ -410,3 +410,72 @@ with tempfile.TemporaryDirectory() as sandbox_root:
 
 if __name__ == "__main__":
     unittest.main()
+
+class SharedBundleTransferTests(unittest.TestCase):
+    def test_partial_receiver_reserves_full_bundle_staging_and_import(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt = SharedBundleReceiptTests.receipt()
+        receipt['bundles']['bundle-1']['archive_bytes'] = 100_000_000
+        receipt = local_images.seal_receipt(receipt)
+        with patch.object(remote_local_images._remote, 'resolve_sandbox_home', return_value='/srv/sandbox'), \
+             patch('sandbox.resources.storage_floor.remote_storage_floor_admission',
+                   return_value={'ok':True}) as admission:
+            remote_local_images._storage_admission({'storage_floor_gb':1}, receipt, {'images':{}})
+        self.assertEqual(admission.call_args.kwargs['minimum_estimate_bytes'],
+                         200_000_000)
+
+    def test_v2_remote_reader_binds_the_version_of_nested_local_receipt(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt = SharedBundleReceiptTests.receipt()
+        document = local_images.remote_receipt_document(receipt, {'app:test':{'id':'sha256:'+'1'*64, 'artifact':'image-1'}}, verified_at='synthetic')
+        document.update(machine_identity='synthetic', registered_host_digest='synthetic',
+                        daemon_identity='synthetic')
+        for schema, valid in ((local_images.REMOTE_RECEIPT_SCHEMA_V2, True),
+                              (local_images.REMOTE_RECEIPT_SCHEMA, False)):
+            document['schema'] = schema
+            digest = local_images.canonical_digest({k:v for k,v in document.items()
+                                                   if k != 'remote_receipt_digest'})
+            document['remote_receipt_digest'] = digest
+            with patch.object(remote_local_images, '_checked', return_value=json.dumps(document)), \
+                 patch.object(remote_local_images._remote, 'resolve_sandbox_home', return_value='/srv/sandbox'):
+                if valid:
+                    self.assertEqual(remote_local_images.read_receipt('local',digest,entry={}), document)
+                else:
+                    with self.assertRaises(remote_local_images.RemoteLocalImageError):
+                        remote_local_images.read_receipt('local',digest,entry={})
+
+    def test_v2_partial_uploads_once_and_all_present_uploads_nothing(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt = SharedBundleReceiptTests.receipt()
+        match = RemoteLocalImageTests._matching_observation()
+        for present, expected_loads in ((False, 1), (True, 0)):
+            initial = match if present else {'engine':'linux/amd64', 'images':{}}
+            lease = MagicMock()
+            lease.__enter__.return_value = lease
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(local_images, 'load_receipt', return_value=(receipt, Path('/synthetic/receipt.json'))))
+                stack.enter_context(patch.object(local_images, 'bundle_identities'))
+                stack.enter_context(patch.object(remote_local_images, 'observe', side_effect=[initial, initial, match] if not present else [match, match]))
+                stack.enter_context(patch.object(remote_local_images, '_storage_admission'))
+                stack.enter_context(patch.object(remote_local_images, 'target_image_lease', return_value=lease))
+                stack.enter_context(patch.object(remote_local_images, '_checked', return_value='same-daemon'))
+                load = stack.enter_context(patch.object(remote_local_images, 'load_archive'))
+                stack.enter_context(patch.object(remote_local_images, 'publish', return_value='synthetic-remote-digest'))
+                value = remote_local_images.push_receipt('synthetic', '/synthetic/receipt.json', timeout=60,
+                    artifact_timeout=60, machine_identity='synthetic', registered_host_digest='synthetic', entry={})
+            self.assertEqual(load.call_count, expected_loads)
+            self.assertEqual(value['transferred_bytes'], 10 * expected_loads)
+            self.assertEqual(value['transferred_bundles'], ['bundle-1'] if expected_loads else [])
+            self.assertEqual(value['loaded'], ['image-1'] if expected_loads else [])
+            self.assertEqual(value['skipped'], [] if expected_loads else ['image-1'])
+
+    def test_v2_remote_receipt_requires_complete_inventory_and_nested_continuity(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt = SharedBundleReceiptTests.receipt()
+        verified = {'app:test':{'id':'sha256:'+'1'*64, 'artifact':'image-1'}}
+        document = local_images.remote_receipt_document(receipt, verified, verified_at='synthetic')
+        local_images.validate_remote_v2(document)
+        for field, bad in (('images', {}), ('commit', 'b'*40),
+                           ('receipt_digest', 'sha256:'+'b'*64)):
+            with self.subTest(field=field), self.assertRaises(local_images.LocalImageError):
+                local_images.validate_remote_v2({**document, field:bad})

@@ -1127,6 +1127,12 @@ CPU-heavy hosted application images can be built on a faster Linux controller:
 ./sb host apply --project-dir /path/to/app --environment development --remote xcloud-london --local-images sha256:REMOTE_RECEIPT_DIGEST --confirm --json
 ```
 
+Add `--receipt-version v2` to `build-local` to export one shared raw image
+bundle. V1 remains the default. V2 output uses a separate `v2/` directory, so
+retained v1 receipts remain available for rollback. See
+[shared bundle transport](docs/remote-hosting.md#opt-in-shared-local-image-bundle-pack-9)
+for membership checks, timeout sizing, and transfer reporting.
+
 The first command creates artifacts, the second only stages and verifies them,
 and only `host apply` can claim deployment. The environment must declare
 `compose.build: false`; Sandbox never falls back to a remote build or pull.

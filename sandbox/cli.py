@@ -1030,6 +1030,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="allow protected host apply or separately confirmed edge continuation")
     host_p.add_argument("--revision", default=None,
         help="exact Git revision for `host image build-local` (default: HEAD)")
+    host_p.add_argument("--receipt-version", choices=["v1", "v2"], default="v1",
+        help="build-local archive contract (v2: one shared bundle; default v1)")
     host_p.add_argument("--receipt", default=None, metavar="PATH",
         help="local build receipt for `host image push-local`")
     host_p.add_argument("--local-images", default=None, metavar="DIGEST",

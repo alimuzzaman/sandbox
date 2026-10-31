@@ -44,6 +44,10 @@ from sandbox.hosting.names import TARGET_PART_RE, COMPOSE_PROJECT_RE
 
 RECEIPT_SCHEMA = "sandbox.host.local-images.v1"
 REMOTE_RECEIPT_SCHEMA = "sandbox.host.local-images.remote.v1"
+RECEIPT_SCHEMA_V2 = "sandbox.host.local-images.v2"
+REMOTE_RECEIPT_SCHEMA_V2 = "sandbox.host.local-images.remote.v2"
+MAX_BUNDLE_BYTES = 64 * 1024**3
+
 REMOTE_RECEIPT_NAME = "local-images.json"
 RECEIPT_FILE_NAME = "receipt.json"
 SUPPORTED_PLATFORMS = ("linux/amd64",)
@@ -416,7 +420,7 @@ def accepted_ids(artifact: dict) -> set[str]:
     return {value} if isinstance(value, str) and _DIGEST_RE.fullmatch(value) else set()
 
 
-def validate_receipt(document: object) -> dict:
+def _validate_v1_receipt(document: object) -> dict:
     """Validate one closed receipt and its self digest; return it unchanged."""
     def fail(reason: str):
         raise LocalImageError("local_images_receipt_invalid", reason)
@@ -520,6 +524,218 @@ def validate_receipt(document: object) -> dict:
     return document
 
 
+def remote_schema(receipt: dict) -> str:
+    return REMOTE_RECEIPT_SCHEMA_V2 if receipt.get("schema") == RECEIPT_SCHEMA_V2 else REMOTE_RECEIPT_SCHEMA
+
+
+def validate_receipt(document: object) -> dict:
+    if not isinstance(document, dict) or document.get("schema") != RECEIPT_SCHEMA_V2:
+        return _validate_v1_receipt(document)
+    def fail():
+        raise LocalImageError("local_images_receipt_invalid", "invalid closed v2 bundle receipt")
+    if len(json.dumps(document).encode()) > MAX_RECEIPT_BYTES:
+        fail()
+    if document.get("receipt_digest") != canonical_digest({k:v for k,v in document.items() if k != "receipt_digest"}):
+        fail()
+    bundles = document.get("bundles")
+    images = document.get("artifacts")
+    if not isinstance(images, dict) or not isinstance(bundles, dict):
+        fail()
+    if set(bundles) != ({"bundle-1"} if images else set()):
+        fail()
+    # Reuse the unchanged v1 target/service/identity rules on an ephemeral view.
+    # This view is never persisted and its digest is never returned to callers.
+    view = {k:v for k,v in document.items() if k not in {"bundles", "receipt_digest"}}
+    view["schema"] = RECEIPT_SCHEMA
+    view["artifacts"] = {}
+    refs = set()
+    configs = set()
+    for key, image in images.items():
+        if not isinstance(image, dict) or set(image) != {"refs", "image_id", "builder_image_id", "manifest_digest", "config_digest", "layers_digest", "platform"}:
+            fail()
+        config = image["config_digest"]
+        if not isinstance(config, str) or config in configs:
+            fail()
+        configs.add(config)
+        values = image["refs"]
+        if not isinstance(values, list) or not values or len(values)>MAX_SERVICES:
+            fail()
+        for ref in values:
+            if not isinstance(ref,str) or _normalize_ref(ref) in refs:
+                fail()
+            refs.add(_normalize_ref(ref))
+        view["artifacts"][key] = {**image, "archive":f"{key}.tar", "archive_sha256":image["config_digest"], "archive_bytes":1}
+    try:
+        _validate_v1_receipt(seal_receipt(view))
+    except (TypeError, KeyError, AttributeError, ValueError):
+        fail()
+    referenced = {v["artifact"] for v in document["services"].values() if v["artifact"] is not None}
+    service_refs = {_normalize_ref(v["image"]) for v in document["services"].values() if v["artifact"] is not None}
+    if refs != service_refs or referenced != set(images):
+        fail()
+    if images:
+        bundle = bundles["bundle-1"]
+        if not isinstance(bundle,dict) or set(bundle) != {"archive", "archive_sha256", "archive_bytes", "members"}:
+            fail()
+        if bundle["archive"] != "bundle-1.tar" or not isinstance(bundle["archive_sha256"],str) or not _DIGEST_RE.fullmatch(bundle["archive_sha256"]):
+            fail()
+        size = bundle["archive_bytes"]
+        if type(size) is not int or not 0<size<=MAX_BUNDLE_BYTES:
+            fail()
+        if not isinstance(bundle["members"],list) or bundle["members"] != sorted(images):
+            fail()
+    return document
+
+
+def validate_remote_v2(document: dict) -> None:
+    """Check nested v2 continuity and the complete published identity inventory."""
+    receipt = validate_receipt(document.get("local_receipt"))
+    if receipt["schema"] != RECEIPT_SCHEMA_V2:
+        return
+    def fail():
+        raise LocalImageError("local_images_receipt_invalid", "remote v2 receipt binding differs")
+    for field in ("receipt_digest", "project", "environment", "commit", "source_revision", "platform"):
+        if document.get(field) != receipt[field]:
+            fail()
+    expected = {ref:(key, image) for key,image in receipt["artifacts"].items() for ref in image["refs"]}
+    expected.update({ref:(None, None) for ref in pinned_refs(receipt)})
+    images = document.get("images")
+    if not isinstance(images,dict) or set(images) != set(expected):
+        fail()
+    for ref,(key,image) in expected.items():
+        item = images[ref]
+        if not isinstance(item,dict) or set(item) != {"id", "artifact"} or item["artifact"] != key:
+            fail()
+        if not isinstance(item["id"],str) or not _DIGEST_RE.fullmatch(item["id"]):
+            fail()
+        if image is not None and item["id"] not in accepted_ids(image):
+            fail()
+
+
+def bundle_identities(path: Path, images: dict, *, resolve: bool = False) -> dict:
+    """Resolve every save manifest config without extracting archive paths."""
+    def fail():
+        raise LocalImageError("local_images_archive_invalid", "bundle members differ from receipt")
+    if not 0 < path.stat().st_size <= MAX_BUNDLE_BYTES:
+        fail()
+    try:
+        with tarfile.open(path, "r:") as archive:
+            members = {}
+            for member in archive:
+                if len(members)>=100000 or member.name in members or member.name.startswith("/") or ".." in member.name.split("/") or not (member.isfile() or member.isdir()):
+                    fail()
+                members[member.name] = member
+            def raw(name):
+                member = members.get(name)
+                if member is None or not member.isfile() or member.size>MAX_CONFIG_BYTES:
+                    fail()
+                with archive.extractfile(member) as handle:
+                    return handle.read()
+            manifest = _json_loads_closed(raw("manifest.json"))
+            if not isinstance(manifest,list) or len(manifest)!=len(images):
+                fail()
+            found = {}
+            used = {"manifest.json"}
+            config_keys = {}
+            layer_paths = {}
+            for item in manifest:
+                if not isinstance(item,dict) or set(item)-{"Config","RepoTags","Layers","LayerSources"}:
+                    fail()
+                config_path = item.get("Config", "")
+                match = re.fullmatch(r"(?:blobs/sha256/|)([0-9a-f]{64})(?:\.json)?",config_path)
+                if match is None:
+                    fail()
+                used.add(config_path)
+                data = raw(config_path)
+                digest = "sha256:"+hashlib.sha256(data).hexdigest()
+                if digest != "sha256:"+match.group(1):
+                    fail()
+                config = _json_loads_closed(data)
+                tags = item.get("RepoTags")
+                if not isinstance(tags,list) or not all(isinstance(t,str) for t in tags):
+                    fail()
+                keys = [k for k,v in images.items() if sorted(map(_normalize_ref,v["refs"])) == sorted(map(_normalize_ref,tags))]
+                if len(keys)!=1 or keys[0] in found:
+                    fail()
+                key = keys[0]; image = images[key]
+                if not resolve and image["config_digest"] != digest:
+                    fail()
+                if sorted(map(_normalize_ref,tags)) != sorted(map(_normalize_ref,image["refs"])):
+                    fail()
+                layers = config.get("rootfs",{}).get("diff_ids")
+                if not isinstance(layers,list) or not all(isinstance(x,str) and _DIGEST_RE.fullmatch(x) for x in layers) or len(layers)>1024:
+                    fail()
+                if canonical_digest(layers)!=image["layers_digest"] or config.get("os","")+"/"+config.get("architecture","")!=image["platform"]:
+                    fail()
+                paths = item.get("Layers")
+                if not isinstance(paths,list) or len(paths)!=len(layers) or any(x not in members or not members[x].isfile() for x in paths):
+                    fail()
+                used.update(paths)
+                if digest in config_keys:
+                    fail()
+                config_keys[digest] = key
+                layer_paths[key] = paths
+                found[key] = {"config_digest":digest,"manifest_digest":None}
+            if set(found)!=set(images):
+                fail()
+            if "index.json" in members:
+                used.update({"index.json", "oci-layout"})
+                index = _json_loads_closed(raw("index.json"))
+                pending = list(index.get("manifests", []))
+                configs = set()
+                index_tags = set()
+                while pending:
+                    descriptor = pending.pop()
+                    digest = descriptor.get("digest")
+                    if not isinstance(digest,str) or not _DIGEST_RE.fullmatch(digest):
+                        fail()
+                    name = "blobs/sha256/"+digest[7:]
+                    data = raw(name)
+                    if descriptor.get("size") != len(data) or "sha256:"+hashlib.sha256(data).hexdigest()!=digest:
+                        fail()
+                    used.add(name)
+                    node = _json_loads_closed(data)
+                    if "manifests" in node:
+                        fail()  # Save --platform must resolve to image manifests.
+                    else:
+                        config = node.get("config",{})
+                        cd = config.get("digest")
+                        if cd not in config_keys:
+                            fail()
+                        key = config_keys[cd]
+                        if cd in configs and found[key]["manifest_digest"] != digest:
+                            fail()
+                        configs.add(cd)
+                        dp = descriptor.get("platform", {})
+                        if dp.get("os", "")+"/"+dp.get("architecture", "") != images[key]["platform"]:
+                            fail()
+                        tag = descriptor.get("annotations",{}).get("io.containerd.image.name")
+                        if not isinstance(tag,str) or _normalize_ref(tag) not in set(map(_normalize_ref,images[key]["refs"])) or _normalize_ref(tag) in index_tags:
+                            fail()
+                        index_tags.add(_normalize_ref(tag))
+                        if ["blobs/sha256/"+v.get("digest", "")[7:] for v in node.get("layers",[])] != layer_paths[key]:
+                            fail()
+                        if config.get("size") != members["blobs/sha256/"+cd[7:]].size:
+                            fail()
+                        found[key]["manifest_digest"] = digest
+                        for layer in node.get("layers",[]):
+                            ld = layer.get("digest", "")
+                            if not _DIGEST_RE.fullmatch(ld):
+                                fail()
+                            ln = "blobs/sha256/"+ld[7:]
+                            if ln not in used or layer.get("size") != members[ln].size:
+                                fail()
+                if configs != set(config_keys) or index_tags != {_normalize_ref(ref) for image in images.values() for ref in image["refs"]}:
+                    fail()
+            if not resolve and any(found[k]["manifest_digest"] != v["manifest_digest"] for k,v in images.items()):
+                fail()
+            if any(m.isfile() and name not in used for name,m in members.items()):
+                fail()
+            return found
+    except (OSError, tarfile.TarError, ValueError, TypeError, KeyError, AttributeError):
+        fail()
+
+
 def load_receipt(path: str | Path) -> tuple[dict, Path]:
     selected = Path(path).expanduser()
     try:
@@ -530,7 +746,8 @@ def load_receipt(path: str | Path) -> tuple[dict, Path]:
             raise LocalImageError("local_images_receipt_unavailable",
                                   "receipt file is not owner-only regular content")
         receipt_path = selected.resolve(strict=True)
-        raw = receipt_path.read_bytes()
+        with receipt_path.open("rb") as handle:
+            raw = handle.read(MAX_RECEIPT_BYTES + 1)
     except OSError as exc:
         raise LocalImageError("local_images_receipt_unavailable",
                               f"receipt file is unreadable ({type(exc).__name__})") from None
@@ -567,7 +784,7 @@ def require_receipt_target(validated: dict, receipt: dict, compose_project: str)
 
 def remote_receipt_document(receipt: dict, verified: dict[str, dict], *, verified_at: str) -> dict:
     return {
-        "schema": REMOTE_RECEIPT_SCHEMA,
+        "schema": remote_schema(receipt),
         "receipt_digest": receipt["receipt_digest"],
         "project": receipt["project"],
         "environment": receipt["environment"],
@@ -676,7 +893,12 @@ def compare_remote_receipt(receipt: dict, observation: dict) -> list[dict]:
     if state.get("state") != "present":
         return [{"code": "remote_receipt_" + str(state.get("state") or "unavailable")}]
     document = state.get("document") or {}
-    if document.get("schema") != REMOTE_RECEIPT_SCHEMA \
+    if receipt["schema"] == RECEIPT_SCHEMA_V2:
+        try:
+            validate_remote_v2(document)
+        except LocalImageError:
+            return [{"code": "remote_receipt_mismatch"}]
+    if document.get("schema") != remote_schema(receipt) \
             or document.get("receipt_digest") != receipt["receipt_digest"] \
             or document.get("commit") != receipt["commit"]:
         return [{"code": "remote_receipt_mismatch",
@@ -792,8 +1014,10 @@ def build_local_images(*, validated: dict, commit: str, source_revision: str,
                        source_dir: str, runtime_dir: str, output_dir: Path,
                        platform: str, environment: dict, timeout: int,
                        source_root_relative: str = ".", progress=None,
-                       symbolic_secrets=()) -> dict:
+                       symbolic_secrets=(), receipt_version: str = "v1") -> dict:
     """Observe, build/pull, save, and seal one receipt. Returns the receipt."""
+    if receipt_version not in {"v1", "v2"}:
+        raise LocalImageError("local_images_receipt_invalid", "unsupported receipt version")
     services = declared_services(validated)
     observation = parse_probe_output(_probe_local(
         probe_argv(config_command=config_command, services=list(services),
@@ -869,26 +1093,28 @@ def build_local_images(*, validated: dict, commit: str, source_revision: str,
         if ref not in group["refs"]:
             group["refs"].append(ref)
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for stale in output_dir.glob("image-*.tar"):
-        stale.unlink()
     artifacts: dict[str, dict] = {}
     artifact_by_ref: dict[str, str] = {}
     for number, (image_id, group) in enumerate(sorted(groups.items()), start=1):
         key = f"image-{number}"
         archive = output_dir / f"{key}.tar"
-        if progress is not None:
-            progress(f"saving {', '.join(group['refs'])} to {archive.name}")
-        returncode, tail = _run_local(
-            shlex.join(["docker", "image", "save", "--platform", platform, "-o", str(archive),
-                        *group["refs"]]),
-            environment=environment, timeout=timeout)
-        if returncode != 0:
-            raise LocalImageError("local_images_save_failed",
-                                  f"could not save {', '.join(group['refs'])}",
-                                  detail=tail[-2000:])
-        os.chmod(archive, 0o600)
-        identity = archive_identity(archive, group["refs"])
-        archive_sha256, archive_bytes = file_sha256(archive)
+        if receipt_version == "v1":
+            if progress is not None:
+                progress(f"saving {', '.join(group['refs'])} to {archive.name}")
+            returncode, tail = _run_local(
+                shlex.join(["docker", "image", "save", "--platform", platform, "-o", str(archive),
+                            *group["refs"]]),
+                environment=environment, timeout=timeout)
+            if returncode != 0:
+                raise LocalImageError("local_images_save_failed",
+                                      f"could not save {', '.join(group['refs'])}",
+                                      detail=tail[-2000:])
+            os.chmod(archive, 0o600)
+            identity = archive_identity(archive, group["refs"])
+            archive_sha256, archive_bytes = file_sha256(archive)
+        else:
+            identity = {"config_digest": image_id, "manifest_digest": None}
+            archive_sha256, archive_bytes = image_id, 1
         artifacts[key] = {
             "refs": list(group["refs"]),
             "image_id": identity["config_digest"],
@@ -903,6 +1129,23 @@ def build_local_images(*, validated: dict, commit: str, source_revision: str,
         }
         for ref in group["refs"]:
             artifact_by_ref[ref] = key
+    bundles = {}
+    if receipt_version == "v2" and artifacts:
+        archive = output_dir / "bundle-1.tar"
+        rc, tail = _run_local(shlex.join(["docker", "image", "save", "--platform", platform, "-o", str(archive), *sorted(artifact_by_ref)]), environment=environment, timeout=timeout)
+        if rc:
+            raise LocalImageError("local_images_save_failed", "could not save bundle", detail=tail[-2000:])
+        os.chmod(archive, 0o600)
+        identities = bundle_identities(archive, artifacts, resolve=True)
+        for key, identity in identities.items():
+            artifacts[key].update(identity)
+            artifacts[key]["image_id"] = identity["config_digest"]
+        digest, size = file_sha256(archive)
+        bundles["bundle-1"] = {"archive":archive.name, "archive_sha256":digest, "archive_bytes":size, "members":sorted(artifacts)}
+    if receipt_version == "v2":
+        for artifact in artifacts.values():
+            for field in ("archive", "archive_sha256", "archive_bytes"):
+                del artifact[field]
     receipt_services = {
         name: {"role": role, "image": observed[name]["image"],
                "build_digest": observed[name]["build_digest"],
@@ -927,6 +1170,8 @@ def build_local_images(*, validated: dict, commit: str, source_revision: str,
         "services": receipt_services,
         "artifacts": artifacts,
     })
+    if receipt_version == "v2":
+        receipt = seal_receipt({**receipt, "schema": RECEIPT_SCHEMA_V2, "bundles": bundles})
     validate_receipt(receipt)
     receipt_path = output_dir / RECEIPT_FILE_NAME
     descriptor, temporary = tempfile.mkstemp(prefix=".receipt-", dir=output_dir)

@@ -258,3 +258,104 @@ class LocalImageReceiptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class SharedBundleReceiptTests(unittest.TestCase):
+    @staticmethod
+    def receipt():
+        value = _receipt()
+        artifact = value['artifacts']['image-1']
+        bundle = {k: artifact.pop(k) for k in ('archive', 'archive_sha256', 'archive_bytes')}
+        bundle.update(archive='bundle-1.tar', members=['image-1'])
+        return local_images.seal_receipt({**value, 'schema': local_images.RECEIPT_SCHEMA_V2,
+                                          'bundles': {'bundle-1': bundle}})
+
+    def test_v2_separates_transport_and_preserves_exact_identity_comparison(self):
+        value = self.receipt()
+        self.assertEqual(local_images.validate_receipt(value), value)
+        self.assertEqual(local_images.accepted_ids(value['artifacts']['image-1']),
+                         {'sha256:' + '1' * 64})
+        remote = local_images.remote_receipt_document(value, {}, verified_at='synthetic')
+        self.assertEqual(remote['schema'], local_images.REMOTE_RECEIPT_SCHEMA_V2)
+        self.assertEqual(remote['local_receipt'], value)
+
+    def test_v2_rejects_incomplete_duplicate_extra_or_unbounded_members(self):
+        import copy
+        for field, bad in (('members', []), ('members', ['image-1', 'image-1']),
+                           ('members', ['image-1', 'image-2']), ('archive', '../bundle-1.tar'),
+                           ('archive_bytes', True), ('archive_bytes', 2**50),
+                           ('extra', 'field')):
+            value = copy.deepcopy(self.receipt())
+            value['bundles']['bundle-1'][field] = bad
+            with self.subTest(field=field, bad=bad), self.assertRaises(local_images.LocalImageError):
+                local_images.validate_receipt(local_images.seal_receipt(value))
+
+    def test_v2_rejects_extra_image_refs_and_digest_tampering(self):
+        value = self.receipt()
+        value['artifacts']['image-1']['refs'].append('unreceipted:tag')
+        with self.assertRaises(local_images.LocalImageError):
+            local_images.validate_receipt(local_images.seal_receipt(value))
+        value = self.receipt()
+        value['bundles']['bundle-1']['archive_bytes'] += 1
+        with self.assertRaises(local_images.LocalImageError):
+            local_images.validate_receipt(value)
+
+    def test_bundle_resolves_configs_and_refuses_extra_tags_platform_and_members(self):
+        import hashlib
+        import io
+        import tarfile
+        config = json.dumps({'os':'linux','architecture':'amd64',
+                             'rootfs':{'diff_ids':[]}}).encode()
+        digest = hashlib.sha256(config).hexdigest()
+        image = {'refs':['app:test'], 'config_digest':'sha256:'+digest,
+                 'layers_digest':local_images.canonical_digest([]),
+                 'manifest_digest':None, 'platform':'linux/amd64'}
+        with tempfile.TemporaryDirectory() as directory:
+            for change in ('valid', 'extra-tag', 'extra-member', 'wrong-platform', 'missing-config'):
+                path = Path(directory, change+'.tar')
+                manifest = [{'Config':digest+'.json', 'RepoTags':['app:test'], 'Layers':[]}]
+                selected = dict(image)
+                if change == 'extra-tag': manifest[0]['RepoTags'].append('extra:test')
+                if change == 'wrong-platform': selected['platform'] = 'linux/arm64'
+                entries = {'manifest.json':json.dumps(manifest).encode(), digest+'.json':config}
+                if change == 'extra-member': entries['unbound.json'] = b'{}'
+                if change == 'missing-config': del entries[digest+'.json']
+                with tarfile.open(path, 'w') as archive:
+                    for name, data in entries.items():
+                        member = tarfile.TarInfo(name); member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+                if change == 'valid':
+                    self.assertEqual(local_images.bundle_identities(path, {'image-1':selected})
+                                     ['image-1']['config_digest'], 'sha256:'+digest)
+                else:
+                    with self.subTest(change=change), self.assertRaises(local_images.LocalImageError):
+                        local_images.bundle_identities(path, {'image-1':selected})
+
+    def test_v2_rejects_repeated_config_identity_even_with_different_refs(self):
+        import copy
+        value = self.receipt()
+        second = copy.deepcopy(value['artifacts']['image-1'])
+        second['refs'] = ['second:test']
+        value['artifacts']['image-2'] = second
+        value['services']['second'] = {**value['services']['web'], 'role':'background',
+                                       'image':'second:test', 'artifact':'image-2'}
+        value['bundles']['bundle-1']['members'].append('image-2')
+        value['build_config_digest'] = local_images.canonical_digest(
+            {k:v['build_digest'] for k,v in value['services'].items()})
+        with self.assertRaises(local_images.LocalImageError):
+            local_images.validate_receipt(local_images.seal_receipt(value))
+
+    def test_v2_malformed_service_reference_refuses_with_receipt_error(self):
+        value = self.receipt()
+        value['services']['web']['artifact'] = []
+        with self.assertRaises(local_images.LocalImageError) as raised:
+            local_images.validate_receipt(local_images.seal_receipt(value))
+        self.assertEqual(raised.exception.code, 'local_images_receipt_invalid')
+
+    def test_oversized_local_receipt_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, 'receipt.json')
+            path.write_bytes(b' ' * (local_images.MAX_RECEIPT_BYTES + 1))
+            path.chmod(0o600)
+            with self.assertRaises(local_images.LocalImageError) as raised:
+                local_images.load_receipt(path)
+            self.assertEqual(raised.exception.code, 'local_images_receipt_invalid')

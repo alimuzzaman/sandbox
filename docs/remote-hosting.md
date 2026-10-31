@@ -2191,3 +2191,26 @@ before use (exact revision equality under `--strict-runtime`).
 active status, unknown status, or retained-without-result marker through the
 activation owner. It never re-enters activation. A frontend can recover a lost
 committed reply even after its original admission deadline expires.
+
+### Opt-in shared local-image bundle (pack 9)
+
+`sb host image build-local --receipt-version v2` saves all built image references
+in one raw `bundle-1.tar`. The default remains v1 (one archive per image).
+V2 retains per-image `artifacts` identities and service keys, and moves transport
+hash, byte size and exact sorted image membership into a closed `bundles` map.
+Local and remote schema namespaces end in `.v2`; canonical digests bind the full
+receipt. Portable config IDs remain the only accepted destination IDs.
+
+Push transfers the entire bundle once when any reference differs, then verifies
+all references before publication. All-present receivers upload zero bytes.
+`loaded`/`skipped` describe images at the initial locked observation; skipped
+images can still travel inside the bundle. `transferred_bundles` and
+`transferred_bytes` report transport separately. `--artifact-timeout` applies to
+the whole bundle; size the aggregate `--timeout` accordingly. Staging and import
+reserve twice the bundle bytes when a storage floor is configured.
+
+Older clients reject the v2 schema before transfer writes. Roll back by using
+the older client with a separately exported v1 receipt; there is no automatic
+fallback or conversion of persisted receipts. Do not overwrite retained v1
+output directories when selecting v2. No remote acceptance is implied by local
+proof. Control protocol 14 records this additive contract.

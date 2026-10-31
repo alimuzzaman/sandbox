@@ -98,13 +98,14 @@ except Exception: sys.exit(53)
                 "daemon_identity", "remote_receipt_digest"}
     if set(document) != expected:
         raise RemoteLocalImageError("local_images_receipt_invalid")
+    local_images.validate_receipt(document.get("local_receipt"))
     body = {key: value for key, value in document.items()
             if key != "remote_receipt_digest"}
     if document.get("remote_receipt_digest") != digest \
             or local_images.canonical_digest(body) != digest \
-            or document.get("schema") != local_images.REMOTE_RECEIPT_SCHEMA:
+            or document.get("schema") != local_images.remote_schema(document.get("local_receipt") or {}):
         raise RemoteLocalImageError("local_images_receipt_invalid")
-    local_images.validate_receipt(document.get("local_receipt"))
+    local_images.validate_remote_v2(document)
     return document
 
 
@@ -388,7 +389,10 @@ def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
         mismatches, _verified = local_images.compare_images(
             receipt, observation, artifacts={key})
         if mismatches:
-            missing_bytes += artifact["archive_bytes"]
+            missing_bytes += artifact.get("archive_bytes", 0)
+    if receipt["schema"] == local_images.RECEIPT_SCHEMA_V2:
+        mismatches, _ = local_images.compare_images(receipt, observation)
+        missing_bytes = sum(b["archive_bytes"] for b in receipt["bundles"].values()) if mismatches else 0
     # The upload file and Docker's content-store import can coexist.
     estimate = max(2 * missing_bytes, local_images.MAX_RECEIPT_BYTES)
     if before_write is not None:
@@ -443,24 +447,41 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
             remaining(30)
             if not daemon_id_before or len(daemon_id_before) > 256:
                 raise RemoteLocalImageError("local_images_daemon_unavailable")
-            for key, artifact in sorted(receipt["artifacts"].items()):
-                remaining(artifact_timeout)
-                mismatches, _ = local_images.compare_images(receipt, observation, artifacts={key})
-                if not mismatches:
-                    skipped.append(key)
-                    continue
-                load_archive(remote_name, path.parent / artifact["archive"], artifact,
-                             timeout=remaining(artifact_timeout), progress=progress,
-                             cancelled=lease.lost, entry=entry)
-                remaining(120)
-                lease.require()
-                observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
-                remaining(120)
-                lease.require()
-                mismatches, _ = local_images.compare_images(receipt, observation, artifacts={key})
-                if mismatches:
-                    raise RemoteLocalImageError("local_images_image_mismatch")
-                loaded.append(key)
+            transferred_bundles, transferred_bytes = [], 0
+            if receipt["schema"] == local_images.RECEIPT_SCHEMA_V2:
+                for key in sorted(receipt["artifacts"]):
+                    mismatch, _ = local_images.compare_images(receipt, observation, artifacts={key})
+                    (loaded if mismatch else skipped).append(key)
+                if loaded:
+                    for key, bundle in receipt["bundles"].items():
+                        local_images.bundle_identities(path.parent / bundle["archive"], receipt["artifacts"])
+                        load_archive(remote_name, path.parent / bundle["archive"], bundle,
+                                     timeout=remaining(artifact_timeout), progress=progress,
+                                     cancelled=lease.lost, entry=entry)
+                        transferred_bundles.append(key)
+                        transferred_bytes += bundle["archive_bytes"]
+                    lease.require()
+                    observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
+            else:
+                for key, artifact in sorted(receipt["artifacts"].items()):
+                    remaining(artifact_timeout)
+                    mismatches, _ = local_images.compare_images(receipt, observation, artifacts={key})
+                    if not mismatches:
+                        skipped.append(key)
+                        continue
+                    load_archive(remote_name, path.parent / artifact["archive"], artifact,
+                                 timeout=remaining(artifact_timeout), progress=progress,
+                                 cancelled=lease.lost, entry=entry)
+                    remaining(120)
+                    lease.require()
+                    observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
+                    remaining(120)
+                    lease.require()
+                    mismatches, _ = local_images.compare_images(receipt, observation, artifacts={key})
+                    if mismatches:
+                        raise RemoteLocalImageError("local_images_image_mismatch")
+                    loaded.append(key)
+                    transferred_bytes += artifact["archive_bytes"]
             mismatches, verified = local_images.compare_images(receipt, observation)
             if mismatches:
                 raise RemoteLocalImageError("local_images_image_mismatch")
@@ -487,4 +508,5 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                 "local_images_transfer_unknown" if wrote else "local_images_transfer_timeout") from None
         raise
     return {"receipt": receipt, "remote_receipt_digest": digest,
-            "loaded": loaded, "skipped": skipped, "daemon_identity": engine_id}
+            "loaded": loaded, "skipped": skipped, "daemon_identity": engine_id,
+            "transferred_bundles": transferred_bundles, "transferred_bytes": transferred_bytes}

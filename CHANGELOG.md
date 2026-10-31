@@ -16,6 +16,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   revision changes, so exact-match consumers still require supported migration.
 
 ### Added
+- Opt-in local-image v2 receipts (`--receipt-version v2`) bind one shared raw
+  save bundle, with closed image membership and version-aware apply readers.
+  V1 remains the default and rollback format. Control protocol advances to 14;
+  no installed runtime or deployment is changed by this source work.
 - Hosted local images (spec 068). `sb host image build-local` builds an exact
   clean revision for `linux/amd64` with hosted Compose inputs and writes a
   bounded non-secret receipt; `host image push-local` confirmation-gates a

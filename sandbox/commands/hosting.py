@@ -457,6 +457,8 @@ def _cmd_host_image_build_local(args) -> None:
                     child_env[destination] = source_values[source]
             output_dir = local_images.default_output_directory(
                 RUNTIME_DIR, validated, commit)
+            if getattr(args, "receipt_version", "v1") == "v2":
+                output_dir = output_dir / "v2"
             progress = None
             if not args.json:
                 def progress(message):
@@ -475,6 +477,7 @@ def _cmd_host_image_build_local(args) -> None:
                 source_dir=str(source_dir), runtime_dir=str(runtime_dir),
                 output_dir=output_dir, platform=local_images.DEFAULT_PLATFORM,
                 environment=child_env, timeout=timeout,
+                receipt_version=getattr(args, "receipt_version", "v1"),
                 source_root_relative=source_root_relative, progress=progress,
                 symbolic_secrets=validated["secrets"]["required"].keys()
                 | validated["secrets"]["generated"].keys())
@@ -537,7 +540,9 @@ def _cmd_host_image_push_local(args) -> None:
         payload = {"ok": True, "action": "push-local", "remote": args.remote,
                    "receipt_digest": result["receipt"]["receipt_digest"],
                    "remote_receipt_digest": result["remote_receipt_digest"],
-                   "loaded": result["loaded"], "skipped": result["skipped"]}
+                   "loaded": result["loaded"], "skipped": result["skipped"],
+                   "transferred_bundles": result.get("transferred_bundles", []),
+                   "transferred_bytes": result.get("transferred_bytes", 0)}
     except RemoteJobAdmissionError as exc:
         if args.json:
             print(json.dumps(exc.to_payload(remote=args.remote, operation="push-local"),

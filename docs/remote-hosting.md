@@ -2206,11 +2206,68 @@ all references before publication. All-present receivers upload zero bytes.
 `loaded`/`skipped` describe images at the initial locked observation; skipped
 images can still travel inside the bundle. `transferred_bundles` and
 `transferred_bytes` report transport separately. `--artifact-timeout` applies to
-the whole bundle; size the aggregate `--timeout` accordingly. Staging and import
-reserve twice the bundle bytes when a storage floor is configured.
+the whole bundle; size the aggregate `--timeout` accordingly. Staging, import and unpacking
+reserve at least three times the bundle bytes, with a default 1 GiB storage floor.
 
 Older clients reject the v2 schema before transfer writes. Roll back by using
 the older client with a separately exported v1 receipt; there is no automatic
 fallback or conversion of persisted receipts. Do not overwrite retained v1
 output directories when selecting v2. No remote acceptance is implied by local
-proof. Control protocol 14 records this additive contract.
+proof. Protocol 14 introduced this contract; the review fixes below require protocol 15.
+
+### Shared-bundle runtime upgrade and review fixes
+
+V2 export requires **Docker >=25 with the containerd image store** on the
+builder. Classic graphdriver stores and legacy saves must use v1. The builder
+check runs before builds or export writes; a classic `repositories` archive
+also receives an explicit unsupported-builder error. Archive member validation
+runs only on the client. It remains a separate read from the hash/stream pass
+and therefore relies on the controller owner's runtime-directory trust.
+
+V2 storage admission always runs. An unset or zero `storage_floor_gb` uses a
+1 GiB floor; a configured positive floor is retained. The reservation is at
+least **3 times the full bundle bytes**, including on partial receivers, for
+staging, import and unpacking. The load timeout is 1800 seconds plus one second
+per started MiB. Controller aggregate/per-artifact deadlines may expire first;
+the worker continues under its fence. V1 keeps its existing storage policy and
+1800-second load limit.
+
+Before v2 load starts, the worker persists `load-unverified` and changes
+`load-fence.lock` to mode 0400. Successful Docker completion restores mode 0600
+and removes the marker. A load timeout, CLI error or worker death leaves the
+engine quarantined: new controllers refuse the marker, and old controllers
+refuse the unsafe fence mode. The result is unknown, never permission to start
+another import. There is no automatic quarantine reset. An operator must first
+independently establish that the daemon is idle, for example through an approved
+Docker maintenance stop, before restoring the owner-only fence to mode 0600
+and removing `load-unverified`. Do not clear it merely because a CLI exited.
+
+Protocol 14 introduced the v2 receipt/transport shapes and also recorded existing
+`cmd_retention` shape drift: `commands`, `remedy`, and `skipped`. These retention
+keys were missing from the pinned protocol-13 manifest; pack 9 did not add that
+retention behavior. Review fixes advance the protocol to **15**, as required by
+the shape gate for the new worker/admission contract. After upgrading a client,
+**reinstall each remote runtime**, including for v1-only verdict-gated commands.
+A protocol-13 or protocol-14 runtime cannot serve this protocol-15 client.
+No v1-only compatibility exception is added to the global verdict gate.
+
+From the upgraded Sandbox checkout, review and explicitly authorize the migration:
+
+```sh
+./sb remote service migrate NAME --plan --json
+./sb remote service migrate NAME --confirm --json
+./sb remote service status NAME --json
+```
+
+Check the installed revision and compatibility range in the status response
+before using verdict-gated commands. These are operator rollout instructions;
+this change performs no remote migration. Old clients remain within the runtime's
+served range, but their v1 archive behavior does not gain v2 support.
+
+In v2 results, `skipped` means initially verified at the locked observation.
+Those images still travel inside a transferred full bundle and may be re-imported;
+`transferred_bytes` and `transferred_bundles` expose the transport cost.
+
+A hard-killed stage worker can leave its private `.upload-*.tar` file behind.
+There is no automatic sweeper; inspect task-owned staging during operator
+reconciliation after proving the daemon idle.

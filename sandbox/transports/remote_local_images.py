@@ -122,7 +122,11 @@ def observe(remote_name: str, receipt: dict, *, remote_receipt_digest: str | Non
 
 
 _STAGE_PROGRAM = r'''import fcntl,hashlib,json,os,stat,subprocess,sys,tempfile
-root,name,want,size=sys.argv[1:]; size=int(size)
+root,name,want,size=sys.argv[1:5]; size=int(size)
+bundle_load=len(sys.argv)==6
+load_timeout=int(sys.argv[5]) if bundle_load else 1800
+quarantine=os.path.dirname(root)+'/load-unverified'
+if os.path.lexists(quarantine): sys.exit(75)
 if not root.startswith('/') or '/' in name or name in {'.','..'}: sys.exit(31)
 os.makedirs(root,mode=0o700,exist_ok=True)
 ri=os.lstat(root)
@@ -143,8 +147,21 @@ try:
   os.write(fd,chunk);h.update(chunk);count+=len(chunk)
  os.fsync(fd);os.close(fd);fd=-1
  if count!=size or 'sha256:'+h.hexdigest()!=want: sys.exit(32)
- q=subprocess.run(['docker','image','load','-i',path],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=1800,check=False,pass_fds=(fence,))
- if q.returncode: sys.exit(33)
+ if bundle_load:
+  # Persist refusal before starting Docker: even SIGKILL cannot reopen admission.
+  marker=os.open(quarantine,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+  os.write(marker,b'load outcome unverified\n');os.fsync(marker);os.close(marker)
+  os.fchmod(fence,0o400);os.fsync(fence)
+  directory=os.open(os.path.dirname(root),os.O_RDONLY|os.O_DIRECTORY)
+  os.fsync(directory);os.close(directory)
+ try:
+  q=subprocess.run(['docker','image','load','-i',path],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=load_timeout,check=False,pass_fds=(fence,))
+ except (subprocess.TimeoutExpired,OSError):
+  if bundle_load: sys.exit(34)
+  raise
+ if q.returncode: sys.exit(34 if bundle_load else 33)
+ if bundle_load:
+  os.fchmod(fence,0o600);os.fsync(fence);os.unlink(quarantine)
  print(json.dumps({'schema':1,'state':'loaded','bytes':count},separators=(',',':')))
 finally:
  if fd>=0: os.close(fd)
@@ -172,6 +189,10 @@ def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: in
         raise RemoteLocalImageError("local_images_archive_changed")
     root = f"{_local_image_root(entry)}/uploads"
     argv = ["python3", "-c", _STAGE_PROGRAM, root, artifact["archive"], digest, str(size)]
+    if "members" in artifact:
+        # One MiB/s allowance plus 30 minutes for import setup and unpacking.
+        # Controller deadlines may expire first; quarantine then survives it.
+        argv.append(str(1800 + (size + 1048575) // 1048576))
     timeout -= time.monotonic() - started
     if timeout <= 0:
         raise RemoteLocalImageError("local_images_transfer_unknown")
@@ -179,6 +200,8 @@ def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: in
         _remote.ssh_command_args(entry, shlex.join(argv), multiplex=False),
         archive, timeout=timeout, progress=progress, cancelled=cancelled)
     if result["timed_out"] or result["cancelled"] or result["broken_pipe"]:
+        raise RemoteLocalImageError("local_images_transfer_unknown")
+    if result["returncode"] == 34 or ("members" in artifact and result["returncode"] != 0):
         raise RemoteLocalImageError("local_images_transfer_unknown")
     if result["returncode"] != 0 or result["sha256"] != digest:
         raise RemoteLocalImageError("local_images_transfer_failed")
@@ -265,6 +288,8 @@ os.makedirs(root,mode=0o700,exist_ok=True)
 ri=os.lstat(root)
 if not stat.S_ISDIR(ri.st_mode) or ri.st_uid!=os.geteuid() or stat.S_IMODE(ri.st_mode)&0o002: sys.exit(62)
 os.chmod(root,0o700)
+if os.path.lexists(root+'/load-unverified'):
+ print(json.dumps({'schema':1,'acquired':False},separators=(',',':')),flush=True);sys.exit(75)
 # The worker fence survives loss of the engine lock's SSH owner. Test both
 # without waiting; contention is a bounded busy refusal. Keep engine.lock held.
 for name in ('engine.lock','load-fence.lock'):
@@ -373,8 +398,12 @@ def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
                        timeout: float = 60, before_write=None) -> None:
     """Reserve remote storage before the first transfer-side remote write."""
     local_images.validate_receipt(receipt)
-    if entry.get("storage_floor_gb") in (None, 0):
+    bundle = receipt["schema"] == local_images.RECEIPT_SCHEMA_V2
+    if not bundle and entry.get("storage_floor_gb") in (None, 0):
         return
+    effective_entry = entry.copy()
+    if bundle and entry.get("storage_floor_gb") in (None, 0):
+        effective_entry["storage_floor_gb"] = 1
     from sandbox.resources.storage_floor import describe, remote_storage_floor_admission
 
     home = _remote.resolve_sandbox_home(entry)
@@ -394,11 +423,13 @@ def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
         mismatches, _ = local_images.compare_images(receipt, observation)
         missing_bytes = sum(b["archive_bytes"] for b in receipt["bundles"].values()) if mismatches else 0
     # The upload file and Docker's content-store import can coexist.
-    estimate = max(2 * missing_bytes, local_images.MAX_RECEIPT_BYTES)
+    estimate = max((3 if bundle else 2) * missing_bytes, local_images.MAX_RECEIPT_BYTES)
     if before_write is not None:
         before_write()
     decision = remote_storage_floor_admission(
-        entry, target, minimum_estimate_bytes=estimate, timeout=timeout)
+        effective_entry, target, minimum_estimate_bytes=estimate, timeout=timeout)
+    if bundle and decision is None:
+        raise RemoteLocalImageError("remote_storage_floor", "v2 storage admission unavailable")
     if decision is not None and decision.get("ok") is not True:
         raise RemoteLocalImageError("remote_storage_floor", describe(decision))
 
@@ -460,8 +491,11 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                                      cancelled=lease.lost, entry=entry)
                         transferred_bundles.append(key)
                         transferred_bytes += bundle["archive_bytes"]
+                    remaining(120)
                     lease.require()
                     observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
+                    remaining(120)
+                    lease.require()
             else:
                 for key, artifact in sorted(receipt["artifacts"].items()):
                     remaining(artifact_timeout)

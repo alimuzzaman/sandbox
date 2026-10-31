@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 import subprocess
 import sys
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
@@ -408,9 +409,6 @@ with tempfile.TemporaryDirectory() as sandbox_root:
             lookup.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class SharedBundleTransferTests(unittest.TestCase):
     def test_partial_receiver_reserves_full_bundle_staging_and_import(self):
         from tests.test_hosting_local_images import SharedBundleReceiptTests
@@ -422,7 +420,7 @@ class SharedBundleTransferTests(unittest.TestCase):
                    return_value={'ok':True}) as admission:
             remote_local_images._storage_admission({'storage_floor_gb':1}, receipt, {'images':{}})
         self.assertEqual(admission.call_args.kwargs['minimum_estimate_bytes'],
-                         200_000_000)
+                         300_000_000)
 
     def test_v2_remote_reader_binds_the_version_of_nested_local_receipt(self):
         from tests.test_hosting_local_images import SharedBundleReceiptTests
@@ -479,3 +477,86 @@ class SharedBundleTransferTests(unittest.TestCase):
                            ('receipt_digest', 'sha256:'+'b'*64)):
             with self.subTest(field=field), self.assertRaises(local_images.LocalImageError):
                 local_images.validate_remote_v2({**document, field:bad})
+
+
+class BundleReviewAdmissionTests(unittest.TestCase):
+    def test_v2_default_floor_is_mandatory_and_reserves_three_copies(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        value = SharedBundleReceiptTests.receipt()
+        value['bundles']['bundle-1']['archive_bytes'] = 100_000_000
+        value = local_images.seal_receipt(value)
+        for floor in (None,0,5):
+            entry = {} if floor is None else {'storage_floor_gb':floor}
+            with self.subTest(floor=floor), \
+                 patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value='/srv/sandbox'), \
+                 patch('sandbox.resources.storage_floor.remote_storage_floor_admission',return_value={'ok':True}) as admission:
+                remote_local_images._storage_admission(entry,value,{'images':{}})
+            self.assertEqual(admission.call_args.args[0]['storage_floor_gb'],floor or 1)
+            self.assertEqual(admission.call_args.kwargs['minimum_estimate_bytes'],300_000_000)
+            self.assertEqual(entry,{} if floor is None else {'storage_floor_gb':floor})
+        with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value='/srv/sandbox'), \
+             patch('sandbox.resources.storage_floor.remote_storage_floor_admission',return_value=None):
+            with self.assertRaises(remote_local_images.RemoteLocalImageError):
+                remote_local_images._storage_admission({},value,{'images':{}})
+
+    def test_bundle_load_budget_scales_and_remote_timeout_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory,'bundle-1.tar')
+            path.write_bytes(b'x'*(2*1048576+1)); path.chmod(0o600)
+            digest,size = local_images.file_sha256(path)
+            bundle = {'archive':path.name,'archive_bytes':size,'archive_sha256':digest,'members':['image-1']}
+            for code in (0,34,137):
+                result = {'returncode':code,'timed_out':False,'cancelled':False,'broken_pipe':False,
+                          'sha256':digest,'output_tail':json.dumps({'schema':1,'state':'loaded','bytes':size})}
+                with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value='/srv/sandbox'), \
+                     patch.object(remote_local_images._remote,'ssh_command_args',return_value=['synthetic']) as command, \
+                     patch.object(local_images,'stream_archive',return_value=result):
+                    if code:
+                        with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                            remote_local_images.load_archive('local',path,bundle,timeout=60,entry={})
+                        self.assertEqual(raised.exception.code,'local_images_transfer_unknown')
+                    else:
+                        remote_local_images.load_archive('local',path,bundle,timeout=60,entry={})
+                self.assertEqual(shlex.split(command.call_args.args[1])[-1],'1803')
+
+    def test_load_timeout_and_worker_loss_keep_persistent_quarantine(self):
+        harness = """
+import hashlib,json,os,stat,subprocess,sys,tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
+for outcome in ('success','timeout','worker-loss'):
+ with tempfile.TemporaryDirectory() as root:
+  data=b'archive';chunks=[data,b''];scope={}
+  def load(argv,**kwargs):
+   assert kwargs['timeout']==37
+   assert os.path.exists(root+'/load-unverified')
+   assert stat.S_IMODE(os.stat(root+'/load-fence.lock').st_mode)==0o400
+   if outcome=='timeout': raise subprocess.TimeoutExpired(argv,37)
+   if outcome=='worker-loss': raise SystemExit(99)
+   return SimpleNamespace(returncode=0)
+  args=['worker',root+'/uploads','bundle-1.tar','sha256:'+hashlib.sha256(data).hexdigest(),str(len(data)),'37']
+  with patch.object(sys,'argv',args),patch('os.read',side_effect=lambda *_:chunks.pop(0)),patch('subprocess.run',side_effect=load):
+   try: exec(__STAGE_PROGRAM__,scope)
+   except SystemExit as exc: assert exc.code==({'timeout':34,'worker-loss':99}[outcome])
+   else: assert outcome=='success'
+  os.close(scope['fence'])
+  assert not os.listdir(root+'/uploads')
+  if outcome=='success':
+   assert not os.path.exists(root+'/load-unverified')
+   assert stat.S_IMODE(os.stat(root+'/load-fence.lock').st_mode)==0o600
+  else:
+   assert os.path.exists(root+'/load-unverified')
+   with patch.object(sys,'argv',['lock',root]):
+    try: exec(__LOCK_PROGRAM__,{})
+    except SystemExit as exc: assert exc.code==75
+    else: raise AssertionError('admitted after unverified load')
+""".replace('__STAGE_PROGRAM__',repr(remote_local_images._STAGE_PROGRAM)).replace('__LOCK_PROGRAM__',repr(remote_local_images._ENGINE_LOCK_PROGRAM))
+        result = run_test_process([sys.executable,'-c',harness],capture_output=True,text=True,timeout=3)
+        self.assertEqual(result.returncode,0,result.stderr)
+        frames = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(frames[0]['state'],'loaded')
+        self.assertEqual(frames[1:],[{'schema':1,'acquired':False}]*2)
+
+
+if __name__ == "__main__":
+    unittest.main()

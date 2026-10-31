@@ -625,6 +625,9 @@ def bundle_identities(path: Path, images: dict, *, resolve: bool = False) -> dic
                 if len(members)>=100000 or member.name in members or member.name.startswith("/") or ".." in member.name.split("/") or not (member.isfile() or member.isdir()):
                     fail()
                 members[member.name] = member
+            if "repositories" in members:
+                raise LocalImageError("local_images_v2_unsupported_builder",
+                                      "v2 requires the containerd image store and Docker >=25; classic repositories archives require v1")
             def raw(name):
                 member = members.get(name)
                 if member is None or not member.isfile() or member.size>MAX_CONFIG_BYTES:
@@ -1009,6 +1012,25 @@ def _inspect_local(ref: str, environment: dict) -> dict | None:
     return document if isinstance(document, dict) else None
 
 
+def _require_v2_builder(environment: dict) -> None:
+    """V2 deliberately supports only modern containerd save archives."""
+    try:
+        version = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True, text=True, check=True, timeout=30, env=environment)
+        store = subprocess.run(
+            ["docker", "info", "--format", "{{json .DriverStatus}}"],
+            capture_output=True, text=True, check=True, timeout=30, env=environment)
+        supported = (int(version.stdout.strip().split(".")[0]) >= 25
+                     and ["driver-type", "io.containerd.snapshotter.v1"]
+                     in json.loads(store.stdout))
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        supported = False
+    if not supported:
+        raise LocalImageError("local_images_v2_unsupported_builder",
+                              "v2 requires the containerd image store and Docker >=25; select v1 for classic or legacy stores")
+
+
 def build_local_images(*, validated: dict, commit: str, source_revision: str,
                        config_command: str, build_command, compose_project: str,
                        source_dir: str, runtime_dir: str, output_dir: Path,
@@ -1018,6 +1040,8 @@ def build_local_images(*, validated: dict, commit: str, source_revision: str,
     """Observe, build/pull, save, and seal one receipt. Returns the receipt."""
     if receipt_version not in {"v1", "v2"}:
         raise LocalImageError("local_images_receipt_invalid", "unsupported receipt version")
+    if receipt_version == "v2":
+        _require_v2_builder(environment)
     services = declared_services(validated)
     observation = parse_probe_output(_probe_local(
         probe_argv(config_command=config_command, services=list(services),
@@ -1093,6 +1117,9 @@ def build_local_images(*, validated: dict, commit: str, source_revision: str,
         if ref not in group["refs"]:
             group["refs"].append(ref)
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if receipt_version == "v1":
+        for stale in output_dir.glob("image-*.tar"):
+            stale.unlink()
     artifacts: dict[str, dict] = {}
     artifact_by_ref: dict[str, str] = {}
     for number, (image_id, group) in enumerate(sorted(groups.items()), start=1):

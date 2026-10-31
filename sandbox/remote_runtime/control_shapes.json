@@ -3771,12 +3771,14 @@
   ],
   "sandbox/transports/remote_local_images.py": [
    "<:_ENGINE_LOCK_PROGRAM>:json.dumps(0)#2={acquired,schema}",
+   "<:_ENGINE_LOCK_PROGRAM>:json.dumps(0)#3={acquired,schema}",
    "<:_ENGINE_LOCK_PROGRAM>:json.dumps(0)={acquired,schema}",
    "<:_PUBLISH_PROGRAM>:json.dumps(0)#2={remote_receipt_digest,schema}",
    "<:_STAGE_PROGRAM>:json.dumps(0)={bytes,schema,state}",
    "_TransferLease.__enter__:_#2={acquired,schema}",
    "_TransferLease.__enter__:_={acquired,schema}",
    "_entry:read[provisioned]",
+   "_storage_admission:effective_entry[storage_floor_gb]=",
    "_storage_admission:read[archive_bytes]",
    "_storage_admission:read[artifacts]",
    "_storage_admission:read[bundles]",
@@ -3795,7 +3797,7 @@
    "cancelled",
    "daemon_identity",
    "environment",
-   "load_archive:_#5={bytes,schema,state}",
+   "load_archive:_#7={bytes,schema,state}",
    "load_archive:read[archive]",
    "load_archive:read[archive_bytes]",
    "load_archive:read[archive_sha256]",
@@ -4201,5 +4203,5 @@
    "stage"
   ]
  },
- "spoken": 14
+ "spoken": 15
 }

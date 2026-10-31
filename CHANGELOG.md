@@ -8,6 +8,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Shared bundles now refuse classic/legacy builders before builds or writes;
+  v2 requires Docker >=25 and the containerd image store. V1 stale-archive cleanup
+  is restored. V2 reserves at least 3 times bundle bytes with a default 1 GiB
+  storage floor, scales the load timeout by size, and persistently quarantines
+  uncertain loads so old and new controllers refuse concurrent imports.
+- Review fixes advance control protocol 14 to **15**. Reinstall each remote
+  runtime after upgrading, even for v1-only verdict-gated commands. Review
+  `sb remote service migrate NAME --plan --json`, authorize with
+  `sb remote service migrate NAME --confirm --json`, then verify installed
+  revision/compatibility using `sb remote service status NAME --json`.
+  Protocol-13/14 runtimes cannot serve this client; no compatibility exception
+  or remote migration is performed here.
+- The protocol-14 manifest also absorbed existing `cmd_retention` shape drift:
+  `commands`, `remedy`, and `skipped`. This records behavior already present at
+  the pin, rather than new pack 9 retention behavior.
 - Local-image transfer now strictly decodes byte acknowledgements after remote
   receipt publication instead of crashing without JSON. Malformed replies stay
   publication-unknown; unexpected transfer exceptions emit the closed
@@ -18,8 +33,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - Opt-in local-image v2 receipts (`--receipt-version v2`) bind one shared raw
   save bundle, with closed image membership and version-aware apply readers.
-  V1 remains the default and rollback format. Control protocol advances to 14;
-  no installed runtime or deployment is changed by this source work.
+  V1 remains the default and rollback format. The receipt contract introduced
+  protocol 14; the review fixes above require 15. No installed runtime or
+  deployment is changed by this source work.
 - Hosted local images (spec 068). `sb host image build-local` builds an exact
   clean revision for `linux/amd64` with hosted Compose inputs and writes a
   bounded non-secret receipt; `host image push-local` confirmation-gates a

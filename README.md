@@ -1327,3 +1327,24 @@ Hosted image conversion can use [component data recovery](docs/hosted-data-recov
 for encrypted PostgreSQL/storage checkpoints and isolated restore evidence.
 Immutable image preparation exposes public authority discovery and an explicit
 operator handoff; see [remote hosting](docs/remote-hosting.md).
+
+### Upgrading shared-bundle clients
+
+V2 builders require Docker >=25 with the containerd image store; classic and
+legacy stores use v1. V2 now requires a storage floor, reserves at least 3 times
+the bundle bytes, and quarantines uncertain loads. See the
+[operational details](docs/remote-hosting.md#shared-bundle-runtime-upgrade-and-review-fixes).
+
+Protocol 14 introduced v2; these review fixes require **protocol 15**.
+After upgrading, reinstall remote runtimes, including for v1-only verdict-gated
+commands. Protocol-13 and protocol-14 runtimes cannot serve this client:
+
+```sh
+./sb remote service migrate NAME --plan --json
+./sb remote service migrate NAME --confirm --json
+./sb remote service status NAME --json
+```
+
+Review the plan and explicitly authorize the migration. Verify the installed
+revision and compatibility range in status before remote operations. No migration
+is performed by upgrading this checkout.

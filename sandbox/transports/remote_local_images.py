@@ -11,10 +11,12 @@ import stat
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from sandbox.core import _remote
 from sandbox.hosting import local_images
+from sandbox.resources.storage_floor import RESERVATION_RELEASE_PROGRAM
 
 _REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -121,9 +123,11 @@ def observe(remote_name: str, receipt: dict, *, remote_receipt_digest: str | Non
     return local_images.parse_probe_output(output)
 
 
-_STAGE_PROGRAM = r'''import fcntl,hashlib,json,os,stat,subprocess,sys,tempfile
+_STAGE_PROGRAM = RESERVATION_RELEASE_PROGRAM + r'''import fcntl,hashlib,json,os,stat,subprocess,sys,tempfile
 root,name,want,size=sys.argv[1:5]; size=int(size)
-bundle_load=len(sys.argv)==6
+bundle_load=len(sys.argv)>=6
+reservation_id=sys.argv[6] if len(sys.argv)==7 else None
+load_may_run=False
 load_timeout=int(sys.argv[5]) if bundle_load else 1800
 quarantine=os.path.dirname(root)+'/load-unverified'
 if os.path.lexists(quarantine): sys.exit(75)
@@ -150,10 +154,11 @@ try:
  if bundle_load:
   # Persist refusal before starting Docker: even SIGKILL cannot reopen admission.
   marker=os.open(quarantine,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
-  os.write(marker,b'load outcome unverified\n');os.fsync(marker);os.close(marker)
+  os.write(marker,json.dumps({'reservation_id':reservation_id}).encode());os.fsync(marker);os.close(marker)
   os.fchmod(fence,0o400);os.fsync(fence)
   directory=os.open(os.path.dirname(root),os.O_RDONLY|os.O_DIRECTORY)
   os.fsync(directory);os.close(directory)
+ load_may_run=True
  try:
   q=subprocess.run(['docker','image','load','-i',path],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=load_timeout,check=False,pass_fds=(fence,))
  except (subprocess.TimeoutExpired,OSError):
@@ -161,17 +166,23 @@ try:
   raise
  if q.returncode: sys.exit(34 if bundle_load else 33)
  if bundle_load:
+  if reservation_id is not None:
+   try: release_storage_reservation(os.path.dirname(os.path.dirname(root))+'/storage',reservation_id)
+   except Exception: sys.exit(34)
   os.fchmod(fence,0o600);os.fsync(fence);os.unlink(quarantine)
  print(json.dumps({'schema':1,'state':'loaded','bytes':count},separators=(',',':')))
 finally:
  if fd>=0: os.close(fd)
  try: os.unlink(path)
  except OSError: pass
+ if reservation_id is not None and not load_may_run:
+  release_storage_reservation(os.path.dirname(os.path.dirname(root))+'/storage',reservation_id)
 '''
 
 
 def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: int,
-                 progress=None, cancelled=None, entry: dict | None = None) -> dict:
+                 progress=None, cancelled=None, entry: dict | None = None,
+                 reservation_id: str | None = None) -> dict:
     """Verify the complete staged bytes before invoking the fixed Docker load."""
     started = time.monotonic()
     entry = _entry(remote_name) if entry is None else entry
@@ -193,6 +204,8 @@ def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: in
         # One MiB/s allowance plus 30 minutes for import setup and unpacking.
         # Controller deadlines may expire first; quarantine then survives it.
         argv.append(str(1800 + (size + 1048575) // 1048576))
+        if reservation_id is not None:
+            argv.append(reservation_id)
     timeout -= time.monotonic() - started
     if timeout <= 0:
         raise RemoteLocalImageError("local_images_transfer_unknown")
@@ -395,7 +408,7 @@ def target_image_lease(remote_name: str, project: str, environment: str,
 
 
 def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
-                       timeout: float = 60, before_write=None) -> None:
+                       timeout: float = 60, before_write=None) -> str | None:
     """Reserve remote storage before the first transfer-side remote write."""
     local_images.validate_receipt(receipt)
     bundle = receipt["schema"] == local_images.RECEIPT_SCHEMA_V2
@@ -420,18 +433,34 @@ def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
         if mismatches:
             missing_bytes += artifact.get("archive_bytes", 0)
     if receipt["schema"] == local_images.RECEIPT_SCHEMA_V2:
-        mismatches, _ = local_images.compare_images(receipt, observation)
-        missing_bytes = sum(b["archive_bytes"] for b in receipt["bundles"].values()) if mismatches else 0
+        # Reserve the complete immutable transport before the engine lease:
+        # a later locked observation can discover a changed tag.
+        missing_bytes = sum(b["archive_bytes"] for b in receipt["bundles"].values())
     # The upload file and Docker's content-store import can coexist.
     estimate = max((3 if bundle else 2) * missing_bytes, local_images.MAX_RECEIPT_BYTES)
     if before_write is not None:
         before_write()
-    decision = remote_storage_floor_admission(
-        effective_entry, target, minimum_estimate_bytes=estimate, timeout=timeout)
+    reservation_id = uuid.uuid4().hex if bundle else None
+    if bundle:
+        decision = remote_storage_floor_admission(
+            effective_entry, target, minimum_estimate_bytes=estimate, timeout=timeout,
+            reservation_id=reservation_id)
+    else:
+        decision = remote_storage_floor_admission(
+            effective_entry, target, minimum_estimate_bytes=estimate, timeout=timeout)
     if bundle and decision is None:
         raise RemoteLocalImageError("remote_storage_floor", "v2 storage admission unavailable")
     if decision is not None and decision.get("ok") is not True:
         raise RemoteLocalImageError("remote_storage_floor", describe(decision))
+    return reservation_id
+
+
+def _release_reservation(entry: dict, receipt: dict, reservation_id: str) -> None:
+    from sandbox.resources.storage_floor import remote_storage_floor_release
+    home = _remote.resolve_sandbox_home(entry)
+    target = posixpath.join(home, "deploy-src", receipt["project"])
+    if not remote_storage_floor_release(entry, target, reservation_id, timeout=30):
+        raise RemoteLocalImageError("local_images_transfer_unknown", "storage reservation release unverified")
 
 
 def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: int,
@@ -440,6 +469,8 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                  entry: dict | None = None) -> dict:
     deadline = time.monotonic() + timeout
     wrote = False
+    reservation_id = None
+    worker_may_run = False
 
     def mark_write():
         nonlocal wrote
@@ -462,7 +493,7 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
             raise RemoteLocalImageError("local_images_platform_mismatch")
         budget = remaining(60)
         # Storage admission may create lock/reservation files even on refusal.
-        _storage_admission(entry, receipt, observation, timeout=budget,
+        reservation_id = _storage_admission(entry, receipt, observation, timeout=budget,
                            before_write=mark_write)
         budget = remaining(30)
         wrote = True  # The lease creates remote lock files.
@@ -486,9 +517,11 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                 if loaded:
                     for key, bundle in receipt["bundles"].items():
                         local_images.bundle_identities(path.parent / bundle["archive"], receipt["artifacts"])
+                        worker_may_run = True
                         load_archive(remote_name, path.parent / bundle["archive"], bundle,
                                      timeout=remaining(artifact_timeout), progress=progress,
-                                     cancelled=lease.lost, entry=entry)
+                                     cancelled=lease.lost, entry=entry, reservation_id=reservation_id)
+                        reservation_id = None  # Worker acknowledged load and durable release.
                         transferred_bundles.append(key)
                         transferred_bytes += bundle["archive_bytes"]
                     remaining(120)
@@ -541,6 +574,11 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
             raise RemoteLocalImageError(
                 "local_images_transfer_unknown" if wrote else "local_images_transfer_timeout") from None
         raise
+    finally:
+        if reservation_id is not None and not worker_may_run:
+            # No load could have started. Cleanup is bounded independently of
+            # an exhausted controller deadline; failure retains the reservation.
+            _release_reservation(entry, receipt, reservation_id)
     return {"receipt": receipt, "remote_receipt_digest": digest,
             "loaded": loaded, "skipped": skipped, "daemon_identity": engine_id,
             "transferred_bundles": transferred_bundles, "transferred_bytes": transferred_bytes}

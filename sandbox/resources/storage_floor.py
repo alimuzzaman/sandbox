@@ -15,12 +15,15 @@ import base64
 import json
 import shlex
 import re
+import inspect
 
 from sandbox.core._remote import ssh_run
 
 GB = 1024 ** 3
 DEFAULT_ESTIMATE_BYTES = 5 * GB
 RESERVATION_WINDOW_SECONDS = 45 * 60
+# Numeric expiry stays compatible with older admission/reclaim readers.
+OPERATION_RESERVATION_EXPIRY = 253402300799  # 9999-12-31, explicit release only.
 PROBE_TIMEOUT_SECONDS = 60
 MAX_FLOOR_GB = 100000
 
@@ -136,9 +139,76 @@ def _run_probe(remote: dict, request: dict, *, timeout: int) -> dict | None:
     return found[0] if len(found) == 1 else None
 
 
+def release_storage_reservation(store: str, reservation_id: str) -> None:
+    """Atomically release only one owned operation reservation; usable in workers."""
+    import fcntl
+    import json
+    import os
+    import re
+    import stat
+    import tempfile
+    from pathlib import Path
+
+    if not re.fullmatch(r"[0-9a-f]{32}", reservation_id):
+        raise ValueError("invalid operation reservation")
+    root = Path(store)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError("unsafe reservation store")
+    lock = os.open(root / "reservations.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(lock)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe reservation lock")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd = os.open(root / "reservations.json", os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 8 * 1024**2):
+                raise ValueError("unsafe reservation ledger")
+            entries = json.loads(handle.read(8 * 1024**2 + 1))
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            raise ValueError("invalid reservation ledger")
+        retained = [e for e in entries if e.get("id") != reservation_id]
+        if retained == entries:
+            return  # Idempotent after an acknowledgement was lost.
+        if any(e.get("id") == reservation_id and e.get("kind") != "host-local-images" for e in entries):
+            raise ValueError("reservation ownership differs")
+        descriptor, temporary = tempfile.mkstemp(prefix=".reservation-release-", dir=root)
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                json.dump(retained, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, root / "reservations.json")
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    finally:
+        os.close(lock)
+
+
+# One canonical stdlib function runs in the controller helper and load worker.
+RESERVATION_RELEASE_PROGRAM = inspect.getsource(release_storage_reservation)
+
+
+def remote_storage_floor_release(remote: dict, target: str, reservation_id: str, *, timeout: int = 30) -> bool:
+    if not isinstance(reservation_id, str) or re.fullmatch(r"[0-9a-f]{32}", reservation_id) is None:
+        return False
+    payload = _run_probe(remote, {"target": target, "release_id": reservation_id}, timeout=timeout)
+    return payload == {"status": "released"}
+
+
 def remote_storage_floor_admission(remote: dict, target: str, *,
                                    timeout: int = PROBE_TIMEOUT_SECONDS,
-                                   minimum_estimate_bytes: int = 0) -> dict | None:
+                                   minimum_estimate_bytes: int = 0,
+                                   reservation_id: str | None = None) -> dict | None:
     """Probe, decide and (when admitted) reserve. None when no floor is set."""
     value = remote.get("storage_floor_gb")
     if value is None or (type(value) is int and value == 0):
@@ -148,11 +218,17 @@ def remote_storage_floor_admission(remote: dict, target: str, *,
         return evaluate_storage_floor(None, floor_gb=0)
     if type(minimum_estimate_bytes) is not int or minimum_estimate_bytes < 0:
         return evaluate_storage_floor(None, floor_gb=floor // GB)
+    if reservation_id is not None and (not isinstance(reservation_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", reservation_id) is None):
+        return evaluate_storage_floor(None, floor_gb=floor // GB)
     request = {"target": str(target), "floor_bytes": floor,
                "default_estimate": DEFAULT_ESTIMATE_BYTES,
                "minimum_estimate": minimum_estimate_bytes,
                "window_seconds": RESERVATION_WINDOW_SECONDS,
                "reservations": None}
+    if reservation_id is not None:
+        request["reservation_id"] = reservation_id
+        request["operation_expiry"] = OPERATION_RESERVATION_EXPIRY
     payload = _run_probe(remote, request, timeout=timeout)
     return evaluate_storage_floor(payload, floor_gb=floor // GB)
 
@@ -171,7 +247,7 @@ def remote_free_space(remote: dict, *, timeout: int = 30) -> dict:
 
 
 # Runs on the remote with ``REQUEST`` bound. Prints exactly one JSON line.
-_PROGRAM = r'''
+_PROGRAM = RESERVATION_RELEASE_PROGRAM + r'''
 import fcntl, json, math, os, stat, subprocess, time
 from pathlib import Path
 
@@ -194,6 +270,9 @@ def main():
     deploy = Path(target).parent if target else home / "deploy-src"
     if target and deploy.name == "deploy-src":
         home = deploy.parent
+    if REQUEST.get("release_id") is not None:
+        release_storage_reservation(str(home / "runtime" / "storage"), REQUEST["release_id"])
+        return emit({"status": "released"})
     roots = [str(deploy if deploy.exists() else home if home.exists() else Path.home())]
     for docker_root in ("/var/lib/docker",):
         if os.path.isdir(docker_root):
@@ -277,20 +356,47 @@ def main():
         live = [e for e in entries if isinstance(e, dict)
                 and isinstance(e.get("expires_at"), (int, float)) and e["expires_at"] > now
                 and isinstance(e.get("estimate_bytes"), int) and e["estimate_bytes"] >= 0]
-        reserved = sum(e["estimate_bytes"] for e in live)
+        operation_id = REQUEST.get("reservation_id")
+        if operation_id is not None:
+            import re
+            if not isinstance(operation_id, str) or re.fullmatch(r"[0-9a-f]{32}", operation_id) is None:
+                return emit({"status": "unavailable", "reason": "invalid_operation_reservation"})
+            if any(e.get("id") == operation_id and (e.get("target") != str(target)
+                    or e.get("kind") != "host-local-images") for e in live):
+                return emit({"status": "unavailable", "reason": "reservation_owner_mismatch"})
+        if operation_id is not None:
+            estimate = max([estimate] + [e["estimate_bytes"] for e in live if e.get("id") == operation_id])
+        reserved = sum(e["estimate_bytes"] for e in live if operation_id is None or e.get("id") != operation_id)
         free = free_bytes(roots)
         if free is None:
             return emit({"status": "unavailable", "reason": "statvfs_failed"})
         floor = int(REQUEST.get("floor_bytes") or 0)
         admitted = free - reserved - estimate >= floor
         if admitted:
-            live.append({"id": os.urandom(8).hex(), "target": str(target), "estimate_bytes": int(estimate),
-                         "created_at": now,
-                         "expires_at": now + int(REQUEST.get("window_seconds") or 0)})
+            if operation_id is not None:
+                # Never shorten an existing reservation on idempotent replay.
+                estimate = max([estimate] + [e["estimate_bytes"] for e in live if e.get("id") == operation_id])
+                live = [e for e in live if e.get("id") != operation_id]
+            record = {"id": operation_id or os.urandom(8).hex(), "target": str(target), "estimate_bytes": int(estimate),
+                      "created_at": now,
+                      "expires_at": now + int(REQUEST.get("window_seconds") or 0)}
+            if operation_id is not None:
+                record["expires_at"] = int(REQUEST["operation_expiry"])
+                record["kind"] = "host-local-images"
+            live.append(record)
         if admitted:
             tmp = store / ("reservations.json.tmp-%d" % os.getpid())
-            tmp.write_text(json.dumps(live))
+            descriptor = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "w") as handle:
+                json.dump(live, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp, path)
+            directory = os.open(store, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         emit({"status": "complete", "free_bytes": free, "reserved_bytes": reserved,
               "history_bytes": history, "estimate_bytes": estimate,
               "estimate_source": estimate_source, "admitted": admitted})

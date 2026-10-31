@@ -1335,9 +1335,9 @@ legacy stores use v1. V2 now requires a storage floor, reserves at least 3 times
 the bundle bytes, and quarantines uncertain loads. See the
 [operational details](docs/remote-hosting.md#shared-bundle-runtime-upgrade-and-review-fixes).
 
-Protocol 14 introduced v2; these review fixes require **protocol 15**.
+Protocol 14 introduced v2; the current reservation lifecycle requires **protocol 16**.
 After upgrading, reinstall remote runtimes, including for v1-only verdict-gated
-commands. Protocol-13 and protocol-14 runtimes cannot serve this client:
+commands. Protocol-13/14/15 runtimes cannot serve this client:
 
 ```sh
 ./sb remote service migrate NAME --plan --json
@@ -1348,3 +1348,9 @@ commands. Protocol-13 and protocol-14 runtimes cannot serve this client:
 Review the plan and explicitly authorize the migration. Verify the installed
 revision and compatibility range in status before remote operations. No migration
 is performed by upgrading this checkout.
+
+The reservation lifecycle follow-up requires **protocol 16**, so migrate
+protocol-13/14/15 runtimes after upgrading. V2 reserves the full 3x bundle before
+the lease and retains its reservation across controller loss until worker success
+or explicit operator reconciliation. See the
+[reservation lifecycle and exact recovery commands](docs/remote-hosting.md#v2-reservation-lifecycle-and-quarantine-recovery).

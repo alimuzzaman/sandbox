@@ -2213,7 +2213,7 @@ Older clients reject the v2 schema before transfer writes. Roll back by using
 the older client with a separately exported v1 receipt; there is no automatic
 fallback or conversion of persisted receipts. Do not overwrite retained v1
 output directories when selecting v2. No remote acceptance is implied by local
-proof. Protocol 14 introduced this contract; the review fixes below require protocol 15.
+proof. Protocol 14 introduced this contract; the reservation lifecycle below requires protocol 16.
 
 ### Shared-bundle runtime upgrade and review fixes
 
@@ -2245,10 +2245,10 @@ and removing `load-unverified`. Do not clear it merely because a CLI exited.
 Protocol 14 introduced the v2 receipt/transport shapes and also recorded existing
 `cmd_retention` shape drift: `commands`, `remedy`, and `skipped`. These retention
 keys were missing from the pinned protocol-13 manifest; pack 9 did not add that
-retention behavior. Review fixes advance the protocol to **15**, as required by
-the shape gate for the new worker/admission contract. After upgrading a client,
+retention behavior. The first review fixes advanced the protocol to 15; the reservation lifecycle
+follow-up below requires **16**, as required by the shape gate. After upgrading a client,
 **reinstall each remote runtime**, including for v1-only verdict-gated commands.
-A protocol-13 or protocol-14 runtime cannot serve this protocol-15 client.
+A protocol-13/14/15 runtime cannot serve this protocol-16 client.
 No v1-only compatibility exception is added to the global verdict gate.
 
 From the upgraded Sandbox checkout, review and explicitly authorize the migration:
@@ -2271,3 +2271,71 @@ Those images still travel inside a transferred full bundle and may be re-importe
 A hard-killed stage worker can leave its private `.upload-*.tar` file behind.
 There is no automatic sweeper; inspect task-owned staging during operator
 reconciliation after proving the daemon idle.
+
+### V2 reservation lifecycle and quarantine recovery
+
+V2 reserves at least 3 times the **full** bundle before acquiring the engine
+lease, even when the first observation finds every image present. A changed tag
+in the locked observation therefore cannot cause an under-reserved import.
+All-present hosts still upload zero bytes but must pass this conservative admission.
+
+V2 operation reservations do not use the ordinary 45-minute expiry. They use a
+numeric year-9999 expiry, so existing admission and reclaim readers also retain
+them. The unique reservation ID is passed to the load worker and saved in the
+`load-unverified` marker. Only confirmed Docker success releases that exact ID,
+before clearing quarantine and acknowledging the load. Controller loss cannot
+shorten the reservation. Timeout, CLI error, worker death, or release failure
+retains it until operator reconciliation. When no worker could have started,
+the controller explicitly releases its reservation in bounded cleanup. A hard
+controller death before worker start or a lost admission acknowledgement can
+leave an orphan reservation; inspect
+its `kind=host-local-images`, target, and ID before explicit reconciliation.
+Ordinary job/deploy reservations retain their 45-minute policy.
+
+This lifecycle changes the contract to **protocol 16**. Protocol-13/14/15 runtimes
+must be migrated after upgrading the client using the plan, confirmed migration,
+and status commands above. No remote migration is performed by this change.
+
+After independently establishing daemon idleness, for example through an
+**approved Docker maintenance stop**, run the following **on the target itself,
+from the upgraded Sandbox checkout**. Use the registered Sandbox home if it
+is different from `$HOME/sandbox`. These commands take both engine and worker
+locks, release the marker's exact reservation, restore the fence to mode 0600,
+and remove the marker. They refuse while a worker still holds its fence.
+Do not run them just because a CLI timed out.
+
+```sh
+SANDBOX_HOME="${SANDBOX_HOME:-$HOME/sandbox}" python3 - <<'PY'
+import fcntl, json, os
+from pathlib import Path
+from sandbox.resources.storage_floor import release_storage_reservation
+
+home = Path(os.environ["SANDBOX_HOME"])
+root = home / "runtime" / "host-local-images"
+marker = root / "load-unverified"
+fence = root / "load-fence.lock"
+with (root / "engine.lock").open("r+b") as engine, fence.open("rb") as worker:
+    fcntl.flock(engine, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fcntl.flock(worker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    raw = marker.read_bytes()
+    # Protocol-15 markers predate operation-bound reservations.
+    reservation_id = None if raw == b"load outcome unverified\n" else json.loads(raw)["reservation_id"]
+    if reservation_id is not None:
+        release_storage_reservation(str(home / "runtime" / "storage"), reservation_id)
+    os.fchmod(worker.fileno(), 0o600)
+    os.fsync(worker.fileno())
+    marker.unlink()
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+PY
+```
+
+Older quarantine markers can be plain text without a reservation ID. After
+proving idleness and holding the same locks, those pre-lifecycle markers need
+only the mode restore and marker removal; do not guess an operation reservation
+ID. For a current orphan with no marker, explicitly identify its ledger ID and
+call `release_storage_reservation` under the same locks after proving no worker
+or daemon import remains. Never delete or reset the complete reservation ledger.

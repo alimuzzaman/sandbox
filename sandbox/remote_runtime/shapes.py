@@ -61,6 +61,7 @@ RUNTIME_PRODUCERS = (
 # then the runtime-side response producers.
 SHAPE_SOURCES = (
     "sandbox/transports/remote_local_images.py",
+    "sandbox/resources/storage_floor.py",
     "sandbox/transports/remote_hosting_activation.py",
     "sandbox/transports/remote_hosting_images.py",
     "sandbox/transports/remote_jobs.py",

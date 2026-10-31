@@ -8,6 +8,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- V2 image admission reserves the full 3x bundle before the engine lease, so a
+  tag change between observations cannot bypass disk admission. Operation
+  reservations persist until explicit release; confirmed worker success releases
+  them, while controller loss or quarantine retains capacity. Ordinary job
+  reservation expiry is unchanged. Added exact quarantine recovery commands.
+- Reservation lifecycle payloads advance control protocol to 16. Migrate older
+  runtimes using the supported plan/confirmed migration/status workflow before
+  verdict-gated commands. This change performs no remote migration.
 - Shared bundles now refuse classic/legacy builders before builds or writes;
   v2 requires Docker >=25 and the containerd image store. V1 stale-archive cleanup
   is restored. V2 reserves at least 3 times bundle bytes with a default 1 GiB

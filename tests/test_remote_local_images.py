@@ -454,7 +454,7 @@ class SharedBundleTransferTests(unittest.TestCase):
                 stack.enter_context(patch.object(local_images, 'load_receipt', return_value=(receipt, Path('/synthetic/receipt.json'))))
                 stack.enter_context(patch.object(local_images, 'bundle_identities'))
                 stack.enter_context(patch.object(remote_local_images, 'observe', side_effect=[initial, initial, match] if not present else [match, match]))
-                stack.enter_context(patch.object(remote_local_images, '_storage_admission'))
+                stack.enter_context(patch.object(remote_local_images, '_storage_admission', return_value=None))
                 stack.enter_context(patch.object(remote_local_images, 'target_image_lease', return_value=lease))
                 stack.enter_context(patch.object(remote_local_images, '_checked', return_value='same-daemon'))
                 load = stack.enter_context(patch.object(remote_local_images, 'load_archive'))
@@ -556,6 +556,71 @@ for outcome in ('success','timeout','worker-loss'):
         frames = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(frames[0]['state'],'loaded')
         self.assertEqual(frames[1:],[{'schema':1,'acquired':False}]*2)
+
+
+
+class BundleReservationRaceTests(unittest.TestCase):
+    def test_first_present_then_locked_mismatch_has_full_reservation_or_refuses(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt = SharedBundleReceiptTests.receipt()
+        receipt['bundles']['bundle-1']['archive_bytes'] = 100_000_000
+        receipt = local_images.seal_receipt(receipt)
+        matching = RemoteLocalImageTests._matching_observation()
+        missing = {'engine':'linux/amd64','images':{}}
+        for admit in (True,False):
+            lease = MagicMock(); lease.__enter__.return_value = lease
+            with self.subTest(admit=admit), ExitStack() as stack:
+                stack.enter_context(patch.object(local_images,'load_receipt',return_value=(receipt,Path('/synthetic/receipt.json'))))
+                stack.enter_context(patch.object(local_images,'bundle_identities'))
+                stack.enter_context(patch.object(remote_local_images,'observe',side_effect=[matching,missing,matching]))
+                stack.enter_context(patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value='/srv/sandbox'))
+                policy = stack.enter_context(patch('sandbox.resources.storage_floor.remote_storage_floor_admission',return_value={'ok':admit}))
+                acquire = stack.enter_context(patch.object(remote_local_images,'target_image_lease',return_value=lease))
+                stack.enter_context(patch.object(remote_local_images,'_checked',return_value='same-daemon'))
+                upload = stack.enter_context(patch.object(remote_local_images,'load_archive'))
+                publish = stack.enter_context(patch.object(remote_local_images,'publish',return_value='synthetic'))
+                release = stack.enter_context(patch.object(remote_local_images,'_release_reservation'))
+                if admit:
+                    result = remote_local_images.push_receipt('synthetic','unused',timeout=60,
+                        artifact_timeout=30,machine_identity='synthetic',registered_host_digest='synthetic',entry={})
+                    self.assertEqual(result['loaded'],['image-1'])
+                    upload.assert_called_once()
+                    self.assertEqual(upload.call_args.kwargs['reservation_id'],policy.call_args.kwargs['reservation_id'])
+                    release.assert_not_called()  # Worker acknowledged its own durable release.
+                else:
+                    with self.assertRaises(remote_local_images.RemoteLocalImageError):
+                        remote_local_images.push_receipt('synthetic','unused',timeout=60,
+                            artifact_timeout=30,machine_identity='synthetic',registered_host_digest='synthetic',entry={})
+                    acquire.assert_not_called(); upload.assert_not_called(); publish.assert_not_called()
+                self.assertEqual(policy.call_args.kwargs['minimum_estimate_bytes'],300_000_000)
+                self.assertRegex(policy.call_args.kwargs['reservation_id'],r'^[0-9a-f]{32}$')
+
+    def test_no_worker_releases_but_uncertain_worker_keeps_reservation(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt = SharedBundleReceiptTests.receipt()
+        matching = RemoteLocalImageTests._matching_observation()
+        for starts in (False,True):
+            locked = {'engine':'linux/amd64','images':{}} if starts else matching
+            lease = MagicMock(); lease.__enter__.return_value = lease
+            with self.subTest(starts=starts), ExitStack() as stack:
+                stack.enter_context(patch.object(local_images,'load_receipt',return_value=(receipt,Path('/synthetic/receipt.json'))))
+                stack.enter_context(patch.object(local_images,'bundle_identities'))
+                stack.enter_context(patch.object(remote_local_images,'observe',side_effect=[matching,locked]))
+                stack.enter_context(patch.object(remote_local_images,'_storage_admission',return_value='a'*32))
+                stack.enter_context(patch.object(remote_local_images,'target_image_lease',return_value=lease))
+                stack.enter_context(patch.object(remote_local_images,'_checked',return_value='same-daemon'))
+                stack.enter_context(patch.object(remote_local_images,'load_archive',side_effect=remote_local_images.RemoteLocalImageError('local_images_transfer_unknown')))
+                stack.enter_context(patch.object(remote_local_images,'publish',return_value='synthetic'))
+                release = stack.enter_context(patch.object(remote_local_images,'_release_reservation'))
+                if starts:
+                    with self.assertRaises(remote_local_images.RemoteLocalImageError):
+                        remote_local_images.push_receipt('synthetic','unused',timeout=60,artifact_timeout=30,
+                            machine_identity='synthetic',registered_host_digest='synthetic',entry={})
+                    release.assert_not_called()
+                else:
+                    remote_local_images.push_receipt('synthetic','unused',timeout=60,artifact_timeout=30,
+                        machine_identity='synthetic',registered_host_digest='synthetic',entry={})
+                    release.assert_called_once_with({},receipt,'a'*32)
 
 
 if __name__ == "__main__":

@@ -960,6 +960,11 @@ class JobRepository:
         if set(fields) - allowed_fields:
             raise ValueError("unsupported job transition fields")
         with self.transaction(immediate=True) as connection:
+            if target in {Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                          Lifecycle.CANCELLED, Lifecycle.INTERRUPTED} and connection.execute(
+                    "SELECT 1 FROM job_events WHERE job_id=? AND kind='supervisor_stop_uncertain' LIMIT 1",
+                    (job_id,)).fetchone():
+                raise ValueError("owned work cessation is uncertain; retain job authority")
             current = connection.execute("SELECT lifecycle FROM jobs WHERE job_id=?", (job_id,)).fetchone()
             if current is None:
                 raise JobNotFound(f"job {job_id!r} was not found")
@@ -1137,6 +1142,10 @@ class JobRepository:
 
     def release_leases(self, job_id: str) -> None:
         with self.transaction(immediate=True) as connection:
+            if connection.execute(
+                    "SELECT 1 FROM job_events WHERE job_id=? AND kind='supervisor_stop_uncertain' LIMIT 1",
+                    (job_id,)).fetchone():
+                raise ValueError("owned work cessation is uncertain; retain job authority")
             connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
 

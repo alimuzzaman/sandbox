@@ -42,6 +42,10 @@ import hashlib
 import ipaddress
 import math
 from datetime import datetime, timezone
+import functools
+import http.client
+import socket
+import ssl
 import urllib.error
 import urllib.request
 import subprocess
@@ -558,6 +562,17 @@ def deploy_exact_working_tree(
         )
         if network_capacity.get("ok") is not True:
             raise NetworkCapacityAdmissionError(network_capacity)
+    # Spec 066: the storage floor is the second admission, still before any
+    # remote write. It is a no-op unless the remote declares a floor.
+    storage_floor = None
+    if isinstance(remote, dict) and remote.get("storage_floor_gb") is not None:
+        from sandbox.resources.storage_floor import (
+            StorageFloorAdmissionError, remote_storage_floor_admission,
+        )
+        storage_floor = remote_storage_floor_admission(
+            remote, deploy_target_path(remote, root, home_timeout=push_timeout))
+        if storage_floor is not None and storage_floor.get("ok") is not True:
+            raise StorageFloorAdmissionError(storage_floor)
     target = ensure_deploy_repo(remote, root, home_timeout=push_timeout)
     # A detached HEAD (the normal PR-review checkout) is pushed to an
     # immutable sandbox-source-<sha> ref; only a named branch is pushed by name.
@@ -580,6 +595,7 @@ def deploy_exact_working_tree(
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
             "uncommitted_files_applied": applied,
             "network_capacity": network_capacity,
+            "storage_floor": storage_floor,
             "source_ref": source_ref,
             # For a nested immutable deploy the pushed commit is the
             # source-root subtree artifact; retain the user's resolved ref as
@@ -1122,11 +1138,9 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
             "Authorization": f"Bearer {token}",
             "Accept": "application/json, text/event-stream",
         })
-        # Doctor must probe the VPS directly. A developer's ambient HTTP proxy
-        # can otherwise transform a healthy MCP response into a false negative.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
-            with opener.open(request, timeout=10) as response:
+            # Doctor probes directly, while sharing the verified DNS fallback.
+            with _control_urlopen(remote, request, timeout=10, direct=True) as response:
                 status = response.status
         except urllib.error.HTTPError as error:
             status = error.code
@@ -2710,12 +2724,12 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10,
         url += "?processes=1"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _control_urlopen(remote, request, timeout=timeout) as response:
             if response.status != 200:
                 raise RuntimeError(f"remote diagnostics returned HTTP {response.status}")
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        raise RuntimeError("remote diagnostics endpoint is unreachable") from exc
+        raise RuntimeError("remote diagnostics endpoint is unreachable" + _dns_detail(exc)) from exc
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError("remote diagnostics returned an invalid payload")
     if include_processes:
@@ -2736,6 +2750,83 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10,
     if not isinstance(sanitized, dict):
         raise RuntimeError("remote diagnostics redaction failed")
     return sanitized
+
+
+class _OriginHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS to a fixed origin address, with SNI and certificate checks for ``host``."""
+
+    def __init__(self, host, *, origin: str, **kwargs):
+        super().__init__(host, **kwargs)
+        self._origin = origin
+
+    def connect(self):
+        sock = socket.create_connection((self._origin, self.port or 443), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _OriginHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, origin: str):
+        super().__init__(context=ssl.create_default_context())
+        self._origin = origin
+
+    def https_open(self, req):
+        return self.do_open(functools.partial(_OriginHTTPSConnection, origin=self._origin),
+                            req, context=self._context)
+
+
+def _control_urlopen(remote: dict, request, timeout, *, direct: bool = False):
+    """Open a control request; survive a control host that stops resolving.
+
+    The control endpoint is reached by its DNS name. When that name does not
+    resolve (an expired zone, a deleted record) and the remote has a recorded
+    ``origin_ipv4``, connect to that address instead: TLS is still verified
+    for the control hostname, so this cannot reach a different server. With no
+    recorded origin the error names the hostname that failed to resolve.
+    """
+    parsed = urlsplit(request.full_url)
+    try:
+        if direct:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            return opener.open(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.URLError as exc:
+        if not isinstance(exc.reason, socket.gaierror):
+            raise
+        if request.host != parsed.netloc:
+            # The request went through a proxy; that proxy's name is what failed.
+            raise urllib.error.URLError(
+                f"proxy host {request.host} for control host {parsed.hostname} does not "
+                "resolve in DNS") from exc
+        origin = remote.get("origin_ipv4")
+        try:
+            origin = str(ipaddress.IPv4Address(origin)) if origin else None
+        except ValueError:
+            origin = None
+        if parsed.scheme != "https" or origin is None:
+            raise urllib.error.URLError(
+                f"control host {parsed.hostname} does not resolve in DNS; restore its "
+                "DNS-only A record to the origin") from exc
+        print(f"warning: control host {parsed.hostname} does not resolve in DNS; using the "
+              f"recorded origin {origin} (TLS verified for {parsed.hostname})", file=sys.stderr)
+        # No proxy, no redirects, no plain HTTP: only this one verified TLS hop,
+        # so the bearer token can never follow a redirect to another authority.
+        opener = urllib.request.OpenerDirector()
+        for handler in (_OriginHTTPSHandler(origin), urllib.request.HTTPErrorProcessor(),
+                        urllib.request.HTTPDefaultErrorHandler()):
+            opener.add_handler(handler)
+        fresh = urllib.request.Request(request.full_url, data=request.data,
+                                       headers=dict(request.header_items()),
+                                       method=request.get_method())
+        return opener.open(fresh, timeout=timeout)
+
+
+def _dns_detail(exc: BaseException) -> str:
+    """The named DNS failure from ``_control_urlopen``, for a caller's message."""
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, urllib.error.URLError) and isinstance(reason, str) \
+            and "does not resolve in DNS" in reason:
+        return ": " + reason[:200]
+    return ""
 
 
 def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
@@ -2762,7 +2853,7 @@ def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
     request = urllib.request.Request(base.rstrip("/") + path, data=data, headers=headers,
                                      method="POST" if data is not None else "GET")
     try:
-        with urllib.request.urlopen(request, timeout=max(int(timeout), 1)) as response:
+        with _control_urlopen(remote, request, timeout=max(int(timeout), 1)) as response:
             if response.status != 200:
                 raise RuntimeError(f"remote control returned HTTP {response.status}")
             raw = response.read(4 * 1024 * 1024 + 1)
@@ -2770,7 +2861,7 @@ def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
                 raise RuntimeError("remote control response is too large")
             result = json.loads(raw.decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        raise RuntimeError("remote control endpoint is unreachable") from exc
+        raise RuntimeError("remote control endpoint is unreachable" + _dns_detail(exc)) from exc
     if not isinstance(result, dict):
         raise RuntimeError("remote control returned an invalid payload")
     return result
@@ -4388,14 +4479,15 @@ def verify_remote(remote: dict, *, name: str | None = None, timeout: int = 10) -
     status = None
     authenticated = False
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _control_urlopen(remote, request, timeout=timeout) as response:
             status = int(response.status)
             authenticated = status in {200, 204, 400, 405, 406}
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
         authenticated = status in {200, 204, 400, 405, 406}
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise RuntimeError("remote_auth_failed: authenticated control probe was unavailable")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError("remote_auth_failed: authenticated control probe was unavailable"
+                           + _dns_detail(exc))
     elapsed = min(max(time.monotonic() - started, 0.0), float(timeout))
     service = remote.get("mcp_service") if isinstance(remote.get("mcp_service"), dict) else {}
     revision = service.get("runtime_revision") if isinstance(service.get("runtime_revision"), str) else None

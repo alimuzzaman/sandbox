@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -31,44 +32,107 @@ def ensure_pyyaml() -> None:
     except ImportError:
         pass
 
-    cli_py = CLI_VENV / "bin" / "python"
-    if not cli_py.exists():
-        # A killed or interrupted first bootstrap can leave the venv directory
-        # behind without its interpreter.  Passing that path back to
-        # ``python -m venv`` raises ``FileExistsError`` instead of recovering.
-        # Only remove a real directory at the generated CLI-venv location;
-        # never follow or replace a user-supplied file/symlink.
-        if CLI_VENV.is_symlink() or (CLI_VENV.exists() and not CLI_VENV.is_dir()):
-            die("CLI venv path exists but is not a directory; remove it and retry")
-        if CLI_VENV.is_dir():
-            info("Incomplete CLI venv found; recreating .cli-venv/…")
-            shutil.rmtree(CLI_VENV)
-        info("Creating CLI venv at .cli-venv/ (one-time)…")
-        subprocess.check_call([sys.executable, "-m", "venv", str(CLI_VENV)])
-        subprocess.check_call(
-            [str(CLI_VENV / "bin" / "pip"), "install", "--quiet",
-             "--disable-pip-version-check", "pyyaml"]
-        )
-
-    # If we're not already running under the CLI venv, re-exec there.
-    # Compare sys.prefix (not sys.executable, which resolves to the underlying
-    # interpreter binary that the venv symlinks to).
-    if Path(sys.prefix).resolve() != CLI_VENV.resolve():
-        # Replay the original argv only when this process genuinely is the
-        # Sandbox CLI entry point. A foreign caller (unittest discovery, an
-        # embedded interpreter, another tool importing this package) cannot be
-        # replaced by an argv replay it never expressed: os.execv would swap
-        # the whole process for a bogus `sb <foreign argv>` invocation and
-        # silently kill the host process.
-        try:
-            invoked_as_cli = Path(sys.argv[0] or "").resolve() == ENTRY.resolve()
-        except OSError:
-            invoked_as_cli = False
-        if invoked_as_cli:
-            os.execv(str(cli_py), [str(cli_py), str(ENTRY), *sys.argv[1:]])
+    if bootstrap_cli_dependencies():
+        import yaml  # noqa: F401
+        return
+    # A foreign caller (unittest discovery, an embedded interpreter, another
+    # tool importing this package) cannot be replaced by an argv replay it
+    # never expressed.
+    if not _is_cli_process():
         die("PyYAML is required but unavailable outside the Sandbox CLI venv; "
             "run commands through ./sb (or .cli-venv/bin/python), or install "
             "pyyaml into the current interpreter.")
+
+
+def _is_cli_process() -> bool:
+    """Return true only for a process actually executing the ``sb`` entry.
+
+    ``sys.argv`` alone is insufficient: embedded callers and tests commonly
+    present CLI-shaped arguments while their real ``__main__`` remains a test
+    runner or host application. Re-executing those processes would replace the
+    caller and lose its result stream.
+    """
+    main_module = sys.modules.get("__main__")
+    main_file = getattr(main_module, "__file__", "")
+    try:
+        return (Path(sys.argv[0] or "").resolve() == ENTRY.resolve()
+                and Path(main_file or "").resolve() == ENTRY.resolve())
+    except OSError:
+        return False
+
+
+def bootstrap_cli_dependencies() -> bool:
+    """Converge and enter the CLI venv only for the real ``sb`` process.
+
+    Callers use this lazily when a required import is unavailable. Keeping the
+    bootstrap off the unconditional startup path lets dependency-free commands
+    keep working when an OS Python already provides their imports.
+    """
+    if not _is_cli_process():
+        return False
+    cli_py = CLI_VENV / "bin" / "python"
+    if not cli_py.exists():
+        _create_cli_venv()
+    _ensure_cli_requirements(cli_py)
+    if Path(sys.prefix).resolve() != CLI_VENV.resolve():
+        os.execv(str(cli_py), [str(cli_py), str(ENTRY), *sys.argv[1:]])
+    return True
+
+
+def _create_cli_venv() -> None:
+    if CLI_VENV.is_symlink() or (CLI_VENV.exists() and not CLI_VENV.is_dir()):
+        die("CLI venv path exists but is not a directory; remove it and retry")
+    if CLI_VENV.is_dir():
+        info("Incomplete CLI venv found; recreating .cli-venv/…")
+        shutil.rmtree(CLI_VENV)
+    info("Creating CLI venv at .cli-venv/ (one-time)…")
+    try:
+        subprocess.check_call([sys.executable, "-m", "venv", str(CLI_VENV)])
+    except (OSError, subprocess.CalledProcessError):
+        # ``venv`` can fail after creating an interpreter and pyvenv.cfg. Do
+        # not leave that partial directory available to a later invocation.
+        if CLI_VENV.is_dir() and not CLI_VENV.is_symlink():
+            shutil.rmtree(CLI_VENV)
+        die("CLI venv could not be created; install the operating system's "
+            "python3-venv package and retry")
+
+
+def _ensure_cli_requirements(cli_py: Path) -> None:
+    requirements = ROOT / "requirements-cli.txt"
+    stamp = CLI_VENV / ".requirements-cli.sha256"
+    try:
+        digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+        installed_digest = stamp.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        installed_digest = ""
+        try:
+            digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+        except OSError:
+            die("CLI dependency manifest is unavailable")
+    except OSError:
+        die("CLI dependency manifest or revision marker is unavailable")
+    if installed_digest == digest:
+        return
+
+    pip_check = subprocess.run(
+        [str(cli_py), "-m", "pip", "--version"], capture_output=True, text=True,
+    )
+    if pip_check.returncode != 0:
+        try:
+            subprocess.check_call([str(cli_py), "-m", "ensurepip", "--upgrade"])
+        except (OSError, subprocess.CalledProcessError):
+            die("CLI dependencies could not be bootstrapped; install the operating "
+                "system's python3-venv package and retry")
+    try:
+        subprocess.check_call([
+            str(cli_py), "-m", "pip", "install", "--quiet",
+            "--disable-pip-version-check", "-r", str(requirements),
+        ])
+    except (OSError, subprocess.CalledProcessError):
+        die("CLI dependencies could not be installed from requirements-cli.txt")
+    temporary = stamp.with_name(stamp.name + ".tmp")
+    temporary.write_text(digest + "\n", encoding="ascii")
+    os.replace(temporary, stamp)
 
 
 def expand(value, vars_: dict) -> object:

@@ -7,7 +7,83 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- V2 readiness reads stdout only; SSH stderr warnings are captured separately
+  in bounded diagnostics and cannot block a valid worker acknowledgement.
+  Garbage on stdout still refuses before upload. Protocol 17 is unchanged.
+- Local-image receipt publication decodes byte acknowledgements correctly;
+  malformed replies remain publication-unknown and unexpected exceptions return
+  a closed JSON error without exposing details.
+- Shared-bundle reservations now start under the engine lease after proven
+  orphans for that target are reconciled. A reservation-verified worker readiness
+  acknowledgement precedes upload; early failures release their reservation.
+  Persistent reservations remain for live workers and quarantined imports.
+- Release accepts same-owner non-writable 0644 ledgers from older clients,
+  tightens them to 0600, and waits boundedly for the ledger lock. Cleanup failures
+  preserve the original error or successful publication and report pending cleanup.
+- V2 builders require Docker >=25 and containerd. V1 archive cleanup is restored;
+  ordinary reservation expiry is unchanged. V2 reserves at least 3x the full bundle
+  with a default 1 GiB floor, scales load timeout, and fences uncertain imports.
+- Current control protocol is **17**. Migrate runtimes from the upgraded checkout
+  before bumping client pins: review `sb remote service migrate NAME --plan --json`,
+  authorize `sb remote service migrate NAME --confirm --json`, and verify with
+  `sb remote service status NAME --json`. Older runtimes cannot serve this client,
+  including v1-only verdict-gated commands. No remote migration is performed here.
+- Protocol history: 14 introduced v2 and recorded existing `cmd_retention` drift
+  (`commands`, `remedy`, `skipped`); 15 added quarantine and 16 added persistent
+  operation reservations. Their lifecycle corrections ship under 17.
+
 ### Added
+- Opt-in local-image v2 receipts (`--receipt-version v2`) bind one shared raw
+  save bundle, with closed image membership and version-aware apply readers.
+  V1 remains the default and rollback format. The receipt contract introduced
+  protocol 14; the current fixes above require 17. No installed runtime or
+  deployment is changed by this source work.
+- Hosted local images (spec 068). `sb host image build-local` builds an exact
+  clean revision for `linux/amd64` with hosted Compose inputs and writes a
+  bounded non-secret receipt; `host image push-local` confirmation-gates a
+  registered-transport upload, skips exact remote images and publishes an
+  immutable remote receipt. `host apply --local-images DIGEST` revalidates the
+  source, target, Docker daemon and exact config/platform/layer identities
+  before the existing hard no-build/no-pull lifecycle. A dedicated SSH-held
+  remote-engine lock serializes load, verification and receipt-bound apply
+  before delivery admission. Receipts retain a builder store ID separately from
+  the portable archive configuration ID required on the destination, supporting
+  Docker 29 containerd-store builders without digest aliases. The initial control
+  contract used protocol 13. Apply also verifies the actual remote Compose render;
+  local rendering refuses Docker-client-dependent image interpolation. Transfer
+  pins registration, gates readiness before writes, validates target path slugs,
+  caps every step with the aggregate timeout, and fences surviving load workers
+  from subsequent transfer/apply owners.
+- Secret-manager hardening binds each controller credential to the canonical
+  project root and Infisical endpoint, exact selector, MCP grants and fixed consuming profiles;
+  authority changes require explicit credential placement with no legacy-item
+  migration. Provider OS-store reads/status, DNS and HTTPS work now shares one killable helper
+  deadline, unsafe provider control characters fail closed, and brokered child
+  groups are ended on every exit with wrapper/symlink/set-id escalation refused;
+  supervised-session group cleanup is bounded below four seconds.
+- Remote storage floor (spec 066). `sb remote set-storage-floor R --gb N` records free
+  space that remote test/job work must leave for hosted sites; every remote deploy
+  then refuses before any upload with `remote_storage_floor` (free, reserved,
+  estimate and floor in the message) when it would cross it, or when free space
+  cannot be measured. Concurrent submissions reserve their estimate for 45 minutes.
+- `sb host heal --remote R [--target P/E] [--confirm]` lists hosted containers that
+  exited after exhausting their on-failure restarts and starts exactly those, only
+  while free space is strictly above the floor.
+- Workspace reclaim removes the workspace's whole Compose project (containers,
+  unshared volumes, networks) before its checkout, and treats a workspace whose
+  retained jobs all finished more than 6 hours ago as a safe-tier
+  `finished_job_idle` candidate (needs `sb remote service migrate`). CI job-cleanup
+  uses the same stack teardown behind its identity checks and retains source and
+  cleanup state if teardown fails.
+- `sb host destroy --remote R --target PROJECT/ENV [--confirm]` removes one hosted
+  target on the nginx front door: Compose containers, volumes, networks and its own
+  image tags, edge route and certificates, remote
+  runtime directory and generated secrets, the Cloudflare DNS records Sandbox
+  created, the Origin CA certificate, and the local state entry; the deploy source, shared by the
+  project's environments, is kept. It works from recorded state alone, dry-runs without
+  `--confirm`, keeps state when any step fails, and refuses a Compose name shared
+  with another recorded target. New target mutation capability `destroy`.
 - Per-target hosting foundations (spec 060 Phase 1-2). A remote coordination
   program under `<remote SANDBOX_HOME>/runtime/hosting-leases` (one flock,
   owner-only files) keeps per-target leases with fencing tokens, a FIFO wait
@@ -112,6 +188,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a validated project-relative path.
 
 ### Changed
+- Remote control requests survive a control host that stops resolving: they connect
+  to the recorded `origin_ipv4` with TLS still verified for the control hostname and
+  warn, and without an origin the error names the unresolvable host (2026-10-12: the
+  `.bd` registry dropped the `asb.bd` delegation and `sb-xcloud-london.asb.bd` went
+  NXDOMAIN, failing lenzora deploy preflight with `recovery_target_identity_unavailable`).
 - The local remote-registration lock is per remote: work holding one remote no
   longer blocks registration changes or listing of another, and a busy lock
   reports its holder (pid, command, start time). Mismatch refusals name the

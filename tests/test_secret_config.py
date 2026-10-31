@@ -362,6 +362,104 @@ class TestSecretConfigNormalization(unittest.TestCase):
                 }})
 
 
+class TestInfisicalSecretConfig(unittest.TestCase):
+    def descriptor(self, **changes):
+        return {
+            "type": "infisical", "endpoint": "https://Vault.Example.invalid:443/",
+            "projectId": "synthetic-project", "environment": "dev",
+            "path": "/sandbox", "key": "API_TOKEN", "clientId": "controller-one",
+            **changes,
+        }
+
+    def normalize(self, descriptor, *, profile=None):
+        from sandbox.config.secrets import normalize_secret_config
+
+        project = {"sources": {"vault": descriptor}}
+        if profile is not None:
+            project["useProfiles"] = {"fixed": profile}
+        return normalize_secret_config({"secrets": project})
+
+    def test_exact_registration_is_canonical_bounded_and_side_effect_free(self):
+        descriptor = self.descriptor(mcpModes=["use", "keys", "source_info"])
+        original = json.loads(json.dumps(descriptor))
+        with mock.patch("builtins.open", side_effect=AssertionError("file read")), \
+             mock.patch("subprocess.run", side_effect=AssertionError("process")), \
+             mock.patch("socket.create_connection", side_effect=AssertionError("network")):
+            source = self.normalize(descriptor)["sources"]["vault"]
+        self.assertEqual(source, {
+            **original, "endpoint": "https://vault.example.invalid",
+            "mcpModes": ["source_info", "keys", "use"], "timeoutSeconds": 10,
+        })
+        self.assertEqual(descriptor, original)
+
+    def test_missing_metadata_and_unknown_authority_are_refused(self):
+        for field in ("endpoint", "projectId", "environment", "path", "key", "clientId"):
+            descriptor = self.descriptor()
+            del descriptor[field]
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                self.normalize(descriptor)
+        for field in ("clientSecret", "token", "role", "capacity", "format", "allowImports",
+                      "fallback", "proxy", "argv"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "unknown"):
+                self.normalize(self.descriptor(**{field: "synthetic"}))
+
+    def test_endpoint_requires_https_origin_without_credentials_or_selectors(self):
+        for endpoint in (
+            "http://vault.example.invalid", "https://user:pass@vault.example.invalid",
+            "https://vault.example.invalid/api", "https://vault.example.invalid?key=X",
+            "https://vault.example.invalid#X", "https://vault.example.invalid:",
+            "https://vault.example.invalid.", "https://vault.example.invalid/\n",
+            "https://vault.example.invalid:99999", "https://vault%2eexample.invalid",
+        ):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                self.normalize(self.descriptor(endpoint=endpoint))
+
+    def test_provider_path_and_nonsecret_metadata_are_strict(self):
+        for path in ("sandbox", "/sandbox/", "/sandbox//item", "/sandbox/../item",
+                     "/sandbox/./item", "/sandbox\\item", "/sandbox\n"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                self.normalize(self.descriptor(path=path))
+        for field in ("projectId", "clientId", "environment", "key"):
+            for value in ("", "with space", "Bearer synthetic", "ghp_synthetic", "x" * 257):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.normalize(self.descriptor(**{field: value}))
+
+    def test_provider_modes_and_deadlines_cannot_expand_authority(self):
+        for modes in (["masked"], ["reveal"], ["browse"], ["keys", "keys"], "keys", None):
+            with self.subTest(modes=modes), self.assertRaises(ValueError):
+                self.normalize(self.descriptor(mcpModes=modes))
+        for timeout in (0, 61, True, "10"):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                self.normalize(self.descriptor(timeoutSeconds=timeout))
+
+    def test_profile_key_is_exact_and_mcp_needs_explicit_use_mode(self):
+        profile = {"source": "vault", "key": "API_TOKEN", "argv": ["fixed-child"],
+                   "destination": "API_TOKEN", "mcp": True}
+        result = self.normalize(self.descriptor(mcpModes=["use"]), profile=profile)
+        self.assertEqual(result["useProfiles"]["fixed"]["key"], "API_TOKEN")
+        with self.assertRaisesRegex(ValueError, "match"):
+            self.normalize(self.descriptor(mcpModes=["use"]),
+                           profile={**profile, "key": "OTHER_TOKEN"})
+        with self.assertRaisesRegex(ValueError, "mcpModes"):
+            self.normalize(self.descriptor(), profile=profile)
+
+    def test_explicit_file_type_and_missing_type_preserve_legacy_normalization(self):
+        from sandbox.config.secrets import normalize_secret_config
+
+        source = {"path": ".env.synthetic", "mcpModes": ["masked", "keys", "use"]}
+        implicit = normalize_secret_config({"secrets": {"sources": {"fixture": source}}})
+        explicit = normalize_secret_config({"secrets": {"sources": {
+            "fixture": {**source, "type": "file"},
+        }}})
+        self.assertEqual(explicit, implicit)
+        mixed = normalize_secret_config({"secrets": {"sources": {
+            "fixture": source, "vault": self.descriptor(),
+        }}})
+        self.assertEqual(mixed["sources"]["fixture"], implicit["sources"]["fixture"])
+        with self.assertRaises(ValueError):
+            self.normalize(self.descriptor(type="unregistered"))
+
+
 class TestSecretConfigProviders(unittest.TestCase):
     def test_wordpress_provider_carries_project_and_machine_layers(self):
         from sandbox.config.facade import resolve_project_config

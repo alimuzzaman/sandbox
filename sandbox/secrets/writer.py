@@ -8,6 +8,10 @@ import os
 import stat
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Sequence
+
+if TYPE_CHECKING:
+    from .ownership.models import SourceContinuity
 
 from .models import SafeSource, SecretBrokerError
 from .parser import ParsedDocument, parse_document, render_assignment, replace_assignment
@@ -174,3 +178,142 @@ def _atomic_replace(source: SafeSource, updated: bytes) -> None:
         raise
     except OSError as exc:
         raise SecretBrokerError("update_failed", "secret source update failed") from exc
+
+
+def remove_keys(path: Path, keys: Sequence[str], *, expected: SourceContinuity,
+                before_replace: Callable[[SourceContinuity], None] | None = None,
+                deadline: float | None = None) -> SourceContinuity:
+    """Remove selected dotenv assignments atomically using metadata continuity.
+
+    No value digest or legacy revision participates. The caller must perform
+    its final destination comparison immediately before calling this function.
+    """
+    import time
+    from .models import MAX_SOURCE_BYTES
+    from .parser import SecretParseError
+    from .ownership.continuity import capture
+    from .ownership.models import SourceContinuity
+
+    if (not isinstance(expected, SourceContinuity) or not expected.reliable):
+        raise SecretBrokerError("continuity_unreliable", "source continuity is unreliable")
+    if (not isinstance(keys, (list, tuple)) or not keys
+            or any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys)):
+        raise SecretBrokerError("selection_invalid", "cleanup key selection is invalid")
+    path = Path(path)
+    directory_fd = lock_fd = source_fd = temporary_fd = -1
+    temporary_name = None
+    nofollow = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+
+    def changed():
+        return SecretBrokerError("source_changed", "source changed before cleanup")
+
+    if deadline is not None and time.time() >= deadline:
+        raise SecretBrokerError("approval_expired", "cleanup authority expired")
+
+    try:
+        for parent in (path.parent, *path.parent.parents):
+            if not stat.S_ISDIR(os.lstat(parent).st_mode):
+                raise changed()
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+        lock_name = f".{path.name.lstrip('.')}.sb-secrets.lock"
+        lock_fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | nofollow, 0o600, dir_fd=directory_fd)
+        lock_info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.geteuid()
+                or stat.S_IMODE(lock_info.st_mode) != 0o600 or lock_info.st_nlink != 1):
+            raise changed()
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise SecretBrokerError("journal_locked", "source update lock is held") from None
+        source_fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | nofollow, dir_fd=directory_fd)
+        before = os.fstat(source_fd)
+        # Check metadata before a byte read, then full continuity after parsing.
+        if any(getattr(before, stat_key) != getattr(expected, field) for field, stat_key in (
+                ("dev", "st_dev"), ("ino", "st_ino"), ("size", "st_size"),
+                ("mtime_ns", "st_mtime_ns"), ("ctime_ns", "st_ctime_ns"),
+                ("nlink", "st_nlink"), ("uid", "st_uid"), ("mode", "st_mode"))):
+            raise changed()
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(source_fd, min(65536, MAX_SOURCE_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_SOURCE_BYTES:
+                raise changed()
+        try:
+            document = parse_document(b"".join(chunks))
+        except SecretParseError:
+            raise SecretBrokerError("source_unsupported", "source cannot be safely cleaned") from None
+        current = capture(expected.alias, os.fstat(source_fd), document.entries,
+                          now_ns=time.time_ns())
+        if not current.reliable or not current.same_as(expected):
+            raise changed()
+        if not set(keys) <= set(document.entries):
+            raise SecretBrokerError("cleanup_ineligible", "cleanup key is no longer present")
+        selected = set(keys)
+        updated = b"".join(record.raw for record in document.records
+                           if getattr(record, "key", None) not in selected)
+        # mkstemp uses a sibling file, preserving owner-only permissions.
+        temporary_fd, temp_path = tempfile.mkstemp(prefix=".sb-cleanup-", dir=path.parent)
+        temporary_name = Path(temp_path).name
+        os.fchmod(temporary_fd, stat.S_IMODE(before.st_mode))
+        view = memoryview(updated)
+        while view:
+            written = os.write(temporary_fd, view)
+            if written <= 0:
+                raise changed()
+            view = view[written:]
+        os.fsync(temporary_fd)
+        latest = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        post_latest = capture(expected.alias, latest, document.entries,
+                              now_ns=time.time_ns())
+        if not post_latest.reliable or not post_latest.same_as(expected):
+            raise changed()
+        if deadline is not None and time.time() >= deadline:
+            raise SecretBrokerError("approval_expired", "cleanup authority expired")
+        staged_continuity = capture(expected.alias, os.fstat(temporary_fd),
+                                    set(document.entries) - selected,
+                                    now_ns=time.time_ns())
+        if before_replace is not None:
+            before_replace(staged_continuity)
+        if deadline is not None and time.time() >= deadline:
+            raise SecretBrokerError("approval_expired", "cleanup authority expired")
+        final_latest = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        final_check = capture(expected.alias, final_latest, document.entries,
+                              now_ns=time.time_ns())
+        if not final_check.reliable or not final_check.same_as(expected):
+            raise changed()
+        if deadline is not None and time.time() >= deadline:
+            raise SecretBrokerError("approval_expired", "cleanup authority expired")
+        os.replace(temporary_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary_name = None
+        # Rename may change ctime; all other staged metadata must stay ours.
+        from dataclasses import replace
+        renamed = capture(expected.alias, os.fstat(temporary_fd),
+                          set(document.entries) - selected, now_ns=time.time_ns())
+        permitted = replace(staged_continuity, ctime_ns=renamed.ctime_ns)
+        if not renamed.reliable or not renamed.same_as(permitted):
+            raise changed()
+        os.fsync(directory_fd)
+        result = capture(expected.alias, os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False),
+                         set(document.entries) - selected, now_ns=time.time_ns())
+        if not result.reliable:
+            raise SecretBrokerError("continuity_unreliable", "cleanup continuity is unreliable")
+        if not result.same_as(renamed):
+            raise changed()
+        return renamed
+    except SecretBrokerError:
+        raise
+    except OSError:
+        raise changed() from None
+    finally:
+        if temporary_name is not None and directory_fd >= 0:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        for descriptor in (temporary_fd, source_fd, lock_fd, directory_fd):
+            if descriptor >= 0:
+                os.close(descriptor)

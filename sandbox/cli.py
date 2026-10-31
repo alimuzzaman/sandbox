@@ -158,8 +158,11 @@ def _dispatch_remote_admission_error(exc: RemoteJobAdmissionError, args) -> None
             suffix += f" Remedy: {remedy}."
         elif isinstance(remote, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", remote):
             suffix += f" Recovery: run ./sb remote docker-pool {remote} --json."
+        # A storage-floor refusal (spec 066) carries its numbers in detail.
+        detail = payload.get("detail")
+        message = detail if isinstance(detail, str) and detail else payload["error"]
         print(
-            f"error: {payload['error']} ({payload['code']})."
+            f"error: {message} ({payload['code']})."
             f"{suffix}",
             file=sys.stderr,
         )
@@ -878,7 +881,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Readiness (spec 063):\n"
             "  ./sb remote readiness [NAME] [--project-dir DIR] [--json]"
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "set-storage-floor", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
@@ -911,6 +914,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--subnet-prefix", dest="subnet_prefix", type=int, default=None,
         help="for `remote network-range assign`: per-network subnet prefix (default 26)")
     remote_p.add_argument("--ipv4", default=None, help="public IPv4 address for hosted DNS records")
+    remote_p.add_argument("--gb", "--storage-floor-gb", dest="storage_floor_gb", type=int, default=None,
+        help="set-storage-floor: free space (GB) remote test/job work must leave "
+             "for hosted sites; 0 clears it (spec 066)")
     remote_p.add_argument("--ipv6", default=None, help="public IPv6 address for hosted DNS records")
     remote_p.add_argument("--yes", action="store_true",
         help="accept the default HTTPS control-plane choice without prompting")
@@ -1004,19 +1010,36 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, or heal hosted services that exhausted their restarts")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle"],
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
+    host_p.add_argument("--project", default=None, help="host heal: hosted project name")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
+    host_p.add_argument("--target", default=None, metavar="PROJECT/ENVIRONMENT",
+                        help="host destroy: the recorded target to remove (no manifest needed)")
+    host_p.add_argument("--clear-fenced", action="store_true",
+                        help="host destroy: remove a target still fenced by a stale apply or recovery record")
     host_p.add_argument("--confirm", action="store_true",
         help="allow protected host apply or separately confirmed edge continuation")
+    host_p.add_argument("--revision", default=None,
+        help="exact Git revision for `host image build-local` (default: HEAD)")
+    host_p.add_argument("--receipt-version", choices=["v1", "v2"], default="v1",
+        help="build-local archive contract (v2: one shared bundle; default v1)")
+    host_p.add_argument("--receipt", default=None, metavar="PATH",
+        help="local build receipt for `host image push-local`")
+    host_p.add_argument("--local-images", default=None, metavar="DIGEST",
+        help="immutable remote local-image receipt for `host apply`")
+    host_p.add_argument("--timeout", type=int, default=None, metavar="SECONDS",
+        help="bounded local image build or aggregate transfer timeout")
+    host_p.add_argument("--artifact-timeout", type=int, default=None, metavar="SECONDS",
+        help="per-artifact local image transfer timeout")
     host_p.add_argument("--purge-edge-cache", action="store_true",
         help="with an approved manifest policy, purge all Cloudflare edge cache zones")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",

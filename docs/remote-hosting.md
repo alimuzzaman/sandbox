@@ -826,6 +826,74 @@ Compose output, Compose model larger than the bounded 1 MiB preflight input, or 
 preflight refuses the apply. Every subsequent Compose `up`/`run` command carries
 `--no-build`; there is no build or development fallback. New application code ships only
 after those explicit images are produced separately.
+
+For CPU-heavy application builds, produce those images on a faster Linux
+controller and transfer them through Sandbox:
+
+```bash
+./sb host image build-local --project-dir /absolute/app \
+  --environment development --revision 0123456789abcdef0123456789abcdef01234567 --json
+./sb host image push-local --remote xcloud-london \
+  --receipt /absolute/receipt.json --confirm --json
+./sb host apply --project-dir /absolute/app --environment development \
+  --remote xcloud-london --local-images sha256:<remote-receipt-digest> \
+  --confirm --json
+```
+
+`build-local` requires a clean checkout, materializes that exact revision,
+targets only `linux/amd64`, and stores owner-only archives plus a bounded
+non-secret receipt under `$SANDBOX_HOME/runtime/hosting/local-images`. Approved
+secret values remain private build inputs; receipts contain only their declared
+bindings. Local rendering refuses service image references that change when
+Docker client selection variables (`DOCKER_CONTEXT`, `DOCKER_HOST`,
+`DOCKER_CONFIG`, `DOCKER_CERT_PATH`, `DOCKER_TLS_VERIFY`) are removed.
+`push-local` holds the named registration lock from target resolution through
+publication and passes that same target to the readiness gate before any
+reservation, lock creation, or upload. Typed readiness refusals retain their
+structured admission error. It validates each complete archive before loading
+it and runs the configured remote storage-floor admission before its first remote write,
+and holds a dedicated remote-engine lock while loading and publishing.
+Receipt-bound apply takes that same engine-wide lock before delivery admission
+or source staging and holds it through verification and runtime convergence.
+The SSH connection owns the engine lock; the remote upload/load worker also
+holds a load fence for its entire lifetime, inherited by its Docker child.
+A new transfer or apply refuses as busy while an orphaned load holds that fence.
+Disconnect or lock loss makes the outcome unknown. This engine-wide scope prevents a tag shared by two hosted environments
+from changing between verification and Compose. Transfer skips only a fresh
+exact configuration/platform/layer match and publishes an immutable remote
+receipt bound to the registered machine and Docker daemon.
+Digest-pinned external images are verified in place and never pulled.
+
+The receipt records the builder engine's observed store ID separately from the
+portable image ID extracted from the saved archive configuration. Remote
+verification requires the remote reference's Docker `.Id` to equal that exact
+portable ID; the builder-only store ID, a tag, or a manifest digest is never an
+accepted substitute. This supports Docker 29 containerd-store builders without
+silently weakening the destination comparison.
+
+This remote receipt digest is the Linux-to-Mac handoff: the applying controller
+does not need the archives. `--local-images` is valid only with
+`compose.build: false`; apply re-reads the receipt and images, then renders
+Compose remotely with the actual apply environment, files, and generated override
+and verifies each service reference plus its exact image identity before Compose,
+adds `--pull never`, and never falls back to a remote build. Transfer is staging
+evidence, not deployment success. Interrupted transfer is unknown until a fresh
+observation. One aggregate transfer deadline caps every observation, storage
+admission, lease acquisition, daemon probe, upload, and publication. Expiry before
+any remote write returns `local_images_transfer_timeout`; expiry after a possible
+write returns `local_images_transfer_unknown`. Receipt target components must be
+safe hosted slugs with the matching Compose namespace before path construction.
+Publication accepts a bounded, strictly UTF-8 acknowledgement in either bytes
+or text form; malformed replies return `local_images_receipt_publish_unknown`.
+Unexpected client exceptions return `local_images_transfer_unknown` in the
+nonzero `--json` envelope without exposing exception text. An unknown result may
+follow a complete atomic remote receipt publication. A caller-initiated retry
+of the same local receipt freshly observes and skips exact remote images, then
+publishes a receipt with the new verification timestamp; it does not resume a
+partial archive. Retained receipts and lock files are not cleanup targets.
+Environments declaring `hostingImages` use a separate signed
+machine authority and cannot use this workflow.
+
 Targeted/no-build Compose convergence is guarded by exact source identity, configuration
 digest, topology, and health proof, and never runs migration/setup initializers. Host apply uses
 an even narrower replay rule: an exact same-source `edge: pending` receipt resumes only
@@ -1034,6 +1102,11 @@ unbuffered streaming, unlimited body size and 3600s timeouts match the Caddy rou
 certificates expired, or with fewer than 25 days left, which means renewal at 30 days did not happen), and `sb remote domains`
 lists nginx routes.
 
+The remote MCP check connects directly, without an ambient proxy. If its HTTPS
+control hostname no longer resolves and a valid origin IPv4 is recorded, it
+uses that address while verifying TLS for the original hostname. Restore the
+DNS record; the fallback does not follow redirects.
+
 Moving every site from one remote to another: [server-migration.md](server-migration.md).
 
 **Limitations.** The nginx front door serves `sb host` routes and the HTTPS MCP control
@@ -1176,6 +1249,55 @@ app by hostname through Caddy. Sandbox's control endpoint should get its own hos
 (`app.example.com`). Plain sandbox WordPress instances still use high ports; avoid
 `domains setup` unless you intend sandbox to add public hostname routes for those sites
 too.
+
+### Removing a hosted target
+
+A hosted stack is not a Sandbox instance, so `sb instance delete` does not see it.
+`sb host destroy` removes one target from its recorded state, with no manifest or
+project checkout needed:
+
+```bash
+./sb host destroy --remote myvps --target my-site/sandbox            # dry run
+./sb host destroy --remote myvps --target my-site/sandbox --confirm
+```
+
+It supports targets on the nginx front door; a Caddy target refuses with
+`front_door_capability_unavailable`. It removes the Compose stack's containers,
+volumes and networks, the images built for it (by its own `<project>-<service>`
+tags, never forced, so a shared image survives), the edge route and its
+certificates (including a Certbot lineage), the remote runtime
+directory (where generated passwords live), the Cloudflare DNS records Sandbox
+created (a record that existed before is restored to its captured value instead),
+the Origin CA certificate, and finally the local state entry. The project's deploy
+source is shared by its environments and a first apply of another environment
+could be writing it, so destroy never removes it; delete
+`<home>/deploy-src/hosts/<project>` by hand once no environment of the project is
+left. Containers, volumes and networks are selected by the Compose project label,
+never through `docker compose down`, so a Compose file elsewhere on the host cannot
+widen what is removed. Destroy refuses while the state file of the target, or of
+any target sharing its Compose name, cannot be read.
+
+Any failed step keeps the state entry, so the command can be re-run; Cloudflare
+objects that are already gone count as removed. It refuses when another recorded
+target maps to the same Compose project name (`site-blue/sandbox` and
+`site/blue-sandbox`), and holds the target lock of every such name while it runs, so
+a first apply of a colliding target waits. It also refuses when the target is fenced by an apply or recovery record
+until you confirm nothing is running and pass `--clear-fenced`. Before its first remote
+step destroy records its own fence on the target and on every name sharing its
+Compose project, so a run that fails or is interrupted (the remote
+shell may still be working) keeps apply, recovery and a second destroy out; re-run
+with `--clear-fenced` once the earlier run has ended. `host retire-delivery` refuses
+while a destroy owns the target. Certificate cleanup also
+reloads nginx, so a retry after an interrupted route removal cannot leave the old
+route loaded. Destroy waits up to
+`--lock-wait` seconds for the shared host state lock, like apply, and never holds
+that lock across an SSH call.
+
+Two gaps come from what apply records. A target applied more than once records
+its own DNS record as the "previous" one, so destroy restores it rather than
+deleting it; remove that record in Cloudflare by hand. On nginx, a re-apply that
+reuses the certificate records no Origin CA id, so destroy cannot revoke it; it
+expires on its own.
 
 ### Disposable remote previews
 
@@ -2069,3 +2191,239 @@ before use (exact revision equality under `--strict-runtime`).
 active status, unknown status, or retained-without-result marker through the
 activation owner. It never re-enters activation. A frontend can recover a lost
 committed reply even after its original admission deadline expires.
+
+### Opt-in shared local-image bundle (pack 9)
+
+`sb host image build-local --receipt-version v2` saves all built image references
+in one raw `bundle-1.tar`. The default remains v1 (one archive per image).
+V2 retains per-image `artifacts` identities and service keys, and moves transport
+hash, byte size and exact sorted image membership into a closed `bundles` map.
+Local and remote schema namespaces end in `.v2`; canonical digests bind the full
+receipt. Portable config IDs remain the only accepted destination IDs.
+
+Push transfers the entire bundle once when any reference differs, then verifies
+all references before publication. All-present receivers upload zero bytes.
+`loaded`/`skipped` describe images at the initial locked observation; skipped
+images can still travel inside the bundle. `transferred_bundles` and
+`transferred_bytes` report transport separately. `--artifact-timeout` applies to
+the whole bundle; size the aggregate `--timeout` accordingly. Staging, import and unpacking
+reserve at least three times the bundle bytes, with a default 1 GiB storage floor.
+
+Older clients reject the v2 schema before transfer writes. Roll back by using
+the older client with a separately exported v1 receipt; there is no automatic
+fallback or conversion of persisted receipts. Do not overwrite retained v1
+output directories when selecting v2. No remote acceptance is implied by local
+proof. Protocol 14 introduced this contract; the reservation lifecycle below requires protocol 17.
+
+### Shared-bundle runtime upgrade and review fixes
+
+V2 export requires **Docker >=25 with the containerd image store** on the
+builder. Classic graphdriver stores and legacy saves must use v1. The builder
+check runs before builds or export writes; a classic `repositories` archive
+also receives an explicit unsupported-builder error. Archive member validation
+runs only on the client. It remains a separate read from the hash/stream pass
+and therefore relies on the controller owner's runtime-directory trust.
+
+V2 storage admission always runs. An unset or zero `storage_floor_gb` uses a
+1 GiB floor; a configured positive floor is retained. The reservation is at
+least **3 times the full bundle bytes**, including on partial receivers, for
+staging, import and unpacking. The load timeout is 1800 seconds plus one second
+per started MiB. Controller aggregate/per-artifact deadlines may expire first;
+the worker continues under its fence. V1 keeps its existing storage policy and
+1800-second load limit.
+
+Before v2 load starts, the worker persists `load-unverified` and changes
+`load-fence.lock` to mode 0400. Successful Docker completion restores mode 0600
+and removes the marker. A load timeout, CLI error or worker death leaves the
+engine quarantined: new controllers refuse the marker, and old controllers
+refuse the unsafe fence mode. The result is unknown, never permission to start
+another import. There is no automatic quarantine reset. An operator must first
+independently establish that the daemon is idle, for example through an approved
+Docker maintenance stop, before restoring the owner-only fence to mode 0600
+and removing `load-unverified`. Do not clear it merely because a CLI exited.
+
+Protocol 14 introduced the v2 receipt/transport shapes and also recorded existing
+`cmd_retention` shape drift: `commands`, `remedy`, and `skipped`. These retention
+keys were missing from the pinned protocol-13 manifest; pack 9 did not add that
+retention behavior. The first review fixes advanced the protocol to 15; the reservation lifecycle
+follow-up below requires **17**, as required by the shape gate. From the upgraded
+checkout, **migrate each runtime before changing client pins**, including for
+v1-only verdict-gated commands.
+A protocol-13/14/15/16 runtime cannot serve this protocol-17 client.
+No v1-only compatibility exception is added to the global verdict gate.
+
+From the upgraded Sandbox checkout, review and explicitly authorize the migration:
+
+```sh
+./sb remote service migrate NAME --plan --json
+./sb remote service migrate NAME --confirm --json
+./sb remote service status NAME --json
+```
+
+Check the installed revision and compatibility range in the status response
+before using verdict-gated commands. These are operator rollout instructions;
+this change performs no remote migration. Old clients remain within the runtime's
+served range, but their v1 archive behavior does not gain v2 support.
+
+In v2 results, `skipped` means initially verified at the locked observation.
+Those images still travel inside a transferred full bundle and may be re-imported;
+`transferred_bytes` and `transferred_bundles` expose the transport cost.
+
+A hard-killed stage worker can leave its private `.upload-*.tar` file behind.
+There is no automatic sweeper; inspect task-owned staging during operator
+reconciliation after proving the daemon idle.
+
+### V2 reservation lifecycle and quarantine recovery
+
+V2 holds the engine lease before reconciling reservations and admitting the full
+3x bundle budget. Reconciliation also acquires the worker fence and checks there
+is no quarantine marker. Only then are `kind=host-local-images` reservations for
+the exact target provably orphaned and automatically removed. Other targets and
+ordinary job reservations are preserved. A delayed worker must verify its token
+still exists before acknowledging readiness; a reaped token cannot import.
+
+The controller sends no archive bytes before the exact readiness acknowledgement.
+Readiness is read only from stdout. SSH stderr warnings are kept as bounded
+diagnostics; unexpected stdout still refuses before any archive bytes are sent.
+Local preflight failures, SSH failures without acknowledgement and early worker
+exits release the operation's reservation. An acknowledged worker killed during
+upload is reconciled when its fence is free and no marker exists, either during
+failure handling or before the next admission. Live workers and quarantine are
+never reaped. Cleanup failure cannot hide an original error or replace successful
+publication; successful v2 JSON reports `reservation_cleanup_pending` if necessary.
+
+V2 operation reservations use a numeric year-9999 expiry so older admission and
+reclaim readers retain them too. Confirmed Docker success durably releases the
+operation before clearing quarantine and acknowledging completion. A timeout or
+uncertain import retains both reservation and quarantine until reconciliation.
+Ordinary job/deploy reservations retain their 45-minute policy. Safe same-owner
+0644 ledgers written by old clients are accepted and tightened to 0600; group or
+other write access, links and foreign ownership refuse. Release waits up to ten
+seconds for the ledger lock. A tight all-present v2 host can still fail the full
+budget check; select a separately exported v1 receipt for that fallback.
+
+The current contract requires **protocol 17**. Migrate runtimes first using the
+plan/confirmed migration/status workflow above, then bump client pins. No remote
+migration is performed by this change.
+
+After independently proving daemon idleness, for example through an **approved
+Docker maintenance stop**, run this self-contained command **on the target as the
+Sandbox owner**. It uses Python's standard library only; no Sandbox checkout,
+package import or PYTHONPATH is required. Set the registered Sandbox home if it
+is different from `$HOME/sandbox`. The command takes both engine and worker locks,
+releases the marker's exact reservation, restores mode 0600 and removes the marker.
+It also handles legacy plain-text markers. It refuses while a worker holds the
+fence. Do not run it just because a CLI timed out.
+
+```sh
+SANDBOX_HOME="${SANDBOX_HOME:-$HOME/sandbox}" python3 - <<'PY'
+def release_storage_reservation(store: str, reservation_id: str | None, *,
+                                orphan_target: str | None = None, verify_only: bool = False,
+                                lock_timeout: float = 10) -> None:
+    """Atomically release only one owned operation reservation; usable in workers."""
+    import fcntl
+    import json
+    import os
+    import re
+    import stat
+    import tempfile
+    import time
+    from pathlib import Path
+
+    if reservation_id is None and orphan_target is None:
+        raise ValueError("operation or target required")
+    if reservation_id is not None and not re.fullmatch(r"[0-9a-f]{32}", reservation_id):
+        raise ValueError("invalid operation reservation")
+    root = Path(store)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError("unsafe reservation store")
+    lock = os.open(root / "reservations.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(lock)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe reservation lock")
+        deadline = time.monotonic() + lock_timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("reservation lock busy")
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        try:
+            fd = os.open(root / "reservations.json", os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if verify_only:
+                raise ValueError("operation reservation missing")
+            return
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o022 or info.st_nlink != 1 or info.st_size > 8 * 1024**2):
+                raise ValueError("unsafe reservation ledger")
+            # Older admissions rewrite this same-owner ledger as 0644.
+            os.fchmod(handle.fileno(), 0o600)
+            entries = json.loads(handle.read(8 * 1024**2 + 1))
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            raise ValueError("invalid reservation ledger")
+        if verify_only:
+            if not any(e.get("id") == reservation_id and e.get("kind") == "host-local-images" for e in entries):
+                raise ValueError("operation reservation missing")
+            return
+        retained = [e for e in entries if not (
+            e.get("kind") == "host-local-images" and e.get("target") == orphan_target
+            if orphan_target is not None else e.get("id") == reservation_id)]
+        if retained == entries:
+            return  # Idempotent after an acknowledgement was lost.
+        if reservation_id is not None and any(e.get("id") == reservation_id and e.get("kind") != "host-local-images" for e in entries):
+            raise ValueError("reservation ownership differs")
+        descriptor, temporary = tempfile.mkstemp(prefix=".reservation-release-", dir=root)
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                json.dump(retained, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, root / "reservations.json")
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    finally:
+        os.close(lock)
+
+import fcntl, json, os
+from pathlib import Path
+
+home = Path(os.environ["SANDBOX_HOME"])
+root = home / "runtime" / "host-local-images"
+marker = root / "load-unverified"
+fence = root / "load-fence.lock"
+with (root / "engine.lock").open("r+b") as engine, fence.open("rb") as worker:
+    fcntl.flock(engine, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fcntl.flock(worker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    raw = marker.read_bytes()
+    reservation_id = None if raw == b"load outcome unverified\n" else json.loads(raw)["reservation_id"]
+    if reservation_id is not None:
+        release_storage_reservation(str(home / "runtime" / "storage"), reservation_id)
+    os.fchmod(worker.fileno(), 0o600)
+    os.fsync(worker.fileno())
+    marker.unlink()
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+PY
+```
+
+Markers from genuine uncertain imports still require manual idle verification.
+Unmarked orphan reservations self-heal on the next v2 attempt under the lease,
+fence and marker checks. Never delete or reset the complete reservation ledger.
+A hard-killed worker can retain an owned `.upload-*.tar`; inspect and remove only
+that owned staging file after proving idleness. No automatic staging sweeper is added.

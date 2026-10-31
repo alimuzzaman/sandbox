@@ -169,9 +169,10 @@ class _HostingOwnerFixture:
                 return self.stack.enter_context(patch.object(*args, **kwargs))
         return Patcher()
 
-    def apply(self):
+    def apply(self, **kwargs):
         return hosting_cmd._apply_host(self.validated, self.entry, self.remote_name,
-            self.runtime, self.state, False, "main", recovery_repository=self.repository)
+            self.runtime, self.state, False, "main", recovery_repository=self.repository,
+            **kwargs)
 
     def config_digest(self):
         runtime = dict(self.runtime, environment=hosting.render_env_file(
@@ -307,10 +308,17 @@ def _run_host_observer_fixture(services, rows, inspections, *, deadline=10,
             " else: print('null')\n"
         )
         docker.chmod(0o755)
+        source = root / "source"
+        source.mkdir()
+        (source / "file").write_text("fixture")
+        for args in (("init", "-q"), ("add", "file"),
+                     ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                      "commit", "-qm", "fixture")):
+            run_test_process(["git", *args], cwd=source, capture_output=True, check=True)
         prefix = shlex.join([sys.executable, str(compose), str(fixture)])
         command = hosting_cmd._host_observation_command(
             prefix, services, ["LENZORA_SOURCE_REVISION"], deadline,
-            source_dir=str(ROOT),
+            source_dir=str(source),
         )
         from tests.subprocess_support import synthetic_environment
 
@@ -2271,7 +2279,7 @@ class TestHostingManifest(unittest.TestCase):
             ["timeout"],
         )
 
-    def test_observer_revision_batch_refuses_inexact_container_evidence(self):
+    def _observer_revision_batch_refuses_inexact_container_evidence(self, label):
         revision = "b" * 40
         cases = {
             "missing": (
@@ -2316,7 +2324,7 @@ class TestHostingManifest(unittest.TestCase):
              "observed": None}
             for service in ("web", "worker")
         ]
-        for label, (rows, inspections) in cases.items():
+        for label, (rows, inspections) in [(label, cases[label])]:
             with self.subTest(label=label):
                 receipt, inspect_count, _elapsed = _run_host_observer_fixture(
                     ["web", "worker"], rows, inspections,
@@ -2324,6 +2332,21 @@ class TestHostingManifest(unittest.TestCase):
                 self.assertEqual(receipt["revision_checks"], expected)
                 self.assertNotIn(revision, json.dumps(receipt))
                 self.assertLessEqual(inspect_count, 1)
+
+    def test_observer_revision_batch_refuses_missing(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("missing")
+
+    def test_observer_revision_batch_refuses_duplicate(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("duplicate")
+
+    def test_observer_revision_batch_refuses_unexpected(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("unexpected")
+
+    def test_observer_revision_batch_refuses_swapped_identity(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("swapped_identity")
+
+    def test_observer_revision_batch_refuses_malformed(self):
+        self._observer_revision_batch_refuses_inexact_container_evidence("malformed")
 
     def test_observer_revision_batch_drops_malformed_value_without_leaking_it(self):
         secret = "token-like-value-that-must-not-survive"
@@ -3377,6 +3400,44 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(record["runtime"]["state"], "unverified")
         self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
 
+    def test_local_image_apply_requires_engine_lock_before_admission(self):
+        manifest = _public_acme_manifest().replace(
+            "      container_port: 8080\n",
+            "      container_port: 8080\n      build: false\n").replace(
+            "      require_clean: true\n",
+            "      require_clean: true\n      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")
+        fixture = _HostingOwnerFixture(self, manifest)
+        with self.assertRaisesRegex(hosting.HostingError,
+                                    "engine lock is unavailable"):
+            fixture.apply(local_images_digest="sha256:" + "a" * 64)
+        fixture.prepare.assert_not_called()
+        fixture.push.assert_not_called()
+        fixture.update.assert_not_called()
+        fixture.save.assert_not_called()
+
+    def test_local_image_digest_completes_runtime_identity_evidence(self):
+        manifest = _public_acme_manifest().replace(
+            "      container_port: 8080\n",
+            "      container_port: 8080\n      build: false\n").replace(
+            "      require_clean: true\n",
+            "      require_clean: true\n      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")
+        fixture = _HostingOwnerFixture(self, manifest)
+        digest = "sha256:" + "a" * 64
+        lease = MagicMock()
+        fixture.patch.object(
+            hosting_cmd, "_verify_receipt_bound_local_images",
+            return_value={"remote_receipt_digest": digest,
+                          "local_receipt_digest": "sha256:" + "b" * 64})
+        result = fixture.apply(local_images_digest=digest,
+                               active_image_lease=lease)
+        self.assertTrue(result["delivery"]["delivery_succeeded"], result)
+        self.assertEqual(result["delivery"]["evidence_completeness"], "complete")
+        self.assertEqual(fixture.delivery()["operation"]["runtime"]["images"],
+                         [digest])
+        self.assertGreaterEqual(lease.require.call_count, 3)
+
     def test_invalid_derived_push_sha_fails_before_reset_compose_or_state(self):
         fixture = _HostingOwnerFixture(self, _manifest_with_derived_revision())
         fixture.push.return_value = "abc123"
@@ -3667,6 +3728,42 @@ class TestHostingManifest(unittest.TestCase):
 
         self.assertEqual(build_opener.return_value.open.call_count, 1)
 
+    @patch("sandbox.commands.hosting.urllib.request.build_opener")
+    def test_edge_verification_waits_before_resolving_a_freshly_created_hostname(self, build_opener):
+        events = []
+        response = MagicMock(status=200)
+        response.__enter__.return_value = response
+        build_opener.return_value.open.side_effect = lambda *_a, **_k: events.append("open") or response
+        with patch("sandbox.commands.hosting.time.sleep",
+                   side_effect=lambda seconds: events.append(("sleep", seconds))):
+            hosting_cmd._verify_edge(
+                [{"hostname": "fresh.example.test", "mode": "serve"},
+                 {"hostname": "old.example.test", "mode": "serve"}],
+                fresh_hostnames=frozenset({"fresh.example.test"}),
+            )
+        self.assertEqual(events, [
+            ("sleep", hosting_cmd._NEW_DNS_RECORD_GRACE_SECONDS), "open", "open"])
+
+    @patch("sandbox.commands.hosting.time.sleep")
+    @patch("sandbox.commands.hosting.urllib.request.build_opener")
+    def test_edge_verification_has_no_dns_grace_for_existing_hostnames(self, build_opener, sleep):
+        response = MagicMock(status=200)
+        response.__enter__.return_value = response
+        build_opener.return_value.open.return_value = response
+        hosting_cmd._verify_edge([{"hostname": "old.example.test", "mode": "serve"}])
+        sleep.assert_not_called()
+
+    def test_apply_marks_only_newly_created_dns_hostnames_as_fresh(self):
+        fixture = _HostingOwnerFixture(self)
+        hostnames = [record["hostname"] for record in fixture.runtime["records"]]
+        existing = {"id": "record-0", "type": "A", "name": hostnames[0],
+                    "content": "192.0.2.1", "proxied": True, "ttl": 1}
+        fixture.client.records.side_effect = lambda _zone, hostname: (
+            [existing] if hostname == hostnames[0] else [])
+        fixture.apply()
+        self.assertEqual(fixture.edge.call_args.kwargs["fresh_hostnames"],
+                         frozenset(hostnames[1:]))
+
     def test_public_acme_apply_skips_origin_ca_and_creates_dns_only_records(self):
         fixture = _HostingOwnerFixture(self)
         origin_certificate = fixture.patch.object(hosting_cmd, "_origin_certificate")
@@ -3679,7 +3776,8 @@ class TestHostingManifest(unittest.TestCase):
                             for call in fixture.client.upsert_address.call_args_list))
         self.assertNotIn("    tls ", fixture.configure_edge.call_args.args[2])
         fixture.edge.assert_called_once_with(fixture.validated["routes"],
-            healthcheck_path="/", basic_auth_enabled=False)
+            healthcheck_path="/", basic_auth_enabled=False,
+            fresh_hostnames=frozenset(record["hostname"] for record in fixture.runtime["records"]))
         self.assertEqual(fixture.repository.load()["hosts"][fixture.key]["edge"]["state"], "ready")
 
     @patch("sandbox.commands.hosting.cloudflare.cloudflare_token", return_value="configured")
@@ -4612,6 +4710,210 @@ class TestEdgeFailureDetail(unittest.TestCase):
         self.assertEqual(hosting_cmd._edge_failure_detail(
             urllib.error.URLError(ConnectionRefusedError())), "connection refused")
         self.assertEqual(hosting_cmd._edge_failure_detail(ValueError("x")), "route unavailable")
+
+
+class TestLocalImageApplyLease(unittest.TestCase):
+    def test_receipt_bound_apply_uses_the_transfer_target_lease(self):
+        digest = "sha256:" + "a" * 64
+        lease = MagicMock()
+        lease.__enter__.return_value = lease
+        with patch("sandbox.transports.remote_local_images.target_image_lease",
+                   return_value=lease) as factory:
+            with hosting_cmd._local_image_apply_lease(
+                    {"project": "app", "environment": "development"},
+                    "remote", digest) as acquired:
+                self.assertIs(acquired, lease)
+        factory.assert_called_once_with("remote", "app", "development", digest)
+        lease.__exit__.assert_called_once()
+
+    def test_receipt_free_apply_does_not_open_remote_image_coordination(self):
+        with patch("sandbox.transports.remote_local_images.target_image_lease") as factory:
+            with hosting_cmd._local_image_apply_lease(
+                    {"project": "app", "environment": "development"},
+                    "remote", None) as acquired:
+                self.assertIsNone(acquired)
+        factory.assert_not_called()
+
+
+class TestLocalImageReviewFixes(unittest.TestCase):
+    @staticmethod
+    def _validated():
+        return {"project": "app", "environment": "development",
+                "source_root": "/synthetic/source", "secrets": {"required": {}, "generated": {}},
+                "compose": {"files": ["compose.yml", "compose.jobs.yml"],
+                            "service": "web", "build": False}}
+
+    @staticmethod
+    def _observation():
+        return {"schema": 1, "engine": "linux/amd64", "config_error": None,
+                "services": {"web": {"present": True, "image": "app:test", "pull_policy": None}},
+                "images": {"app:test": {"present": True, "id": "sha256:" + "1" * 64,
+                    "platform": "linux/amd64", "layers_digest": "sha256:" + "4" * 64,
+                    "repo_digests": []}}, "remote_receipt": None}
+
+    def test_remote_compose_model_uses_actual_apply_env_files_and_override(self):
+        from tests.test_hosting_local_images import _receipt
+        validated = self._validated()
+        runtime = {"environment": "SYNTHETIC=value", "compose_override": "services: {}"}
+        entry = {"host": "original"}
+        with patch.object(hosting_cmd, "_write_remote_text") as write, \
+             patch.object(hosting_cmd, "_remote_checked",
+                          return_value=json.dumps(self._observation())) as checked:
+            hosting_cmd._verify_remote_local_image_model(
+                validated, entry, _receipt(), "/remote/source", "/remote/runtime", runtime)
+        self.assertEqual(write.call_args_list, [
+            unittest.mock.call(entry, "/remote/runtime/compose.override.yml", "services: {}", "0600"),
+            unittest.mock.call(entry, "/remote/runtime/environment.env", "SYNTHETIC=value", "0600")])
+        command = shlex.split(checked.call_args.args[1])
+        payload = json.loads(base64.b64decode(command[-1]))
+        config = payload["config_command"]
+        for fragment in ("SANDBOX_HOST_ENV_FILE=/remote/runtime/environment.env",
+                         "--env-file /remote/runtime/environment.env",
+                         "-f /remote/source/compose.yml", "-f /remote/source/compose.jobs.yml",
+                         "-f /remote/runtime/compose.override.yml", "--profile '*' config --format json"):
+            self.assertIn(fragment, config)
+        self.assertEqual(payload["refs"], ["app:test"])
+        self.assertEqual(payload["services"], ["web"])
+
+    def test_remote_compose_reference_and_exact_portable_id_must_match(self):
+        from tests.test_hosting_local_images import _receipt
+        for reason in ("remote_interpolation", "portable_id", "platform", "layers", "missing", "config", "build_policy"):
+            observation = self._observation()
+            if reason == "remote_interpolation":
+                # The locally verified reference exists, but remote Compose
+                # resolves DOCKER_CONTEXT's fallback to a different existing tag.
+                observation["services"]["web"]["image"] = "app:default"
+                observation["images"]["app:default"] = {**observation["images"]["app:test"]}
+            elif reason == "portable_id":
+                observation["images"]["app:test"]["id"] = _receipt()["artifacts"]["image-1"]["builder_image_id"]
+            elif reason in ("platform", "layers"):
+                key = "platform" if reason == "platform" else "layers_digest"
+                observation["images"]["app:test"][key] = "different"
+            elif reason == "missing":
+                observation["services"] = {}
+            elif reason == "config":
+                observation["config_error"] = "unavailable"
+            else:
+                observation["services"]["web"]["pull_policy"] = "build"
+            with self.subTest(reason=reason), \
+                 patch.object(hosting_cmd, "_write_remote_text"), \
+                 patch.object(hosting_cmd, "_remote_checked", return_value=json.dumps(observation)):
+                with self.assertRaisesRegex(hosting.HostingError, "remote Compose verification refused"):
+                    hosting_cmd._verify_remote_local_image_model(
+                        self._validated(), {}, _receipt(), "/remote/source", "/remote/runtime",
+                        {"environment": "", "compose_override": ""})
+
+    def test_receipt_verifier_rejects_remote_render_after_local_render_matches(self):
+        from sandbox.hosting import local_images
+        from sandbox.transports import remote_local_images
+        from tests.test_hosting_local_images import _receipt
+        receipt = _receipt()
+        observation = self._observation()
+        local_model = self._observation()
+        local_model["services"]["web"]["build_digest"] = receipt["services"]["web"]["build_digest"]
+        document = {"local_receipt": receipt, "machine_identity": "machine",
+                    "registered_host_digest": "host", "daemon_identity": "daemon"}
+        remote_model = self._observation()
+        remote_model["services"]["web"]["image"] = "app:default"
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(remote_local_images, "read_receipt", return_value=document))
+            stack.enter_context(patch.object(remote_local_images, "observe", return_value=observation))
+            stack.enter_context(patch.object(local_images, "compare_remote_receipt", return_value=[]))
+            stack.enter_context(patch.object(local_images, "observe_local_model", return_value=local_model))
+            stack.enter_context(patch.object(hosting, "render_env_file", return_value=""))
+            stack.enter_context(patch.object(remote, "resolve_sandbox_home", return_value="/srv/sandbox"))
+            stack.enter_context(patch("sandbox.delivery.context.registered_host_digest", return_value="host"))
+            stack.enter_context(patch.object(hosting_cmd, "_write_remote_text"))
+            checked = stack.enter_context(patch.object(hosting_cmd, "_remote_checked",
+                side_effect=["daemon", json.dumps(remote_model)]))
+            with self.assertRaisesRegex(hosting.HostingError, "remote Compose verification refused"):
+                hosting_cmd._verify_receipt_bound_local_images(
+                    self._validated(), {}, "target", "sha256:" + "a" * 64,
+                    receipt["commit"], receipt["source_revision"], "machine", {},
+                    source_dir="/remote/source", runtime_dir="/remote/runtime",
+                    runtime={"environment": "", "compose_override": ""})
+            self.assertEqual(checked.call_count, 2)
+
+    @staticmethod
+    def _push_args():
+        return types.SimpleNamespace(confirm=True, remote="target", receipt="/synthetic/receipt.json",
+                                     timeout=60, artifact_timeout=30, json=True)
+
+    def test_push_local_pins_registration_through_readiness_authentication_and_publication(self):
+        from sandbox.transports import remote_local_images
+        active = [False]
+        events = []
+        entry = {"provisioned": True, "host": "original"}
+        @contextmanager
+        def lock(name):
+            self.assertEqual(name, remote.registration_lock_name("target"))
+            active[0] = True
+            yield
+            active[0] = False
+        def lookup(name):
+            self.assertTrue(active[0])
+            events.append("resolve")
+            return entry
+        def ready(root, name, *, target):
+            self.assertTrue(active[0])
+            self.assertIs(target.remote, entry)
+            self.assertEqual(target.remote_name, "target")
+            self.assertEqual(target.sources["remote_selection"], "explicit")
+            events.append("ready")
+        def authenticate(name):
+            self.assertTrue(active[0])
+            events.append("authenticate")
+            return "machine"
+        def transfer(*args, **kwargs):
+            self.assertTrue(active[0])
+            self.assertIs(kwargs["entry"], entry)
+            events.append("publish")
+            return {"receipt": {"receipt_digest": "local"}, "remote_receipt_digest": "remote",
+                    "loaded": [], "skipped": []}
+        with patch.object(remote, "registered_remote_lock", side_effect=lock), \
+             patch.object(remote, "get_remote", side_effect=lookup) as get_remote, \
+             patch("sandbox.readiness.gate.require_ready", side_effect=ready), \
+             patch.object(remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_authenticated_machine_identity", side_effect=authenticate), \
+             patch("sandbox.delivery.context.registered_host_digest", return_value="host"), \
+             patch.object(remote_local_images, "push_receipt", side_effect=transfer), \
+             redirect_stdout(io.StringIO()):
+            hosting_cmd._cmd_host_image_push_local(self._push_args())
+        self.assertEqual(events, ["resolve", "ready", "authenticate", "publish"])
+        get_remote.assert_called_once_with("target")
+        self.assertFalse(active[0])
+
+    def test_push_local_readiness_refusal_preserves_typed_json_before_any_transfer(self):
+        from sandbox.readiness.errors import RemoteNotReadyError
+        from sandbox.transports import remote_local_images
+        refusal = RemoteNotReadyError({"aspect": "capacity", "reason": "full",
+                                       "remedy": "./sb remote readiness target"},
+                                      remote="target", selection="explicit")
+        output = io.StringIO()
+        with patch.object(remote, "registered_remote_lock", return_value=nullcontext()), \
+             patch.object(remote, "get_remote", return_value={"provisioned": True}), \
+             patch("sandbox.readiness.gate.require_ready", side_effect=refusal), \
+             patch.object(hosting_cmd, "_authenticated_machine_identity") as authenticate, \
+             patch.object(remote_local_images, "push_receipt") as transfer, redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                hosting_cmd._cmd_host_image_push_local(self._push_args())
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["code"], "remote_not_ready_capacity")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["side_effects"], {"staging_started": False, "bytes_transferred": 0})
+        self.assertEqual(payload["remote_selection"], "explicit")
+        authenticate.assert_not_called()
+        transfer.assert_not_called()
+
+    def test_push_local_readiness_gate_statically_precedes_transfer(self):
+        import ast
+        import inspect
+        function = ast.parse(inspect.getsource(hosting_cmd._cmd_host_image_push_local))
+        calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+        ready = next(call for call in calls if getattr(call.func, "id", None) == "require_ready")
+        push = next(call for call in calls if getattr(call.func, "attr", None) == "push_receipt")
+        self.assertLess(ready.lineno, push.lineno)
+        self.assertIn("target", [keyword.arg for keyword in ready.keywords])
 
 
 class TestHostRemoteRequiredFirst(unittest.TestCase):

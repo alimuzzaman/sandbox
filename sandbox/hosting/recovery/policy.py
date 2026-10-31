@@ -83,7 +83,7 @@ def _host_apply_arguments(argv: object) -> dict | None:
     flags = set()
     items = argv[host_index + 2:]
     index = 0
-    value_flags = {"--project-dir", "--environment", "--remote"}
+    value_flags = {"--project-dir", "--environment", "--remote", "--local-images"}
     while index < len(items):
         item = items[index]
         matching = next((flag for flag in value_flags if item.startswith(flag + "=")), None)
@@ -103,11 +103,13 @@ def _host_apply_arguments(argv: object) -> dict | None:
         else:
             return None
         index += 1
-    if "--confirm" not in flags or not all(flag in values for flag in value_flags):
+    required_values = {"--project-dir", "--environment", "--remote"}
+    if "--confirm" not in flags or not all(flag in values for flag in required_values):
         return None
     return {"project_dir": values["--project-dir"],
             "environment": values["--environment"],
-            "remote": values["--remote"]}
+            "remote": values["--remote"],
+            "local_images": values.get("--local-images")}
 
 
 def validate_job_binding(request: RecoveryRequest, job: object,
@@ -203,6 +205,8 @@ def validate_job_binding(request: RecoveryRequest, job: object,
     arguments = _host_apply_arguments(submission.get("argv"))
     if (arguments is None or arguments["environment"] != request.target.environment or
             arguments["remote"] != request.target.remote):
+        return "binding_mismatch"
+    if arguments["local_images"] != exact_evidence.get("local_images_digest"):
         return "binding_mismatch"
     project_argument = Path(arguments["project_dir"]).expanduser()
     if not project_argument.is_absolute():

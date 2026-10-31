@@ -26,6 +26,33 @@ Stop as soon as the task is satisfied:
 All examples below use placeholders. Replace identifiers such as `SOURCE_ALIAS`,
 `SECRET_KEY`, and `PROFILE_NAME`; never substitute a secret value into a command.
 
+## Ownership profiles
+
+For `secrets ownership` or `run --ownership-profile`, read the ownership section
+of [the secret guide](../../docs/secret-inspection.md). Plain `ownership classify`
+and unconfirmed migration plans are metadata-only. Use only registered aliases;
+the reserved `personal` alias still resolves through the registry. Initial
+ownership source reads support file/dotenv only.
+
+A human creates migration or cleanup approval in their own foreground terminal.
+Agents may execute approved actions only inside that unexpired, exactly bound
+approval. Never create, extend, renew, or simulate approval, including by
+allocating a pseudo-terminal. Cleanup is a separate human operation, never an
+automatic migration step. A mismatch or expiry requires the operator's decision.
+
+Scoped runs require `--ownership-profile PROFILE` and explicit repeated
+`--ownership-key NAME` selections. NAME is the mapped destination name; consumer
+variables and origins come from the map. Mixed source/destination origins within
+one profile are allowed. Do not combine these selectors with source/key/secret,
+destination, or session options. Never read source files or native credentials.
+
+Resume uses the existing journal and exact names, never blind create retries or
+journal copying. Keep unknown/unresolved state. Storage is `operator_attested`;
+revocation uncertainty is `cleanup_unknown`, exit 6 after otherwise successful
+work. Bootstrap/native-store and Cloudflare cleanup remain operator-managed.
+Real provider proofs, Linux/macOS acceptance, and human security review remain
+required before real migration. No ownership approval or action is exposed by MCP.
+
 ## 0. Check the source without reading it
 
 ```bash
@@ -56,6 +83,18 @@ and `binary`. Never request automatic detection or a directory scan.
 Structured key results are selectors, not values. JSON/YAML/TOML use JSON
 Pointer-style paths, INI uses `/section/key`, XML may include `@attribute` or
 `#text`, PEM lists block labels, and binary containers expose only `/file`.
+
+For an Infisical source, placing the controller-local credential is also the
+operator's approval of the canonical project root and endpoint, exact selector,
+MCP grants, and fixed consuming profiles. Any change must return
+`credential_missing` until an operator reviews the configuration and uses
+`credential-set` again. Never copy or migrate an older keyring item, and never
+replace the supported broker with raw keyring, D-Bus, HTTP, provider, or
+Tailscale commands. The approved path keeps provider OS-store reads/status, DNS, and HTTPS work under
+one killable total deadline.
+After re-approval, ask the operator to rotate the provider client secret and
+remove obsolete items through the native credential-store UI. Do not list,
+export, or delete keyring entries yourself.
 
 ## 2. Inspect one key without characters
 
@@ -148,8 +187,12 @@ Each `--secret KEY=DEST` is resolved through the same broker and injected into
 the same minimal child environment. Destinations must be unique and safe; the
 key names and destination names are recorded, never the values.
 
-A command that is itself `sudo`, `doas`, `su`, `pkexec` or `run0` is refused
-with `escalation_unsupported` before any read: run it without escalation.
+A direct, supported-wrapper, symlinked, or set-id escalation command—including
+`sudo`, `sudo-rs`, `sudoedit`, `doas`, `su`, `pkexec`, `run0`, `systemd-run`,
+or `machinectl`—is refused
+with `escalation_unsupported` before any read. Shell/script contents are opaque;
+never hide escalation there. Every outcome ends the whole child process group,
+so fixed profiles and bounded runs must not intentionally detach daemons.
 
 MCP may inspect or validate only explicitly authorized source modes. MCP use is
 limited to a registered reviewed use profile; it never accepts arbitrary
@@ -176,7 +219,7 @@ or another termination request (`interrupted`), the terminal closing
 (`hangup`), or the child's own exit (`child_exited`). A broker killed with
 `SIGKILL` cannot end its child, so the child can outlive it, and a child that
 escalates privileges (`sudo` and friends) cannot be force-ended either: the
-direct form is refused (`escalation_unsupported`), anything deeper is reported
+direct/wrapper/symlink/set-id forms are refused (`escalation_unsupported`), anything deeper is reported
 as a warning with `group_ended=false`. Keep using the bounded `secrets run`
 above for every agent-run check.
 

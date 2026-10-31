@@ -141,7 +141,7 @@ class TestVolumeProtection(unittest.TestCase):
                 reclaimable_workspaces=(), present_workspaces=set(),
             )
             self.assertFalse(decision.eligible, name)
-            self.assertEqual(decision.reason, "volume_not_workspace_scoped", name)
+            self.assertEqual(decision.reason, "hosted_site" if name.startswith("sandbox-host-") else "volume_not_workspace_scoped", name)
 
     def test_workspace_scoped_volume_is_eligible_only_with_its_workspace(self):
         name = "sandbox-speckit-workspace-d493_lenzora-sandbox-node-modules"

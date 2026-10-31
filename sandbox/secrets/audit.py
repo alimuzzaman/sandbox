@@ -22,6 +22,10 @@ _FORBIDDEN_TOKENS = (
     "value", "secret", "preview", "mask", "length", "hash", "excerpt",
     "output", "content", "candidate", "temporary",
 )
+OWNERSHIP_OPERATIONS = frozenset({
+    "ownership_classify", "ownership_approve", "ownership_migrate",
+    "ownership_cleanup", "ownership_run",
+})
 
 
 def _now() -> str:
@@ -97,6 +101,13 @@ class SecretAudit:
         })
 
     def _append(self, event: dict[str, Any]) -> None:
+        operation = event.get("operation", "")
+        is_ownership = isinstance(operation, str) and operation.startswith("ownership_")
+        if is_ownership:
+            if (operation not in OWNERSHIP_OPERATIONS or event.get("revision") is not None
+                    or event.get("input_channel") is not None):
+                raise SecretBrokerError("audit_invalid", "ownership audit permits names and counts only")
+            event = {k: v for k, v in event.items() if k not in ("revision", "input_channel")}
         if set(event) - _ALLOWED_FIELDS:
             raise SecretBrokerError("audit_invalid", "audit event contains unsupported fields")
         if any(
@@ -107,6 +118,10 @@ class SecretAudit:
             raise SecretBrokerError("audit_invalid", "audit event contains a forbidden field")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
+            if is_ownership:
+                for parent in (self.path.parent, *self.path.parent.parents):
+                    if not stat.S_ISDIR(os.lstat(parent).st_mode):
+                        raise SecretBrokerError("audit_unavailable", "secret audit directory is unsafe")
             parent_stat = self.path.parent.stat()
             if parent_stat.st_uid != os.geteuid() or stat.S_IMODE(parent_stat.st_mode) & 0o077:
                 raise SecretBrokerError("audit_unavailable", "secret audit directory is unsafe")
@@ -124,7 +139,12 @@ class SecretAudit:
                 ):
                     raise SecretBrokerError("audit_unavailable", "secret audit file is unsafe")
                 payload = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode()
-                os.write(fd, payload)
+                view = memoryview(payload)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError("short audit write")
+                    view = view[written:]
                 os.fsync(fd)
             finally:
                 os.close(fd)

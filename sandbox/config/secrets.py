@@ -8,14 +8,19 @@ from pathlib import Path, PurePosixPath
 import re
 
 from sandbox.secrets.formats import SUPPORTED_FORMATS
+from sandbox.secrets.provider_identity import canonical_https_origin
 
 
 _SAFE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _MCP_MODE_ORDER = ("source_info", "keys", "metadata", "validate", "masked", "use")
 _MCP_MODES = frozenset(_MCP_MODE_ORDER)
-_SECRET_KEYS = frozenset(("sources", "useProfiles"))
-_SOURCE_KEYS = frozenset(("path", "format", "mcpModes"))
+_SECRET_KEYS = frozenset(("sources", "useProfiles", "ownership"))
+_FILE_SOURCE_KEYS = frozenset(("type", "path", "format", "mcpModes"))
+_INFISICAL_SOURCE_KEYS = frozenset((
+    "type", "endpoint", "projectId", "environment", "path", "key",
+    "clientId", "mcpModes", "timeoutSeconds",
+))
 _PROFILE_KEYS = frozenset((
     "source", "key", "argv", "destination", "timeoutSeconds",
     "maxOutputBytes", "mcp",
@@ -25,6 +30,16 @@ _DANGEROUS_DESTINATIONS = frozenset((
     "BASH_ENV", "ENV", "SHELLOPTS", "PS4", "PROMPT_COMMAND",
     "GIT_ASKPASS", "SSH_ASKPASS",
 ))
+_PROVIDER_MCP_MODE_ORDER = ("source_info", "keys", "metadata", "validate", "use")
+_PROVIDER_MCP_MODES = frozenset(_PROVIDER_MCP_MODE_ORDER)
+_PROVIDER_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_PROVIDER_ENVIRONMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_SECRET_LIKE_METADATA = re.compile(
+    r"(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+|"
+    r"\b(?:gh[pousr]_|github_pat_|sk_(?:test|live)_|xox[baprs]-))",
+    re.IGNORECASE,
+)
+_MAX_PROVIDER_TIMEOUT_SECONDS = 60
 
 
 def _mapping(value: object, label: str) -> dict:
@@ -118,12 +133,88 @@ def _mcp_modes(value: object, format_name: str) -> list[str]:
     return [mode for mode in _MCP_MODE_ORDER if mode in selected]
 
 
+def _provider_metadata(value: object, label: str, pattern: re.Pattern[str]) -> str:
+    if (not isinstance(value, str) or not value or len(value) > 256
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            or not pattern.fullmatch(value)
+            or _SECRET_LIKE_METADATA.search(value)):
+        raise ValueError(f"Infisical {label} must be a bounded non-secret identifier")
+    return value
+
+
+def _provider_endpoint(value: object) -> str:
+    try:
+        return canonical_https_origin(value)
+    except ValueError:
+        raise ValueError("Infisical endpoint must be a canonical HTTPS origin") from None
+
+
+def _provider_path(value: object) -> str:
+    if (not isinstance(value, str) or not value.startswith("/") or len(value) > 512
+            or "\\" in value
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError("Infisical path must be a canonical absolute provider path")
+    candidate = PurePosixPath(value)
+    if (str(candidate) != value or value != "/" and value.endswith("/")
+            or any(part in {"", ".", ".."} for part in candidate.parts[1:])):
+        raise ValueError("Infisical path must be a canonical absolute provider path")
+    return value
+
+
+def _provider_modes(value: object) -> list[str]:
+    if (not isinstance(value, list) or any(not isinstance(mode, str) for mode in value)
+            or len(value) != len(set(value)) or set(value) - _PROVIDER_MCP_MODES):
+        raise ValueError(
+            "Infisical mcpModes must be a unique list containing only "
+            "source_info, keys, metadata, validate, and use"
+        )
+    selected = set(value)
+    return [mode for mode in _PROVIDER_MCP_MODE_ORDER if mode in selected]
+
+
+def _normalize_infisical_source(name: str, descriptor: Mapping) -> dict:
+    _unknown_keys(descriptor, _INFISICAL_SOURCE_KEYS, f"secret source {name!r}")
+    required = ("endpoint", "projectId", "environment", "path", "key", "clientId")
+    missing = [key for key in required if key not in descriptor]
+    if missing:
+        raise ValueError(
+            f"secret source {name!r} requires {', '.join(missing)}"
+        )
+    key = _provider_metadata(descriptor["key"], "key", _ENV_NAME)
+    path = _provider_path(descriptor["path"])
+    return {
+        "type": "infisical",
+        "endpoint": _provider_endpoint(descriptor["endpoint"]),
+        "projectId": _provider_metadata(
+            descriptor["projectId"], "projectId", _PROVIDER_IDENTIFIER,
+        ),
+        "environment": _provider_metadata(
+            descriptor["environment"], "environment", _PROVIDER_ENVIRONMENT,
+        ),
+        "path": path,
+        "key": key,
+        "clientId": _provider_metadata(
+            descriptor["clientId"], "clientId", _PROVIDER_IDENTIFIER,
+        ),
+        "mcpModes": _provider_modes(descriptor.get("mcpModes", [])),
+        "timeoutSeconds": _bounded_int(
+            descriptor.get("timeoutSeconds", 10), 1,
+            _MAX_PROVIDER_TIMEOUT_SECONDS, "provider timeoutSeconds",
+        ),
+    }
+
+
 def _normalize_source(alias: object, value: object, root: object) -> tuple[str, dict]:
     name = _slug(alias, "source alias")
     if name == "personal":
         raise ValueError("secret source alias personal is reserved")
     descriptor = _mapping(value, f"secret source {name!r}")
-    _unknown_keys(descriptor, _SOURCE_KEYS, f"secret source {name!r}")
+    source_type = descriptor.get("type", "file")
+    if source_type == "infisical":
+        return name, _normalize_infisical_source(name, descriptor)
+    if source_type != "file":
+        raise ValueError(f"secret source {name!r} has an unsupported type")
+    _unknown_keys(descriptor, _FILE_SOURCE_KEYS, f"secret source {name!r}")
     if "path" not in descriptor:
         raise ValueError(f"secret source {name!r} requires path")
     format_name = _source_format(descriptor.get("format", "dotenv"))
@@ -174,8 +265,16 @@ def _normalize_profile(name: object, value: object, sources: Mapping[str, dict])
     source = descriptor["source"]
     if not isinstance(source, str) or (source != "personal" and source not in sources):
         raise ValueError(f"secret use profile {profile_name!r} references an unknown source")
-    source_format = "dotenv" if source == "personal" else sources[source].get("format", "dotenv")
-    if source_format == "dotenv":
+    source_descriptor = {} if source == "personal" else sources[source]
+    source_type = source_descriptor.get("type", "file")
+    source_format = source_descriptor.get("format", "dotenv")
+    if source_type == "infisical":
+        if descriptor["key"] != source_descriptor["key"]:
+            raise ValueError(
+                f"secret use profile {profile_name!r} key must match its Infisical source exactly"
+            )
+        key = source_descriptor["key"]
+    elif source_format == "dotenv":
         key = _env_name(descriptor["key"], "key")
     else:
         from sandbox.secrets.formats import SecretFormatError, validate_selector
@@ -278,4 +377,15 @@ def normalize_secret_config(result: Mapping | None) -> dict:
     for name, descriptor in (*project_profiles.items(), *machine_profiles.items()):
         normalized_name, normalized = _normalize_profile(name, descriptor, sources)
         profiles[normalized_name] = normalized
-    return {"sources": sources, "useProfiles": profiles}
+    secret_config = {"sources": sources, "useProfiles": profiles}
+    if "ownership" in project or "ownership" in machine:
+        # Lazy: configurations without an ownership block keep their exact
+        # previous import graph and return shape.
+        from sandbox.secrets.ownership.config import normalize_ownership
+        for layer in (project, machine):
+            if "ownership" in layer and not isinstance(layer["ownership"], Mapping):
+                raise ValueError("secret ownership configuration must be an object")
+        secret_config["ownership"] = normalize_ownership(
+            project.get("ownership"), machine.get("ownership"), sources, root,
+        )
+    return secret_config

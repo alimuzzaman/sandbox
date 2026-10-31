@@ -8,6 +8,18 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 CLI progress masks credential option values. Treat command output as sensitive until
 you check it; do not copy credential material into feedback or chat.
 
+For an Infisical source, `sb secrets credential-set --create-only` (or the
+explicit replacement form) is also approval of the canonical project root and endpoint,
+exact selector, MCP grants, and fixed consuming profiles. A change to any of
+them must yield `credential_missing` until an operator reviews the config and
+places the controller-local credential again; never work around that refusal
+or copy an old keyring item. After re-approval, the operator rotates the provider
+client secret and removes obsolete items through the native credential-store UI.
+Agents never list or delete keyring entries. Use `secrets keys` for non-network inspection and
+a fixed profile for consumption. Do not substitute raw keyring, D-Bus, HTTP,
+Tailscale, or provider commands. Brokered children may not detach daemons or
+escalate through a wrapper, symlink, set-id executable, shell string, or script.
+
 For read-only PostgreSQL restore inspection, check `data.inspection_diagnostic`
 with `data.all_match`. The bounded phase and code identify what was observed;
 `status=complete` alone does not mean the target matches. Keep the original
@@ -17,6 +29,42 @@ Remote project `status` is read-only. If no Sandbox instance is registered for
 the selected workspace, it reports that state and points to
 `sb instances --remote NAME --json` for the remote inventory. It does not
 create or register an instance.
+
+## Shared secrets across Linux and macOS
+
+Use only `sb secrets`. An opt-in Infisical source may reach an operator-provided
+self-hosted origin over Tailscale, but Tailscale is only the private route:
+verified HTTPS authenticates the endpoint, Infisical authenticates the
+controller credential, and the registered exact selector plus fixed profile
+constrain Sandbox. Each project uses a distinct Viewer identity; each controller
+keeps its own credential in macOS Keychain or an existing unlocked Linux Secret
+Service.
+
+Never place provider credentials in config, argv, environment, output, feedback,
+or chat. The spec 067 read-only source path never browses, reveals, exports, mutates,
+migrates, or administers Infisical. Never start or unlock a Linux keyring service. On keyring,
+route, TLS, provider, or authorization failure, stop on the broker's bounded
+result; do not use a plaintext, public, shared-credential, or raw-CLI fallback.
+See `docs/secret-inspection.md`.
+
+## Ownership profiles
+
+Spec 069's separate CLI-only `secrets ownership` capability supports explicit
+ownership classification and create-only migration under a current human
+approval. Read [the ownership guide](../../docs/secret-inspection.md#ownership-profiles-and-create-only-migration)
+before credential placement, migration, cleanup, or scoped consumption. Agents
+never approve or manufacture a terminal for approval. Plain classification and
+unconfirmed plans need no provider credential. Ownership source reads initially
+support registered file/dotenv aliases only. Keep uncertain journals; resume
+checks exact names without blind retry. Cleanup is a separate human operation.
+
+Use `secrets run --ownership-profile PROFILE --ownership-key NAME -- argv` for an
+explicit mapped subset, with repeated keys as needed. No source/session selector
+may be mixed in. Grants bind full canonical metadata; a stale authority requires
+operator re-approval and credential placement. No list/search/export/admin or
+token persistence is added. Derived-token revocation uncertainty is explicit;
+bootstrap and Cloudflare cleanup remain operator-managed. Live provider and
+Linux/macOS proofs and human security review remain unverified release gates.
 
 ## Host storage monitoring and cleanup
 
@@ -393,6 +441,29 @@ unlabelled history remains unknown. A missing or unreadable protected apply log
 reports that state directly.
 
 ### Failed hosting apply recovery
+
+For a declared `compose.build: false` environment, a faster Linux controller
+can run `sb host image build-local --project-dir DIR --environment ENV
+--revision SHA --json`, followed by confirmation-gated `sb host image
+push-local --remote NAME --receipt PATH --confirm --json`. Pass the returned
+remote receipt digest to ordinary `sb host apply ... --local-images DIGEST
+--confirm`. Transfer is not deployment. Do not replace this path with raw
+Docker/SSH, copy secret-bearing files between controllers, or treat an empty or
+interrupted transfer response as success. Transfer runs the configured remote
+storage-floor admission before writing and holds a dedicated remote-engine lock
+through load and receipt publication. The lock is held by its SSH connection;
+it does not enable or use the separately gated hosting coordination store.
+Receipt-bound apply takes the same engine-wide lock before
+delivery admission and holds it through runtime convergence; engine contention
+or lock loss never degrades to an uncoordinated transfer. A load-worker fence
+also blocks new owners while an import survives its SSH lease. Push pins the
+named registration and gates readiness before reservations or locks. Every
+transfer step shares `--timeout`; expiry before any remote write is
+`local_images_transfer_timeout`, after a possible write is
+`local_images_transfer_unknown`. Apply compares the actual remote Compose
+render (environment, files, override) and exact portable image IDs before Compose.
+Local rendering refuses service image references dependent on Docker client
+selection variables. Receipt target names must be safe hosted slugs.
 
 Use recovery when the first safe step must be observation. Do not substitute ordinary
 `host apply`, because apply may stage source before deciding replay safety.

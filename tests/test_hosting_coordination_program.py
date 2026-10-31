@@ -12,6 +12,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -39,9 +40,23 @@ class ProgramTests(unittest.TestCase):
         self.env = TwoControllers()
         self.addCleanup(self.env.cleanup)
         self.store = self.env.remote_home / "runtime" / "hosting-leases"
+        self.clock_time = None
+        self.lock_wait = None
 
     def raw(self, request):
-        return self.env.remote(None, program.remote_command(request), timeout=15)
+        source = program.PROGRAM
+        if self.clock_time is not None:
+            marker = "now = int(time.time())"
+            self.assertEqual(source.count(marker), 1)
+            source = source.replace(marker, f"now = {self.clock_time}", 1)
+        if self.lock_wait is not None:
+            prefix = "WAITER_LAPSE, CAP_DEFAULT, CAP_MAX, LOCK_WAIT = 10, 2, 64, "
+            marker = prefix + str(program.LOCK_WAIT_SECONDS)
+            self.assertEqual(source.count(marker), 1)
+            source = source.replace(marker, prefix + str(self.lock_wait), 1)
+        with mock.patch.object(program, "PROGRAM", source):
+            command = program.remote_command(request)
+        return self.env.remote(None, command, timeout=15)
 
     def call(self, action, **fields):
         result = self.raw({"action": action, **fields})
@@ -335,6 +350,7 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(stranger["refused"], "lease_lost")
 
     def test_renewed_build_slots_survive_original_expiry_and_keep_cap(self):
+        self.clock_time = 1_000_000
         self.enable()
         keys = [f"london/site{i}/production" for i in range(3)]
         leases = [self.admit(key, ttl=5 if index < 2 else None)["lease"]
@@ -345,7 +361,9 @@ class ProgramTests(unittest.TestCase):
             renewed = self.call("renew", state_key=keys[index],
                                 lease_id=leases[index]["lease_id"], fencing_token=1, ttl=90)
             self.assertFalse(renewed["lost"])
-        time.sleep(5.5)  # past every slot's cached expiry; both leases still live
+            self.assertGreater(renewed["lease"]["expires_at"], leases[index]["expires_at"])
+        self.clock_time += 6  # past the original cached expiry; renewed leases remain live
+        self.assertTrue(all(self.clock_time > lease["expires_at"] for lease in leases[:2]))
         refused = self.call("build-acquire", state_key=keys[2], lease_id=leases[2]["lease_id"])
         self.assertEqual(refused.get("refused"), "build_cap_reached", refused)
         self.assertEqual(len(refused["build_holders"]), 2)
@@ -378,6 +396,7 @@ class ProgramTests(unittest.TestCase):
 
         for name, corrupt in (("broken_lease", broken_lease), ("foreign_key", foreign_key)):
             with self.subTest(name):
+                self.clock_time = 1_000_000
                 self.env = TwoControllers()
                 self.addCleanup(self.env.cleanup)
                 self.store = self.env.remote_home / "runtime" / "hosting-leases"
@@ -389,7 +408,10 @@ class ProgramTests(unittest.TestCase):
                 path.write_text(corrupt(json.loads(path.read_text())))
                 other = self.admit(OTHER)["lease"]
                 self.call("cap-set", value=1, controller_id=CONTROLLER_A)
-                time.sleep(2.2)
+                self.assertEqual(self.call("build-acquire", state_key=OTHER,
+                                           lease_id=other["lease_id"])["refused"],
+                                 "build_cap_reached")
+                self.clock_time = lease["expires_at"] + 1
                 self.assertTrue(self.call("build-acquire", state_key=OTHER,
                                           lease_id=other["lease_id"])["acquired"])
                 remote = json.loads((self.store / "remote.json").read_text())
@@ -403,6 +425,9 @@ class ProgramTests(unittest.TestCase):
                                      "target_record_unreadable")
 
     def test_busy_store_lock_refuses_within_its_bound(self):
+        self.assertEqual(program.LOCK_WAIT_SECONDS, 10)
+        self.assertLess(program.LOCK_WAIT_SECONDS, 15)  # client call timeout
+        self.lock_wait = 0.2
         self.enable()
         import fcntl
         descriptor = os.open(self.store / "coord.lock", os.O_RDWR)
@@ -413,7 +438,8 @@ class ProgramTests(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertEqual(refused["refused"], "lease_authority_unavailable")
         self.assertEqual(refused["reason"], "store_busy")
-        self.assertLess(elapsed, program.LOCK_WAIT_SECONDS + 3)
+        self.assertGreaterEqual(elapsed, self.lock_wait)
+        self.assertLess(elapsed, self.lock_wait + 3)
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         self.assertTrue(self.admit()["admitted"])
 
@@ -573,6 +599,197 @@ class ProgramTests(unittest.TestCase):
         remote["shared_lease"] = {"step": "build", "expires_at": 1}
         remote_file.write_text(json.dumps(remote))
         self.assertIsNone(self.call("list")["shared_lease"])
+
+    def test_retained_malformed_slots_across_remote_actions(self):
+        self.enable()
+        lease = self.admit()["lease"]
+        other = self.admit(OTHER)["lease"]
+        self.call("cap-set", value=10, controller_id=CONTROLLER_A)
+        path = self.store / "remote.json"
+        baseline = json.loads(path.read_text())
+        future = int(time.time()) + 3600
+        slots = [
+            {"state_key": KEY, "lease_id": lease["lease_id"]},
+            {"state_key": KEY, "expires_at": future},
+            {"state_key": 7, "lease_id": "l-" + "1" * 16, "expires_at": future},
+            {"state_key": "\ud800", "lease_id": "l-" + "2" * 16, "expires_at": future},
+        ]
+        expected = [dict(slot) for slot in slots]
+        expected[0]["expires_at"] = lease["expires_at"]
+        shared = {"lease_id": "l-" + "3" * 16, "state_key": KEY, "step": "edge",
+                  "acquired_at": 1, "expires_at": future}
+        actions = [
+            ("list", {}, "build_holders"),
+            ("cap-get", {}, "build_holders"),
+            ("cap-set", {"value": 10, "controller_id": CONTROLLER_A}, "build_cap"),
+            ("register-controller", {"controller_id": CONTROLLER_B}, "registered"),
+            ("shared-acquire", {"state_key": OTHER, "step": "edge"}, "shared_lease"),
+            ("shared-release", {"lease_id": shared["lease_id"]}, "released"),
+            ("build-acquire", {"state_key": OTHER, "lease_id": other["lease_id"]}, "acquired"),
+            ("build-release", {"state_key": OTHER, "lease_id": other["lease_id"]}, "released"),
+            ("release", {"state_key": OTHER, "lease_id": other["lease_id"],
+                         "fencing_token": 1}, "released"),
+        ]
+        for action, fields, result_key in actions:
+            with self.subTest(action=action):
+                remote = dict(baseline, build_slots=slots,
+                              shared_lease=shared if action == "shared-release" else None)
+                path.write_text(json.dumps(remote))
+                before = path.read_bytes()
+                result = self.call(action, **fields)
+                self.assertIn(result_key, result)
+                if action == "cap-set":
+                    self.assertEqual(result["build_cap"], 10)
+                if action == "register-controller":
+                    self.assertTrue(result["registered"])
+                if action == "shared-acquire":
+                    self.assertEqual(result["shared_lease"]["state_key"], OTHER)
+                if action in ("list", "cap-get"):
+                    self.assertEqual(result["build_holders"], [
+                        {"target": slot.get("state_key"), "lease_id": slot.get("lease_id"),
+                         "since": slot.get("started_at")} for slot in expected])
+                    self.assertEqual(path.read_bytes(), before)
+                else:
+                    persisted = json.loads(path.read_text())["build_slots"]
+                    self.assertEqual(persisted[:len(expected)], expected)
+                    if action == "build-acquire":
+                        self.assertTrue(result["acquired"])
+                        self.assertEqual(persisted[-1]["lease_id"], other["lease_id"])
+                    else:
+                        self.assertEqual(persisted, expected)
+                    if action == "build-release":
+                        self.assertFalse(result["released"])
+                    if action in ("shared-release", "release"):
+                        self.assertTrue(result["released"])
+
+    def test_recovered_slot_without_started_at_persists_target_expiry(self):
+        self.enable()
+        lease = self.admit()["lease"]
+        self.call("cap-set", value=2, controller_id=CONTROLLER_A)
+        path = self.store / "remote.json"
+        remote = json.loads(path.read_text())
+        remote["build_slots"] = [{"state_key": KEY, "lease_id": lease["lease_id"]}]
+        path.write_text(json.dumps(remote))
+        self.assertTrue(self.call("register-controller", controller_id=CONTROLLER_B)["registered"])
+        stored = json.loads(path.read_text())
+        self.assertEqual(stored["build_slots"], [{"state_key": KEY, "lease_id": lease["lease_id"],
+                                                  "expires_at": lease["expires_at"]}])
+        self.assertEqual(self.call("cap-get")["build_holders"][0]["since"], None)
+
+    def test_future_cached_expiry_depends_on_target_state(self):
+        self.enable()
+        lease = self.admit()["lease"]
+        self.call("cap-set", value=2, controller_id=CONTROLLER_A)
+        path = self.store / "remote.json"
+        target = self.store / "targets" / program_target(KEY)
+        original = json.loads(target.read_text())
+        remote = json.loads(path.read_text())
+        slot = {"state_key": KEY, "lease_id": lease["lease_id"],
+                "started_at": 1, "expires_at": int(time.time()) + 3600}
+        for state in ("absent", "mismatched", "expired", "unreadable"):
+            with self.subTest(state=state):
+                path.write_text(json.dumps(dict(remote, build_slots=[slot])))
+                target.write_text(json.dumps(original))
+                if state == "absent":
+                    target.unlink()
+                elif state == "unreadable":
+                    target.write_text("{broken")
+                else:
+                    changed = json.loads(json.dumps(original))
+                    if state == "mismatched":
+                        changed["lease"]["lease_id"] = "l-" + "f" * 16
+                    else:
+                        changed["lease"]["expires_at"] = 1
+                    target.write_text(json.dumps(changed))
+                holders = self.call("cap-get")["build_holders"]
+                expected = [slot] if state == "unreadable" else []
+                self.assertEqual(len(holders), len(expected))
+                self.assertEqual(self.call("cap-set", value=2, controller_id=CONTROLLER_A)["build_cap"], 2)
+                self.assertEqual(json.loads(path.read_text())["build_slots"], expected)
+
+    def test_malformed_shared_lease_refusals_preserve_remote_and_target_actions_work(self):
+        self.enable()
+        lease = self.admit()["lease"]
+        self.call("cap-set", value=2, controller_id=CONTROLLER_A)
+        path = self.store / "remote.json"
+        remote = json.loads(path.read_text())
+        remote["shared_lease"] = {"step": "edge", "expires_at": int(time.time()) + 3600}
+        path.write_text(json.dumps(remote))
+        before = path.read_bytes()
+        target = self.store / "targets" / program_target(KEY)
+        target_before = target.read_bytes()
+        actions = [
+            ("list", {}), ("cap-get", {}),
+            ("cap-set", {"value": 3, "controller_id": CONTROLLER_A}),
+            ("register-controller", {"controller_id": CONTROLLER_B}),
+            ("shared-acquire", {"state_key": KEY, "step": "edge"}),
+            ("shared-release", {"lease_id": "l-" + "0" * 16}),
+            ("build-acquire", {"state_key": KEY, "lease_id": lease["lease_id"]}),
+            ("build-release", {"state_key": KEY, "lease_id": lease["lease_id"]}),
+            ("release", {"state_key": KEY, "lease_id": lease["lease_id"], "fencing_token": 1}),
+        ]
+        for action, fields in actions:
+            with self.subTest(action=action):
+                result = self.call(action, **fields)
+                self.assertEqual(result.get("refused"), "lease_authority_unavailable")
+                self.assertEqual(result.get("reason"), "remote_record_unreadable")
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(target.read_bytes(), target_before)
+        self.assertFalse(self.call("renew", state_key=KEY, lease_id=lease["lease_id"],
+                                   fencing_token=1)["lost"])
+        self.assertTrue(self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"],
+                                  fencing_token=1, event="check", phase_id="build")["valid"])
+        self.assertTrue(self.admit(OTHER)["admitted"])
+        hold_key = "london/hold/production"
+        hold = self.call("hold-claim", state_key=hold_key, purpose="maintenance",
+                         holder={"controller_id": CONTROLLER_A, "session": "s1"})
+        hold_id = hold["hold"]["hold_id"]
+        self.assertEqual(self.call("hold-renew", state_key=hold_key, hold_id=hold_id,
+                                   duration=60)["hold"]["hold_id"], hold_id)
+        self.assertTrue(self.call("hold-release", state_key=hold_key, hold_id=hold_id)["released"])
+        self.call("hold-claim", state_key=hold_key, purpose="maintenance",
+                  holder={"controller_id": CONTROLLER_A, "session": "s1"})
+        self.assertTrue(self.call("hold-break", state_key=hold_key, controller_id=CONTROLLER_B,
+                                  reason="maintenance ended")["broken"])
+        self.assertTrue(self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"],
+                                  fencing_token=1, event="start", phase_id="build")["recorded"])
+        self.assertTrue(self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"],
+                                  fencing_token=1, event="end", phase_id="build")["recorded"])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_expired_incomplete_shared_lease_is_replaced_completely(self):
+        self.enable()
+        self.call("cap-set", value=2, controller_id=CONTROLLER_A)
+        path = self.store / "remote.json"
+        remote = json.loads(path.read_text())
+        remote["shared_lease"] = {"step": "old", "expires_at": 1}
+        path.write_text(json.dumps(remote))
+        result = self.call("shared-acquire", state_key=KEY, step="edge", bound=60)
+        replacement = result["shared_lease"]
+        self.assertRegex(replacement["lease_id"], r"^l-[0-9a-f]{16}$")
+        self.assertEqual(replacement["state_key"], KEY)
+        self.assertEqual(replacement["step"], "edge")
+        self.assertGreater(replacement["expires_at"], replacement["acquired_at"])
+        self.assertLessEqual(replacement["expires_at"] - replacement["acquired_at"], 60)
+        self.assertEqual(json.loads(path.read_text())["shared_lease"], replacement)
+
+    def test_oversized_phase_pid_creates_fence_on_lease_expiry(self):
+        self.enable()
+        lease = self.admit()["lease"]
+        self.assertTrue(self.call("phase-report", state_key=KEY, lease_id=lease["lease_id"],
+                                  fencing_token=1, event="start", phase_id="build",
+                                  pid=2 ** 100)["recorded"])
+        target = self.store / "targets" / program_target(KEY)
+        record = json.loads(target.read_text())
+        record["lease"]["expires_at"] = 1
+        target.write_text(json.dumps(record))
+        result = self.admit(holder=who(controller=CONTROLLER_B))
+        self.assertEqual(result.get("refused"), "predecessor_phase_running")
+        stored = json.loads(target.read_text())
+        self.assertEqual(stored["fence"], "fenced_pending_cessation")
+        self.assertIsNone(stored["lease"])
+        self.assertEqual(stored["phase"]["pid"], 2 ** 100)
+        self.assertIn("expired_with_phase", [entry["event"] for entry in stored["history"]])
 
 if __name__ == "__main__":
     unittest.main()

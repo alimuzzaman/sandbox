@@ -97,7 +97,16 @@ class ActivationScheduler:
     def scan(self, *, dry_run: bool = False, now: float | None = None) -> tuple[ScanResult, ...]:
         results: list[ScanResult] = []
         for claim in self.service.coordinator.claim_due_for_suspend(now=now):
-            route = self._routes[claim.route_id]
+            route = self._routes.get(claim.route_id)
+            if route is None:
+                # Disappearance revokes stop authority, not coordinator state.
+                # Release only this drain generation so a returning route can
+                # become due again without leaving a stale claim executable.
+                self.service.coordinator.run_if_drain_current(
+                    claim, lambda: self.service.coordinator.touch(claim.route_id, now=now),
+                )
+                results.append(ScanResult(claim.route_id, "pinned", "catalog_route_unavailable"))
+                continue
             safe, reason = self.activity_safe(route)
             if not safe:
                 self.service.coordinator.touch(route.route_id, now=now)

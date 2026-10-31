@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -21,21 +22,77 @@ MAX_SESSION_SECONDS = 43_200
 END_REASONS = ("lifetime_expired", "interrupted", "hangup", "child_exited")
 
 
+class CredentialState(str, Enum):
+    UNKNOWN = "unknown"
+    MISSING = "missing"
+    LOCKED = "locked"
+    UNAVAILABLE = "unavailable"
+    PRESENT = "present"
+    FAILED = "failed"
+
+
+class SecretOutcomeCode(str, Enum):
+    PROVIDER_UNSUPPORTED = "provider_unsupported"
+    CREDENTIAL_BACKEND_UNAVAILABLE = "credential_backend_unavailable"
+    CREDENTIAL_LOCKED = "credential_locked"
+    CREDENTIAL_MISSING = "credential_missing"
+    CREDENTIAL_STORE_FAILED = "credential_store_failed"
+    ENDPOINT_UNREACHABLE = "endpoint_unreachable"
+    ENDPOINT_UNTRUSTED = "endpoint_untrusted"
+    AUTHENTICATION_DENIED = "authentication_denied"
+    PROVIDER_DENIED = "provider_denied"
+    ITEM_UNAVAILABLE = "item_unavailable"
+    PROVIDER_RATE_LIMITED = "provider_rate_limited"
+    PROVIDER_FAILED = "provider_failed"
+    RESPONSE_INVALID = "response_invalid"
+    RESPONSE_TOO_LARGE = "response_too_large"
+    OPERATION_TIMEOUT = "operation_timeout"
+    CAPACITY_EXHAUSTED = "capacity_exhausted"
+
+
+@dataclass(frozen=True)
+class InfisicalSourcePolicy:
+    """Validated, exact provider selector containing only non-secret metadata."""
+
+    alias: str
+    endpoint: str
+    project_id: str
+    environment: str
+    path: str
+    key: str
+    client_id: str
+    mcp_modes: frozenset[str] = frozenset()
+    timeout_seconds: int = 10
+
+
+@dataclass(frozen=True)
+class CredentialLocator:
+    """Fixed service plus opaque account; never an OS-store object identifier."""
+
+    service: str
+    account: str
+
+
 class SecretBrokerError(RuntimeError):
     """Bounded public failure with no secret-bearing detail."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(self, code: str, message: str, *, retryable: bool = False,
+                 remedy: str | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        self.remedy = remedy
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "code": self.code,
             "message": self.message,
             "retryable": self.retryable,
         }
+        if self.remedy is not None:
+            result["remedy"] = self.remedy
+        return result
 
 
 @dataclass(frozen=True)

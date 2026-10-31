@@ -265,6 +265,28 @@ not close the external or human gates listed below.
 
 ## P2 — protected recovery, hosting, and product gates
 
+- Host apply: keep first-adoption DNS provenance across re-applies (today the second
+  apply records Sandbox's own record as `previous`, so `host destroy` restores
+  instead of deleting it), and keep the Origin CA id when nginx reuses a certificate
+  (recorded as `id: null`, so destroy cannot revoke it). Found in the 2026-10-12
+  `host destroy` review.
+- Control DNS fallback (`_control_urlopen`) tests the review asked for: a real-opener
+  POST keeping Host, Authorization and one Content-Length; HTTPS and HTTP redirects
+  refused with no second request; a mismatched or untrusted certificate failing before
+  any header is sent; `verify_remote` 400/405/406 vs 401 through the fallback; the DNS
+  reason visible from `remote_diagnostics` and `verify_remote`. Also give the
+  `sb doctor` MCP probe the same fallback.
+- Host destroy leaves explicitly named images (`image: xspeed-sandbox/wordpress:<env>`
+  in the project's compose file): teardown only removes `<compose-name>-*` tags, while
+  the probe counts every project-labelled image, so the target never reads "nothing to
+  remove". Seen on 7 xspeed targets on xcloud-london 2026-10-12; removed by hand with a
+  non-forced `rmi` of the labelled tags no container used. Remove labelled images no
+  container references (non-forced), and make probe and teardown agree.
+- Host destroy tests the review asked for: an interrupted destroy on a real
+  two-key namesake pair (`site-blue/sandbox` + `site/blue-sandbox`) followed by
+  apply and image activation refusing through the placeholder; a retire-delivery
+  vs destroy fence race in both lock orders; public-path v1/v2 activation,
+  rollback, recovery and containment refusing with zero effects under a destroy fence.
 - [ ] **Spec 060 coordination: tests the 2026-10-11 merge-gate review asked
   for.** No known defect behind them; they pin behaviour shipped in `0239e1e`
   (protocol 8) in `tests/test_hosting_coordination_program.py`:

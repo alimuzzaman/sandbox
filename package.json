@@ -35,6 +35,7 @@
     "sandbox/",
     "sandbox_core.py",
     "sandbox.yml",
+    "requirements-cli.txt",
     "docker-compose.yml",
     "config/",
     "mcp/",

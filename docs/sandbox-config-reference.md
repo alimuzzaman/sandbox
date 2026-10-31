@@ -13,6 +13,57 @@ MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /
 
 There is **no central catalog**; each plugin self-describes here.
 
+## Registered secret sources
+
+`secrets.sources` is a strict opt-in catalog. Existing descriptors without
+`type` remain file sources; `type: "file"` is equivalent. An Infisical source
+registers one exact item:
+
+```jsonc
+{
+  "secrets": {"sources": {"deploy-api": {
+    "type": "infisical",
+    "endpoint": "https://infisical.private.example",
+    "projectId": "project-id-placeholder",
+    "environment": "dev",
+    "path": "/",
+    "key": "API_TOKEN",
+    "clientId": "client-id-placeholder",
+    "timeoutSeconds": 10,
+    "mcpModes": ["source_info", "keys", "metadata", "validate", "use"]
+  }}}
+}
+```
+
+Every field is non-secret. The endpoint is an HTTPS origin only; userinfo,
+query, fragment, redirects, alternate origins, and public fallback are refused.
+Selectors cannot be overridden by CLI or MCP. `mcpModes` is the automation
+ceiling; provider sources have no mask/reveal, general listing, arbitrary child,
+write, delete, rotation, migration, or provider-admin operation.
+
+The Universal Auth client secret lives in the current controller's approved OS
+credential store, with a distinct independently revocable credential on each
+Linux/macOS controller. Linux requires an existing unlocked Secret Service;
+Sandbox never starts or unlocks it. Registration is local validation only.
+Placing the credential creates a version-2 approval locator bound to the
+canonical project root and endpoint, exact selector, MCP grants, and all fixed use profiles for
+that source. Changing any bound field requires explicit credential placement;
+old version-1 items are never migrated automatically. Provider credential reads/status,
+DNS, and HTTPS work runs in a disposable helper under the source's one total
+deadline. Provider values with unsafe control/format characters fail closed.
+After placing a credential for changed authority, rotate the provider client
+secret and use the approved native credential-store UI to remove obsolete
+Sandbox items. Agents must not list or delete keyring entries directly.
+Provider role, capacity, project exclusivity, and the Tailscale-private route
+are operator-provisioned and require the separate live acceptance in
+`docs/secret-inspection.md`.
+
+Every fixed profile is subject to the same direct, wrapper-aware, symlink-aware,
+and set-id privilege refusal as `secrets run`. All secret-bearing child process
+groups are ended on normal exit, failure, and timeout; detached background
+daemons are not a supported profile outcome. Shell/interpreter command strings
+remain opaque and must not contain escalation.
+
 ## Optional immutable OCI project intent
 
 Feature 049 adds one kind-neutral, untrusted project channel. It applies to both

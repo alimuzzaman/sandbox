@@ -12,6 +12,7 @@ import shlex
 import socket
 import ssl
 import stat
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -389,6 +390,184 @@ def _secret_status(validated: dict) -> tuple[dict[str, str], list[str]]:
         else:
             missing.append(source_key)
     return values, missing
+
+
+def _cmd_host_image_build_local(args) -> None:
+    from sandbox.config.descriptors import _load_mapping, primary_config
+    from sandbox.hosting import local_images
+
+    project_dir = Path(args.project_dir or ".").resolve()
+    timeout = 7200 if args.timeout is None else args.timeout
+    if not 1 <= timeout <= 86400:
+        die("--timeout must be between 1 and 86400 seconds")
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=project_dir,
+            env=remote.git_environment(), capture_output=True, text=True,
+            check=False, timeout=15)
+        if status.returncode != 0 or status.stdout.strip():
+            raise local_images.LocalImageError(
+                "local_images_source_dirty", "local image build requires a clean checkout")
+        commit, checkout, prefix = local_images.resolve_commit(project_dir, args.revision)
+        with tempfile.TemporaryDirectory(prefix="sandbox-local-images-") as temporary:
+            materialized = Path(temporary) / "source"
+            local_images.materialize_checkout(checkout, commit, materialized)
+            selected = materialized if prefix == "." else materialized / prefix
+            config_path = primary_config(selected)
+            if config_path is not None and "hostingImages" in _load_mapping(config_path):
+                raise local_images.LocalImageError(
+                    "local_images_authority_conflict",
+                    "local images cannot satisfy the declared hostingImages authority")
+            validated = hosting.validate_manifest(selected, args.environment)
+            if validated.get("hostingImages") is not None:
+                raise local_images.LocalImageError(
+                    "local_images_authority_conflict",
+                    "local images cannot satisfy the declared hostingImages authority")
+            if validated["compose"].get("build", True) is not False:
+                raise local_images.LocalImageError(
+                    "local_images_build_enabled",
+                    "set compose.build to false before producing local deployment images")
+            source_dir = Path(validated["source_root"]).resolve()
+            source_revision, _source_checkout = remote._source_tree_commit(
+                source_dir, source_dir, commit)
+            source_root_relative = source_dir.relative_to(materialized).as_posix()
+            source_values, missing = _secret_status(validated)
+            if missing:
+                raise local_images.LocalImageError(
+                    "local_images_secret_missing",
+                    "required hosting secrets are unavailable")
+            runtime_dir = Path(temporary) / "runtime"
+            runtime_dir.mkdir(mode=0o700)
+            env_path = runtime_dir / "environment.env"
+            env_path.write_text(hosting.render_env_file(
+                validated, source_values, pushed_commit_sha=source_revision))
+            env_path.chmod(0o600)
+            compose = ["docker", "compose", "--env-file", str(env_path),
+                       "-p", hosting.compose_project_name(validated)]
+            for file_name in validated["compose"]["files"]:
+                compose.extend(["-f", str(source_dir / file_name)])
+            child_env = local_images.local_environment({
+                "DOCKER_DEFAULT_PLATFORM": local_images.DEFAULT_PLATFORM,
+                "SANDBOX_HOST_ENV_FILE": str(env_path),
+            })
+            for destination, source in {
+                    **validated["secrets"]["required"],
+                    **validated["secrets"]["generated"]}.items():
+                if source in source_values:
+                    child_env[destination] = source_values[source]
+            output_dir = local_images.default_output_directory(
+                RUNTIME_DIR, validated, commit)
+            if getattr(args, "receipt_version", "v1") == "v2":
+                output_dir = output_dir / "v2"
+            progress = None
+            if not args.json:
+                def progress(message):
+                    safe = str(message)
+                    for value in source_values.values():
+                        if value:
+                            safe = safe.replace(value, "[REDACTED]")
+                    info("host image build-local: " + remote.redact_text(safe)[:500])
+            receipt = local_images.build_local_images(
+                validated=validated, commit=commit, source_revision=source_revision,
+                config_command=shlex.join(
+                    [*compose, "--profile", "*", "config", "--format", "json"]),
+                build_command=lambda services: shlex.join(
+                    [*compose, "build", "--with-dependencies", *services]),
+                compose_project=hosting.compose_project_name(validated),
+                source_dir=str(source_dir), runtime_dir=str(runtime_dir),
+                output_dir=output_dir, platform=local_images.DEFAULT_PLATFORM,
+                environment=child_env, timeout=timeout,
+                receipt_version=getattr(args, "receipt_version", "v1"),
+                source_root_relative=source_root_relative, progress=progress,
+                symbolic_secrets=validated["secrets"]["required"].keys()
+                | validated["secrets"]["generated"].keys())
+        result = {"ok": True, "action": "build-local", "project": receipt["project"],
+                  "environment": receipt["environment"], "commit": receipt["commit"],
+                  "platform": receipt["platform"],
+                  "receipt": str(output_dir / local_images.RECEIPT_FILE_NAME),
+                  "receipt_digest": receipt["receipt_digest"],
+                  "services": sorted(receipt["services"]),
+                  "artifacts": sorted(receipt["artifacts"])}
+    except (local_images.LocalImageError, hosting.HostingError, OSError,
+            subprocess.SubprocessError) as exc:
+        message = str(exc).split(": ", 1)[-1]
+        payload = {"ok": False, "code": getattr(exc, "code", "local_images_build_failed"),
+                   "message": remote.redact_text(message)[:500]}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+            raise SystemExit(1)
+        die(payload["message"])
+    _emit(result, args.json)
+
+
+def _cmd_host_image_push_local(args) -> None:
+    from sandbox.delivery.context import registered_host_digest
+    from sandbox.hosting import local_images
+    from sandbox.transports import remote_local_images
+    from sandbox.jobs.models import ResolvedTarget
+    from sandbox.readiness.gate import require_ready
+    from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+
+    if not args.confirm:
+        die("host image push-local is protected; pass --confirm")
+    if not args.remote or not args.receipt:
+        die("host image push-local requires --remote and --receipt")
+    timeout = 7200 if args.timeout is None else args.timeout
+    artifact_timeout = 3600 if args.artifact_timeout is None else args.artifact_timeout
+    if not 1 <= timeout <= 86400 or not 1 <= artifact_timeout <= 86400:
+        die("local image transfer timeouts must be between 1 and 86400 seconds")
+    try:
+        with remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
+            entry = remote_local_images._entry(args.remote)
+            # Transfer requires no project manifest: the receipt directory is
+            # the controller context, and the explicitly locked registration
+            # is the gate's resolved target.
+            project_root = str(Path(args.receipt).expanduser().resolve().parent)
+            target = ResolvedTarget(
+                project_root=project_root, kind="remote", remote_name=args.remote,
+                workspace_label="default", namespace="host-local-images",
+                sources={"remote_selection": "explicit"}, remote=entry)
+            require_ready(project_root, args.remote, target=target)
+            home = remote.resolve_sandbox_home(entry)
+            progress = None if args.json else lambda message: info(
+                "host image push-local: " + remote.redact_text(message)[:500])
+            result = remote_local_images.push_receipt(
+                args.remote, args.receipt, timeout=timeout,
+                artifact_timeout=artifact_timeout,
+                machine_identity=_authenticated_machine_identity(args.remote),
+                registered_host_digest=registered_host_digest(entry, args.remote, home),
+                progress=progress, entry=entry)
+        payload = {"ok": True, "action": "push-local", "remote": args.remote,
+                   "receipt_digest": result["receipt"]["receipt_digest"],
+                   "remote_receipt_digest": result["remote_receipt_digest"],
+                   "loaded": result["loaded"], "skipped": result["skipped"],
+                   "transferred_bundles": result.get("transferred_bundles", []),
+                   "transferred_bytes": result.get("transferred_bytes", 0)}
+        if result["receipt"]["schema"] == local_images.RECEIPT_SCHEMA_V2:
+            payload["reservation_cleanup_pending"] = result.get("reservation_cleanup_pending", False)
+    except RemoteJobAdmissionError as exc:
+        if args.json:
+            print(json.dumps(exc.to_payload(remote=args.remote, operation="push-local"),
+                             sort_keys=True))
+            raise SystemExit(1)
+        die(str(exc))
+    except (local_images.LocalImageError, remote_local_images.RemoteLocalImageError) as exc:
+        payload = {"ok": False, "code": exc.code,
+                   "message": remote.redact_text(str(exc).split(": ", 1)[-1])[:500]}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+            raise SystemExit(1)
+        die(payload["message"])
+    except Exception:
+        # An unexpected client failure may occur after remote writes. Never
+        # claim a clean failure or expose exception text containing inputs.
+        payload = {"ok": False, "code": "local_images_transfer_unknown",
+                   "message": "Local image transfer outcome is unknown; re-observe the same receipt."}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+            raise SystemExit(1)
+        die(payload["message"])
+    _emit(payload, args.json)
 
 
 def _declared_secret_sources(validated: dict) -> set[str]:
@@ -1474,7 +1653,8 @@ def _initializer_dependency_status(entry: dict, prefix: str, service: str,
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
                  *, force_recreate: bool = True,
-                 runtime_convergence_proof: dict | None = None) -> None:
+                 runtime_convergence_proof: dict | None = None,
+                 local_images_verified: bool = False) -> None:
     proof = runtime_convergence_proof or {}
     revisions = [proof.get(key) for key in (
         "requested_revision", "recorded_revision", "observed_runtime_revision",
@@ -1570,7 +1750,8 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
             log_phase="compose_build",
         )
         converge_flags = " --no-build --force-recreate --always-recreate-deps --renew-anon-volumes"
-    command = f"{prefix} up -d{converge_flags} --remove-orphans {service_args}"
+    pull_flag = " --pull never" if local_images_verified else ""
+    command = f"{prefix} up -d{pull_flag}{converge_flags} --remove-orphans {service_args}"
     _remote_checked(
         entry, command, timeout=build_timeout,
         progress=progress, log_path=apply_log,
@@ -1609,7 +1790,7 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     try:
         _remote_checked(
             entry,
-            f"{prefix} up -d{' --no-build' if not build else ''} --no-deps {service_args}",
+            f"{prefix} up -d{pull_flag}{' --no-build' if not build else ''} --no-deps {service_args}",
             timeout=start_timeout,
             progress=progress, log_path=apply_log,
             log_phase="runtime_start",
@@ -2412,7 +2593,8 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
                               edge_intent: dict | None = None,
                               broker_locked: bool = False,
                               publish_binding_key: bool = False,
-                              source_artifact: dict | None = None) -> dict | None:
+                              source_artifact: dict | None = None,
+                              local_images_digest: str | None = None) -> dict | None:
     """Persist current-contract apply authority before the first host effect."""
     context = _durable_host_context(validated["project_root"])
     try:
@@ -2468,6 +2650,7 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
             "source_branch": source_branch,
             "source_clean": True,
             "config_digest": config_digest,
+            "local_images_digest": local_images_digest,
             "manifest_digest": _nonsecret_host_intent(validated),
             "topology": [validated["compose"]["service"],
                          *validated["compose"].get("background_services", []),
@@ -2546,6 +2729,13 @@ def _accept_hosting_operation(state: dict, key: str, *, validated: dict,
         record["hosting_operation"] = operation
         save_state(state)
     return operation
+
+
+def _destroy_owns(state: dict, key: str) -> bool:
+    """True when an unfinished `host destroy` fences this target."""
+    record = (state.get("hosts") or {}).get(key)
+    active = record.get("active_operation") if isinstance(record, dict) else None
+    return isinstance(active, dict) and active.get("action") == "destroy"
 
 
 def _assert_no_active_host_operation(state: dict, key: str) -> None:
@@ -3191,32 +3381,12 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
     if not getattr(args, "confirm", False):
         die("host retire-delivery is protected; review `./sb delivery inspect` "
             "then pass --confirm")
+    if _destroy_owns(hosting.load_host_state(), hosting.state_key(remote_name, validated)):
+        die("host destroy owns this target; finish or re-run it with --clear-fenced first; "
+            "no record was changed")
     try:
         summary = retire_interrupted_operation(
             validated, remote_name, original.strip(), job_lookup=_recovery_job_lookup)
-        target_key = hosting.state_key(remote_name, validated)
-        state = hosting.load_host_state()
-        record = (state.get("hosts") or {}).get(target_key)
-        if record:
-            record["active_operation"] = None
-            record["recovery_uncertainty"] = None
-            activation = record.get("image_activation")
-            if isinstance(activation, dict) and activation.get("active") is not None:
-                activation["active"] = None
-            # A staged revision the retired attempt never proved would fence
-            # every retry with unproven_staged_revision; drop the claim so the
-            # next apply does a full recreate.
-            if record.get("staged_revision") and \
-                    record.get("staged_revision") != record.get("recorded_revision"):
-                record["staged_revision"] = None
-            # The same holds when staged equals recorded but nothing observed
-            # that revision running: an environment without a declared source
-            # revision can never prove it, so the same commit refused forever.
-            # Retire is the operator's consent to converge from scratch once.
-            revision = record.get("recorded_revision") or record.get("commit")
-            if revision and record.get("observed_runtime_revision") != revision:
-                record["retired_unproven_runtime"] = True
-            hosting.save_host_state(state)
     except DeliveryError as exc:
         payload = {"ok": False, "code": exc.code, "operation": "retire-delivery",
                    "original_request_id": original.strip()}
@@ -3224,6 +3394,46 @@ def _cmd_host_retire_delivery(validated: dict, remote_name: str, args) -> None:
             print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
             raise SystemExit(1)
         die(exc.code + "; inspect the retained delivery record before retrying")
+    try:
+        target_key = hosting.state_key(remote_name, validated)
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        # Under the state lock, so a destroy fence written after this read
+        # cannot be overwritten by this save.
+        with RecoveryRepository().state_lock(timeout_seconds=_host_apply_lock_wait(args)):
+            state = hosting.load_host_state()
+            record = (state.get("hosts") or {}).get(target_key)
+            if record and _destroy_owns(state, target_key):
+                die("host destroy took this target during retirement; its fence was kept")
+            if record:
+                record["active_operation"] = None
+                record["recovery_uncertainty"] = None
+                activation = record.get("image_activation")
+                if isinstance(activation, dict) and activation.get("active") is not None:
+                    activation["active"] = None
+                # A staged revision the retired attempt never proved would fence
+                # every retry with unproven_staged_revision; drop the claim so the
+                # next apply does a full recreate.
+                if record.get("staged_revision") and \
+                        record.get("staged_revision") != record.get("recorded_revision"):
+                    record["staged_revision"] = None
+                # The same holds when staged equals recorded but nothing observed
+                # that revision running: an environment without a declared source
+                # revision can never prove it, so the same commit refused forever.
+                # Retire is the operator's consent to converge from scratch once.
+                revision = record.get("recorded_revision") or record.get("commit")
+                if revision and record.get("observed_runtime_revision") != revision:
+                    record["retired_unproven_runtime"] = True
+                hosting.save_host_state(state)
+    except TimeoutError:
+        guidance = ("delivery retirement was recorded, but host state cleanup is pending; "
+                    "inspect the retained delivery record and host state before any further action")
+        payload = {"ok": False, "code": "operation_busy", "operation": "retire-delivery",
+                   "original_request_id": original.strip(), "partial": True,
+                   "retired": summary, "host_state_cleanup": "pending", "guidance": guidance}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+            raise SystemExit(1)
+        die("operation_busy; " + guidance)
     payload = {"ok": True, "operation": "retire-delivery", "retired": summary}
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
@@ -3675,12 +3885,19 @@ def _edge_failure_detail(error: BaseException) -> str:
         return "connection refused"
     return "route unavailable"
 
+# A recursive resolver that asks Cloudflare before a just-created record is
+# served caches NXDOMAIN for the zone's negative TTL (often 30 minutes), which
+# outlasts the whole verification loop. Wait once before the first lookup.
+_NEW_DNS_RECORD_GRACE_SECONDS = 20
+
+
 def _verify_edge(
     routes: list[dict],
     *,
     healthcheck_path: str = "/",
     basic_auth_enabled: bool = False,
     basic_auth_credentials: tuple[str, str] | None = None,
+    fresh_hostnames: frozenset[str] = frozenset(),
 ) -> None:
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
@@ -3693,6 +3910,8 @@ def _verify_edge(
             return None
 
     opener = urllib.request.build_opener(_NoRedirect)
+    if any(route["hostname"] in fresh_hostnames for route in routes):
+        time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS)
     for route in routes:
         if route["hostname"].startswith("*."):
             continue
@@ -3893,14 +4112,151 @@ def _hold_controller_awake():
                 holder.wait(timeout=5)
 
 
+def _verify_remote_local_image_model(validated: dict, entry: dict, receipt: dict,
+                                     source_dir: str, runtime_dir: str,
+                                     runtime: dict) -> None:
+    """Prove the references Compose will use under the actual remote apply inputs."""
+    from sandbox.hosting import local_images
+
+    override = f"{runtime_dir}/compose.override.yml"
+    env_file = f"{runtime_dir}/environment.env"
+    _write_remote_text(entry, override, runtime["compose_override"], "0600")
+    _write_remote_text(entry, env_file, runtime["environment"], "0600")
+    prefix = _compose_prefix(validated, source_dir, override, env_file)
+    refs = sorted({ref for artifact in receipt["artifacts"].values()
+                   for ref in artifact["refs"]} | set(local_images.pinned_refs(receipt)))
+    command = local_images.probe_argv(
+        config_command=f"{prefix} --profile '*' config --format json",
+        services=local_images.declared_services(validated), refs=refs)
+    observation = local_images.parse_probe_output(
+        _remote_checked(entry, shlex.join(command), timeout=120))
+    # The generated override can change build fields, so compare the actual
+    # service references here; the source build definitions were checked above.
+    mismatches = []
+    if observation.get("config_error"):
+        mismatches.append({"code": "remote_compose_config_unavailable"})
+    for name, service in receipt["services"].items():
+        item = (observation.get("services") or {}).get(name) or {}
+        if item.get("present") is not True or item.get("image") != service["image"] \
+                or item.get("pull_policy") == "build":
+            mismatches.append({"code": "remote_compose_image_mismatch", "service": name})
+    image_mismatches, _verified = local_images.compare_images(receipt, observation)
+    mismatches.extend(image_mismatches)
+    if mismatches:
+        raise hosting.HostingError(
+            "local image receipt remote Compose verification refused: "
+            + local_images.mismatch_summary(mismatches))
+
+
+def _verify_receipt_bound_local_images(validated: dict, entry: dict,
+                                       remote_name: str, receipt_digest: str,
+                                       source_commit: str, published_revision: str,
+                                       machine_identity: str,
+                                       secret_values: dict[str, str], *,
+                                       source_dir: str, runtime_dir: str,
+                                       runtime: dict) -> dict:
+    """Re-prove remote local-image evidence before the first Compose effect."""
+    from sandbox.delivery.context import registered_host_digest
+    from sandbox.hosting import local_images
+    from sandbox.transports import remote_local_images
+
+    if validated["compose"].get("build", True) is not False:
+        raise hosting.HostingError(
+            "--local-images requires compose.build: false; remote build fallback is forbidden")
+    if validated.get("hostingImages") is not None:
+        raise hosting.HostingError(
+            "--local-images cannot satisfy the declared hostingImages authority")
+    document = remote_local_images.read_receipt(remote_name, receipt_digest, entry=entry)
+    receipt = document["local_receipt"]
+    local_images.require_receipt_target(
+        validated, receipt, hosting.compose_project_name(validated))
+    if receipt["commit"] != source_commit:
+        raise hosting.HostingError("local image receipt source revision does not match apply")
+    if receipt["source_revision"] != published_revision:
+        raise hosting.HostingError("local image receipt published revision does not match apply")
+    with tempfile.TemporaryDirectory(prefix="sandbox-local-images-verify-") as temporary:
+        env_path = Path(temporary) / "environment.env"
+        env_path.write_text(hosting.render_env_file(
+            validated, secret_values, pushed_commit_sha=published_revision))
+        env_path.chmod(0o600)
+        compose = ["docker", "compose", "--env-file", str(env_path),
+                   "-p", hosting.compose_project_name(validated)]
+        for file_name in validated["compose"]["files"]:
+            compose.extend(["-f", str(Path(validated["source_root"]) / file_name)])
+        child_env = local_images.local_environment({
+            "DOCKER_DEFAULT_PLATFORM": local_images.DEFAULT_PLATFORM,
+            "SANDBOX_HOST_ENV_FILE": str(env_path),
+        })
+        for destination, source in {
+                **validated["secrets"]["required"],
+                **validated["secrets"]["generated"]}.items():
+            if source in secret_values:
+                child_env[destination] = secret_values[source]
+        model = local_images.observe_local_model(
+            config_command=shlex.join(
+                [*compose, "--profile", "*", "config", "--format", "json"]),
+            services=local_images.declared_services(validated),
+            roots={"SOURCE": validated["source_root"], "RUNTIME": temporary},
+            environment=child_env,
+            symbolic_secrets=validated["secrets"]["required"].keys()
+            | validated["secrets"]["generated"].keys())
+    model_mismatches = local_images.compare_compose_model(receipt, model)
+    if model_mismatches:
+        raise hosting.HostingError(
+            "local image receipt Compose model changed: "
+            + local_images.mismatch_summary(model_mismatches))
+    home = remote.resolve_sandbox_home(entry)
+    if document.get("machine_identity") != machine_identity \
+            or document.get("registered_host_digest") != registered_host_digest(
+                entry, remote_name, home):
+        raise hosting.HostingError("local image receipt target identity does not match apply")
+    observation = remote_local_images.observe(
+        remote_name, receipt, remote_receipt_digest=receipt_digest, timeout=120, entry=entry)
+    if document.get("daemon_identity") != _remote_checked(
+            entry, "docker info --format '{{.ID}}'", timeout=30).strip():
+        raise hosting.HostingError("local image receipt Docker daemon identity changed")
+    mismatches = [*local_images.compare_engine(receipt, observation),
+                  *local_images.compare_remote_receipt(receipt, observation)]
+    image_mismatches, _verified = local_images.compare_images(receipt, observation)
+    mismatches.extend(image_mismatches)
+    if mismatches:
+        raise hosting.HostingError(
+            "local image receipt verification refused: "
+            + local_images.mismatch_summary(mismatches))
+    _verify_remote_local_image_model(
+        validated, entry, receipt, source_dir, runtime_dir, runtime)
+    return {"remote_receipt_digest": receipt_digest,
+            "local_receipt_digest": receipt["receipt_digest"]}
+
+
+@contextmanager
+def _local_image_apply_lease(validated: dict, remote_name: str,
+                             receipt_digest: str | None):
+    """Serialize receipt verification/runtime convergence with image transfer."""
+    if receipt_digest is None:
+        yield None
+        return
+    from sandbox.transports.remote_local_images import target_image_lease
+    with target_image_lease(
+            remote_name, validated["project"], validated["environment"],
+            receipt_digest) as lease:
+        yield lease
+
+
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 state: dict, allow_zone_ssl_change: bool, branch: str,
                 progress=None, recovery_repository=None,
-                purge_edge_cache: bool = False, delivery_holder=None) -> dict:
+                purge_edge_cache: bool = False, delivery_holder=None,
+                local_images_digest: str | None = None,
+                active_image_lease=None) -> dict:
     # Validate genuine retained child/source evidence before secret publication or effects.
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities(['delivery_outcomes_v1',
         'ordinary_recovery_admission_v1', 'ordinary_source_artifact_v1'])
+    if local_images_digest is not None:
+        if active_image_lease is None:
+            raise hosting.HostingError("local image engine lock is unavailable")
+        active_image_lease.require()
     _durable_host_context(validated["project_root"])
     machine_identity = _authenticated_machine_identity(remote_name)
     if recovery_repository is None:
@@ -3950,8 +4306,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         attempt = HostingAttempt(validated, remote_name, entry, kind='hosted_apply',
             request_id=context['request_id'], job_id=context['job_id'],
             application={'source_identity': context['source_identity'], 'commit': base_commit,
-                         'dirty_digest': None, 'artifact_digest': None, 'config_digest': config_digest,
-                         'plan_digest': None, 'proof_digest': None, 'dirty_policy': 'clean_required',
+                         'dirty_digest': None, 'artifact_digest': local_images_digest,
+                         'config_digest': config_digest,
+                         'plan_digest': None, 'proof_digest': None,
+                         'dirty_policy': 'clean_required',
                          'source_artifact': source_artifact},
             configuration_digest=config_digest, machine_identity=machine_identity,
             registered_host_digest=_registered_host_identity(entry, remote_name, home),
@@ -3971,7 +4329,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             machine_identity=machine_identity,
             edge_intent=_desired_edge_intent(validated, entry),
             broker_locked=True, publish_binding_key=publish_binding_key,
-            source_artifact=source_artifact)
+            source_artifact=source_artifact,
+            local_images_digest=local_images_digest)
         if operation is None:
             raise hosting.HostingError("recovery_receipt_unavailable")
         try:
@@ -4172,6 +4531,18 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 reason["evidence_error"] = remote.redact_text(
                     str(evidence_error))[:500]
             raise HostRuntimeApplyRefused(reason)
+        local_image_evidence = None
+        if local_images_digest is not None:
+            local_image_evidence = _verify_receipt_bound_local_images(
+                validated, entry, remote_name, local_images_digest,
+                base_commit, sha, machine_identity, secret_values,
+                source_dir=target, runtime_dir=runtime_dir, runtime=runtime)
+            state["hosts"][key]["local_images"] = local_image_evidence
+            durable_save(state)
+            active_image_lease.require()
+        else:
+            state["hosts"][key].pop("local_images", None)
+            durable_save(state)
         if decision == "edge_only":
             if not _reconcile_exact_runtime_state(
                     validated, remote_name, state, sha, config_digest,
@@ -4183,7 +4554,10 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 entry, validated, target, runtime_dir, runtime,
                 stream_progress, apply_log,
                 force_recreate=True,
+                local_images_verified=local_image_evidence is not None,
             )
+            if active_image_lease is not None:
+                active_image_lease.require()
             _mark_hosting_init_complete(
                 state, key, entry=entry, runtime_dir=runtime_dir,
                 save_state=durable_save)
@@ -4234,6 +4608,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             runtime["caddyfile"] = rendered
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
         zones: dict[str, dict] = {}
+        fresh_hostnames: set[str] = set()
         for wanted in runtime["records"]:
             hostname = wanted["hostname"]
             zone = zones.get(hostname)
@@ -4264,6 +4639,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     continue
                 raise RuntimeError(f"declared hostname {hostname} has a conflicting CNAME to {cname_target}")
             previous = next((record for record in all_records if record.get("type") == kind), None)
+            if previous is None:
+                fresh_hostnames.add(hostname)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
         certificate = edge.after_dns(
@@ -4277,6 +4654,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "healthcheck_path": runtime["healthcheck"]["path"],
             "basic_auth_enabled": bool(validated.get("basic_auth")),
         }
+        if fresh_hostnames:
+            verify_kwargs["fresh_hostnames"] = frozenset(fresh_hostnames)
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
         _verify_edge(validated["routes"], **verify_kwargs)
@@ -4359,7 +4738,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                       initializer='passed' if kind == 'runtime' else None,
                       known=kind != 'runtime' or observed_revision == sha,
                       application_revision=observed_revision,
-                      contract_digest=config_digest)
+                      contract_digest=config_digest,
+                      images=[local_images_digest]
+                      if kind == 'runtime' and local_images_digest is not None else None)
     delivery = attempt.finish(True)
     result = {
         "commit": sha,
@@ -6559,14 +6940,98 @@ def _host_apply_lock_wait(args) -> int:
     return value
 
 
+def _cmd_host_destroy(args) -> None:
+    """Remove one hosted target from recorded state; dry run without --confirm."""
+    from sandbox.hosting import destroy
+    if not getattr(args, "remote", None):
+        die("host destroy requires --remote and --target <project>/<environment>")
+    try:
+        project, environment = destroy.parse_target(getattr(args, "target", None) or "")
+        entry = remote.get_remote(args.remote)
+        if not entry:
+            die(f"no remote named '{args.remote}'")
+        if args.confirm:
+            result = destroy.execute(entry, args.remote, project, environment,
+                                     clear_fenced=bool(getattr(args, "clear_fenced", False)),
+                                     lock_wait=_host_apply_lock_wait(args))
+        else:
+            result = destroy.plan(hosting.load_host_state(), entry, args.remote, project, environment)
+    except TimeoutError:
+        die("another host operation owns this target")
+    except (hosting.HostingError, cloudflare.CloudflareError) as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "code": getattr(exc, "code", "host_destroy_failed"),
+                              "error": str(exc)}, sort_keys=True))
+            raise SystemExit(1)
+        die(str(exc))
+    if args.json:
+        print(json.dumps({"ok": True, "confirmed": bool(args.confirm), **result}, sort_keys=True))
+    else:
+        print(destroy.render(result, confirmed=bool(args.confirm)))
+
+
+def _cmd_host_heal(args) -> None:
+    """Spec 066: list, and with --confirm start, restart-exhausted hosted services."""
+    from sandbox.hosting import heal
+    if not getattr(args, "remote", None):
+        die("host heal requires --remote")
+    entry = remote.get_remote(args.remote)
+    if not entry:
+        die(f"no remote named '{args.remote}'")
+    project = getattr(args, "project", None)
+    environment = getattr(args, "environment", None)
+    if getattr(args, "target", None):
+        from sandbox.hosting import destroy
+        try:
+            project, environment = destroy.parse_target(args.target)
+        except hosting.HostingError as exc:
+            die(str(exc))
+    result = heal.run(entry, project=project, environment=environment,
+                      confirm=bool(args.confirm))
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(heal.render(result))
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+
 def cmd_host(cfg, args) -> None:
     if getattr(args, "initializer", None) is not None and args.action != "diagnose":
         die("--initializer is only available with `host diagnose`")
+    image_action = getattr(args, "image_action", None)
+    if getattr(args, "local_images", None) is not None and args.action != "apply":
+        die("--local-images is only available with `host apply`")
+    for value, expected, label in (
+            (getattr(args, "revision", None), "build-local", "--revision"),
+            (getattr(args, "receipt", None), "push-local", "--receipt"),
+            (getattr(args, "artifact_timeout", None), "push-local", "--artifact-timeout")):
+        if value is not None and image_action != expected:
+            die(f"{label} is only available with `host image {expected}`")
+    if getattr(args, "timeout", None) is not None \
+            and image_action not in {"build-local", "push-local"}:
+        die("--timeout is only available with `host image build-local` or `push-local`")
+    if image_action == "build-local":
+        if args.action != "image":
+            die("build-local is only available with `host image`")
+        _cmd_host_image_build_local(args)
+        return
+    if image_action == "push-local":
+        if args.action != "image":
+            die("push-local is only available with `host image`")
+        _cmd_host_image_push_local(args)
+        return
     if args.action == "image" and getattr(args, "image_action", None) == "verify":
         _cmd_host_image_verify(args)
         return
     if args.action == "stage":
         _cmd_host_stage(args)
+        return
+    if args.action == "destroy":
+        _cmd_host_destroy(args)
+        return
+    if args.action == "heal":
+        _cmd_host_heal(args)
         return
     if args.action == "image":
         required = {
@@ -6668,6 +7133,13 @@ def cmd_host(cfg, args) -> None:
     if args.action == "apply":
         if not args.confirm:
             die("host apply is protected; review `./sb host plan` then pass --confirm")
+        local_images_digest = getattr(args, "local_images", None)
+        if local_images_digest is not None and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", local_images_digest) is None:
+            die("--local-images must be an immutable sha256 receipt digest")
+        if local_images_digest is not None and isinstance(cfg, dict) \
+                and cfg.get("hostingImages") is not None:
+            die("--local-images cannot satisfy the declared hostingImages authority")
         try:
             branch = _validate_apply_source(validated)
         except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
@@ -6861,13 +7333,17 @@ def cmd_host(cfg, args) -> None:
                 state = hosting.load_host_state()
                 runtime = hosting.desired_runtime(validated, args.remote, state)
                 runtime["records"] = current_plan["records"]
-                with _hold_controller_awake():
+                with _hold_controller_awake(), _local_image_apply_lease(
+                        validated, args.remote,
+                        getattr(args, "local_images", None)) as active_image_lease:
                     result = _apply_host(
                         validated, current_entry, args.remote, runtime, state,
                         bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
                         recovery_repository=recovery_repository,
                         purge_edge_cache=bool(getattr(args, "purge_edge_cache", False)),
                         delivery_holder=delivery_holder,
+                        local_images_digest=getattr(args, "local_images", None),
+                        active_image_lease=active_image_lease,
                     )
     except RetainedDelivery as exc:
         retained = operation_summary(exc.operation) if exc.operation else None

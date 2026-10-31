@@ -427,7 +427,18 @@ without you switching tabs.
 
 Use the registered-source secret broker to list key names or structured key
 paths across dotenv, JSON, INI, properties, TOML, YAML, XML, PEM, opaque-token,
-and binary-container sources. Before parsing, `secrets source-info` can report
+binary-container, and opt-in Infisical sources. An Infisical source names one
+exact project/environment/path/key, keeps each controller's distinct bootstrap
+credential in macOS Keychain or an existing unlocked Linux Secret Service, and
+permits only exact inspection/validation and a registered fixed child. Tailscale
+provides the private route; verified HTTPS and Infisical identity still provide
+endpoint authentication and authorization. Sandbox never falls back to a public
+endpoint, plaintext credential, shared controller credential, or general vault
+browsing. Placing a controller credential approves the canonical project root and endpoint,
+exact selector, MCP grants, and every fixed consuming profile as one versioned
+authority; changing any of them requires the operator to place the credential
+again. Provider credential reads/status, DNS, and HTTPS work runs in a disposable helper under
+one total deadline. Before parsing, `secrets source-info` can report
 whether the registered file exists, whether it is empty, its type, a size
 bucket, and whether the broker can safely open it—without reading its contents
 or returning its path. It can validate or apply a fixed mask to an
@@ -439,6 +450,12 @@ bounded run. Plaintext reveal is a
 human-only local TTY exception and is never available through MCP. See
 [Safe secret inspection](docs/secret-inspection.md) or load the
 `secret-inspection` skill for the least-disclosure workflow and incident steps.
+
+Optional CLI-only ownership profiles add names-only classification, separately
+approved create-only migration, and scoped runs with explicit mapped keys.
+Source cleanup requires its own human approval. Storage remains operator-attested;
+live provider/controller proofs and human security review are still required
+before real migration. See [ownership profiles](docs/secret-inspection.md#ownership-profiles-and-create-only-migration).
 
 ### Host storage monitoring and safe cleanup
 
@@ -498,15 +515,36 @@ deletion manifest before each removal so "what happened to X" stays answerable:
 ./sb workspace release <name> --remote scaleway-sandbox    # done with it
 ./sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox
 ./sb workspace reap --remote scaleway-sandbox --dry-run
+# keep 30 GB free for hosted sites: remote test/job submissions that would
+# cross it are refused before any upload (remote_storage_floor, spec 066)
+./sb remote set-storage-floor scaleway-sandbox --gb 30
+# hosted services that exhausted their on-failure restarts (e.g. after a full
+# disk): list, then start them once free space is above the floor
+./sb host heal --remote scaleway-sandbox
+./sb host heal --remote scaleway-sandbox --confirm
 # let the remote reap its own safe tier on a systemd timer (spec 057)
 ./sb resources routine --remote scaleway-sandbox --enable --confirm --exclude 'lenzora*'
 ./sb resources routine --remote scaleway-sandbox --status
 ./sb resources routine --remote scaleway-sandbox --disable --confirm
 ```
 
-Only workspace-scoped `node_modules`-style volumes are ever eligible — every
-other volume is protected at every tier, including ones the engine reports as
-unused — hosted sites are untouchable, a partial delete is reported as a
+As standalone candidates, only workspace-scoped `node_modules`-style volumes are
+eligible — every other volume is protected at every tier, including ones the
+engine reports as unused. Reclaiming a workspace (spec 066) removes its whole
+`sandbox-<workspace>` Compose project first: every container (also ones that
+never bind the checkout, such as a job database), the project's volumes no
+other container uses, and its networks; the checkout is deleted only after that
+succeeds. Authorized CI job cleanup applies the same stack teardown after its
+existing identity checks and before broker source removal. A failed teardown
+keeps source and retained cleanup state; workspace reap reports
+`stack_teardown_incomplete` and a later run finishes it. A workspace whose jobs all finished more than 6 hours ago
+(`SANDBOX_FINISHED_JOB_IDLE_HOURS` on the host) is a `safe`-tier
+`finished_job_idle` candidate even if its stack still runs; a queued or running
+job, an unreadable job registry, a live source-family reservation, or an active lease keeps it.
+Admission and reclaim share the host reclaim guard; the largest of the three
+most recent repository footprints supplies the estimate, or a stated 5 GB default.
+`remote list`, `remote readiness`, and `resources status` show the configured floor. Hosted sites are
+untouchable, a partial delete is reported as a
 failure rather than success, and the default retention window is 7 days.
 `resources routine` installs one `systemd --user` timer on the remote that plans
 and executes the same safe-tier selection as `workspace reap` on a cadence
@@ -547,6 +585,17 @@ an explicit `--local` override. Remote job submission deploys the exact working
 tree first, including uncommitted and untracked files; the remote supervisor
 persists process output and callers resume it by cursor rather than streaming
 child pipes over SSH.
+
+The supervisor tracks the entire launch-owned process group, decoupling job
+deadlines from pipe EOF. A child closing its standard streams while running, or
+background descendants holding pipes open after the leader exits, cannot bypass
+the configured deadline or stall the supervisor. When terminating or cancelling,
+the supervisor applies a bounded cancellation grace period and a bounded pipe
+drain to preserve final output from short-lived descendants before sealing logs.
+If process group cessation cannot be confirmed, the supervisor fails closed: the
+job remains in cancelling state and retains its workspace lease to keep durable
+exclusion intact. Clearing that uncertainty requires an explicit recovery procedure;
+a later status poll does not clear the fence.
 
 `job-output` transfers only bounded pages from those retained logs. Select a
 stream, tail, cursor, or bounded long-poll interval (0-20 whole seconds; zero
@@ -598,13 +647,16 @@ memory. Changed, unsupported, or oversized captures remain partial. The
 capability and producer wiring passed isolated supported CLI/MCP exercises.
 Installed-controller and production verification remain separate gates.
 
-Generic Compose `exec` failures retain stdout and stderr independently, each
-bounded to the 1 MiB process-runner limit; when a stream overflows, the runner
-keeps both edges around an explicit truncation marker. Failures include the child `exit_code`. Human `sb exec`
-writes those streams to their matching local streams; `--json` returns one
-envelope containing both fields and exits with the child code. A nested remote
-controller uses the human path so the outer durable supervisor persists the
-same separate evidence.
+Generic Compose `exec` success returns stdout bounded to 1 MiB; overflow keeps
+both edges around an explicit truncation marker. Failures retain stdout and
+stderr independently, each bounded to the 1 MiB process-runner limit; when a
+stream overflows, the runner keeps both edges around an explicit truncation
+marker. Failures include the child `exit_code`. Human `sb exec` writes those
+streams to their matching local streams; `--json` returns one envelope containing
+both fields and exits with the child code. A local declared Compose `sb test`
+also writes failure stdout and stderr to their matching streams and exits with a
+positive child code, or 1 if the code is invalid. A nested remote controller uses
+the human path so the outer durable supervisor persists the same separate evidence.
 
 ```sh
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach \
@@ -1067,6 +1119,40 @@ plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a rem
 host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
 — see [`docs/remote-hosting.md`](docs/remote-hosting.md).
 
+CPU-heavy hosted application images can be built on a faster Linux controller:
+
+```bash
+./sb host image build-local --project-dir /path/to/app --environment development --revision "$COMMIT" --json
+./sb host image push-local --remote xcloud-london --receipt /path/from/previous/result/receipt.json --confirm --json
+./sb host apply --project-dir /path/to/app --environment development --remote xcloud-london --local-images sha256:REMOTE_RECEIPT_DIGEST --confirm --json
+```
+
+Add `--receipt-version v2` to `build-local` to export one shared raw image
+bundle. V1 remains the default. V2 output uses a separate `v2/` directory, so
+retained v1 receipts remain available for rollback. See
+[shared bundle transport](docs/remote-hosting.md#opt-in-shared-local-image-bundle-pack-9)
+for membership checks, timeout sizing, and transfer reporting.
+
+The first command creates artifacts, the second only stages and verifies them,
+and only `host apply` can claim deployment. The environment must declare
+`compose.build: false`; Sandbox never falls back to a remote build or pull.
+Transfer gates readiness against the locked registered target, honors one
+aggregate deadline and the configured remote storage floor before its first write, and
+holds a dedicated remote-engine lock through image load and receipt publication;
+receipt-bound apply takes the same engine-wide lock before delivery admission
+and holds it through runtime convergence. A busy engine refuses; lock loss or
+interruption remains unknown until the
+same receipt is freshly observed. A remote worker fence blocks new owners until
+an interrupted image load exits. Apply verifies the remote Compose render using
+its actual environment and override against receipt references and exact image
+IDs. Local rendering refuses image references dependent on Docker client
+selection variables; receipt target paths require safe hosted slugs.
+Unexpected transfer exceptions return a nonzero JSON envelope with
+`local_images_transfer_unknown`, without exception text. Publication may already
+have completed; retrying the same local receipt freshly verifies and skips exact
+remote images rather than resuming archive bytes. Do not delete remote locks or
+receipts manually. See the [transfer contract](docs/remote-hosting.md).
+
 Immutable multi-image activation prepares private candidate configuration without
 overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)
 for source binding, replay limits and required initializer execution proof.
@@ -1241,3 +1327,27 @@ Hosted image conversion can use [component data recovery](docs/hosted-data-recov
 for encrypted PostgreSQL/storage checkpoints and isolated restore evidence.
 Immutable image preparation exposes public authority discovery and an explicit
 operator handoff; see [remote hosting](docs/remote-hosting.md).
+
+### Upgrading shared-bundle clients
+
+V2 requires Docker >=25 with the containerd image store on the builder. Classic
+and legacy stores use v1. V2 reserves 3x the full bundle under the engine lease,
+reconciles proven orphan reservations before admission, and retains reservations
+for uncertain imports until operator reconciliation. See the
+[reservation lifecycle and self-contained recovery commands](docs/remote-hosting.md#v2-reservation-lifecycle-and-quarantine-recovery).
+
+The current contract requires **protocol 17**. From the upgraded checkout,
+migrate each runtime **before bumping client pins**, including for v1-only
+verdict-gated commands:
+
+```sh
+./sb remote service migrate NAME --plan --json
+./sb remote service migrate NAME --confirm --json
+./sb remote service status NAME --json
+```
+
+Review the plan and explicitly authorize migration. Verify installed revision
+and compatibility, then confirm the old pinned client still reports compatible
+status before changing its pin. Protocol-13/14/15/16 runtimes cannot serve a
+protocol-17 client. New runtimes still serve older clients; strict revision pins
+require an exact revision match. Upgrading this checkout performs no migration.

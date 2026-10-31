@@ -942,7 +942,7 @@ class RoundFiveTests(unittest.TestCase):
                     self.assertIn("_invalidate_readiness(name)", following)
         self.assertGreaterEqual(checked, 5)
 
-    def test_submission_cli_dispatch_preserves_registration_refusal(self):
+    def _submission_cli_dispatch_preserves_registration_refusal(self, selected):
         # The real `./sb` dispatcher, a fresh SANDBOX_HOME, and a project that
         # declares a remote nobody registered: every submission refuses with
         # the registration envelope and transfers nothing.
@@ -967,7 +967,7 @@ class RoundFiveTests(unittest.TestCase):
             "job-start": ["job-start", *pd, "--json", "--", "true"],
             "ensure": ["ensure", *pd, "--remote", "ghost", "--json"],
         }
-        for name, argv in commands.items():
+        for name, argv in ([] if selected == "human" else [(selected, commands[selected])]):
             with self.subTest(command=name):
                 result = run_test_process([str(ROOT / "sb"), *argv], capture_output=True,
                                           text=True, env=env,
@@ -977,9 +977,31 @@ class RoundFiveTests(unittest.TestCase):
                 self.assertEqual((payload["status"], payload["code"], payload["remedy"]),
                                  ("blocked", "remote_not_ready_registration", "./sb remote list"))
                 self.assertEqual(payload["side_effects"]["bytes_transferred"], 0)
-        human = run_test_process([str(ROOT / "sb"), "test", *pd], capture_output=True, text=True,
-                                 env=env, timeout=120, cwd=str(ROOT))
-        self.assertIn("Remedy: ./sb remote list", human.stderr)
+        if selected == "human":
+            human = run_test_process([str(ROOT / "sb"), "test", *pd], capture_output=True, text=True,
+                                     env=env, timeout=120, cwd=str(ROOT))
+            self.assertIn("Remedy: ./sb remote list", human.stderr)
+
+    def test_test_cli_dispatch_preserves_registration_refusal(self):
+        self._submission_cli_dispatch_preserves_registration_refusal("test")
+
+    def test_e2e_cli_dispatch_preserves_registration_refusal(self):
+        self._submission_cli_dispatch_preserves_registration_refusal("e2e")
+
+    def test_ci_cli_dispatch_preserves_registration_refusal(self):
+        self._submission_cli_dispatch_preserves_registration_refusal("ci")
+
+    def test_exec_cli_dispatch_preserves_registration_refusal(self):
+        self._submission_cli_dispatch_preserves_registration_refusal("exec")
+
+    def test_job_start_cli_dispatch_preserves_registration_refusal(self):
+        self._submission_cli_dispatch_preserves_registration_refusal("job-start")
+
+    def test_ensure_cli_dispatch_preserves_registration_refusal(self):
+        self._submission_cli_dispatch_preserves_registration_refusal("ensure")
+
+    def test_human_cli_dispatch_preserves_registration_refusal(self):
+        self._submission_cli_dispatch_preserves_registration_refusal("human")
 
 class RoundSixTests(unittest.TestCase):
     """Fail-closed invalidation, MCP refusal envelopes, cache window, handoff."""

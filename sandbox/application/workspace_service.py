@@ -2872,7 +2872,8 @@ class WorkspaceService:
                 "terminal workspace identity is unavailable")
         guard = repo.operation_lock(self._submission_operation_key(
             preliminary.project_identity, preliminary.label))
-        with guard:
+        from sandbox.resources.ci_teardown import terminal_cleanup_guard, complete_terminal_stack
+        with guard, terminal_cleanup_guard(self.deployment_root):
             record = repo.get(workspace_id)
             if record is None:
                 raise WorkspaceIndexError(
@@ -3039,6 +3040,9 @@ class WorkspaceService:
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift",
                     "terminal checkout filesystem identity changed")
+            if record.bindings:
+                raise WorkspaceIndexError("workspace_busy", "workspace still has indexed bindings")
+            complete_terminal_stack(checkout_path, deployment_root, job_repository)
             references = (
                 self.cleanup_reference_observer(checkout_path, record)
                 if self.cleanup_reference_observer is not None

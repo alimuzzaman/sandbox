@@ -4,6 +4,7 @@ import base64
 import json
 import shlex
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -35,7 +36,7 @@ class CandidateInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             docker = root / "docker"
-            docker.write_text("\n".join(("#!/usr/bin/env python3", "import json,sys", "from pathlib import Path",
+            docker.write_text("\n".join(("#!" + sys.executable, "import json,sys", "from pathlib import Path",
                 "a=sys.argv[1:]",
                 "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
                 "if '--hash' in a: print(a[-1]+' '+'b'*64); sys.exit(0)",
@@ -44,6 +45,7 @@ class CandidateInputTests(unittest.TestCase):
                 " p=a[a.index('--file')+1]",
                 " print(Path(p).read_text()); sys.exit(0)", "sys.exit(99)")))
             docker.chmod(0o700)
+            (root / "python3").symlink_to(sys.executable)
             closed = {"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
             frame = {"schema_version": 2, "source_revision": plan.policy.source_revision,
                 "runtime_directory": str(root), "candidate_id": "e" * 64,
@@ -58,7 +60,7 @@ class CandidateInputTests(unittest.TestCase):
                     "configuration_key": base64.b64encode(b"k" * 32).decode(),
                     "expected_services": sorted(fixture["compose"]["services"])}}
             with patch.object(private_inputs, "_ENV", closed):
-                prepared = run_test_process(("python3", "-c", private_inputs.candidate_program()),
+                prepared = run_test_process((sys.executable, "-c", private_inputs.candidate_program()),
                     input=json.dumps(frame), text=True, capture_output=True)
             self.assertEqual(prepared.returncode, 0, prepared.stderr)
             candidate = root / "activation-inputs" / ("e" * 64)
@@ -154,6 +156,7 @@ class CandidateInputTests(unittest.TestCase):
             docker = root / "docker"
             docker.write_text("#!/usr/bin/env python3\nprint(" + repr(json.dumps(compose)) + ")\n")
             docker.chmod(0o700)
+            (root / "python3").symlink_to(sys.executable)
             frame = {"schema_version": 2, "source_revision": "a" * 40,
                 "runtime_directory": str(root), "candidate_id": "d" * 64,
                 "compose_files": ["compose.yml"], "manifest": "sandbox.hosting.yml",
@@ -165,7 +168,7 @@ class CandidateInputTests(unittest.TestCase):
                     "configuration_key": base64.b64encode(b"k" * 32).decode(), "expected_services": ["web"]}}
             with patch.object(private_inputs, "_ENV", {"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}):
                 program = private_inputs.candidate_program()
-            result = run_test_process(("python3", "-c", program), input=json.dumps(frame),
+            result = run_test_process((sys.executable, "-c", program), input=json.dumps(frame),
                                       text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), {"ok": True, "result": "prepared"})

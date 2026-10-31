@@ -295,7 +295,7 @@ class WorkspaceResourceOwnershipTests(unittest.TestCase):
             "action": "observe", "thorough": False, "deep": False,
             "budget_seconds": 30, "managed_host": True,
             "remote_name": "remote-a",
-        }).split("\ntry:\n    output = remove()", 1)[0]
+        }).split("\nACTIONS = {", 1)[0]
         namespace = {}
         exec(source, namespace)
         unique = {
@@ -350,7 +350,7 @@ class WorkspaceResourceOwnershipTests(unittest.TestCase):
             "action": "observe", "thorough": False, "deep": False,
             "budget_seconds": 30, "managed_host": True,
             "remote_name": "remote-a",
-        }).split("\ntry:\n    output = remove()", 1)[0]
+        }).split("\nACTIONS = {", 1)[0]
         namespace = {}
         exec(source, namespace)
         owner_kind, owner_id, evidence, protected = namespace["workspace_owner"](

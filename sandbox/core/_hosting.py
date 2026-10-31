@@ -16,6 +16,7 @@ from pathlib import Path
 from sandbox.core._config import ensure_pyyaml
 from sandbox.core._paths import RUNTIME_DIR
 from sandbox.hosting.state_partition import layout
+from sandbox.hosting.names import TARGET_PART_RE
 
 
 class HostingError(ValueError):
@@ -38,6 +39,7 @@ TARGET_MUTATION_CAPABILITIES = {
     "rollback": "hosting.image-rollback.v1",
     "image-recover": "hosting.image-recover.v1",
     "image-settle": "hosting.image-settle.v1",
+    "destroy": "hosting.destroy.v1",
 }
 
 
@@ -478,7 +480,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     if manifest.get("version") != 1:
         raise HostingError("manifest version must be 1")
     project = str(manifest.get("project") or "").strip()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", project):
+    if not TARGET_PART_RE.fullmatch(project):
         raise HostingError("project must use lowercase letters, numbers, and hyphens")
     env_name, env = _environment(manifest, environment)
     # A manifest may explicitly name a source root relative to its own parent

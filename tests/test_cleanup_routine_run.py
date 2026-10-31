@@ -198,7 +198,8 @@ class ReclaimingRun(RunCase):
         for name in forbidden[:-1]:
             self.assertTrue(self.paths[name].exists(), name)
         self.assertFalse(self.paths["old-workspace-1"].exists())
-        removals = self.docker_log.read_text().splitlines()
+        calls = self.docker_log.read_text().splitlines()
+        removals = [call for call in calls if call.startswith(("volume rm ", "rm ", "stop ", "network rm "))]
         self.assertEqual(removals, ["volume rm sandbox-old-workspace-1_node-modules"])
         self.assertGreaterEqual(record["skipped_reasons"].get("excluded_by_request", 0), 3)
 

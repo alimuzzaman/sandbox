@@ -971,6 +971,10 @@ class _ActivationHostStatePort:
 
     def read_activation_nested(self, target_identity: str) -> dict | None:
         record = self._record(target_identity)
+        active = record.get("active_operation")
+        if isinstance(active, dict) and active.get("action") == "destroy":
+            # An unfinished `host destroy` may still be tearing the stack down.
+            raise ValueError("operation_busy")
         value = record.get("image_activation")
         if value is None:
             from sandbox.hosting.images.activation.repository import empty_activation_state

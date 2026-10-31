@@ -37,7 +37,7 @@ class JobSchedulerTests(unittest.TestCase):
     def test_exclusive_workspace_and_capacity_are_transactional(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = JobRepository(Path(temp) / "jobs.sqlite")
-            scheduler = JobScheduler(repo, max_parallel=1)
+            scheduler = JobScheduler(repo, max_parallel=1, min_free_memory_mb=0, min_free_disk_mb=0)
             def accept(label):
                 return repo.accept(JobSubmission("test", "/p", "p", "local", label, ("echo", "x"), 60, SourceIdentity("s")))[0]
             first = accept("same"); second = accept("same")
@@ -49,7 +49,7 @@ class JobSchedulerTests(unittest.TestCase):
     def test_busy_submission_queues_then_dispatches_after_release(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = JobRepository(Path(temp) / "jobs.sqlite")
-            scheduler = JobScheduler(repo, max_parallel=1)
+            scheduler = JobScheduler(repo, max_parallel=1, min_free_memory_mb=0, min_free_disk_mb=0)
             launched = []
             service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None,
                 launcher=launched.append, scheduler=scheduler)
@@ -108,7 +108,7 @@ class JobSchedulerTests(unittest.TestCase):
     def test_renewal_and_stale_reconciliation_release_only_expired_leases(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = JobRepository(Path(temp) / "jobs.sqlite")
-            scheduler = JobScheduler(repo, max_parallel=2)
+            scheduler = JobScheduler(repo, max_parallel=2, min_free_memory_mb=0, min_free_disk_mb=0)
             first = repo.accept(JobSubmission("test", "/p", "p", "local", "one", ("echo", "x"), 60, SourceIdentity("s")))[0]
             second = repo.accept(JobSubmission("test", "/p", "p", "local", "two", ("echo", "x"), 60, SourceIdentity("s")))[0]
             scheduler.acquire(first); scheduler.acquire(second)

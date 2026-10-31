@@ -4,6 +4,7 @@ import json
 import base64
 import shlex
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -54,13 +55,15 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             env_file.chmod(0o600)
             docker = root / "docker"
             docker.write_text("\n".join((
-                "#!/usr/bin/env python3", "import json,sys", "a=sys.argv[1:]",
+                "#!" + sys.executable, "import json,sys", "a=sys.argv[1:]",
                 "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
                 "if '--hash' in a: print(a[-1] + ' ' + 'b' * 64); sys.exit(0)",
                 "if '--profiles' in a: print('job-orchestration'); sys.exit(0)",
                 "if a and a[0]=='compose' and 'config' in a: print(" + repr(json.dumps(rendered)) + "); sys.exit(0)",
                 "sys.exit(99)")))
             docker.chmod(0o700)
+            if not (root / "python3").exists():
+                (root / "python3").symlink_to(sys.executable)
             calls = []
             def ssh(_entry, command, **kwargs):
                 result = run_test_process(shlex.split(command),
@@ -120,7 +123,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                      "compose_override": "services: {}\n"}
 
             def invoke(value):
-                return run_test_process(("python3", "-c", PRIVATE_CANDIDATE_INPUT_PROGRAM),
+                return run_test_process((sys.executable, "-c", PRIVATE_CANDIDATE_INPUT_PROGRAM),
                     input=json.dumps(value), text=True, capture_output=True)
 
             first = invoke(frame)
@@ -153,7 +156,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             self.assertEqual(list(foreign.iterdir()), [])
             interrupted_program = PRIVATE_CANDIDATE_INPUT_PROGRAM.replace(
                 "publish(temporary, destination)", "raise OSError('synthetic interruption')")
-            interrupted = run_test_process(("python3", "-c", interrupted_program),
+            interrupted = run_test_process((sys.executable, "-c", interrupted_program),
                 input=json.dumps({**frame, "candidate_id": "e" * 64}),
                 text=True, capture_output=True)
             self.assertNotEqual(interrupted.returncode, 0)
@@ -184,12 +187,15 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                 "secrets": [{"source": "token", "target": "token"}]}},
                 "secrets": {"token": {"file": str(secret_file)}}}
             docker.write_text("\n".join((
-                "#!/usr/bin/env python3", "import json,sys", "a=sys.argv[1:]",
+                "#!" + sys.executable, "import json,sys", "a=sys.argv[1:]",
                 "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
                 "if a and a[0]=='compose' and '--hash' in a: print('web '+'b'*64); sys.exit(0)",
                 "if a and a[0]=='compose': print(" + repr(json.dumps(rendered)) + "); sys.exit(0)",
                 "sys.exit(8)")))
-            docker.chmod(0o700); results = []
+            docker.chmod(0o700)
+            if not (root / "python3").exists():
+                (root / "python3").symlink_to(sys.executable)
+            results = []
             def ssh_run(_entry, command, **kwargs):
                 result = run_test_process(shlex.split(command),
                     env=synthetic_environment({"PATH": f"{root}:/usr/bin:/bin"}),
@@ -297,7 +303,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); docker = root / "docker"
             docker.write_text("\n".join((
-                "#!/usr/bin/env python3",
+                "#!" + sys.executable,
                 "import json, os, sys",
                 "a=sys.argv[1:]",
                 "if 'SANDBOX_ACTIVATION_CONFIGURATION_HMAC_KEY' in os.environ: sys.exit(97)",
@@ -315,6 +321,8 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                 "sys.exit(8)",
             )))
             docker.chmod(0o700)
+            if not (root / "python3").exists():
+                (root / "python3").symlink_to(sys.executable)
             results = []
             def ssh_run(entry, command, **kwargs):
                 result = run_test_process(
@@ -356,7 +364,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             root = Path(directory); docker = root / "docker"
             effect = root / "effect-render"
             docker.write_text("\n".join((
-                "#!/usr/bin/env python3",
+                "#!" + sys.executable,
                 "import json, os, sys",
                 "a=sys.argv[1:]",
                 "if 'SANDBOX_ACTIVATION_CONFIGURATION_HMAC_KEY' in os.environ: sys.exit(97)",
@@ -371,6 +379,8 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                 "sys.exit(8)",
             )))
             docker.chmod(0o700)
+            if not (root / "python3").exists():
+                (root / "python3").symlink_to(sys.executable)
             commands = []; results = []
             def ssh_run(entry, command, **kwargs):
                 commands.append(command)
@@ -435,7 +445,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             docker = root / "docker"
             marker = root / "private-injection-observed"
             docker.write_text("\n".join((
-                "#!/usr/bin/env python3",
+                "#!" + sys.executable,
                 "import json, os, sys",
                 "mode=os.environ.get('SYNTHETIC_DOCKER_MODE','success')",
                 "if len(sys.argv)>1 and sys.argv[1]=='info': print('daemon-a'); sys.exit(0)",
@@ -455,6 +465,8 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                 "print(os.environ['DECLARED_KEY'],file=sys.stderr)",
             )))
             docker.chmod(0o700)
+            if not (root / "python3").exists():
+                (root / "python3").symlink_to(sys.executable)
             commands = []
 
             def ssh_run(entry, command, **kwargs):
@@ -530,7 +542,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); docker = root / "docker"
             docker.write_text("\n".join((
-                "#!/usr/bin/env python3",
+                "#!" + sys.executable,
                 "import json, sys",
                 "a=sys.argv[1:]",
                 "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
@@ -545,6 +557,8 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                 "sys.exit(7)",
             )))
             docker.chmod(0o700)
+            if not (root / "python3").exists():
+                (root / "python3").symlink_to(sys.executable)
             def ssh_run(entry, command, **kwargs):
                 return run_test_process(
                     shlex.split(command),
@@ -596,7 +610,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             env_file.chmod(0o600)
             docker = root / "docker"
             docker.write_text("\n".join((
-                "#!/usr/bin/env python3",
+                "#!" + sys.executable,
                 "import sys",
                 "a=sys.argv[1:]",
                 "if a and a[0]=='info': print('daemon-a'); sys.exit(0)",
@@ -606,6 +620,8 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                 "sys.exit(7)",
             )))
             docker.chmod(0o700)
+            if not (root / "python3").exists():
+                (root / "python3").symlink_to(sys.executable)
             provider = {"snapshot_id": "compose-snapshot/test-v2",
                 "snapshot_digest": digest, "provider_revision": "provider-v2",
                 "target": target, "compose_files": (str(root / "compose.yml"),),
@@ -670,7 +686,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                     env=synthetic_environment({"PATH": f"{root}:/usr/bin:/bin"}),
                     input=kwargs.get("input_data"), text=True, capture_output=True)
             for mode in ("unique", "ambiguous", "mismatch"):
-                docker.write_text("\n".join(("#!/usr/bin/env python3", "import sys,os",
+                docker.write_text("\n".join(("#!" + sys.executable, "import sys,os",
                     "a=sys.argv[1:]",
                     "if a[0]=='info': print('daemon-a'); sys.exit(0)",
                     "if a[0]=='ps': sys.exit(0)",
@@ -680,6 +696,8 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                     "if match and os.environ.get('COMPOSE_PROFILES')==profile: print(" + repr(json.dumps(rendered)) + "); sys.exit(0)",
                     "print('{\"services\":{}}')")))
                 docker.chmod(0o700)
+                if not (root / "python3").exists():
+                    (root / "python3").symlink_to(sys.executable)
                 with self.subTest(mode=mode), patch("sandbox.commands.hosting.remote.ssh_run", side_effect=ssh_run):
                     result = _host_image_argv_runner({"name": "synthetic"}, compose_snapshot_provider=provider)(
                         argv=("sandbox-activation-observe-running-v2", "widget", "web"),
@@ -727,7 +745,7 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             for mode in ("unique", "ambiguous", "mismatch"):
                 effect.unlink(missing_ok=True)
                 docker.write_text("\n".join((
-                    "#!/usr/bin/env python3", "import sys,os,json", "from pathlib import Path",
+                    "#!" + sys.executable, "import sys,os,json", "from pathlib import Path",
                     "a=sys.argv[1:]",
                     "if a[0]=='info': print('daemon-a'); sys.exit(0)",
                     "if a[0]=='inspect': print('hash-a'); sys.exit(0)",
@@ -742,6 +760,8 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                     "if match and os.environ.get('COMPOSE_PROFILES')==profile: print(" + repr(json.dumps(rendered)) + "); sys.exit(0)",
                     "print('{\"services\":{}}')")))
                 docker.chmod(0o700)
+                if not (root / "python3").exists():
+                    (root / "python3").symlink_to(sys.executable)
                 argv = ("docker", "compose", "--file", "-", "--project-directory", str(root),
                         "--project-name", "widget", "up", "--detach", "--no-build",
                         "--pull", "never", "--no-deps", "web")
@@ -808,10 +828,12 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
                     ({"depends_on": {}}, {}), ({"depends_on": {"db": {}}}, {"db": {}}),
                     ({"depends_on": []}, {"__invalid__": {}}),
                     ({"depends_on": "db"}, {"__invalid__": {}})):
-                docker.write_text("\n".join(("#!/usr/bin/env python3", "import sys",
+                docker.write_text("\n".join(("#!" + sys.executable, "import sys",
                     "if '--hash' in sys.argv: print('worker ' + 'a'*64); sys.exit(0)",
                     "print(" + repr(json.dumps({"services": {"worker": service}})) + ")")))
                 docker.chmod(0o700)
+                if not (root / "python3").exists():
+                    (root / "python3").symlink_to(sys.executable)
                 with self.subTest(service=service), patch(
                         "sandbox.commands.hosting.remote.ssh_run", side_effect=ssh_run):
                     result = _host_image_argv_runner({"name": "synthetic"})(
@@ -852,11 +874,13 @@ class ActivationPrivateComposeSourceTests(unittest.TestCase):
             closed = {"PATH": f"{root}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
             for label, rendered in cases:
                 docker.write_text("\n".join((
-                    "#!/usr/bin/env python3",
+                    "#!" + sys.executable,
                     "import json",
                     "print(" + repr(json.dumps(rendered)) + ")",
                 )))
                 docker.chmod(0o700)
+                if not (root / "python3").exists():
+                    (root / "python3").symlink_to(sys.executable)
                 captured = []
                 def ssh_run(entry, command, **kwargs):
                     result = run_test_process(

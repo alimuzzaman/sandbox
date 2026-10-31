@@ -79,6 +79,21 @@ class HostRecoveryPolicyTests(unittest.TestCase):
         self.assertIsNone(refusal)
         self.assertTrue(evidence["evidence_id"].startswith("sha256:"))
 
+    def test_optional_local_image_receipt_is_bound_without_breaking_ordinary_apply(self):
+        self.assertIsNone(validate_job_binding(self.request, self.job, self.operation))
+        digest = "sha256:" + "f" * 64
+        self.job["submission"]["argv"].extend(["--local-images", digest])
+        self.operation["evidence"]["local_images_digest"] = digest
+        self.operation["digest"] = canonical_digest({
+            key: value for key, value in self.operation.items() if key != "digest"})
+        self.assertIsNone(validate_job_binding(self.request, self.job, self.operation))
+        self.operation["evidence"]["local_images_digest"] = "sha256:" + "e" * 64
+        self.operation["digest"] = canonical_digest({
+            key: value for key, value in self.operation.items() if key != "digest"})
+        self.assertEqual(
+            validate_job_binding(self.request, self.job, self.operation),
+            "binding_mismatch")
+
     def test_nested_artifact_keeps_job_source_and_sibling_invocation_separate(self):
         from pathlib import Path
         self.operation["source"]["artifact"] = {

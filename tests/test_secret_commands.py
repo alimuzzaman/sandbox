@@ -4,18 +4,59 @@ import argparse
 import io
 import json
 import os
-import subprocess
-from tests.subprocess_support import synthetic_environment
+from tests.subprocess_support import run_test_process, synthetic_environment
 import sys
 import tempfile
 import unittest
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from sandbox.commands import secrets as command
 from sandbox.secrets import SecretBrokerError
+
+
+_ISOLATED_COMMAND_DRIVER = r'''
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from sandbox.commands import secrets as command
+from sandbox.config.secrets import normalize_secret_config
+from sandbox.secrets.context import build_secret_service
+from sandbox.secrets.models import SecretBrokerError
+
+root = Path(sys.argv[1])
+config = json.loads((root / "sandbox.config.json").read_text())
+config["secrets"] = normalize_secret_config(config)
+class Store:
+    def get(self, policy):
+        if os.environ.get("SB_TEST_CREDENTIAL_MISSING") == "1":
+            raise SecretBrokerError("credential_missing", "local credential absent",
+                                    remedy="Place a local credential.")
+        return "SB_SYNTHETIC_BOOTSTRAP_PRIVATE_42da"
+    def status(self, policy):
+        return "present"
+    def put(self, policy, value, *, intent):
+        assert intent in {"create", "replace"}
+class Provider:
+    def resolve_exact(self, policy, credential):
+        assert credential == "SB_SYNTHETIC_BOOTSTRAP_PRIVATE_42da"
+        return "SB_SYNTHETIC_PROVIDER_PRIVATE_841c"
+    def status(self, policy):
+        return {"state": "available", "endpoint_reachable": True}
+service = build_secret_service(
+    project_root=root, config=config, personal_path=root / "synthetic-personal",
+    runtime_root=root / "home/runtime", provider_adapter=Provider(), credential_store=Store())
+parser = argparse.ArgumentParser()
+command.configure_parser(parser)
+args = parser.parse_args(sys.argv[2:])
+with patch.object(command, "_service", return_value=service):
+    command.cmd_secrets({}, args)
+'''
 
 
 class SecretCommandTests(unittest.TestCase):
@@ -246,8 +287,10 @@ class SecretCommandTests(unittest.TestCase):
         ])
         emit.assert_called_once()
 
-    def test_isolated_live_cli_flow_never_prints_fixture_value(self):
-        repository = Path(__file__).parent.parent
+    def test_isolated_file_command_flow_never_prints_fixture_value(self):
+        from sandbox.config.secrets import normalize_secret_config
+        from sandbox.secrets.context import build_secret_service
+
         fixture_value = "sk_test_" + "SyntheticOnly1234567Qx9Z"
         replacement = "sk_test_" + "ReplacementOnly123456Mn4P"
         with tempfile.TemporaryDirectory() as directory:
@@ -279,17 +322,29 @@ class SecretCommandTests(unittest.TestCase):
                 "private_key": "SB_SYNTHETIC_PRIVATE_KEY_NOT_REAL",
             }))
             structured.chmod(0o600)
-            environment = synthetic_environment({"SANDBOX_HOME": str(home),
-                "SANDBOX_PROJECT_ROOTS": str(root.parent),
-            })
+            config = json.loads((root / "sandbox.config.json").read_text())
+            config["secrets"] = normalize_secret_config(config)
+            service = build_secret_service(
+                project_root=root, config=config, personal_path=root / "synthetic-personal",
+                runtime_root=home / "runtime")
 
             def invoke(*arguments, input_text=None):
-                result = subprocess.run(
-                    [str(repository / "sb"), "secrets", arguments[0],
-                     "--project-dir", str(root), *arguments[1:]],
-                    cwd=repository, env=environment, input=input_text,
-                    text=True, capture_output=True, timeout=15,
-                )
+                args = self.parser().parse_args([
+                    arguments[0], "--project-dir", str(root), *arguments[1:]])
+                stdout, stderr = io.StringIO(), io.StringIO()
+                input_stream = SimpleNamespace(buffer=io.BytesIO((input_text or "").encode()))
+                code = 0
+                with patch.object(command, "_service", return_value=service), \
+                     patch.object(command.sys, "stdin", input_stream), \
+                     patch.object(command, "_controlling_tty", side_effect=OSError("no tty")), \
+                     patch("sandbox.secrets.runner.minimal_environment_values", side_effect=lambda values:
+                           synthetic_environment({"HOME": str(home), **values})), \
+                     redirect_stdout(stdout), redirect_stderr(stderr):
+                    try:
+                        command.cmd_secrets({}, args)
+                    except SystemExit as exc:
+                        code = exc.code
+                result = SimpleNamespace(returncode=code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
                 combined = result.stdout + result.stderr
                 self.assertNotIn(fixture_value, combined)
                 self.assertNotIn(replacement, combined)
@@ -356,6 +411,169 @@ class SecretCommandTests(unittest.TestCase):
             self.assertNotEqual(refused.returncode, 0)
             self.assertIn("tty_required", refused.stderr)
             self.assertFalse((home / "runtime/compose").exists())
+
+    def test_provider_parser_requires_create_or_replace_without_plaintext_options(self):
+        for intent, expected in (("--create-only", (True, False)),
+                                 ("--replace-only", (False, True))):
+            args = self.parser().parse_args([
+                "credential-set", "--source", "vault", intent, "--stdin", "--json"])
+            self.assertEqual((args.create_only, args.replace_only), expected)
+            self.assertTrue(args.stdin)
+        for arguments in (
+            ["credential-set", "--source", "vault"],
+            ["credential-set", "--source", "vault", "--create-only", "--replace-only"],
+            ["credential-set", "--source", "vault", "--create-only", "--value", "synthetic"],
+            ["credential-set", "--source", "vault", "--create-only", "--token", "synthetic"],
+            ["use-profile", "--profile", "fixed", "--source", "other"],
+            ["use-profile", "--profile", "fixed", "--key", "OTHER_TOKEN"],
+            ["use-profile", "--profile", "fixed", "--endpoint", "https://other.invalid"],
+            ["use-profile", "--profile", "fixed", "--", "arbitrary-child"],
+        ):
+            with self.subTest(action=arguments[0]), redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                self.parser().parse_args(arguments)
+
+    def test_credential_set_routes_only_protected_input_with_explicit_intent(self):
+        credential = "SB_SYNTHETIC_PROTECTED_INPUT_82fa"
+        for intent_flag, intent in (("--create-only", "create"), ("--replace-only", "replace")):
+            for stdin in (False, True):
+                with self.subTest(intent=intent, stdin=stdin):
+                    arguments = ["credential-set", "--source", "vault", intent_flag, "--json"]
+                    if stdin:
+                        arguments.append("--stdin")
+                    args = self.parser().parse_args(arguments)
+                    service = SimpleNamespace(set_provider_credential=Mock(return_value={
+                        "ok": True, "operation": "credential_set", "action": intent}))
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with patch.object(command, "_service", return_value=service), \
+                         patch.object(command, "_stdin_secret", return_value=credential) as protected_stdin, \
+                         patch.object(command, "_tty_secret", return_value=credential) as protected_tty, \
+                         redirect_stdout(stdout), redirect_stderr(stderr):
+                        command.cmd_secrets({}, args)
+                    service.set_provider_credential.assert_called_once_with(
+                        "vault", credential, intent=intent, input_channel="stdin" if stdin else "tty")
+                    self.assertEqual(protected_stdin.call_count, int(stdin))
+                    self.assertEqual(protected_tty.call_count, int(not stdin))
+                    self.assertNotIn(credential, stdout.getvalue() + stderr.getvalue())
+
+    def test_provider_error_text_and_json_keep_identical_code_and_remedy(self):
+        from sandbox.secrets.models import SecretOutcomeCode
+
+        for code in SecretOutcomeCode:
+            error = SecretBrokerError(code.value, "provider operation refused",
+                                      remedy="Review the registered source.")
+            outputs = []
+            for as_json in (False, True):
+                with self.subTest(code=code.value, as_json=as_json):
+                    args = self.parser().parse_args(
+                        ["use-profile", "--profile", "fixed"] + (["--json"] if as_json else []))
+                    service = SimpleNamespace(use_profile=Mock(side_effect=error))
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with patch.object(command, "_service", return_value=service), \
+                         redirect_stdout(stdout), redirect_stderr(stderr), \
+                         self.assertRaises(SystemExit) as raised:
+                        command.cmd_secrets({}, args)
+                    self.assertEqual(raised.exception.code, 1)
+                    service.use_profile.assert_called_once_with("fixed", surface="cli")
+                    outputs.append((stdout.getvalue(), stderr.getvalue()))
+            payload = json.loads(outputs[1][0])
+            self.assertEqual(payload["operation"], "use_profile")
+            self.assertEqual(payload["error"], error.as_dict())
+            self.assertIn(code.value, "".join(outputs[0]))
+            self.assertIn(error.remedy, "".join(outputs[0]))
+            self.assertNotIn("Traceback", repr(outputs))
+
+    def test_unknown_provider_json_error_discards_secret_bearing_exception(self):
+        canary = "SB_SYNTHETIC_EXCEPTION_PRIVATE_793e"
+        args = self.parser().parse_args(["use-profile", "--profile", "fixed", "--json"])
+        service = SimpleNamespace(use_profile=Mock(side_effect=RuntimeError(canary)))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(command, "_service", return_value=service), \
+             redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit):
+            command.cmd_secrets({}, args)
+        self.assertEqual(json.loads(stdout.getvalue())["error"]["code"], "operation_failed")
+        self.assertNotIn(canary, stdout.getvalue() + stderr.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+
+class IsolatedProviderCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repository = Path(__file__).parent.parent
+        (self.root / "home").mkdir(mode=0o700)
+        (self.root / "sandbox.config.json").write_text(json.dumps({"secrets": {
+            "sources": {"vault": {
+                "type": "infisical", "endpoint": "https://vault.example.invalid",
+                "projectId": "synthetic-project", "environment": "dev", "path": "/sandbox",
+                "key": "API_TOKEN", "clientId": "controller-one",
+                "mcpModes": ["source_info", "keys", "metadata", "validate", "use"],
+            }},
+            "useProfiles": {"fixed": {
+                "source": "vault", "key": "API_TOKEN", "destination": "API_TOKEN",
+                "argv": [sys.executable, "-c", (
+                    "import os; print('BOUND=' + str('API_TOKEN' in os.environ)); "
+                    "print('AMBIENT=' + str('SB_TEST_AMBIENT_PRIVATE' in os.environ)); "
+                    "print(os.environ['API_TOKEN'])")], "timeoutSeconds": 2,
+            }},
+        }}))
+
+    def invoke(self, *arguments, input_text=None, overrides=None):
+        result = run_test_process(
+            [sys.executable, "-c", _ISOLATED_COMMAND_DRIVER, str(self.root), *arguments],
+            cwd=self.repository, input=input_text, text=True, capture_output=True, timeout=3,
+            env={"SANDBOX_HOME": str(self.root / "home"),
+                 "SB_TEST_AMBIENT_PRIVATE": "SB_SYNTHETIC_AMBIENT_PRIVATE_345a", **(overrides or {})})
+        combined = result.stdout + result.stderr
+        for canary in ("SB_SYNTHETIC_BOOTSTRAP_PRIVATE_42da", "SB_SYNTHETIC_PROVIDER_PRIVATE_841c",
+                       "SB_SYNTHETIC_AMBIENT_PRIVATE_345a", "SB_SYNTHETIC_INPUT_PRIVATE_c21a"):
+            self.assertNotIn(canary, combined)
+        self.assertNotIn("Traceback", combined)
+        return result
+
+    def test_fixed_profile_uses_one_child_with_minimal_environment_and_redacted_json(self):
+        result = self.invoke("use-profile", "--profile", "fixed", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["result"]["exit_code"], 0)
+        self.assertIn("BOUND=True", payload["result"]["output"])
+        self.assertIn("AMBIENT=False", payload["result"]["output"])
+        self.assertIn("[REDACTED]", payload["result"]["output"])
+
+    def test_protected_stdin_credential_placement_has_value_free_json(self):
+        result = self.invoke("credential-set", "--source", "vault", "--create-only", "--stdin",
+                             "--json", input_text="SB_SYNTHETIC_INPUT_PRIVATE_c21a\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["action"], "create")
+        for candidate in ("", "first\nsecond\n", "bad\x00input\n"):
+            with self.subTest(candidate=candidate):
+                result = self.invoke("credential-set", "--source", "vault", "--create-only",
+                                     "--stdin", "--json", input_text=candidate)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stdout)["error"]["code"], "input_invalid")
+
+    def test_provider_refuses_arbitrary_run_mutation_and_derived_disclosure(self):
+        cases = (
+            ("command_denied", ("run", "--source", "vault", "--key", "API_TOKEN", "--", "child")),
+            ("selection_invalid", ("inspect", "--source", "vault", "--key", "OTHER_TOKEN", "--json")),
+            ("mode_invalid", ("inspect", "--source", "vault", "--key", "API_TOKEN", "--mode", "masked", "--json")),
+            ("update_denied", ("set", "--source", "vault", "API_TOKEN", "--stdin", "--json")),
+        )
+        for code, arguments in cases:
+            with self.subTest(code=code):
+                result = self.invoke(*arguments, input_text="SB_SYNTHETIC_INPUT_PRIVATE_c21a\n")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(code, result.stdout + result.stderr)
+
+    def test_missing_local_credential_never_falls_back_and_keeps_remedy(self):
+        result = self.invoke("use-profile", "--profile", "fixed", "--json",
+                             overrides={"SB_TEST_CREDENTIAL_MISSING": "1"})
+        self.assertEqual(result.returncode, 1)
+        error = json.loads(result.stdout)["error"]
+        self.assertEqual(error["code"], "credential_missing")
+        self.assertEqual(error["remedy"], "Place a local credential.")
 
 
 class FakeStdout:

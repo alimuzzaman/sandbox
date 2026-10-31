@@ -5,9 +5,15 @@ from contextlib import contextmanager
 import getpass
 import io
 import json
+import math
 import os
+import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sandbox.secrets.ownership.manifest import OwnershipAdapter
 
 from sandbox.registry import CommandSpec, register_specs
 from sandbox.services.redaction import redact_structure
@@ -21,7 +27,8 @@ from sandbox.secrets.models import (
 )
 
 
-ACTIONS = ("source-info", "inspect", "validate", "run", "set", "organize", "reveal", "migrate-zshrc")
+ACTIONS = ("source-info", "inspect", "validate", "use-profile", "credential-set",
+           "run", "set", "organize", "reveal", "migrate-zshrc", "ownership")
 _DISPLAY_ENTRY_FIELDS = (
     "key", "state", "kind", "length_bucket", "exact_length",
     "public_prefix", "last4", "masked", "disclosed_material",
@@ -29,6 +36,9 @@ _DISPLAY_ENTRY_FIELDS = (
 _DISPLAY_SOURCE_FIELDS = (
     "source", "scope", "format", "exists", "file_type", "content_state",
     "size_bucket", "size_bytes", "broker_readable", "safety",
+    "source_type", "configured_modes", "provider_authorization_scope",
+    "sandbox_selection_policy", "credential_backend", "credential_state",
+    "reachability", "provider_state", "provider_error_code",
 )
 
 
@@ -58,6 +68,28 @@ def configure_parser(parser) -> None:
     validate.add_argument("--json", action="store_true")
     validate.add_argument("--project-dir", default=".")
 
+    use_profile = actions.add_parser(
+        "use-profile", help="run one registered fixed secret-use profile",
+    )
+    use_profile.add_argument("--profile", required=True)
+    use_profile.add_argument("--json", action="store_true")
+    use_profile.add_argument("--project-dir", default=".")
+
+    credential = actions.add_parser(
+        "credential-set", help="place a provider credential in the local OS credential store",
+    )
+    credential.add_argument("--source", required=True)
+    credential_input = credential.add_mutually_exclusive_group()
+    credential_input.add_argument("--stdin", action="store_true",
+                                  help="read one protected line from stdin")
+    credential_intent = credential.add_mutually_exclusive_group(required=True)
+    credential_intent.add_argument("--create-only", action="store_true",
+                                   help="create the local credential only if absent")
+    credential_intent.add_argument("--replace-only", action="store_true",
+                                   help="replace the local credential only if present")
+    credential.add_argument("--json", action="store_true")
+    credential.add_argument("--project-dir", default=".")
+
     run = actions.add_parser(
         "run", help="inject one or more secrets into one direct-argv child",
         description=(
@@ -67,7 +99,11 @@ def configure_parser(parser) -> None:
             "for agents."
         ),
     )
-    run.add_argument("--source", required=True)
+    selection = run.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--source")
+    selection.add_argument("--ownership-profile")
+    run.add_argument("--ownership-key", action="append", dest="ownership_keys")
+    run.add_argument("--json", action="store_true")
     run.add_argument("--key", help="one secret key (use --secret for paired bindings)")
     run.add_argument("--secret", action="append", dest="secrets", metavar="KEY=DEST",
                      help="bind one key to one child environment name; repeatable")
@@ -119,6 +155,36 @@ def configure_parser(parser) -> None:
 
     migrate = actions.add_parser("migrate-zshrc", help="migrate legacy personal exports")
     migrate.add_argument("--json", action="store_true")
+
+    ownership = actions.add_parser("ownership", help="explicit secret ownership profiles")
+    ownership_actions = ownership.add_subparsers(dest="ownership_action", required=True)
+    for action in ("classify", "credential-set", "evidence-check", "approve", "migrate",
+                   "status", "cleanup", "retention"):
+        child = ownership_actions.add_parser(action)
+        child.add_argument("--profile", required=True)
+        child.add_argument("--project-dir", default=".")
+        child.add_argument("--json", action="store_true")
+        if action == "classify":
+            child.add_argument("--check-destination", action="store_true")
+        elif action == "credential-set":
+            child.add_argument("--capability", choices=("read", "create"), required=True)
+            child.add_argument("--stdin", action="store_true")
+            intent = child.add_mutually_exclusive_group(required=True)
+            intent.add_argument("--create-only", action="store_true")
+            intent.add_argument("--replace-only", action="store_true")
+        elif action == "evidence-check":
+            child.add_argument("--evidence", required=True)
+        elif action == "approve":
+            child.add_argument("--operation", choices=("migrate", "cleanup"), required=True)
+            child.add_argument("--evidence")
+            child.add_argument("--minutes", type=int, default=15)
+        elif action in ("migrate", "cleanup"):
+            child.add_argument("--approval")
+            child.add_argument("--confirm", action="store_true")
+            if action == "migrate":
+                child.add_argument("--timeout-seconds", type=int, default=300)
+        elif action == "retention":
+            child.add_argument("--confirm", action="store_true")
 
 
 def _service(project_dir: str):
@@ -276,8 +342,7 @@ def _require_foreground_terminal() -> None:
 def _session_preflight(args):
     """Return the session lifetime, or None for an ordinary run.
 
-    Runs before the service is built so every refusal precedes any read.
-    """
+    Runs before the service is built so every refusal precedes any read."""
     session = bool(getattr(args, "session", False))
     raw = getattr(args, "lifetime_seconds", None)
     if not session and raw is None:
@@ -356,8 +421,7 @@ def _detach_lost_terminal() -> None:
     """Point stdout and stderr at /dev/null once the terminal is gone.
 
     Otherwise the interpreter's final flush hits EIO and Python replaces the
-    documented exit status (129 for hangup) with 120.
-    """
+    documented exit status (129 for hangup) with 120."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
@@ -448,10 +512,265 @@ def _migrate(args) -> None:
         ok(f"personal secret file already configured: {result['file']}")
 
 
-def cmd_secrets(cfg, args) -> None:
+def _ownership_emit(body: dict, as_json: bool) -> int:
+    body = dict(body)
+    code = body.pop("_exit", 0)
+    # Ownership payloads have only whitelisted metadata. Do not pass NAME keys
+    # through generic value redaction, which would erase credential-like names.
+    if as_json:
+        print(json.dumps(body, sort_keys=True))
+    else:
+        print(f"secrets ownership: {body.get('code')} profile={body.get('profile')}")
+        for state, names in sorted(body.get("names", {}).items()):
+            print(f"  {state}: {', '.join(names)}")
+        for key in ("approval_id", "run_id", "revocation", "storage_attestation", "next_action",
+                    "audit", "completion_record", "persistence"):
+            if body.get(key) is not None:
+                print(f"  {key}: {body[key]}")
+        if "journals" in body:
+            print(json.dumps({"journals": body["journals"], "runs": body["runs"]}, sort_keys=True))
+        if body.get("last_run"):
+            print(json.dumps({"last_run": body["last_run"]}, sort_keys=True))
+    return int(code)
+
+
+def _ownership_evidence(ctx, profile: str, filename: str):
+    """Admit a private metadata document, copy exactly those bytes, re-admit."""
+    import hashlib
+    import time
+    from sandbox.secrets.ownership.evidence import admit_evidence
+    from sandbox.secrets.ownership.journal import read_private_file, write_private_file
+    from sandbox.secrets.ownership.migrate import load_admission
+    path = Path(filename)
+    admission = admit_evidence(path, ctx.config.profiles[profile].destination, now=time.time())
+    raw = read_private_file(path, limit=1_048_576)
+    if hashlib.sha256(raw).hexdigest() != admission.evidence_sha256:
+        raise SecretBrokerError("evidence_inadmissible", "evidence changed while being admitted")
+    target = ctx.runtime_root / "evidence" / f"{admission.evidence_sha256}.json"
+    try:
+        write_private_file(target, raw)
+    except FileExistsError:
+        if read_private_file(target) != raw:
+            raise SecretBrokerError("evidence_inadmissible", "stored evidence does not match") from None
+    return load_admission(ctx, profile, admission.evidence_sha256)
+
+
+def _ownership_command(ctx, args, adapter):
+    import time
+    from sandbox.secrets.ownership.approval import ApprovalStore, require_human_terminal
+    from sandbox.secrets.ownership.journal import destination_sha256, read_journal_states, retention
+    from sandbox.secrets.ownership.migrate import (
+        authority_for, build_grant, classify_profile, last_run_record, payload,
+        profile_entries, report_payload, resolve_adapter, revocation_outcome, revocation_status, run_migration,
+    )
+    profile, action = args.profile, args.ownership_action
+    entries = profile_entries(ctx, profile)
+    if action == "classify":
+        report, _, source_names = classify_profile(ctx, profile)
+        if report.blocking or not args.check_destination:
+            return report_payload(report, "classification_blocked" if report.blocking else "classified",
+                                  ok=not report.blocking)
+        from sandbox.secrets.ownership.classify import classify
+        grant = build_grant(ctx, profile, "read", tuple(sorted(e.name for e in entries)))
+        session = resolve_adapter(adapter, capability="read").open_session(
+            grant, deadline=time.time() + grant.destination.timeout_seconds)
+        exists_exc = None
+        try:
+            with session:
+                existence = session.exists(grant.names)
+        except SecretBrokerError as exc:
+            exists_exc = exc
+        outcome = revocation_outcome(session)
+        status = outcome.status
+        if exists_exc is not None:
+            if status == "cleanup_unknown":
+                exists_exc.revocation = "cleanup_unknown"
+                exists_exc.revocation_outcome = outcome
+            raise exists_exc
+        report = classify(ctx.config, profile, source_names, existence)
+        unknown = bool(report.states.get("unknown"))
+        code = "existence_unknown" if unknown else "cleanup_unknown" if status == "cleanup_unknown" else "classified"
+        next_action = None
+        if status == "cleanup_unknown":
+            exp_str = f"expires at {int(outcome.token_expires_at)}" if (outcome.token_expires_at is not None and not isinstance(outcome.token_expires_at, bool) and isinstance(outcome.token_expires_at, (int, float)) and math.isfinite(outcome.token_expires_at)) else "expiry unknown"
+            token_action = f"derived access token revocation not confirmed; account for its remaining lifetime ({exp_str})"
+            operator_action = "native bootstrap entries and Cloudflare credentials remain operator-managed"
+            next_action = f"{token_action}; {operator_action}"
+        elif unknown:
+            operator_action = "native bootstrap entries and Cloudflare credentials remain operator-managed"
+            next_action = operator_action
+        return report_payload(report, code, ok=code == "classified", revocation=status, next_action=next_action)
+    if action == "credential-set":
+        from sandbox.secrets.credentials.base import locator_for_ownership
+        from sandbox.secrets.credentials.manifest import create_credential_store
+        from sandbox.secrets.ownership.broker import validate_bootstrap_input
+        grant = build_grant(ctx, profile, args.capability, tuple(sorted(e.name for e in entries)))
+        locator_for_ownership(grant)  # Pure authority validation before protected input/store access.
+        value = _stdin_secret() if args.stdin else _tty_secret("Ownership bootstrap credential: ")
+        raw = bytearray(value.encode("utf-8"))
+        try:
+            validate_bootstrap_input(raw, grant.destination.gateway)
+            store = ctx.credential_store
+            if store is None:
+                store = create_credential_store(bootstrap_dependencies=False)
+            # Store abstraction accepts the validated ownership grant. It must
+            # route it through locator_for_ownership, never a source locator.
+            store.put(grant, value, intent="create" if args.create_only else "replace")
+        finally:
+            raw[:] = b"\0" * len(raw)
+            value = ""
+        return payload("credential_stored", profile, ok=True)
+    if action == "evidence-check":
+        _ownership_evidence(ctx, profile, args.evidence)
+        return payload("evidence_admitted", profile, ok=True, storage_attestation="operator_attested")
+    if action == "approve":
+        require_human_terminal(sys.stdin, sys.stdout)
+        admission = _ownership_evidence(ctx, profile, args.evidence) if args.evidence else None
+        approval = ApprovalStore(ctx.runtime_root).grant_interactive(
+            operation=args.operation, profile=profile, config=ctx.config, registry=ctx.registry,
+            destination_sha256=destination_sha256(ctx.config.profiles[profile].destination),
+            authority_digest=authority_for(ctx, profile, "create" if args.operation == "migrate" else "read"),
+            admission=admission, minutes=args.minutes, tty_in=sys.stdin, tty_out=sys.stdout)
+        return payload("approved", profile, ok=True, approval_id=approval.approval_id,
+                       storage_attestation="operator_attested" if admission else None)
+    if action == "migrate":
+        return run_migration(ctx, profile, args.approval, confirm=args.confirm,
+                             timeout_seconds=args.timeout_seconds, adapter=adapter)
+    if action == "cleanup":
+        from sandbox.secrets.ownership.cleanup import run_cleanup
+        return run_cleanup(ctx, profile, args.approval, confirm=args.confirm, adapter=adapter)
+    if action == "retention":
+        return retention(ctx.runtime_root, profile, confirm=args.confirm)
+    if action == "status":
+        states = read_journal_states(ctx.runtime_root, profile,
+                                     destination_sha256(ctx.config.profiles[profile].destination))
+        record = last_run_record(ctx.runtime_root, profile)
+        # Rebuild the public result instead of echoing a stored JSON document.
+        body = payload("status", profile, ok=True, states=states or {})
+        if record:
+            from sandbox.secrets.ownership.journal import is_qualified_id
+            if is_qualified_id(record.get("run_id"), "run"):
+                body["run_id"] = record["run_id"]
+            if record.get("revocation") in ("revoked", "cleanup_unknown", "not_applicable"):
+                body["revocation"] = record["revocation"]
+            names = record.get("names")
+            allowed_states = {"pending", "attempted", "created", "pre_existing", "conflict",
+                              "reconciled", "acceptance_unknown", "verified", "failed",
+                              "unresolved", "removed"}
+            if (isinstance(names, dict) and set(names) <= allowed_states
+                    and all(isinstance(items, list) and all(
+                        isinstance(name, str) and re.fullmatch(r"[A-Z_][A-Z0-9_]*", name)
+                        for name in items) for items in names.values())):
+                body["last_run"] = {
+                    "run_id": body.get("run_id"), "revocation": body.get("revocation"),
+                    "names": names, "counts": {state: len(items) for state, items in names.items()},
+                }
+        return body
+    raise SecretBrokerError("input_invalid", "ownership action is invalid")
+
+
+def _ownership_run(ctx, args, adapter):
+    from sandbox.secrets.models import MAX_OUTPUT_BYTES
+    from sandbox.secrets.ownership.models import ScopedRunRequest
+    from sandbox.secrets.ownership.scoped_run import resolve_scoped_bindings
+    from sandbox.secrets.runner import run_with_secrets
+    argv = list(args.command)
+    if argv and argv[0] == "--":
+        argv.pop(0)
+    request = ScopedRunRequest(
+        profile=args.ownership_profile, keys=tuple(args.ownership_keys or ()), argv=tuple(argv),
+        timeout_seconds=DEFAULT_TIMEOUT_SECONDS if args.timeout_seconds is None else args.timeout_seconds,
+        max_output_bytes=MAX_OUTPUT_BYTES)
+    bindings = resolve_scoped_bindings(ctx, request, adapter)
+    try:
+        result = run_with_secrets(request.argv, secrets=bindings,
+                                  timeout_seconds=request.timeout_seconds,
+                                  max_output_bytes=request.max_output_bytes)
+    finally:
+        bindings.clear()
+    child_code = 124 if result.termination == "timed_out" else result.exit_code if result.termination == "exited" else 1
+    status = child_code if isinstance(child_code, int) and 0 <= child_code <= 125 else 1
+    return {"ok": status == 0, "code": "ran" if status == 0 else "child_failed",
+            "profile": request.profile, "counts": {"selected": len(request.keys)},
+            "names": {"selected": sorted(request.keys)}, "result": result.as_dict(), "_exit": status}
+
+
+def _ownership_dispatch(args, *, ownership_adapter=None) -> int:
+    from sandbox.secrets.audit import SecretAudit
+    from sandbox.secrets.ownership.migrate import exit_for, payload
+    profile = getattr(args, "ownership_profile", None) if args.action == "run" else args.profile
+    correlation, audit, operation = None, None, None
+    try:
+        if args.action == "run":
+            if (not profile or getattr(args, "session", False) or any(
+                    getattr(args, key, None) is not None for key in
+                    ("source", "key", "secrets", "destination", "lifetime_seconds"))):
+                raise SecretBrokerError("option_conflict", "ownership selection cannot be combined with source or session selectors")
+            if not args.ownership_keys:
+                raise SecretBrokerError("ownership_keys_required", "explicit ownership keys are required")
+        elif args.ownership_action == "approve":
+            from sandbox.secrets.ownership.approval import require_human_terminal
+            require_human_terminal(sys.stdin, sys.stdout)
+        from sandbox.secrets.context import build_ownership_context
+        ctx = build_ownership_context(args.project_dir)
+        action = "run" if args.action == "run" else args.ownership_action
+        if action in ("classify", "approve", "migrate", "cleanup", "run"):
+            operation = f"ownership_{action}"
+            audit = SecretAudit(ctx.runtime_root / "audit.jsonl")
+            correlation = audit.intent(operation, "ownership", [], surface="cli", profile=profile)
+        body = _ownership_run(ctx, args, ownership_adapter) if args.action == "run" else _ownership_command(ctx, args, ownership_adapter)
+    except SecretBrokerError as exc:
+        # Fixed public codes only; never render backend messages or exception payloads.
+        body = payload(exc.code, profile, ok=False)
+        if exc.code in ("approval_mismatch", "journal_foreign_controller") and isinstance(exc.remedy, str):
+            if re.fullmatch(r"(?:run|resume) from controller [0-9a-f]{32}", exc.remedy):
+                body["next_action"] = exc.remedy
+        rev_outcome = getattr(exc, "revocation_outcome", None)
+        rev_status = getattr(exc, "revocation", None)
+        if rev_status == "cleanup_unknown" or exc.code == "cleanup_unknown":
+            body["revocation"] = "cleanup_unknown"
+            token_expires_at = getattr(rev_outcome, "token_expires_at", None)
+            exp_str = f"expires at {int(token_expires_at)}" if (token_expires_at is not None and not isinstance(token_expires_at, bool) and isinstance(token_expires_at, (int, float)) and math.isfinite(token_expires_at)) else "expiry unknown"
+            token_action = f"derived access token revocation not confirmed; account for its remaining lifetime ({exp_str})"
+            operator_action = "native bootstrap entries and Cloudflare credentials remain operator-managed"
+            if body.get("next_action"):
+                body["next_action"] = f"{token_action}; {body['next_action']}; {operator_action}"
+            else:
+                body["next_action"] = f"{token_action}; {operator_action}"
+    except Exception:
+        body = payload("provider_failed", profile, ok=False)
+    if correlation is not None:
+        try:
+            names = sorted({name for items in body.get("names", {}).values() for name in items})
+            audit.outcome(correlation, operation, "ownership", names, surface="cli", profile=profile,
+                          decision="allowed" if body.get("ok") else "denied",
+                          reason_code=body.get("code"), count=len(names))
+        except Exception:
+            body["audit"] = "audit_unavailable"
+            body["audit_error"] = "audit_unavailable"
+            if body.get("ok"):
+                body["ok"] = False
+                body["code"] = "audit_unavailable"
+                body["_exit"] = exit_for("audit_unavailable")
+            else:
+                body["_exit"] = body.get("_exit") or exit_for(body.get("code", "audit_unavailable"))
+    if args.action == "run" and body.get("result"):
+        if getattr(args, "json", False):
+            print(json.dumps({key: value for key, value in body.items() if key != "_exit"}, sort_keys=True))
+        else:
+            sys.stdout.write(body["result"].get("output", ""))
+        return body.get("_exit", 0)
+    return _ownership_emit(body, getattr(args, "json", False))
+
+
+def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None) -> int:
+    if args.action == "ownership" or (
+            args.action == "run" and (getattr(args, "ownership_profile", None)
+                                      or getattr(args, "ownership_keys", None))):
+        return _ownership_dispatch(args, ownership_adapter=ownership_adapter)
     if args.action == "migrate-zshrc":
         _migrate(args)
-        return
+        return 0
     try:
         session_lifetime = _session_preflight(args) if args.action == "run" else None
         service = _service(args.project_dir)
@@ -463,6 +782,17 @@ def cmd_secrets(cfg, args) -> None:
             _emit(payload, args.json)
         elif args.action == "validate":
             _emit(service.validate(args.source, args.key, args.profile), args.json)
+        elif args.action == "use-profile":
+            _emit(service.use_profile(args.profile, surface="cli"), args.json)
+        elif args.action == "credential-set":
+            intent = "create" if args.create_only else "replace"
+            value = _stdin_secret() if args.stdin else _tty_secret(
+                f"Provider credential for {args.source}: ",
+            )
+            _emit(service.set_provider_credential(
+                args.source, value, intent=intent,
+                input_channel="stdin" if args.stdin else "tty",
+            ), args.json)
         elif args.action == "run":
             command = list(args.command)
             if command and command[0] == "--":
@@ -470,7 +800,7 @@ def cmd_secrets(cfg, args) -> None:
             bindings = _run_bindings(args)
             if session_lifetime is not None:
                 _run_session(service, args, bindings, command, session_lifetime)
-                return
+                return 0
             timeout = args.timeout_seconds
             payload = service.run_many(
                 args.source, bindings, command,
@@ -514,16 +844,43 @@ def cmd_secrets(cfg, args) -> None:
             except OSError as exc:
                 raise SecretBrokerError("tty_required", "a controlling TTY is required for reveal") from exc
     except SecretBrokerError as exc:
+        if getattr(args, "json", False):
+            payload = redact_structure({
+                "ok": False,
+                "operation": args.action.replace("-", "_"),
+                "error": exc.as_dict(),
+            })
+            print(json.dumps(payload, sort_keys=True))
+            raise SystemExit(1) from None
         from sandbox.core import die
-        die(f"{exc.code}: {exc.message}")
+        remedy = f"; remedy: {exc.remedy}" if exc.remedy else ""
+        die(f"{exc.code}: {exc.message}{remedy}")
     except Exception:
         # Do not render, repr, or chain unknown failures. Parser and backend
         # exceptions may retain secret-bearing source buffers or stderr.
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "ok": False,
+                "operation": args.action.replace("-", "_"),
+                "error": {
+                    "code": "operation_failed",
+                    "message": "secret operation failed",
+                    "retryable": False,
+                },
+            }, sort_keys=True))
+            raise SystemExit(1) from None
         from sandbox.core import die
         die("operation_failed: secret operation failed")
+    return 0
+
+
+def _secrets_entrypoint(cfg, args) -> None:
+    status = cmd_secrets(cfg, args)
+    if status:
+        raise SystemExit(status)
 
 
 register_specs((CommandSpec(
-    name="secrets", handler=cmd_secrets, configure=configure_parser,
+    name="secrets", handler=_secrets_entrypoint, configure=configure_parser,
     owner=__name__, scope="global", destructive=False,
 ),))

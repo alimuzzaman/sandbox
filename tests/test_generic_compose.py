@@ -343,6 +343,48 @@ class TestGenericComposeAdapter(unittest.TestCase):
                     "argv": ["pnpm", "test:fast"], "timeout": 0,
                 }))
 
+    def test_exec_success_preserves_output_and_registry_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, registry = self.make_adapter(root)
+            stdout = "test-start\n" + "x" * 12000 + "\ntest-end\n"
+
+            def succeed(argv, *, cwd=None, env=None, timeout=None):
+                if "config" in argv:
+                    return ProcessResult(tuple(argv), 0, "web\n", "")
+                return ProcessResult(tuple(argv), 0, stdout, "separate-stderr")
+
+            process.run = succeed
+            result = adapter.invoke(OperationRequest(
+                str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+            self.assertTrue(result.ok)
+            self.assertEqual(result.data["output"], stdout)
+            self.assertNotIn("separate-stderr", result.data["output"])
+            self.assertEqual(registry.registry_get(str(root))["output"], stdout[-10000:])
+
+    def test_exec_success_bounds_utf8_output_with_both_edges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, _ = self.make_adapter(root)
+
+            def succeed(argv, *, cwd=None, env=None, timeout=None):
+                if "config" in argv:
+                    return ProcessResult(tuple(argv), 0, "web\n", "")
+                return ProcessResult(tuple(argv), 0,
+                                     "test-start\n" + "😀" * 300000 + "\ntest-end\n", "")
+
+            process.run = succeed
+            result = adapter.invoke(OperationRequest(
+                str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+            self.assertTrue(result.ok)
+            output = result.data["output"]
+            self.assertLessEqual(len(output.encode("utf-8")), 1_048_576)
+            self.assertTrue(output.startswith("test-start\n"))
+            self.assertTrue(output.endswith("\ntest-end\n"))
+            self.assertIn("output truncated", output)
+
     def test_exec_failure_returns_separate_bounded_compose_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

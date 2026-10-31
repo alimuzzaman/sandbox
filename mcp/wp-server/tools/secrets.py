@@ -33,19 +33,19 @@ def _safe(callable_):
 
 def secret_inspect(project_dir: str, source: str, keys: list[str] | None = None,
                    mode: str = "keys", exact_length: bool = False) -> dict:
-    """List names by default, or return bounded metadata/fixed masking when authorized."""
+    """Inspect authorized file metadata or a provider's configured singleton item."""
     return _safe(lambda: _service(project_dir).inspect(
         source, keys=keys, mode=mode, exact_length=exact_length, surface="mcp",
     ))
 
 
 def secret_source_info(project_dir: str, source: str) -> dict:
-    """Return registered file existence/type/size-bucket metadata without reading contents."""
+    """Return value-free file or provider capability metadata."""
     return _safe(lambda: _service(project_dir).source_info(source, surface="mcp"))
 
 
 def secret_validate(project_dir: str, source: str, key: str, profile: str) -> dict:
-    """Run one reviewed offline shape profile; never retrieve or live-check the value."""
+    """Run one reviewed shape profile, resolving only a provider's exact registered item."""
     return _safe(lambda: _service(project_dir).validate(
         source, key, profile, surface="mcp",
     ))

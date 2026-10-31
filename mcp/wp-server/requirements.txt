@@ -3,4 +3,4 @@
 # the remote transport is migrated and verified against its replacement API.
 mcp==1.25.0
 httpx
-pyyaml
+-r ../../requirements-cli.txt

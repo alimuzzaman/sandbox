@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Local-image remote-command failures preserve the exit status and bounded,
+  redacted diagnostics instead of discarding the reconciliation error. Document
+  the permission-only repair for legacy 0664 reservation ledgers; strict ledger
+  validation and protocol 17 are unchanged.
 - V2 readiness reads stdout only; SSH stderr warnings are captured separately
   in bounded diagnostics and cannot block a valid worker acknowledgement.
   Garbage on stdout still refuses before upload. Protocol 17 is unchanged.

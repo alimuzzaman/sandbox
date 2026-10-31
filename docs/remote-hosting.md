@@ -2283,6 +2283,8 @@ ordinary job reservations are preserved. A delayed worker must verify its token
 still exists before acknowledging readiness; a reaped token cannot import.
 
 The controller sends no archive bytes before the exact readiness acknowledgement.
+Readiness is read only from stdout. SSH stderr warnings are kept as bounded
+diagnostics; unexpected stdout still refuses before any archive bytes are sent.
 Local preflight failures, SSH failures without acknowledgement and early worker
 exits release the operation's reservation. An acknowledged worker killed during
 upload is reconciled when its fence is free and no marker exists, either during

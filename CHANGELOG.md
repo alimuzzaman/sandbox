@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- V2 readiness reads stdout only; SSH stderr warnings are captured separately
+  in bounded diagnostics and cannot block a valid worker acknowledgement.
+  Garbage on stdout still refuses before upload. Protocol 17 is unchanged.
 - Local-image receipt publication decodes byte acknowledgements correctly;
   malformed replies remain publication-unknown and unexpected exceptions return
   a closed JSON error without exposing details.

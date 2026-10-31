@@ -1253,9 +1253,11 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
     started = time.monotonic()
     timed_out = {"value": False}
     cancelled_state = {"value": False}
-    with tempfile.TemporaryFile() as output:
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as diagnostics:
+        # V2 stdout is a strict protocol channel. SSH warnings belong only in
+        # diagnostics, even when emitted before worker readiness.
         process = subprocess.Popen(ssh_argv, stdin=subprocess.PIPE, stdout=output,
-                                   stderr=subprocess.STDOUT)
+                                   stderr=diagnostics if ready_frame is not None else subprocess.STDOUT)
 
         def kill():
             timed_out["value"] = True
@@ -1320,10 +1322,17 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
             if process.poll() is None:
                 process.kill()
                 process.wait()
-        output.seek(0)
-        tail = output.read()[-4000:].decode("utf-8", errors="replace")
-    return {"returncode": returncode, "timed_out": timed_out["value"],
+        output.seek(0, os.SEEK_END)
+        output.seek(max(0, output.tell() - 4000))
+        tail = output.read(4000).decode("utf-8", errors="replace")
+        diagnostics.seek(0, os.SEEK_END)
+        diagnostics.seek(max(0, diagnostics.tell() - 4000))
+        stderr_tail = diagnostics.read(4000).decode("utf-8", errors="replace")
+    result = {"returncode": returncode, "timed_out": timed_out["value"],
             "cancelled": cancelled_state["value"], "broken_pipe": broken,
             "sent_bytes": sent, "total_bytes": total,
             "sha256": "sha256:" + digest.hexdigest() if sent == total else None,
             "seconds": round(time.monotonic() - started, 1), "output_tail": tail}
+    if ready_frame is not None:
+        result["stderr_tail"] = stderr_tail
+    return result

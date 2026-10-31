@@ -539,5 +539,36 @@ class FinalRecoveryDocumentationTests(unittest.TestCase):
             self.assertEqual(json.loads(ledger.read_text()),[])
 
 
+
+class UnsafeReservationLedgerTests(unittest.TestCase):
+    def test_symlink_writable_foreign_and_hardlinked_ledgers_refuse(self):
+        import os,tempfile
+        from pathlib import Path
+        for case in ('symlink','group-write','world-write','both-write','foreign-owner','hardlink'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'deploy-src').mkdir()
+                OperationReservationTests().run_at(root,10000,token='a'*32)
+                store=root/'runtime'/'storage';ledger=store/'reservations.json'
+                before=ledger.read_bytes();target=ledger
+                if case in ('symlink','hardlink'):
+                    target=store/'original.json';ledger.rename(target)
+                    if case=='symlink':ledger.symlink_to(target.name)
+                    else:os.link(target,ledger)
+                mode={'group-write':0o620,'world-write':0o602,'both-write':0o666,'foreign-owner':0o644}.get(case,0o600)
+                target.chmod(mode)
+                info=target.stat();real_fstat=os.fstat
+                def fstat(fd):
+                    value=real_fstat(fd)
+                    if case=='foreign-owner' and value.st_ino==info.st_ino and value.st_dev==info.st_dev:
+                        fields=list(value);fields[4]=value.st_uid+1;return os.stat_result(fields)
+                    return value
+                with mock.patch('os.fstat',side_effect=fstat):
+                    with self.assertRaises((ValueError,OSError)):
+                        sf.release_storage_reservation(str(store),'a'*32)
+                self.assertEqual(target.read_bytes(),before)
+                self.assertEqual(target.stat().st_mode & 0o777,mode)
+                if case=='symlink':self.assertTrue(ledger.is_symlink())
+
+
 if __name__ == "__main__":
     unittest.main()

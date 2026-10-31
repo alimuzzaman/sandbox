@@ -737,5 +737,104 @@ class FinalReservationTests(unittest.TestCase):
             self.assertNotIn('"acquired":true',result.stdout)
 
 
+
+class SSHReadinessWarningTests(unittest.TestCase):
+    def test_stderr_warnings_allow_push_but_stdout_garbage_refuses(self):
+        helper=FinalReservationTests()
+        missing={'engine':'linux/amd64','images':{}}
+        matching=RemoteLocalImageTests._matching_observation()
+        for garbage in (False,True):
+            with self.subTest(garbage=garbage),tempfile.TemporaryDirectory() as directory, \
+                 helper.controller(directory) as (_,_,release,_,_,publish):
+                frame={'schema':1,'state':'ready','reservation_id':'a'*32}
+                warnings='x'*5000+'\nWarning: Permanently added host\nWARNING: connection is not using a post-quantum key exchange algorithm\nAuthorized users only\n'
+                script='import sys,json\nsys.stderr.write('+repr(warnings)+');sys.stderr.flush()\n'
+                if garbage:script+="print('garbage on stdout',flush=True)\n"
+                script+='print('+repr(json.dumps(frame))+",flush=True)\ndata=sys.stdin.buffer.read()\nprint(json.dumps({'schema':1,'state':'loaded','bytes':len(data)}),flush=True)\n"
+                results=[];real_stream=local_images.stream_archive
+                def stream(*args,**kwargs):
+                    value=real_stream(*args,**kwargs);results.append(value);return value
+                with patch.object(remote_local_images,'observe',side_effect=[missing,missing,matching]), \
+                     patch.object(remote_local_images._remote,'ssh_command_args',return_value=[sys.executable,'-c',script]), \
+                     patch.object(local_images,'stream_archive',side_effect=stream):
+                    if garbage:
+                        with self.assertRaises(remote_local_images.RemoteLocalImageError):helper.push()
+                        publish.assert_not_called();release.assert_called_once()
+                    else:
+                        result=helper.push()
+                        self.assertEqual(result['loaded'],['image-1'])
+                        self.assertEqual(result['remote_receipt_digest'],'published')
+                        publish.assert_called_once();release.assert_not_called()
+                self.assertEqual(results[0]['sent_bytes'],0 if garbage else 7)
+                self.assertIn('Permanently added',results[0]['stderr_tail'])
+                self.assertIn('post-quantum',results[0]['stderr_tail'])
+                self.assertLessEqual(len(results[0]['stderr_tail']),4000)
+                self.assertNotIn('Warning:',results[0]['output_tail'])
+
+    def test_next_attempt_reclaims_failed_upload_before_admitting_again(self):
+        import fcntl
+        from sandbox.resources import storage_floor as sf
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory);(home/'deploy-src').mkdir()
+            engine=home/'runtime'/'host-local-images';engine.mkdir(parents=True,mode=0o700)
+            (engine/'engine.lock').touch(mode=0o600);(engine/'load-fence.lock').touch(mode=0o600)
+            store=home/'runtime'/'storage';store.mkdir(mode=0o700)
+            ledger=store/'reservations.json'
+            peer={'id':'b'*32,'kind':'host-local-images','target':str(home/'deploy-src'/'peer'),
+                  'estimate_bytes':300,'expires_at':sf.OPERATION_RESERVATION_EXPIRY}
+            ordinary={'id':'ordinary','target':str(home/'deploy-src'/'app'),
+                      'estimate_bytes':11,'expires_at':sf.OPERATION_RESERVATION_EXPIRY}
+            # The receipt target is app, matching the reservation fixture.
+            ledger.write_text(json.dumps([peer,ordinary]));ledger.chmod(0o600)
+            receipt=SharedBundleReceiptTests.receipt()
+            events=[];tokens=[];admissions=[];reconciles=[0]
+            @contextmanager
+            def lease(*args,**kwargs):
+                with (engine/'engine.lock').open('r+b') as lock:
+                    fcntl.flock(lock,fcntl.LOCK_EX)
+                    yield SimpleNamespace(require=lambda:None,lost=lambda:False)
+            def ssh(entry,command,timeout=30,**kwargs):
+                if command=="docker info --format '{{.ID}}'":return SimpleNamespace(returncode=0,stdout='same-daemon')
+                if remote_local_images._RECONCILE_PROGRAM in shlex.split(command):
+                    reconciles[0]+=1
+                    if reconciles[0]==2:raise OSError('connection lost after failed upload')
+                    events.append('reconcile')
+                argv=shlex.split(command)
+                self.assertEqual(argv[:2],['python3','-c'])
+                prefix='import os\nfrom types import SimpleNamespace\nos.statvfs=lambda _:SimpleNamespace(f_bavail=10**12,f_frsize=1)\n'
+                return run_test_process([sys.executable,'-c',prefix+argv[2],*argv[3:]],
+                    capture_output=True,text=True,timeout=3,env={'PATH':'/nonexistent','SANDBOX_HOME':directory})
+            actual_admit=sf.remote_storage_floor_admission
+            def admit(*args,**kwargs):
+                events.append('admit')
+                decision=actual_admit(*args,**kwargs);admissions.append(decision);return decision
+            def upload(*args,**kwargs):
+                token=kwargs['reservation_id'];tokens.append(token);kwargs['on_started']()
+                if len(tokens)==1:raise remote_local_images.RemoteLocalImageError('local_images_transfer_unknown')
+                self.assertNotIn(tokens[0],[e['id'] for e in json.loads(ledger.read_text())])
+                sf.release_storage_reservation(str(store),token)
+                return {'schema':1,'state':'loaded','bytes':10}
+            missing={'engine':'linux/amd64','images':{}};matching=RemoteLocalImageTests._matching_observation()
+            with patch.object(local_images,'load_receipt',return_value=(receipt,home/'receipt.json')), \
+                 patch.object(local_images,'bundle_identities'), \
+                 patch.object(remote_local_images,'target_image_lease',side_effect=lease), \
+                 patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value=directory), \
+                 patch.object(remote_local_images._remote,'ssh_run',side_effect=ssh), \
+                 patch.object(sf,'ssh_run',side_effect=ssh), \
+                 patch.object(sf,'remote_storage_floor_admission',side_effect=admit), \
+                 patch.object(remote_local_images,'load_archive',side_effect=upload), \
+                 patch.object(remote_local_images,'observe',side_effect=[missing,missing,missing,missing,matching]), \
+                 patch.object(remote_local_images,'publish',return_value='published'):
+                with self.assertRaises(remote_local_images.RemoteLocalImageError):FinalReservationTests.push()
+                self.assertIn(tokens[0],[e['id'] for e in json.loads(ledger.read_text())])
+                self.assertFalse((engine/'load-unverified').exists())
+                result=FinalReservationTests.push()
+            self.assertEqual(result['remote_receipt_digest'],'published')
+            self.assertEqual(events,['reconcile','admit','reconcile','admit'])
+            self.assertEqual([d['reserved_bytes'] for d in admissions],[311,311])
+            self.assertEqual(json.loads(ledger.read_text()),[peer,ordinary])
+
+
 if __name__ == "__main__":
     unittest.main()

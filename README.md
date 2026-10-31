@@ -1330,14 +1330,15 @@ operator handoff; see [remote hosting](docs/remote-hosting.md).
 
 ### Upgrading shared-bundle clients
 
-V2 builders require Docker >=25 with the containerd image store; classic and
-legacy stores use v1. V2 now requires a storage floor, reserves at least 3 times
-the bundle bytes, and quarantines uncertain loads. See the
-[operational details](docs/remote-hosting.md#shared-bundle-runtime-upgrade-and-review-fixes).
+V2 requires Docker >=25 with the containerd image store on the builder. Classic
+and legacy stores use v1. V2 reserves 3x the full bundle under the engine lease,
+reconciles proven orphan reservations before admission, and retains reservations
+for uncertain imports until operator reconciliation. See the
+[reservation lifecycle and self-contained recovery commands](docs/remote-hosting.md#v2-reservation-lifecycle-and-quarantine-recovery).
 
-Protocol 14 introduced v2; the current reservation lifecycle requires **protocol 16**.
-After upgrading, reinstall remote runtimes, including for v1-only verdict-gated
-commands. Protocol-13/14/15 runtimes cannot serve this client:
+The current contract requires **protocol 17**. From the upgraded checkout,
+migrate each runtime **before bumping client pins**, including for v1-only
+verdict-gated commands:
 
 ```sh
 ./sb remote service migrate NAME --plan --json
@@ -1345,12 +1346,8 @@ commands. Protocol-13/14/15 runtimes cannot serve this client:
 ./sb remote service status NAME --json
 ```
 
-Review the plan and explicitly authorize the migration. Verify the installed
-revision and compatibility range in status before remote operations. No migration
-is performed by upgrading this checkout.
-
-The reservation lifecycle follow-up requires **protocol 16**, so migrate
-protocol-13/14/15 runtimes after upgrading. V2 reserves the full 3x bundle before
-the lease and retains its reservation across controller loss until worker success
-or explicit operator reconciliation. See the
-[reservation lifecycle and exact recovery commands](docs/remote-hosting.md#v2-reservation-lifecycle-and-quarantine-recovery).
+Review the plan and explicitly authorize migration. Verify installed revision
+and compatibility, then confirm the old pinned client still reports compatible
+status before changing its pin. Protocol-13/14/15/16 runtimes cannot serve a
+protocol-17 client. New runtimes still serve older clients; strict revision pins
+require an exact revision match. Upgrading this checkout performs no migration.

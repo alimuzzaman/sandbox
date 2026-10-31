@@ -1240,7 +1240,7 @@ def _builder_identity(environment: dict, engine: str | None) -> dict:
 # ------------------------------------------------------------------
 
 def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress=None,
-                   label: str = "", cancelled=None) -> dict:
+                   label: str = "", cancelled=None, ready_frame=None, on_started=None) -> dict:
     """Stream one archive into a remote command's stdin with a hard deadline.
 
     The archive is hashed while it is sent; the caller compares the digest with
@@ -1266,8 +1266,30 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
         try:
             assert process.stdin is not None
             next_report = 0
+            acknowledged = ready_frame is None
+            if ready_frame is not None:
+                while process.poll() is None and not timed_out["value"]:
+                    prefix = os.pread(output.fileno(), 4097, 0)
+                    if b"\n" in prefix or len(prefix) > 4096:
+                        try:
+                            frame = _json_loads_closed(prefix.split(b"\n", 1)[0])
+                        except (ValueError, UnicodeError):
+                            break
+                        if frame == ready_frame:
+                            if on_started is not None:
+                                on_started()
+                            acknowledged = True
+                        break
+                    if cancelled is not None and cancelled():
+                        cancelled_state["value"] = True
+                        break
+                    threading.Event().wait(0.01)
+                if not acknowledged:
+                    broken = True
+                    if process.poll() is None:
+                        process.kill()
             with open(archive, "rb") as handle:
-                while True:
+                while acknowledged:
                     if cancelled is not None and cancelled():
                         cancelled_state["value"] = True
                         process.kill()

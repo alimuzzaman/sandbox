@@ -139,7 +139,9 @@ def _run_probe(remote: dict, request: dict, *, timeout: int) -> dict | None:
     return found[0] if len(found) == 1 else None
 
 
-def release_storage_reservation(store: str, reservation_id: str) -> None:
+def release_storage_reservation(store: str, reservation_id: str | None, *,
+                                orphan_target: str | None = None, verify_only: bool = False,
+                                lock_timeout: float = 10) -> None:
     """Atomically release only one owned operation reservation; usable in workers."""
     import fcntl
     import json
@@ -147,9 +149,12 @@ def release_storage_reservation(store: str, reservation_id: str) -> None:
     import re
     import stat
     import tempfile
+    import time
     from pathlib import Path
 
-    if not re.fullmatch(r"[0-9a-f]{32}", reservation_id):
+    if reservation_id is None and orphan_target is None:
+        raise ValueError("operation or target required")
+    if reservation_id is not None and not re.fullmatch(r"[0-9a-f]{32}", reservation_id):
         raise ValueError("invalid operation reservation")
     root = Path(store)
     info = root.lstat()
@@ -160,20 +165,41 @@ def release_storage_reservation(store: str, reservation_id: str) -> None:
         info = os.fstat(lock)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise ValueError("unsafe reservation lock")
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fd = os.open(root / "reservations.json", os.O_RDONLY | os.O_NOFOLLOW)
+        deadline = time.monotonic() + lock_timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("reservation lock busy")
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        try:
+            fd = os.open(root / "reservations.json", os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if verify_only:
+                raise ValueError("operation reservation missing")
+            return
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                    or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 8 * 1024**2):
+                    or info.st_mode & 0o022 or info.st_nlink != 1 or info.st_size > 8 * 1024**2):
                 raise ValueError("unsafe reservation ledger")
+            # Older admissions rewrite this same-owner ledger as 0644.
+            os.fchmod(handle.fileno(), 0o600)
             entries = json.loads(handle.read(8 * 1024**2 + 1))
         if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
             raise ValueError("invalid reservation ledger")
-        retained = [e for e in entries if e.get("id") != reservation_id]
+        if verify_only:
+            if not any(e.get("id") == reservation_id and e.get("kind") == "host-local-images" for e in entries):
+                raise ValueError("operation reservation missing")
+            return
+        retained = [e for e in entries if not (
+            e.get("kind") == "host-local-images" and e.get("target") == orphan_target
+            if orphan_target is not None else e.get("id") == reservation_id)]
         if retained == entries:
             return  # Idempotent after an acknowledgement was lost.
-        if any(e.get("id") == reservation_id and e.get("kind") != "host-local-images" for e in entries):
+        if reservation_id is not None and any(e.get("id") == reservation_id and e.get("kind") != "host-local-images" for e in entries):
             raise ValueError("reservation ownership differs")
         descriptor, temporary = tempfile.mkstemp(prefix=".reservation-release-", dir=root)
         try:

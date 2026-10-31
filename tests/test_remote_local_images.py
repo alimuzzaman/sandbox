@@ -17,7 +17,7 @@ from sandbox.hosting import local_images
 from sandbox.commands import hosting as hosting_cmd
 from sandbox.transports import remote_local_images
 from tests.test_hosting_local_images import _receipt
-from tests.subprocess_support import run_test_process
+from tests.subprocess_support import run_test_process, synthetic_environment
 
 
 class RemoteLocalImageTests(unittest.TestCase):
@@ -455,6 +455,7 @@ class SharedBundleTransferTests(unittest.TestCase):
                 stack.enter_context(patch.object(local_images, 'bundle_identities'))
                 stack.enter_context(patch.object(remote_local_images, 'observe', side_effect=[initial, initial, match] if not present else [match, match]))
                 stack.enter_context(patch.object(remote_local_images, '_storage_admission', return_value=None))
+                stack.enter_context(patch.object(remote_local_images, "_reconcile_reservations", return_value=True))
                 stack.enter_context(patch.object(remote_local_images, 'target_image_lease', return_value=lease))
                 stack.enter_context(patch.object(remote_local_images, '_checked', return_value='same-daemon'))
                 load = stack.enter_context(patch.object(remote_local_images, 'load_archive'))
@@ -575,6 +576,7 @@ class BundleReservationRaceTests(unittest.TestCase):
                 stack.enter_context(patch.object(remote_local_images,'observe',side_effect=[matching,missing,matching]))
                 stack.enter_context(patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value='/srv/sandbox'))
                 policy = stack.enter_context(patch('sandbox.resources.storage_floor.remote_storage_floor_admission',return_value={'ok':admit}))
+                stack.enter_context(patch.object(remote_local_images, "_reconcile_reservations", return_value=True))
                 acquire = stack.enter_context(patch.object(remote_local_images,'target_image_lease',return_value=lease))
                 stack.enter_context(patch.object(remote_local_images,'_checked',return_value='same-daemon'))
                 upload = stack.enter_context(patch.object(remote_local_images,'load_archive'))
@@ -591,7 +593,7 @@ class BundleReservationRaceTests(unittest.TestCase):
                     with self.assertRaises(remote_local_images.RemoteLocalImageError):
                         remote_local_images.push_receipt('synthetic','unused',timeout=60,
                             artifact_timeout=30,machine_identity='synthetic',registered_host_digest='synthetic',entry={})
-                    acquire.assert_not_called(); upload.assert_not_called(); publish.assert_not_called()
+                    acquire.assert_called_once(); upload.assert_not_called(); publish.assert_not_called()
                 self.assertEqual(policy.call_args.kwargs['minimum_estimate_bytes'],300_000_000)
                 self.assertRegex(policy.call_args.kwargs['reservation_id'],r'^[0-9a-f]{32}$')
 
@@ -599,6 +601,9 @@ class BundleReservationRaceTests(unittest.TestCase):
         from tests.test_hosting_local_images import SharedBundleReceiptTests
         receipt = SharedBundleReceiptTests.receipt()
         matching = RemoteLocalImageTests._matching_observation()
+        def interrupted(*args, **kwargs):
+            kwargs['on_started']()
+            raise remote_local_images.RemoteLocalImageError('local_images_transfer_unknown')
         for starts in (False,True):
             locked = {'engine':'linux/amd64','images':{}} if starts else matching
             lease = MagicMock(); lease.__enter__.return_value = lease
@@ -607,9 +612,10 @@ class BundleReservationRaceTests(unittest.TestCase):
                 stack.enter_context(patch.object(local_images,'bundle_identities'))
                 stack.enter_context(patch.object(remote_local_images,'observe',side_effect=[matching,locked]))
                 stack.enter_context(patch.object(remote_local_images,'_storage_admission',return_value='a'*32))
+                stack.enter_context(patch.object(remote_local_images, "_reconcile_reservations", side_effect=[True,False] if starts else [True]))
                 stack.enter_context(patch.object(remote_local_images,'target_image_lease',return_value=lease))
                 stack.enter_context(patch.object(remote_local_images,'_checked',return_value='same-daemon'))
-                stack.enter_context(patch.object(remote_local_images,'load_archive',side_effect=remote_local_images.RemoteLocalImageError('local_images_transfer_unknown')))
+                stack.enter_context(patch.object(remote_local_images,'load_archive',side_effect=interrupted))
                 stack.enter_context(patch.object(remote_local_images,'publish',return_value='synthetic'))
                 release = stack.enter_context(patch.object(remote_local_images,'_release_reservation'))
                 if starts:
@@ -621,6 +627,114 @@ class BundleReservationRaceTests(unittest.TestCase):
                     remote_local_images.push_receipt('synthetic','unused',timeout=60,artifact_timeout=30,
                         machine_identity='synthetic',registered_host_digest='synthetic',entry={})
                     release.assert_called_once_with({},receipt,'a'*32)
+
+
+
+class FinalReservationTests(unittest.TestCase):
+    @contextmanager
+    def controller(self, directory, *, matching=False, cleanup_error=False):
+        import hashlib
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt=SharedBundleReceiptTests.receipt()
+        data=b'archive'
+        path=Path(directory,'bundle-1.tar');path.write_bytes(data);path.chmod(0o600)
+        receipt['bundles']['bundle-1'].update(archive_sha256='sha256:'+hashlib.sha256(data).hexdigest(),archive_bytes=len(data))
+        receipt=local_images.seal_receipt(receipt)
+        present=RemoteLocalImageTests._matching_observation()
+        observation=present if matching else {'engine':'linux/amd64','images':{}}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(local_images,'load_receipt',return_value=(receipt,Path(directory,'receipt.json'))))
+            stack.enter_context(patch.object(local_images,'bundle_identities'))
+            stack.enter_context(patch.object(remote_local_images,'observe',return_value=observation))
+            lease=MagicMock();lease.__enter__.return_value=lease;lease.lost.return_value=False
+            stack.enter_context(patch.object(remote_local_images,'target_image_lease',return_value=lease))
+            reconcile=stack.enter_context(patch.object(remote_local_images,'_reconcile_reservations',return_value=True))
+            admission=stack.enter_context(patch.object(remote_local_images,'_storage_admission',return_value='a'*32))
+            release=stack.enter_context(patch.object(remote_local_images,'_release_reservation',side_effect=OSError('cleanup failed') if cleanup_error else None))
+            stack.enter_context(patch.object(remote_local_images,'_checked',return_value='same-daemon'))
+            stack.enter_context(patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value=directory))
+            publish=stack.enter_context(patch.object(remote_local_images,'publish',return_value='published'))
+            real_popen=subprocess.Popen
+            def spawn(*args,**kwargs):
+                kwargs['env']=synthetic_environment({'PATH':'/nonexistent'})
+                return real_popen(*args,**kwargs)
+            stack.enter_context(patch.object(local_images.subprocess,'Popen',side_effect=spawn))
+            yield receipt,path,release,reconcile,admission,publish
+
+    @staticmethod
+    def push(**kwargs):
+        return remote_local_images.push_receipt('local','unused',timeout=30,artifact_timeout=kwargs.pop('artifact_timeout',10),
+            machine_identity='synthetic',registered_host_digest='synthetic',entry={},**kwargs)
+
+    def test_local_and_unacknowledged_remote_failures_release(self):
+        for failure in ('archive-changed','deadline','entry',255,31,62,75):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory, \
+                 self.controller(directory) as (receipt,path,release,reconcile,admission,publish),ExitStack() as stack:
+                if failure=='archive-changed': path.write_bytes(b'changed')
+                if failure=='entry':
+                    stack.enter_context(patch.object(remote_local_images,'_local_image_root',side_effect=remote_local_images.RemoteLocalImageError('local_images_remote_unavailable')))
+                argv=[sys.executable,'-c','import sys;sys.exit('+str(failure if isinstance(failure,int) else 255)+')']
+                ssh=stack.enter_context(patch.object(remote_local_images._remote,'ssh_command_args',return_value=argv))
+                with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                    self.push(artifact_timeout=0 if failure=='deadline' else 10)
+                release.assert_called_once_with({},receipt,'a'*32)
+                publish.assert_not_called()
+                if failure in ('archive-changed','deadline','entry'):ssh.assert_not_called()
+                if failure=='archive-changed':self.assertEqual(raised.exception.code,'local_images_archive_changed')
+
+    def test_cleanup_failure_preserves_error_and_successful_publication(self):
+        with tempfile.TemporaryDirectory() as directory,self.controller(directory,cleanup_error=True) as (_,path,release,_,_,_):
+            path.write_bytes(b'changed')
+            with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                self.push(progress=lambda _: (_ for _ in ()).throw(ValueError('progress failed')))
+            self.assertEqual(raised.exception.code,'local_images_archive_changed')
+            release.assert_called_once()
+        with tempfile.TemporaryDirectory() as directory,self.controller(directory,matching=True,cleanup_error=True) as (_,_,release,_,_,publish):
+            result=self.push()
+            self.assertEqual(result['remote_receipt_digest'],'published')
+            self.assertTrue(result['reservation_cleanup_pending'])
+            publish.assert_called_once();release.assert_called_once()
+
+    def test_orphan_reconcile_precedes_admission_and_floor_message_has_fallback(self):
+        events=[]
+        with tempfile.TemporaryDirectory() as directory,self.controller(directory) as (_,_,_,reconcile,admission,_):
+            reconcile.side_effect=lambda *a,**k: events.append('reconcile') or True
+            admission.side_effect=lambda *a,**k: events.append('admission') or (_ for _ in ()).throw(remote_local_images.RemoteLocalImageError('remote_storage_floor'))
+            with self.assertRaises(remote_local_images.RemoteLocalImageError):self.push()
+        self.assertEqual(events,['reconcile','admission'])
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt=SharedBundleReceiptTests.receipt()
+        with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value='/srv/sandbox'), \
+             patch('sandbox.resources.storage_floor.remote_storage_floor_admission',return_value={'ok':False}):
+            with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                remote_local_images._storage_admission({},receipt,RemoteLocalImageTests._matching_observation())
+        self.assertIn('storage floor',str(raised.exception));self.assertIn('3x',str(raised.exception));self.assertIn('v1',str(raised.exception))
+
+    def test_stream_sends_nothing_until_exact_worker_ack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory,'bundle.tar');path.write_bytes(b'archive')
+            frame={'schema':1,'state':'ready','reservation_id':'a'*32}
+            real_popen=subprocess.Popen
+            def spawn(*args,**kwargs):
+                kwargs['env']=synthetic_environment({'PATH':'/nonexistent'})
+                return real_popen(*args,**kwargs)
+            for valid in (False,True):
+                script=("import sys,json\n"+('print('+repr(__import__('json').dumps(frame))+',flush=True)\n' if valid else 'sys.exit(255)\n')+
+                        "data=sys.stdin.buffer.read()\nprint(json.dumps({'bytes':len(data)}))\n")
+                started=[]
+                with patch.object(local_images.subprocess,'Popen',side_effect=spawn):
+                    result=local_images.stream_archive([sys.executable,'-c',script],path,timeout=2,ready_frame=frame,on_started=lambda:started.append(True))
+                self.assertEqual(started,[True] if valid else [])
+                self.assertEqual(result['sent_bytes'],7 if valid else 0)
+
+    def test_pinned_old_controller_still_refuses_quarantine(self):
+        from tests.fixtures.local_image_legacy_programs import ENGINE_LOCK_V1
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory,'load-fence.lock').touch(mode=0o400)
+            Path(directory,'load-unverified').write_text('unverified')
+            result=run_test_process([sys.executable,'-c',ENGINE_LOCK_V1,directory],input='',capture_output=True,text=True,timeout=2)
+            self.assertNotEqual(result.returncode,0)
+            self.assertNotIn('"acquired":true',result.stdout)
 
 
 if __name__ == "__main__":

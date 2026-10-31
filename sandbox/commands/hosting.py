@@ -543,6 +543,8 @@ def _cmd_host_image_push_local(args) -> None:
                    "loaded": result["loaded"], "skipped": result["skipped"],
                    "transferred_bundles": result.get("transferred_bundles", []),
                    "transferred_bytes": result.get("transferred_bytes", 0)}
+        if result["receipt"]["schema"] == local_images.RECEIPT_SCHEMA_V2:
+            payload["reservation_cleanup_pending"] = result.get("reservation_cleanup_pending", False)
     except RemoteJobAdmissionError as exc:
         if args.json:
             print(json.dumps(exc.to_payload(remote=args.remote, operation="push-local"),

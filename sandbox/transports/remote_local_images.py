@@ -129,21 +129,25 @@ bundle_load=len(sys.argv)>=6
 reservation_id=sys.argv[6] if len(sys.argv)==7 else None
 load_may_run=False
 load_timeout=int(sys.argv[5]) if bundle_load else 1800
-quarantine=os.path.dirname(root)+'/load-unverified'
-if os.path.lexists(quarantine): sys.exit(75)
-if not root.startswith('/') or '/' in name or name in {'.','..'}: sys.exit(31)
-os.makedirs(root,mode=0o700,exist_ok=True)
-ri=os.lstat(root)
-if not stat.S_ISDIR(ri.st_mode) or ri.st_uid!=os.geteuid() or stat.S_IMODE(ri.st_mode)&0o002: sys.exit(31)
-os.chmod(root,0o700)
-# The worker owns this fence even if its controller's SSH lease disappears.
-fence=os.open(os.path.dirname(root)+'/load-fence.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
-fi=os.fstat(fence)
-if not stat.S_ISREG(fi.st_mode) or fi.st_uid!=os.geteuid() or stat.S_IMODE(fi.st_mode)!=0o600 or fi.st_nlink!=1: sys.exit(31)
-try: fcntl.flock(fence,fcntl.LOCK_EX|fcntl.LOCK_NB)
-except BlockingIOError: sys.exit(75)
-fd,path=tempfile.mkstemp(prefix='.upload-',suffix='.tar',dir=root); h=hashlib.sha256(); count=0
+fd=-1;path=None;fence=None
 try:
+ quarantine=os.path.dirname(root)+'/load-unverified'
+ if os.path.lexists(quarantine): sys.exit(75)
+ if not root.startswith('/') or '/' in name or name in {'.','..'}: sys.exit(31)
+ os.makedirs(root,mode=0o700,exist_ok=True)
+ ri=os.lstat(root)
+ if not stat.S_ISDIR(ri.st_mode) or ri.st_uid!=os.geteuid() or stat.S_IMODE(ri.st_mode)&0o002: sys.exit(31)
+ os.chmod(root,0o700)
+ # The worker owns this fence even if its controller's SSH lease disappears.
+ fence=os.open(os.path.dirname(root)+'/load-fence.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+ fi=os.fstat(fence)
+ if not stat.S_ISREG(fi.st_mode) or fi.st_uid!=os.geteuid() or stat.S_IMODE(fi.st_mode)!=0o600 or fi.st_nlink!=1: sys.exit(31)
+ try: fcntl.flock(fence,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError: sys.exit(75)
+ fd,path=tempfile.mkstemp(prefix='.upload-',suffix='.tar',dir=root); h=hashlib.sha256(); count=0
+ if reservation_id is not None:
+  release_storage_reservation(os.path.dirname(os.path.dirname(root))+'/storage',reservation_id,verify_only=True)
+  print(json.dumps({'schema':1,'state':'ready','reservation_id':reservation_id},separators=(',',':')),flush=True)
  os.fchmod(fd,0o600)
  while count<=size:
   chunk=os.read(0,min(1048576,size+1-count))
@@ -173,16 +177,17 @@ try:
  print(json.dumps({'schema':1,'state':'loaded','bytes':count},separators=(',',':')))
 finally:
  if fd>=0: os.close(fd)
- try: os.unlink(path)
- except OSError: pass
- if reservation_id is not None and not load_may_run:
+ if path is not None:
+  try: os.unlink(path)
+  except OSError: pass
+ if reservation_id is not None and not load_may_run and root.startswith('/'):
   release_storage_reservation(os.path.dirname(os.path.dirname(root))+'/storage',reservation_id)
 '''
 
 
 def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: int,
                  progress=None, cancelled=None, entry: dict | None = None,
-                 reservation_id: str | None = None) -> dict:
+                 reservation_id: str | None = None, on_started=None) -> dict:
     """Verify the complete staged bytes before invoking the fixed Docker load."""
     started = time.monotonic()
     entry = _entry(remote_name) if entry is None else entry
@@ -209,9 +214,13 @@ def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: in
     timeout -= time.monotonic() - started
     if timeout <= 0:
         raise RemoteLocalImageError("local_images_transfer_unknown")
+    handshake = {}
+    if reservation_id is not None:
+        handshake["ready_frame"] = {"schema": 1, "state": "ready", "reservation_id": reservation_id}
+        handshake["on_started"] = on_started
     result = local_images.stream_archive(
         _remote.ssh_command_args(entry, shlex.join(argv), multiplex=False),
-        archive, timeout=timeout, progress=progress, cancelled=cancelled)
+        archive, timeout=timeout, progress=progress, cancelled=cancelled, **handshake)
     if result["timed_out"] or result["cancelled"] or result["broken_pipe"]:
         raise RemoteLocalImageError("local_images_transfer_unknown")
     if result["returncode"] == 34 or ("members" in artifact and result["returncode"] != 0):
@@ -407,9 +416,38 @@ def target_image_lease(remote_name: str, project: str, environment: str,
     return _TransferLease(entry, timeout=timeout)
 
 
+_RECONCILE_PROGRAM = RESERVATION_RELEASE_PROGRAM + r"""
+import fcntl,json,os,stat,sys
+root,target=sys.argv[1:]
+def done(safe): print(json.dumps({'safe':safe},separators=(',',':')))
+if os.path.lexists(root+'/load-unverified'):
+ done(False);sys.exit(0)
+fd=os.open(root+'/load-fence.lock',os.O_RDWR|os.O_NOFOLLOW)
+try:
+ info=os.fstat(fd)
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1:
+  done(False);sys.exit(0)
+ try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ except BlockingIOError: done(False);sys.exit(0)
+ if os.path.lexists(root+'/load-unverified'): done(False);sys.exit(0)
+ store=os.path.dirname(root)+'/storage'
+ if os.path.exists(store): release_storage_reservation(store,None,orphan_target=target)
+ done(True)
+finally: os.close(fd)
+"""
+
+
+def _reconcile_reservations(entry: dict, receipt: dict, *, timeout: float = 30) -> bool:
+    """Caller holds the engine lease; worker fence + marker prove orphans."""
+    root = _local_image_root(entry)
+    target = posixpath.normpath(posixpath.join(_remote.resolve_sandbox_home(entry), "deploy-src", receipt["project"]))
+    output = _checked(entry, shlex.join(["python3", "-c", _RECONCILE_PROGRAM, root, target]), timeout=timeout)
+    return json.loads(output) == {"safe": True}
+
+
 def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
                        timeout: float = 60, before_write=None) -> str | None:
-    """Reserve remote storage before the first transfer-side remote write."""
+    """Reserve remote storage before image upload."""
     local_images.validate_receipt(receipt)
     bundle = receipt["schema"] == local_images.RECEIPT_SCHEMA_V2
     if not bundle and entry.get("storage_floor_gb") in (None, 0):
@@ -451,14 +489,17 @@ def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
     if bundle and decision is None:
         raise RemoteLocalImageError("remote_storage_floor", "v2 storage admission unavailable")
     if decision is not None and decision.get("ok") is not True:
-        raise RemoteLocalImageError("remote_storage_floor", describe(decision))
+        message = describe(decision)
+        if bundle:
+            message = "image push blocked by storage floor (full 3x bundle reservation): " + message.split(": ", 1)[-1] + "; export/select v1 for per-image storage admission"
+        raise RemoteLocalImageError("remote_storage_floor", message)
     return reservation_id
 
 
 def _release_reservation(entry: dict, receipt: dict, reservation_id: str) -> None:
     from sandbox.resources.storage_floor import remote_storage_floor_release
     home = _remote.resolve_sandbox_home(entry)
-    target = posixpath.join(home, "deploy-src", receipt["project"])
+    target = posixpath.normpath(posixpath.join(home, "deploy-src", receipt["project"]))
     if not remote_storage_floor_release(entry, target, reservation_id, timeout=30):
         raise RemoteLocalImageError("local_images_transfer_unknown", "storage reservation release unverified")
 
@@ -471,6 +512,8 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
     wrote = False
     reservation_id = None
     worker_may_run = False
+    cleanup_pending = False
+    bundle_receipt = False
 
     def mark_write():
         nonlocal wrote
@@ -483,7 +526,12 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                 "local_images_transfer_unknown" if wrote else "local_images_transfer_timeout")
         return min(cap, budget)
 
+    def worker_started():
+        nonlocal worker_may_run
+        worker_may_run = True
+
     receipt, path = local_images.load_receipt(receipt_path_value)
+    bundle_receipt = receipt["schema"] == local_images.RECEIPT_SCHEMA_V2
     entry = _entry(remote_name) if entry is None else entry
     try:
         observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
@@ -493,14 +541,20 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
             raise RemoteLocalImageError("local_images_platform_mismatch")
         budget = remaining(60)
         # Storage admission may create lock/reservation files even on refusal.
-        reservation_id = _storage_admission(entry, receipt, observation, timeout=budget,
-                           before_write=mark_write)
+        if not bundle_receipt:
+            reservation_id = _storage_admission(entry, receipt, observation, timeout=budget,
+                               before_write=mark_write)
         budget = remaining(30)
         wrote = True  # The lease creates remote lock files.
         loaded, skipped = [], []
         with target_image_lease(
                 remote_name, receipt["project"], receipt["environment"],
                 receipt["receipt_digest"], entry=entry, timeout=budget) as lease:
+            if bundle_receipt:
+                if not _reconcile_reservations(entry, receipt, timeout=remaining(30)):
+                    raise RemoteLocalImageError("local_images_target_busy")
+                reservation_id = _storage_admission(entry, receipt, observation,
+                    timeout=remaining(60), before_write=mark_write)
             observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
             remaining(30)
             lease.require()
@@ -517,10 +571,21 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                 if loaded:
                     for key, bundle in receipt["bundles"].items():
                         local_images.bundle_identities(path.parent / bundle["archive"], receipt["artifacts"])
-                        worker_may_run = True
-                        load_archive(remote_name, path.parent / bundle["archive"], bundle,
-                                     timeout=remaining(artifact_timeout), progress=progress,
-                                     cancelled=lease.lost, entry=entry, reservation_id=reservation_id)
+                        try:
+                            load_archive(remote_name, path.parent / bundle["archive"], bundle,
+                                         timeout=remaining(artifact_timeout), progress=progress,
+                                         cancelled=lease.lost, entry=entry, reservation_id=reservation_id,
+                                         on_started=worker_started)
+                        except Exception:
+                            # Once the acknowledged worker exits before quarantine,
+                            # a free fence proves these reservations are orphans.
+                            if worker_may_run:
+                                try:
+                                    if _reconcile_reservations(entry, receipt, timeout=30):
+                                        reservation_id = None
+                                except Exception:
+                                    pass  # Keep the original error and the pin.
+                            raise
                         reservation_id = None  # Worker acknowledged load and durable release.
                         transferred_bundles.append(key)
                         transferred_bytes += bundle["archive_bytes"]
@@ -578,7 +643,14 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
         if reservation_id is not None and not worker_may_run:
             # No load could have started. Cleanup is bounded independently of
             # an exhausted controller deadline; failure retains the reservation.
-            _release_reservation(entry, receipt, reservation_id)
+            try:
+                _release_reservation(entry, receipt, reservation_id)
+            except Exception:
+                cleanup_pending = True
+                if progress is not None:
+                    try: progress("Storage cleanup pending; the next v2 attempt will reconcile under the engine lease")
+                    except Exception: pass
     return {"receipt": receipt, "remote_receipt_digest": digest,
             "loaded": loaded, "skipped": skipped, "daemon_identity": engine_id,
-            "transferred_bundles": transferred_bundles, "transferred_bytes": transferred_bytes}
+            "transferred_bundles": transferred_bundles, "transferred_bytes": transferred_bytes,
+            "reservation_cleanup_pending": cleanup_pending}

@@ -21,6 +21,73 @@ from tests.subprocess_support import run_test_process, synthetic_environment
 
 
 class RemoteLocalImageTests(unittest.TestCase):
+    def test_legacy_writable_ledger_reports_reconciliation_error_and_succeeds_after_manual_chmod(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory, "runtime", "host-local-images")
+            root.mkdir(parents=True, mode=0o700)
+            (root / "load-fence.lock").touch(mode=0o600)
+            store = root.parent / "storage"
+            store.mkdir(mode=0o700)
+            ledger = store / "reservations.json"
+            ledger.write_text("[]")
+            ledger.chmod(0o664)
+
+            def local_ssh(_entry, command, **_kwargs):
+                argv = shlex.split(command)
+                return run_test_process([sys.executable, *argv[1:]],
+                                        capture_output=True, text=True)
+
+            with patch.object(remote_local_images._remote, "resolve_sandbox_home",
+                              return_value=directory), \
+                 patch.object(remote_local_images._remote, "ssh_run", side_effect=local_ssh):
+                with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                    remote_local_images._reconcile_reservations({}, {"project": "lenzora"})
+                self.assertEqual(raised.exception.code, "local_images_remote_failed")
+                self.assertIn("remote command exited 1", str(raised.exception))
+                self.assertIn("ValueError: unsafe reservation ledger", str(raised.exception))
+                self.assertEqual(ledger.stat().st_mode & 0o777, 0o664)
+                ledger.chmod(0o600)
+                self.assertTrue(remote_local_images._reconcile_reservations(
+                    {}, {"project": "lenzora"}))
+                self.assertEqual(ledger.read_text(), "[]")
+
+    def test_remote_failure_diagnostic_is_bounded_and_redacts_credentials_and_ssh_target(self):
+        target = "synthetic-user@198.51.100.20"
+        secret = "synthetic-private-bearer-value"
+        diagnostic = ("x" * 2000 + "\nAuthorization: Bearer " + secret
+                      + "\n" + target + "\nValueError: unsafe reservation ledger")
+        for value in (diagnostic, diagnostic.encode()):
+            with self.subTest(kind=type(value).__name__), \
+                 patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                     returncode=255, stdout="", stderr=value)):
+                with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                    remote_local_images._checked({"ssh": target}, "do-not-echo-command", timeout=5)
+                message = str(raised.exception)
+                self.assertIn("remote command exited 255", message)
+                self.assertIn("unsafe reservation ledger", message)
+                self.assertLess(len(message), 450)
+                for private in (secret, target, "do-not-echo-command"):
+                    self.assertNotIn(private, message)
+
+    def test_empty_remote_failure_still_reports_exit_status(self):
+        with patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                returncode=71, stdout="", stderr="")):
+            with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                remote_local_images._checked({}, "do-not-echo-command", timeout=5)
+        self.assertEqual(str(raised.exception),
+                         "local_images_remote_failed: remote command exited 71")
+
+    def test_remote_stdout_is_never_included_in_error(self):
+        for stderr in ("", " ", b""):
+            with self.subTest(stderr=stderr), \
+                 patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                     returncode=71, stdout='{"machine_identity":"private-stdout-value"}', stderr=stderr)):
+                with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                    remote_local_images._checked({}, "do-not-echo-command", timeout=5)
+                self.assertEqual(str(raised.exception),
+                                 "local_images_remote_failed: remote command exited 71")
+                self.assertNotIn("private-stdout-value", str(raised.exception))
+
     def test_publish_accepts_byte_and_text_acknowledgements(self):
         document = {"synthetic": "document"}
         want = local_images.canonical_digest(document)

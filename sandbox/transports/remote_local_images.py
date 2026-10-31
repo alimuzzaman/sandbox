@@ -40,7 +40,11 @@ def _entry(remote_name: str) -> dict:
 def _checked(entry: dict, command: str, *, timeout: int) -> str:
     result = _remote.ssh_run(entry, command, timeout=timeout)
     if result.returncode != 0:
-        raise RemoteLocalImageError("local_images_remote_failed")
+        diagnostic = _remote._safe_remote_diagnostic(result, entry, limit=350)
+        message = f"remote command exited {result.returncode}"
+        if diagnostic:
+            message += f": {diagnostic}"
+        raise RemoteLocalImageError("local_images_remote_failed", message)
     output = result.stdout or ""
     if len(output.encode("utf-8")) > local_images.MAX_CONFIG_BYTES:
         raise RemoteLocalImageError("local_images_remote_output_too_large")

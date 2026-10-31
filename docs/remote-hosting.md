@@ -2427,3 +2427,28 @@ Unmarked orphan reservations self-heal on the next v2 attempt under the lease,
 fence and marker checks. Never delete or reset the complete reservation ledger.
 A hard-killed worker can retain an owned `.upload-*.tar`; inspect and remove only
 that owned staging file after proving idleness. No automatic staging sweeper is added.
+
+### Local-image remote command failures
+
+`local_images_remote_failed` includes the nonzero SSH/remote exit status and a
+bounded, redacted stderr diagnostic. Stdout is never used as an error fallback.
+The helper bounds input to a complete-line tail within 16 KiB before decoding,
+then redacts SSH identities, ports and absolute remote paths before the final
+350-character display limit. It performs no extra remote lookup. Commands and
+stdin are not echoed. Read the final
+exception line before retrying; a failure during v2 reservation reconciliation
+happens before storage admission and bundle upload.
+
+For example, `ValueError: unsafe reservation ledger` can mean that a legacy
+controller wrote `runtime/storage/reservations.json` as 0664 under umask 0002.
+The v2 reconciler intentionally refuses group-writable ledgers. New admissions
+write mode 0600, and old non-writable 0644 ledgers are accepted and tightened.
+Do not weaken that validation, reset the ledger, or remove reservations.
+
+With the owner's approval and deployment holds claimed, verify that the storage
+directory is private (0700), the lock is private (0600), and both the directory
+and the single-link regular ledger belong to the remote operator. While holding
+`reservations.lock`, tighten only the legacy ledger mode to 0600; preserve its
+contents. This permission correction is reversible and does not clear live
+reservations. Retire the old writer from active use: running it again can recreate
+the group-writable file. Then retry the same immutable receipt.

@@ -695,20 +695,51 @@ _SSH_CONNECTION_RE = re.compile(
 
 
 def redact_ssh_connection(value: str, remote: dict | None = None) -> str:
-    """Remove SSH connection targets from user-visible CLI/MCP errors."""
-    text = str(value or "")
+    """Remove remote identities and paths without network lookups."""
+    # Mask credentials first: a username such as "token" must not erase the
+    # assignment prefix before the credential redactor sees it.
+    text = redact_text(str(value or ""))
     if remote and remote.get("ssh"):
-        text = text.replace(str(remote["ssh"]), "[redacted SSH target]")
-        text = text.replace(f"ssh://{remote['ssh']}", "[redacted SSH target]")
-    return redact_text(_SSH_CONNECTION_RE.sub("[redacted SSH target]", text))
+        ssh = str(remote["ssh"])
+        try:
+            parts = parse_ssh_target(ssh)
+        except ValueError:
+            return "[redacted SSH diagnostic]"
+        host, port = parts["host"], parts["port"]
+        user = parts["target"].rsplit("@", 1)[0] if "@" in parts["target"] else ""
+        # OpenSSH may report a resolved IP instead of the registered hostname.
+        text = re.sub(r"(?i)connect to host \S+ port \d+",
+                      "connect to [redacted SSH target]", text)
+        text = re.sub(r"(?i)Permanently added (['\"])[^'\"]+\1",
+                      "Permanently added '[redacted SSH target]'", text)
+        identities = {ssh, f"ssh://{ssh}", host, f"[{host}]", user}
+        if port is not None:
+            identities.update({f"{host}:{port}", f"[{host}]:{port}"})
+            text = re.sub(rf"(?i)\bport\s+{port}\b", "port [redacted SSH port]", text)
+        for identity in sorted(filter(None, identities), key=len, reverse=True):
+            text = re.sub(r"(?<![A-Za-z0-9_.-])" + re.escape(identity)
+                          + r"(?![A-Za-z0-9_.-])", "[redacted SSH target]", text)
+    if remote:
+        # Paths in remote stderr need no resolution: hide the absolute path,
+        # including non-default Sandbox homes, and retain the error description.
+        text = re.sub(r"(['\"])/[^'\"\r\n]*\1", r"\1[redacted remote path]\1", text)
+        text = re.sub(r"(?<![\w:/])/[^\s'\"<>]+", "[redacted remote path]", text)
+    return _SSH_CONNECTION_RE.sub("[redacted SSH target]", text)
 
 
 def _safe_remote_diagnostic(result, remote: dict | None = None, *, limit: int = 1000) -> str:
-    """Bound and sanitize injected runner diagnostics without raw fallback."""
-    value = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    """Bound stderr before decoding; redact before the final display limit."""
+    value = getattr(result, "stderr", "") or ""
+    if not isinstance(value, (str, bytes)):
+        return ""
+    if len(value) > 16 * 1024:
+        value = value[-16 * 1024:]
+        # Drop a cut first line: its credential prefix may lie outside the tail.
+        newline = b"\n" if isinstance(value, bytes) else "\n"
+        value = value.partition(newline)[2]
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
-    return redact_ssh_connection(value, remote)[-limit:]
+    return redact_ssh_connection(value.strip(), remote)[-limit:]
 
 
 def parse_ssh_target(ssh_value: str) -> dict:

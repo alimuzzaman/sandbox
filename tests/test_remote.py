@@ -498,6 +498,96 @@ class TestSshRun(unittest.TestCase):
         self.assertIn("[redacted SSH target]", error)
 
 
+class TestSafeRemoteDiagnostics(unittest.TestCase):
+    def test_redacts_both_openssh_host_port_messages(self):
+        remote = {"ssh": "deployop@vps.example.net:2222"}
+        lines = [
+            "ssh: connect to host 203.0.113.9 port 2222: Connection refused",
+            "Warning: Permanently added '[vps.example.net]:2222' (ED25519) to known hosts.",
+        ]
+        for line in lines:
+            for value in (line, line.encode()):
+                with self.subTest(line=line, kind=type(value).__name__):
+                    result = sr._safe_remote_diagnostic(
+                        types.SimpleNamespace(stderr=value), remote, limit=350)
+                    for private in ("203.0.113.9", "vps.example.net", "2222", "deployop"):
+                        self.assertNotIn(private, result)
+                    self.assertIn("[redacted SSH target]", result)
+
+    def test_redacts_plain_bracketed_and_paired_targets_and_user(self):
+        for ssh, host in [("deployop@vps.example.net:2222", "vps.example.net"),
+                          ("ssh://deployop@[2001:db8::9]:2222", "2001:db8::9")]:
+            text = f"{host} [{host}] {host}:2222 [{host}]:2222 user deployop port 2222"
+            result = sr.redact_ssh_connection(text, {"ssh": ssh})
+            for private in (host, "2222", "deployop"):
+                self.assertNotIn(private, result)
+
+    def test_redacts_remote_home_paths_and_user_without_network_resolution(self):
+        for path in ("/home/deployop/sandbox/runtime/storage/reservations.json",
+                     "/srv/private-custom-home/runtime/storage/reservations.json"):
+            with self.subTest(path=path), patch.object(sr, "ssh_run") as ssh:
+                result = sr.redact_ssh_connection(
+                    f"PermissionError: '{path}' user deployop", {"ssh": "deployop@vps.example.net"})
+                ssh.assert_not_called()
+                self.assertNotIn(path, result)
+                self.assertNotIn("deployop", result)
+                self.assertIn("PermissionError", result)
+                self.assertIn("[redacted remote path]", result)
+
+    def test_identity_masks_cannot_erase_credential_assignment_prefixes(self):
+        result = sr._safe_remote_diagnostic(types.SimpleNamespace(
+            stderr="token=opaque-private-one password=opaque-private-two\nValueError: failed"),
+            {"ssh": "token@password:2222"}, limit=350)
+        self.assertNotIn("opaque-private-one", result)
+        self.assertNotIn("opaque-private-two", result)
+        self.assertIn("ValueError: failed", result)
+
+    def test_diagnostic_never_falls_back_to_stdout(self):
+        for stderr in ("", "   ", b"", b" "):
+            result = sr._safe_remote_diagnostic(types.SimpleNamespace(
+                stderr=stderr, stdout='{"machine_identity":"private-stdout-value"}'))
+            self.assertEqual(result, "")
+
+    def test_stderr_is_bounded_before_decode_and_redaction(self):
+        class DecodeGuard(bytes):
+            def strip(self, *args):
+                return type(self)(super().strip(*args))
+
+            def decode(self, *args, **kwargs):
+                if len(self) > 16 * 1024:
+                    raise AssertionError("decoded oversized stderr before bounding")
+                return super().decode(*args, **kwargs)
+
+        text = "x" * 32000 + "\nValueError: unsafe reservation ledger"
+        for value in (text, DecodeGuard(text.encode())):
+            with self.subTest(kind=type(value).__name__), \
+                 patch.object(sr, "redact_ssh_connection", wraps=sr.redact_ssh_connection) as redact:
+                result = sr._safe_remote_diagnostic(types.SimpleNamespace(stderr=value), limit=350)
+                self.assertIn("unsafe reservation ledger", result)
+                self.assertLessEqual(len(redact.call_args.args[0]), 16 * 1024)
+
+    def test_cut_credential_line_is_dropped_and_single_oversized_line_is_suppressed(self):
+        secret = "Z" * 20000
+        for suffix in ("", "\nValueError: unsafe reservation ledger"):
+            for value in ("Authorization: Bearer " + secret + suffix,
+                          ("Authorization: Bearer " + secret + suffix).encode()):
+                result = sr._safe_remote_diagnostic(types.SimpleNamespace(stderr=value), limit=350)
+                self.assertNotIn("ZZZZ", result)
+                if suffix:
+                    self.assertEqual(result, suffix.strip())
+                else:
+                    self.assertEqual(result, "")
+
+    def test_display_truncation_happens_after_redaction(self):
+        secret = "synthetic-private-value" * 20
+        result = sr._safe_remote_diagnostic(types.SimpleNamespace(
+            stderr="Authorization: Bearer " + secret + "\nValueError: failed"), limit=80)
+        self.assertNotIn("synthetic", result)
+        self.assertIn("[REDACTED]", result)
+        self.assertIn("ValueError: failed", result)
+        self.assertLessEqual(len(result), 80)
+
+
 class TestRemoteDiagnostics(unittest.TestCase):
     @patch("sandbox.core._remote.urllib.request.urlopen")
     def test_resource_and_inventory_use_authenticated_control_http(self, urlopen):

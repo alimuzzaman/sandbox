@@ -2431,7 +2431,11 @@ that owned staging file after proving idleness. No automatic staging sweeper is 
 ### Local-image remote command failures
 
 `local_images_remote_failed` includes the nonzero SSH/remote exit status and a
-bounded, redacted diagnostic. Commands and stdin are not echoed. Read the final
+bounded, redacted stderr diagnostic. Stdout is never used as an error fallback.
+The helper bounds input to a complete-line tail within 16 KiB before decoding,
+then redacts SSH identities, ports and absolute remote paths before the final
+350-character display limit. It performs no extra remote lookup. Commands and
+stdin are not echoed. Read the final
 exception line before retrying; a failure during v2 reservation reconciliation
 happens before storage admission and bundle upload.
 

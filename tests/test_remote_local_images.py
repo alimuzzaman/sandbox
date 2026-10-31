@@ -21,7 +21,7 @@ from tests.subprocess_support import run_test_process, synthetic_environment
 
 
 class RemoteLocalImageTests(unittest.TestCase):
-    def test_legacy_writable_ledger_reports_reconciliation_error_and_permission_repair(self):
+    def test_legacy_writable_ledger_reports_reconciliation_error_and_succeeds_after_manual_chmod(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory, "runtime", "host-local-images")
             root.mkdir(parents=True, mode=0o700)
@@ -76,6 +76,17 @@ class RemoteLocalImageTests(unittest.TestCase):
                 remote_local_images._checked({}, "do-not-echo-command", timeout=5)
         self.assertEqual(str(raised.exception),
                          "local_images_remote_failed: remote command exited 71")
+
+    def test_remote_stdout_is_never_included_in_error(self):
+        for stderr in ("", " ", b""):
+            with self.subTest(stderr=stderr), \
+                 patch.object(remote_local_images._remote, "ssh_run", return_value=SimpleNamespace(
+                     returncode=71, stdout='{"machine_identity":"private-stdout-value"}', stderr=stderr)):
+                with self.assertRaises(remote_local_images.RemoteLocalImageError) as raised:
+                    remote_local_images._checked({}, "do-not-echo-command", timeout=5)
+                self.assertEqual(str(raised.exception),
+                                 "local_images_remote_failed: remote command exited 71")
+                self.assertNotIn("private-stdout-value", str(raised.exception))
 
     def test_publish_accepts_byte_and_text_acknowledgements(self):
         document = {"synthetic": "document"}

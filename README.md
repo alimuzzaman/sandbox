@@ -1153,10 +1153,9 @@ have completed; retrying the same local receipt freshly verifies and skips exact
 remote images rather than resuming archive bytes. Do not delete remote locks or
 receipts manually. See the [transfer contract](docs/remote-hosting.md).
 Remote-command refusals report their exit status and a bounded, redacted
-remote diagnostic. If v2 reconciliation reports `unsafe reservation ledger`,
-see the [legacy-ledger permission repair](docs/remote-hosting.md#local-image-remote-command-failures)
+remote stderr diagnostic (never stdout). If v2 reconciliation reports
+`unsafe reservation ledger`, see the [legacy-ledger permission repair](docs/remote-hosting.md#local-image-remote-command-failures)
 before retrying; keep the strict ownership and writable-bit checks.
-
 
 Immutable multi-image activation prepares private candidate configuration without
 overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)

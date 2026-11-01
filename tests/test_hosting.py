@@ -4987,17 +4987,39 @@ class TestBuildSecretFingerprint(unittest.TestCase):
                 hosting._derived_environment(deploy, self.validated["secrets"])
             self.assertNotIn("synthetic-private-input", str(error.exception))
 
-    def test_value_mode_rejects_required_and_generated_inputs_without_echo(self):
+    def test_value_mode_warns_once_for_required_and_generated_inputs_without_values(self):
         for source in ("required", "generated"):
             with self.subTest(source=source):
-                secrets = {"values": {}, "required": {}, "generated": {}}
-                secrets[source]["PRIVATE_INPUT"] = "SYNTHETIC_SOURCE"
-                deploy = {"require_clean": True, "derived_environment": {"BUILD_FP": {
-                    "provider": "hmac_sha256_v1", "inputs": {"PRIVATE_INPUT": "value"}}}}
-                with self.assertRaisesRegex(hosting.HostingError, "value inputs must be declared in secrets.values") as error:
-                    hosting._derived_environment(deploy, secrets)
-                self.assertNotIn("SYNTHETIC_SOURCE", str(error.exception))
-                self.assertNotIn("PRIVATE_INPUT", str(error.exception))
+                manifest = _manifest_with_derived_revision().replace(
+                    "    cloudflare:\n", "    secrets:\n      " + source + ":\n        PRIVATE_INPUT: SYNTHETIC_SOURCE\n    cloudflare:\n")
+                manifest = manifest.replace("        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
+                    "        BUILD_FP:\n          provider: hmac_sha256_v1\n          inputs:\n            PRIVATE_INPUT: value\n"
+                    "        SECOND_FP:\n          provider: hmac_sha256_v1\n          inputs:\n            PRIVATE_INPUT: value\n")
+                with TestHostingManifest()._write(manifest) as project:
+                    validated = hosting.validate_manifest(project)
+                resolved = hosting.resolve_environment(validated, {"SYNTHETIC_SOURCE": "synthetic-private-value-123"})
+                self.assertRegex(resolved["BUILD_FP"], r"^[0-9a-f]{32}$")
+                plan = hosting.desired_plan(validated, "203.0.113.10")
+                self.assertEqual(validated["warnings"], plan["warnings"])
+                self.assertEqual(len(plan["warnings"]), 1)
+                warning = plan["warnings"][0]
+                self.assertEqual(warning.count("PRIVATE_INPUT"), 1)
+                self.assertIn("hash is guessable if the secret is low-entropy", warning)
+                self.assertNotIn("SYNTHETIC_SOURCE", warning)
+                for payload in (validated, plan):
+                    for as_json in (False, True):
+                        output = io.StringIO()
+                        with redirect_stdout(output):
+                            hosting_cmd._emit(payload, as_json)
+                        self.assertEqual(output.getvalue().count(warning), 1)
+                        self.assertNotIn("synthetic-private-value-123", output.getvalue())
+
+    def test_value_literals_and_presence_inputs_need_no_guessability_warning(self):
+        self.assertEqual(hosting._fingerprint_warnings(self.validated["deploy"], self.validated["secrets"]), [])
+        secrets = {"values": {}, "required": {"TOKEN": "SYNTHETIC_SOURCE"}, "generated": {}}
+        deploy = {"derived_environment": {"BUILD_FP": {
+            "provider": "hmac_sha256_v1", "inputs": {"TOKEN": "presence"}}}}
+        self.assertEqual(hosting._fingerprint_warnings(deploy, secrets), [])
 
     def test_required_and_generated_presence_is_true_or_resolution_fails(self):
         for source in ("required", "generated"):

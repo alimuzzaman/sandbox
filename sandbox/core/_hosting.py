@@ -341,11 +341,21 @@ def _derived_environment(deploy: dict, secrets: dict) -> dict[str, str | dict]:
                        or name not in declared or mode not in ("value", "presence")
                        for name, mode in inputs.items())):
             raise HostingError("hmac_sha256_v1 inputs must name declared environment keys with value or presence mode")
-        if any(mode == "value" and name not in secrets["values"]
-               for name, mode in inputs.items()):
-            raise HostingError("hmac_sha256_v1 value inputs must be declared in secrets.values")
         result[key] = {"provider": "hmac_sha256_v1", "inputs": dict(sorted(inputs.items()))}
     return result
+
+
+def _fingerprint_warnings(deploy: dict, secrets: dict) -> list[str]:
+    private_names = set(secrets["required"]) | set(secrets["generated"])
+    names = sorted({name
+                    for provider in deploy.get("derived_environment", {}).values()
+                    if isinstance(provider, dict) and provider["provider"] == "hmac_sha256_v1"
+                    for name, mode in provider["inputs"].items()
+                    if mode == "value" and name in private_names})
+    if not names:
+        return []
+    return ["value-mode fingerprint over required/generated secrets " + ", ".join(names)
+            + ": hash is guessable if the secret is low-entropy"]
 
 
 def _autologin(env: dict) -> dict | None:
@@ -665,7 +675,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
             "compose": normalized_compose, "healthcheck": healthcheck, "routes": routes,
             "deploy": deploy, "cloudflare": cf, "secrets": secrets,
             "autologin": _autologin(env), "basic_auth": basic_auth,
-            "robots": robots}
+            "robots": robots, "warnings": _fingerprint_warnings(deploy, secrets)}
 
 
 def state_key(remote_name: str, validated: dict) -> str:
@@ -1036,6 +1046,7 @@ def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | No
                 "mode": r["mode"], "target": r.get("target")}
                for r in validated["routes"] for a in addresses]
     return {"project": validated["project"], "environment": validated["environment"],
+            "warnings": _fingerprint_warnings(validated["deploy"], validated["secrets"]),
             "routes": validated["routes"], "records": records,
             "certificate_hostnames": [r["hostname"] for r in validated["routes"]],
             "ssl_mode": "strict" if proxied else None,

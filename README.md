@@ -1375,10 +1375,13 @@ deploy:
         UPLOAD_PROJECT: value
 ```
 
-`value` inputs must be declared in `secrets.values`, for non-confidential values
-such as a browser DSN or an organization name. Required and generated secrets
-are rejected in `value` mode because the fixed public HMAC key permits offline
-guessing of low-entropy inputs.
+`value` inputs may name `secrets.values`, `secrets.required`, or
+`secrets.generated` destinations. Prefer non-confidential values such as a
+browser DSN or an organization name. Validate and plan emit one warning listing
+required/generated destinations used in value mode: the fixed public HMAC key
+permits offline guessing of low-entropy inputs. The warning contains destination
+names only, never resolved values or source names. This warning does not reject
+semi-public required inputs such as Lenzora's NEXT_PUBLIC_SENTRY_DSN.
 
 `presence` accepts inputs from `secrets.values`, `secrets.required`, and
 `secrets.generated`. It encodes only whether the resolved string is nonempty;

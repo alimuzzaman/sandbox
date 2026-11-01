@@ -297,6 +297,8 @@ def _emit(data: dict, as_json: bool) -> None:
         print(json.dumps(data))
         return
     print(f"{data['project']} / {data['environment']}")
+    for warning in data.get("warnings", []):
+        print(f"  warning: {warning}")
     for route in data.get("routes", []):
         suffix = f" -> {route['target']}" if route.get("target") else ""
         print(f"  {route['mode']}: {route['hostname']}{suffix}")
@@ -7095,6 +7097,8 @@ def cmd_host(cfg, args) -> None:
                 name = result.get("environment", "<unknown>")
                 if result.get("ok"):
                     print(f"  {name}: ok")
+                    for warning in result.get("warnings", []):
+                        print(f"    warning: {warning}")
                 else:
                     print(f"  {name}: invalid ({result.get('error', 'validation failed')})")
         if not all_ok:

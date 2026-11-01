@@ -159,7 +159,9 @@ p=json.loads(base64.b64decode(sys.argv[1]).decode())
 end=time.monotonic()+p["deadline"]
 KEYS=("context","dockerfile","dockerfile_inline","args","target","additional_contexts","secrets","ssh","network","extra_hosts","labels","shm_size","privileged","entitlements")
 secret_names=set(p.get("symbolic_secrets") or [])
-secret_values=sorted(((name,os.environ.get(name)) for name in secret_names if os.environ.get(name)),key=lambda item:len(item[1]),reverse=True)
+# Short values cannot reliably identify exposure by substring (e.g. hex digests).
+# Declared secret argument names remain forbidden regardless of value length.
+secret_values=sorted(((name,os.environ.get(name)) for name in secret_names if len(os.environ.get(name) or "")>=8),key=lambda item:len(item[1]),reverse=True)
 roots=sorted([(label,path.rstrip("/")) for label,path in p.get("roots",[]) if path],key=lambda item:len(item[1]),reverse=True)
 def left():
     return max(0.1,end-time.monotonic())

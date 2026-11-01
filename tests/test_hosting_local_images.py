@@ -526,10 +526,6 @@ class BundleReviewArchiveTests(unittest.TestCase):
                 self.assertEqual(local_images.load_receipt(output/'receipt.json')[0],value)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class BuildFingerprintReceiptModelTests(unittest.TestCase):
     def test_recomputed_fingerprint_participates_in_receipt_model_identity_without_raw_inputs(self):
         from sandbox.core import _hosting as hosting
@@ -557,16 +553,40 @@ class BuildFingerprintReceiptModelTests(unittest.TestCase):
         for raw in ["synthetic-browser-dsn-one", "synthetic-token-one", "synthetic-org", "synthetic-project"]:
             self.assertNotIn(raw, json.dumps(initial))
 
+    def test_short_secret_substrings_do_not_refuse_or_normalize_fingerprint_args(self):
+        fingerprint = "0123456789abcdef" * 2
+        config = {"services": {"web": {"image": "app:test", "build": {
+            "context": ".", "args": {"BUILD_FP": fingerprint}}}}}
+        observations = []
+        for secret in ("0", "1a", "0123456", "synthetic-long-token"):
+            observation = local_images.observe_local_model(
+                config_command="printf %s " + shlex.quote(json.dumps(config)),
+                services=["web"], roots={}, environment=synthetic_environment({"TOKEN": secret}),
+                symbolic_secrets={"TOKEN"})
+            self.assertIsNone(observation["config_error"])
+            observations.append(observation["services"]["web"]["build_digest"])
+        self.assertEqual(len(set(observations)), 1)
+
+    def test_short_declared_secret_arguments_are_still_rejected(self):
+        for args in ({"TOKEN": "0"}, ["TOKEN=0"]):
+            config = {"services": {"web": {"image": "app:test", "build": {"context": ".", "args": args}}}}
+            observation = local_images.observe_local_model(
+                config_command="printf %s " + shlex.quote(json.dumps(config)),
+                services=["web"], roots={}, environment=synthetic_environment({"TOKEN": "0"}),
+                symbolic_secrets={"TOKEN"})
+            self.assertEqual(observation["config_error"], "secret_exposed")
+
     def test_apply_recomputes_current_inputs_before_accepting_the_receipt_model(self):
         from sandbox.core import _hosting as hosting
         from sandbox.transports import remote_local_images
         revision = "a" * 40
         validated = {"project": "app", "environment": "development", "source_root": "/synthetic/source",
                      "compose": {"build": False, "files": ["compose.yml"], "service": "web", "background_services": [], "init_services": []},
-                     "secrets": {"values": {}, "required": {"DSN": "DSN_SOURCE"}, "generated": {}},
+                     "secrets": {"values": {"DSN": "synthetic-old-dsn"}, "required": {}, "generated": {}},
                      "deploy": {"derived_environment": {"BUILD_FP": {"provider": "hmac_sha256_v1", "inputs": {"DSN": "value"}}}}}
-        original = hosting.resolve_environment(validated, {"DSN_SOURCE": "synthetic-old-dsn"})["BUILD_FP"]
-        current = hosting.resolve_environment(validated, {"DSN_SOURCE": "synthetic-new-dsn"})["BUILD_FP"]
+        original = hosting.resolve_environment(validated, {})["BUILD_FP"]
+        validated["secrets"]["values"]["DSN"] = "synthetic-new-dsn"
+        current = hosting.resolve_environment(validated, {})["BUILD_FP"]
         captured = {}
         def model(**kwargs):
             captured.update(kwargs)
@@ -584,6 +604,10 @@ class BuildFingerprintReceiptModelTests(unittest.TestCase):
             with self.assertRaisesRegex(hosting.HostingError, "Compose model changed"):
                 hosting_cmd._verify_receipt_bound_local_images(
                     validated, {}, "synthetic-remote", "sha256:" + "d" * 64, revision, revision,
-                    "synthetic-machine", {"DSN_SOURCE": "synthetic-new-dsn"},
+                    "synthetic-machine", {},
                     source_dir="/synthetic/source", runtime_dir="/synthetic/runtime", runtime={})
         self.assertTrue(captured)
+
+
+if __name__ == "__main__":
+    unittest.main()

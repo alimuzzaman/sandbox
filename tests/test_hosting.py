@@ -4987,6 +4987,34 @@ class TestBuildSecretFingerprint(unittest.TestCase):
                 hosting._derived_environment(deploy, self.validated["secrets"])
             self.assertNotIn("synthetic-private-input", str(error.exception))
 
+    def test_value_mode_rejects_required_and_generated_inputs_without_echo(self):
+        for source in ("required", "generated"):
+            with self.subTest(source=source):
+                secrets = {"values": {}, "required": {}, "generated": {}}
+                secrets[source]["PRIVATE_INPUT"] = "SYNTHETIC_SOURCE"
+                deploy = {"require_clean": True, "derived_environment": {"BUILD_FP": {
+                    "provider": "hmac_sha256_v1", "inputs": {"PRIVATE_INPUT": "value"}}}}
+                with self.assertRaisesRegex(hosting.HostingError, "value inputs must be declared in secrets.values") as error:
+                    hosting._derived_environment(deploy, secrets)
+                self.assertNotIn("SYNTHETIC_SOURCE", str(error.exception))
+                self.assertNotIn("PRIVATE_INPUT", str(error.exception))
+
+    def test_required_and_generated_presence_is_true_or_resolution_fails(self):
+        for source in ("required", "generated"):
+            with self.subTest(source=source):
+                secrets = {"values": {}, "required": {}, "generated": {}}
+                secrets[source]["TOKEN"] = "SYNTHETIC_SOURCE"
+                deploy = {"require_clean": True, "derived_environment": {"BUILD_FP": {
+                    "provider": "hmac_sha256_v1", "inputs": {"TOKEN": "presence"}}}}
+                deploy["derived_environment"] = hosting._derived_environment(deploy, secrets)
+                validated = {"secrets": secrets, "deploy": deploy}
+                first = hosting.resolve_environment(validated, {"SYNTHETIC_SOURCE": "synthetic-token-one"})
+                rotated = hosting.resolve_environment(validated, {"SYNTHETIC_SOURCE": "synthetic-token-two"})
+                self.assertEqual(first["BUILD_FP"], rotated["BUILD_FP"])
+                for values in ({}, {"SYNTHETIC_SOURCE": ""}):
+                    with self.assertRaisesRegex(hosting.HostingError, "required hosting secret is missing"):
+                        hosting.resolve_environment(validated, values)
+
     def test_plan_metadata_has_no_inputs_and_runtime_env_checks_exclude_build_fingerprint(self):
         manifest = _manifest_with_derived_revision().replace(
             "    cloudflare:\n", "    secrets:\n      values:\n        BROWSER_DSN: synthetic-dsn\n    cloudflare:\n")

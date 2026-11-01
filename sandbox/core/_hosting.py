@@ -341,6 +341,9 @@ def _derived_environment(deploy: dict, secrets: dict) -> dict[str, str | dict]:
                        or name not in declared or mode not in ("value", "presence")
                        for name, mode in inputs.items())):
             raise HostingError("hmac_sha256_v1 inputs must name declared environment keys with value or presence mode")
+        if any(mode == "value" and name not in secrets["values"]
+               for name, mode in inputs.items()):
+            raise HostingError("hmac_sha256_v1 value inputs must be declared in secrets.values")
         result[key] = {"provider": "hmac_sha256_v1", "inputs": dict(sorted(inputs.items()))}
     return result
 

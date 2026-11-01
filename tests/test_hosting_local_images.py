@@ -212,11 +212,13 @@ class LocalImageReceiptTests(unittest.TestCase):
                     "compose": {"build": False, "files": ["compose.yml"],
                                 "service": "web", "background_services": [],
                                 "init_services": ["migrate"]},
-                    "secrets": {"required": {}, "generated": {}},
+                    "secrets": {"values": {"BROWSER_DSN": "synthetic-fingerprint-dsn"}, "required": {}, "generated": {}},
+                    "deploy": {"derived_environment": {"BUILD_FP": {"provider": "hmac_sha256_v1", "inputs": {"BROWSER_DSN": "value"}}}},
                 }
 
             def build(**kwargs):
                 captured.update(kwargs)
+                captured["rendered_environment"] = Path(kwargs["runtime_dir"], "environment.env").read_text()
                 return {"project": "app", "environment": "development",
                         "commit": commit, "platform": "linux/amd64",
                         "receipt_digest": "sha256:" + "c" * 64,
@@ -237,7 +239,6 @@ class LocalImageReceiptTests(unittest.TestCase):
                  patch.object(hosting_cmd.remote, "_source_tree_commit",
                               return_value=(published, checkout)) as source_commit, \
                  patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-                 patch.object(hosting_cmd.hosting, "render_env_file", return_value=""), \
                  patch.object(hosting_cmd.hosting, "compose_project_name",
                               return_value="sandbox-host-app-development"), \
                  patch.object(local_images, "default_output_directory",
@@ -251,6 +252,11 @@ class LocalImageReceiptTests(unittest.TestCase):
             self.assertEqual(source_commit.call_args.args[1], source)
             self.assertEqual(captured["source_dir"], str(source))
             self.assertEqual(captured["source_root_relative"], "site")
+            fingerprint = captured["environment"]["BUILD_FP"]
+            self.assertRegex(fingerprint, r"^[0-9a-f]{32}$")
+            self.assertIn("BUILD_FP=" + fingerprint, captured["rendered_environment"])
+            self.assertIn("--env-file", captured["config_command"])
+            self.assertIn("--env-file", captured["build_command"](["web"]))
             self.assertIn("--profile '*' config --format json",
                           captured["config_command"])
             self.assertIn(str(source / "compose.yml"), captured["config_command"])
@@ -522,3 +528,62 @@ class BundleReviewArchiveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuildFingerprintReceiptModelTests(unittest.TestCase):
+    def test_recomputed_fingerprint_participates_in_receipt_model_identity_without_raw_inputs(self):
+        from sandbox.core import _hosting as hosting
+        def observe(dsn, token):
+            values = {"DSN": dsn, "TOKEN": token, "ORG": "synthetic-org", "PROJECT": "synthetic-project"}
+            validated = {"secrets": {"values": values, "required": {}, "generated": {}},
+                         "deploy": {"derived_environment": {"BUILD_FP": {"provider": "hmac_sha256_v1", "inputs": {
+                             "DSN": "value", "TOKEN": "presence", "ORG": "value", "PROJECT": "value"}}}}}
+            resolved = hosting.resolve_environment(validated, {})
+            config = {"services": {"web": {"image": "app:test", "build": {"context": ".", "args": {"BUILD_FP": resolved["BUILD_FP"]}}}}}
+            return local_images.observe_local_model(
+                config_command="printf %s " + shlex.quote(json.dumps(config)), services=["web"], roots={},
+                environment=synthetic_environment(resolved), symbolic_secrets={"DSN", "TOKEN"})
+        initial = observe("synthetic-browser-dsn-one", "synthetic-token-one")
+        changed = observe("synthetic-browser-dsn-two", "synthetic-token-one")
+        rotated = observe("synthetic-browser-dsn-one", "synthetic-token-two")
+        absent = observe("synthetic-browser-dsn-one", "")
+        self.assertIsNone(initial["config_error"])
+        digest = initial["services"]["web"]["build_digest"]
+        receipt = {"services": {"web": {"image": "app:test", "build_digest": digest}}}
+        self.assertEqual(local_images.compare_compose_model(receipt, initial), [])
+        self.assertEqual(local_images.compare_compose_model(receipt, rotated), [])
+        self.assertTrue(local_images.compare_compose_model(receipt, changed))
+        self.assertTrue(local_images.compare_compose_model(receipt, absent))
+        for raw in ["synthetic-browser-dsn-one", "synthetic-token-one", "synthetic-org", "synthetic-project"]:
+            self.assertNotIn(raw, json.dumps(initial))
+
+    def test_apply_recomputes_current_inputs_before_accepting_the_receipt_model(self):
+        from sandbox.core import _hosting as hosting
+        from sandbox.transports import remote_local_images
+        revision = "a" * 40
+        validated = {"project": "app", "environment": "development", "source_root": "/synthetic/source",
+                     "compose": {"build": False, "files": ["compose.yml"], "service": "web", "background_services": [], "init_services": []},
+                     "secrets": {"values": {}, "required": {"DSN": "DSN_SOURCE"}, "generated": {}},
+                     "deploy": {"derived_environment": {"BUILD_FP": {"provider": "hmac_sha256_v1", "inputs": {"DSN": "value"}}}}}
+        original = hosting.resolve_environment(validated, {"DSN_SOURCE": "synthetic-old-dsn"})["BUILD_FP"]
+        current = hosting.resolve_environment(validated, {"DSN_SOURCE": "synthetic-new-dsn"})["BUILD_FP"]
+        captured = {}
+        def model(**kwargs):
+            captured.update(kwargs)
+            self.assertEqual(kwargs["environment"]["BUILD_FP"], current)
+            self.assertNotEqual(kwargs["environment"]["BUILD_FP"], original)
+            env_file = shlex.split(kwargs["config_command"])[3]
+            self.assertIn("BUILD_FP=" + current, Path(env_file).read_text())
+            return {"config_error": None, "services": {"web": {"present": True, "image": "app:test", "build_digest": "sha256:" + "b" * 64}}}
+        receipt = {"commit": revision, "source_revision": revision,
+                   "services": {"web": {"image": "app:test", "build_digest": "sha256:" + "c" * 64}}}
+        with patch.object(remote_local_images, "read_receipt", return_value={"local_receipt": receipt}), \
+             patch.object(local_images, "require_receipt_target"), \
+             patch.object(hosting, "compose_project_name", return_value="sandbox-host-app-development"), \
+             patch.object(local_images, "observe_local_model", side_effect=model):
+            with self.assertRaisesRegex(hosting.HostingError, "Compose model changed"):
+                hosting_cmd._verify_receipt_bound_local_images(
+                    validated, {}, "synthetic-remote", "sha256:" + "d" * 64, revision, revision,
+                    "synthetic-machine", {"DSN_SOURCE": "synthetic-new-dsn"},
+                    source_dir="/synthetic/source", runtime_dir="/synthetic/runtime", runtime={})
+        self.assertTrue(captured)

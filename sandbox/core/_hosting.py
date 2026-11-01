@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import ipaddress
 import os
 import re
@@ -306,7 +307,7 @@ def _secrets(env: dict) -> dict:
     return {"values": values, "required": required, "generated": generated}
 
 
-def _derived_environment(deploy: dict, secrets: dict) -> dict[str, str]:
+def _derived_environment(deploy: dict, secrets: dict) -> dict[str, str | dict]:
     raw = deploy.get("derived_environment")
     if raw is None:
         return {}
@@ -322,15 +323,25 @@ def _derived_environment(deploy: dict, secrets: dict) -> dict[str, str]:
             "deploy.derived_environment keys must not overlap secret environment keys: "
             + ", ".join(sorted(str(key) for key in collisions))
         )
-    result: dict[str, str] = {}
+    result: dict[str, str | dict] = {}
     for key, provider in raw.items():
         if not isinstance(key, str) or not _ENV_RE.fullmatch(key):
             raise HostingError("deploy.derived_environment contains an invalid environment key")
-        if provider != "pushed_commit_sha":
-            raise HostingError(
-                "deploy.derived_environment providers must be pushed_commit_sha"
-            )
-        result[key] = provider
+        if provider == "pushed_commit_sha":
+            result[key] = provider
+            continue
+        if (not isinstance(provider, dict)
+                or set(provider) != {"provider", "inputs"}
+                or provider.get("provider") != "hmac_sha256_v1"):
+            raise HostingError("deploy.derived_environment providers must be pushed_commit_sha or hmac_sha256_v1")
+        inputs = provider["inputs"]
+        declared = set(secrets["values"]) | set(secrets["required"]) | set(secrets["generated"])
+        if (not isinstance(inputs, dict) or not 1 <= len(inputs) <= 64
+                or any(not isinstance(name, str) or not _ENV_RE.fullmatch(name)
+                       or name not in declared or mode not in ("value", "presence")
+                       for name, mode in inputs.items())):
+            raise HostingError("hmac_sha256_v1 inputs must name declared environment keys with value or presence mode")
+        result[key] = {"provider": "hmac_sha256_v1", "inputs": dict(sorted(inputs.items()))}
     return result
 
 
@@ -754,9 +765,9 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     )
 
 
-def render_env_file(validated: dict, source_values: dict[str, str],
-                    pushed_commit_sha: str | None = None) -> str:
-    """Render the exact environment passed to Compose, without persisting secrets locally."""
+def resolve_environment(validated: dict, source_values: dict[str, str],
+                        pushed_commit_sha: str | None = None) -> dict[str, str]:
+    """Resolve private inputs once; only the derived digest is safe to disclose."""
     values = dict(validated["secrets"]["values"])
     for container_key, source_key in {**validated["secrets"]["required"],
                                       **validated["secrets"]["generated"]}.items():
@@ -765,12 +776,27 @@ def render_env_file(validated: dict, source_values: dict[str, str],
             raise HostingError(f"required hosting secret is missing: {source_key}")
         values[container_key] = value
     derived = validated["deploy"].get("derived_environment", {})
-    if derived:
+    if any(provider == "pushed_commit_sha" for provider in derived.values()):
         if not isinstance(pushed_commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", pushed_commit_sha):
             raise HostingError("pushed_commit_sha must be an exact lowercase 40-hex commit SHA")
-        for container_key, provider in derived.items():
-            if provider == "pushed_commit_sha":
-                values[container_key] = pushed_commit_sha
+    for container_key, provider in derived.items():
+        if provider == "pushed_commit_sha":
+            values[container_key] = pushed_commit_sha
+        else:
+            # Names and modes are framed too. Presence never serializes token contents.
+            frame = [[name, mode, bool(values.get(name)) if mode == "presence"
+                      else values[name]] for name, mode in sorted(provider["inputs"].items())]
+            encoded = json.dumps(frame, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            values[container_key] = hmac.new(
+                b"sandbox.build-secret-fingerprint.v1", encoded, hashlib.sha256,
+            ).hexdigest()[:32]
+    return values
+
+
+def render_env_file(validated: dict, source_values: dict[str, str],
+                    pushed_commit_sha: str | None = None) -> str:
+    """Render private Compose input; callers must keep this file and its inputs private."""
+    values = resolve_environment(validated, source_values, pushed_commit_sha)
     return "".join(f"{key}={shlex.quote(value)}\n" for key, value in sorted(values.items()))
 
 
@@ -874,7 +900,8 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
     derived = validated["deploy"].get("derived_environment", {})
     if derived:
         runtime["derived_environment"] = [
-            {"key": key, "provider": provider, "resolved_at_apply": True}
+            {"key": key, "provider": provider if isinstance(provider, str) else provider["provider"],
+             "resolved_at_apply": True}
             for key, provider in sorted(derived.items())
         ]
     return runtime

@@ -1355,3 +1355,47 @@ and compatibility, then confirm the old pinned client still reports compatible
 status before changing its pin. Protocol-13/14/15/16 runtimes cannot serve a
 protocol-17 client. New runtimes still serve older clients; strict revision pins
 require an exact revision match. Upgrading this checkout performs no migration.
+
+
+### Derived build-secret fingerprints
+
+A clean hosted deployment can declare a non-secret cache identity under
+`deploy.derived_environment`:
+
+```yaml
+deploy:
+  require_clean: true
+  derived_environment:
+    BUILD_SECRET_FINGERPRINT:
+      provider: hmac_sha256_v1
+      inputs:
+        BROWSER_DSN: value
+        UPLOAD_TOKEN: presence
+        UPLOAD_ORG: value
+        UPLOAD_PROJECT: value
+```
+
+Inputs name resolved Compose environment destinations declared in `secrets.values`,
+`secrets.required`, or `secrets.generated`. `presence` encodes only whether the
+resolved string is nonempty; it never hashes token contents. Optional inputs can
+be declared as empty `secrets.values` strings. Unknown inputs, modes, options,
+secret-destination collisions and derived-input chains are rejected.
+
+The provider uses HMAC-SHA256 with the fixed public versioned key
+`sandbox.build-secret-fingerprint.v1`. Its message is UTF-8 compact JSON of
+`[name, mode, value-or-boolean]` rows sorted by input name, with ASCII escaping.
+The first 32 lowercase hex characters become the result. This is a deterministic
+cache identity, not a secret MAC key or a confidentiality guarantee for
+low-entropy inputs. No resolved input is logged or returned by the provider.
+
+Sandbox resolves this value before Compose config observation and local build,
+using the same private environment for both. When used as a Compose build arg,
+the result contributes to the receipt's build digest. Apply-time model checking
+recomputes it from current inputs, so a changed value or presence requires a new
+receipt. Rotating a still-present token does not change the result. Runtime Env
+revision checks remain specific to `pushed_commit_sha`; build fingerprints do
+not require a running container environment variable. Plan output contains only
+the derived key, provider name and resolution timing, not input values or results.
+
+This provider changes the staged runtime revision. Upgrade through the supported
+runtime lifecycle only as part of an explicitly authorized pin/runtime rollout.

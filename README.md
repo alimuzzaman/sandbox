@@ -1375,11 +1375,30 @@ deploy:
         UPLOAD_PROJECT: value
 ```
 
-Inputs name resolved Compose environment destinations declared in `secrets.values`,
-`secrets.required`, or `secrets.generated`. `presence` encodes only whether the
-resolved string is nonempty; it never hashes token contents. Optional inputs can
-be declared as empty `secrets.values` strings. Unknown inputs, modes, options,
-secret-destination collisions and derived-input chains are rejected.
+`value` inputs may name `secrets.values`, `secrets.required`, or
+`secrets.generated` destinations. Prefer non-confidential values such as a
+browser DSN or an organization name. Validate and plan emit one warning listing
+required/generated destinations used in value mode: the fixed public HMAC key
+permits offline guessing of low-entropy inputs. The warning contains destination
+names only, never resolved values or source names. This warning does not reject
+semi-public required inputs such as Lenzora's NEXT_PUBLIC_SENTRY_DSN.
+
+`presence` accepts inputs from `secrets.values`, `secrets.required`, and
+`secrets.generated`. It encodes only whether the resolved string is nonempty;
+it never hashes token contents. Required and generated inputs must resolve to
+nonempty strings before the provider runs, so their presence bit is always
+`true`: an absent input fails resolution rather than changing the fingerprint.
+Use a `secrets.values` entry that can be empty when presence changes must
+invalidate the cache. Lenzora's required SENTRY_AUTH_TOKEN uses the constant-true
+case; rotating its value does not invalidate the cache. Unknown inputs, modes,
+options, secret-destination collisions and derived-input chains are rejected.
+
+Local image model observation rejects declared secret names as build arguments,
+regardless of value length. Its additional substring exposure/normalization probe
+uses only secret values of at least eight characters, to avoid false matches of
+short strings inside fingerprints, paths and other public build metadata. This
+heuristic cannot detect a short secret copied under an unrelated argument name;
+pass secrets through Compose build secret mounts, never build arguments.
 
 The provider uses HMAC-SHA256 with the fixed public versioned key
 `sandbox.build-secret-fingerprint.v1`. Its message is UTF-8 compact JSON of

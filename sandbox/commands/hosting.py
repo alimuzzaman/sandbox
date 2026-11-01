@@ -455,6 +455,10 @@ def _cmd_host_image_build_local(args) -> None:
                     **validated["secrets"]["generated"]}.items():
                 if source in source_values:
                     child_env[destination] = source_values[source]
+            derived = validated.get("deploy", {}).get("derived_environment", {})
+            if derived:
+                resolved = hosting.resolve_environment(validated, source_values, source_revision)
+                child_env.update({key: resolved[key] for key in derived})
             output_dir = local_images.default_output_directory(
                 RUNTIME_DIR, validated, commit)
             if getattr(args, "receipt_version", "v1") == "v2":
@@ -1821,7 +1825,8 @@ def _verify_remote_derived_environment(entry: dict, validated: dict,
                                        *, observation: dict | None = None) -> dict:
     """Fail closed when a running service did not receive the pushed revision."""
     derived = validated["deploy"].get("derived_environment", {})
-    if not derived:
+    # Fingerprints attest build inputs through the receipt/model, not container Env.
+    if not any(provider == "pushed_commit_sha" for provider in derived.values()):
         return {"state": "not_declared", "checks": []}
     observation = observation or _observe_host_runtime(
         validated, entry, source_dir, runtime_dir,
@@ -2244,7 +2249,8 @@ def _unavailable_host_observation() -> dict:
 
 def _host_observation_is_exact_ready(validated: dict, classified: dict,
                                      expected_revision: str) -> bool:
-    source_required = bool(validated["deploy"].get("derived_environment"))
+    source_required = any(provider == "pushed_commit_sha" for provider in
+                          validated["deploy"].get("derived_environment", {}).values())
     return (
         classified.get("complete") is True
         and classified["topology"]["state"] == "ready"
@@ -4192,6 +4198,10 @@ def _verify_receipt_bound_local_images(validated: dict, entry: dict,
                 **validated["secrets"]["generated"]}.items():
             if source in secret_values:
                 child_env[destination] = secret_values[source]
+        derived = validated.get("deploy", {}).get("derived_environment", {})
+        if derived:
+            resolved = hosting.resolve_environment(validated, secret_values, published_revision)
+            child_env.update({key: resolved[key] for key in derived})
         model = local_images.observe_local_model(
             config_command=shlex.join(
                 [*compose, "--profile", "*", "config", "--format", "json"]),

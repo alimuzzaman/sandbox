@@ -4868,7 +4868,7 @@ class TestLocalImageReviewFixes(unittest.TestCase):
             self.assertTrue(active[0])
             self.assertIs(kwargs["entry"], entry)
             events.append("publish")
-            return {"receipt": {"receipt_digest": "local"}, "remote_receipt_digest": "remote",
+            return {"receipt": {"schema": "sandbox.host.local-images.v1", "receipt_digest": "local"}, "remote_receipt_digest": "remote",
                     "loaded": [], "skipped": []}
         with patch.object(remote, "registered_remote_lock", side_effect=lock), \
              patch.object(remote, "get_remote", side_effect=lookup) as get_remote, \
@@ -4926,3 +4926,81 @@ class TestHostRemoteRequiredFirst(unittest.TestCase):
                 hosting_cmd.cmd_host({}, args)
         validate.assert_not_called()
         self.assertIn("--remote is required", die.call_args[0][0])
+
+
+class TestBuildSecretFingerprint(unittest.TestCase):
+    def setUp(self):
+        self.inputs = {"BROWSER_DSN": "value", "UPLOAD_TOKEN": "presence",
+                       "UPLOAD_ORG": "value", "UPLOAD_PROJECT": "value"}
+        self.values = {"BROWSER_DSN": "https://synthetic-dsn.invalid/one",
+                       "UPLOAD_TOKEN": "synthetic-upload-token-one",
+                       "UPLOAD_ORG": "synthetic-org-one", "UPLOAD_PROJECT": "synthetic-project-one"}
+        provider = {"provider": "hmac_sha256_v1", "inputs": self.inputs}
+        self.validated = {"secrets": {"values": self.values, "required": {}, "generated": {}},
+                          "deploy": {"require_clean": True, "derived_environment": {"BUILD_FP": provider}}}
+        self.validated["deploy"]["derived_environment"] = hosting._derived_environment(
+            self.validated["deploy"], self.validated["secrets"])
+
+    def fingerprint(self, **changes):
+        from copy import deepcopy
+        validated = deepcopy(self.validated)
+        validated["secrets"]["values"].update(changes)
+        return hosting.resolve_environment(validated, {})["BUILD_FP"]
+
+    def test_value_rotations_change_identity_and_token_value_rotation_does_not(self):
+        original = self.fingerprint()
+        self.assertRegex(original, r"^[0-9a-f]{32}$")
+        # Independently generated with Node createHmac; locks the v1 wire framing.
+        self.assertEqual(original, "2575ea87dfcaf6a4ec9fd36f5b719c39")
+        for key in ("BROWSER_DSN", "UPLOAD_ORG", "UPLOAD_PROJECT"):
+            with self.subTest(input=key):
+                self.assertNotEqual(original, self.fingerprint(**{key: self.values[key] + "-rotated"}))
+        self.assertNotEqual(original, self.fingerprint(UPLOAD_TOKEN=""))
+        self.assertEqual(original, self.fingerprint(UPLOAD_TOKEN="synthetic-upload-token-rotated"))
+
+    def test_serialization_is_framed_order_independent_and_never_emits_inputs(self):
+        from copy import deepcopy
+        original = self.fingerprint()
+        reversed_input = deepcopy(self.validated)
+        reversed_input["deploy"]["derived_environment"]["BUILD_FP"]["inputs"] = dict(reversed(list(self.inputs.items())))
+        self.assertEqual(original, hosting.resolve_environment(reversed_input, {})["BUILD_FP"])
+        self.assertNotEqual(self.fingerprint(UPLOAD_ORG="ab", UPLOAD_PROJECT="c"),
+                            self.fingerprint(UPLOAD_ORG="a", UPLOAD_PROJECT="bc"))
+        output = io.StringIO()
+        with redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.fingerprint()
+        self.assertEqual(output.getvalue(), "")
+        self.assertTrue(all(value not in original for value in self.values.values()))
+
+    def test_validation_rejects_unknown_modes_inputs_options_and_chains_without_echo(self):
+        from copy import deepcopy
+        for provider in [
+            {"provider": "hmac_sha256_v1", "inputs": {"BROWSER_DSN": "unsafe-mode"}},
+            {"provider": "hmac_sha256_v1", "inputs": {"UNDECLARED": "value"}},
+            {"provider": "hmac_sha256_v1", "inputs": {"BUILD_FP": "value"}},
+            {"provider": "hmac_sha256_v1", "inputs": {}},
+            {"provider": "hmac_sha256_v1", "inputs": self.inputs, "key": "synthetic-private-input"},
+        ]:
+            deploy = deepcopy(self.validated["deploy"])
+            deploy["derived_environment"]["BUILD_FP"] = provider
+            with self.assertRaises(hosting.HostingError) as error:
+                hosting._derived_environment(deploy, self.validated["secrets"])
+            self.assertNotIn("synthetic-private-input", str(error.exception))
+
+    def test_plan_metadata_has_no_inputs_and_runtime_env_checks_exclude_build_fingerprint(self):
+        manifest = _manifest_with_derived_revision().replace(
+            "    cloudflare:\n", "    secrets:\n      values:\n        BROWSER_DSN: synthetic-dsn\n    cloudflare:\n")
+        manifest = manifest.replace("        LENZORA_SOURCE_REVISION: pushed_commit_sha\n",
+            "        BUILD_FP:\n          provider: hmac_sha256_v1\n          inputs:\n            BROWSER_DSN: value\n")
+        with TestHostingManifest()._write(manifest) as project:
+            validated = hosting.validate_manifest(project)
+            plan = hosting.desired_runtime(validated, "synthetic-remote")
+        self.assertEqual(plan["derived_environment"], [{"key": "BUILD_FP", "provider": "hmac_sha256_v1", "resolved_at_apply": True}])
+        self.assertNotIn("synthetic-dsn", json.dumps(plan))
+        self.assertNotIn("BROWSER_DSN", json.dumps(plan["derived_environment"]))
+        self.assertEqual(hosting_cmd._verify_remote_derived_environment({}, validated, "src", "runtime", "a" * 40),
+                         {"state": "not_declared", "checks": []})
+        self.assertTrue(hosting_cmd._host_observation_is_exact_ready(validated, {
+            "complete": True, "topology": {"state": "ready"}, "health": {"state": "ready"},
+            "source_revision": {"state": "not_declared", "checks": []},
+        }, "a" * 40))

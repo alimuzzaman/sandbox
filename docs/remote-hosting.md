@@ -1297,11 +1297,12 @@ route loaded. Destroy waits up to
 `--lock-wait` seconds for the shared host state lock, like apply, and never holds
 that lock across an SSH call.
 
-Two gaps come from what apply records. A target applied more than once records
-its own DNS record as the "previous" one, so destroy restores it rather than
-deleting it; remove that record in Cloudflare by hand. On nginx, a re-apply that
-reuses the certificate records no Origin CA id, so destroy cannot revoke it; it
-expires on its own.
+Destroy undoes the first adoption: a record Sandbox created is deleted, and a
+record it adopted is restored to what the first apply found, however many
+applies followed. Hosts applied before this correction may have their own record
+saved as the previous one; check `--dry-run` output before destroying them. A
+reused nginx Origin CA certificate keeps its recorded ID so destroy can revoke
+it.
 
 ### Disposable remote previews
 

@@ -4122,6 +4122,130 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(state["hosts"][target_key]["staged_revision"], "a" * 40)
 
 
+class TestHostDnsFirstAdoption(unittest.TestCase):
+    def test_first_apply_keeps_what_it_found(self):
+        changes = [{"zone_id": "z", "previous": None, "created_id": "x"}]
+        result = hosting_cmd._first_adoption_records(None, changes)
+        self.assertEqual(result, changes)
+
+    def test_reapply_keeps_the_original_absence_so_destroy_deletes(self):
+        prior = [{"zone_id": "z", "previous": None, "created_id": "x"}]
+        changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.1"}, "created_id": "x"}]
+        result = hosting_cmd._first_adoption_records(prior, changes)
+        self.assertEqual(result, prior)
+
+    def test_reapply_keeps_the_original_adopted_record(self):
+        prior = [{"zone_id": "z", "previous": {"id": "x", "content": "198.51.100.9"}, "created_id": "x"}]
+        changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.1"}, "created_id": "x"}]
+        result = hosting_cmd._first_adoption_records(prior, changes)
+        self.assertEqual(result, prior)
+
+    def test_recreated_record_starts_over(self):
+        prior = [{"zone_id": "z", "previous": None, "created_id": "old"}]
+        changes = [{"zone_id": "z", "previous": None, "created_id": "new"}]
+        result = hosting_cmd._first_adoption_records(prior, changes)
+        self.assertEqual(result, changes)
+
+    def test_same_id_in_another_zone_is_not_the_same_record(self):
+        prior = [{"zone_id": "z1", "previous": None, "created_id": "x"}]
+        changes = [{"zone_id": "z2", "previous": None, "created_id": "x"}]
+        result = hosting_cmd._first_adoption_records(prior, changes)
+        self.assertEqual(result, changes)
+
+    def test_malformed_prior_is_ignored(self):
+        changes = [{"zone_id": "z", "previous": None, "created_id": "x"}]
+        for prior in ("x", [None, "x"], [{"zone_id": "z"}], {"a": 1}):
+            with self.subTest(prior=prior):
+                result = hosting_cmd._first_adoption_records(prior, changes)
+                self.assertEqual(result, changes)
+
+    def test_destroy_plan_deletes_a_record_after_reapply(self):
+        from sandbox.hosting import destroy
+        prior = [{"zone_id": "z", "previous": None, "created_id": "x"}]
+        changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.1"}, "created_id": "x"}]
+        records = hosting_cmd._first_adoption_records(prior, changes)
+        state = {
+            "hosts": {
+                "r1/site/sandbox": {
+                    "compose_project": "sandbox-host-site-sandbox",
+                    "front_door": "nginx",
+                    "records": records,
+                }
+            }
+        }
+        entry = {"name": "r1", "host": "h", "user": "u", "front_door": "nginx"}
+        probe = {
+            "containers": 0, "volumes": 0, "networks": 0, "images": 0,
+            "runtime_kb": 0, "source_kb": 0, "route": 0, "certs": 0,
+        }
+        with patch.object(destroy.remote, "resolve_sandbox_home", return_value="/home/u/sandbox"):
+            planned = destroy.plan(state, entry, "r1", "site", "sandbox", probe=probe)
+        self.assertEqual(
+            planned["dns_records"],
+            [{"zone_id": "z", "action": "delete", "record_id": "x"}],
+        )
+
+    def test_second_apply_keeps_first_adoption_in_saved_state(self):
+        fixture = _HostingOwnerFixture(self)
+        hostnames = [record["hostname"] for record in fixture.runtime["records"]]
+        fixture.client.records.side_effect = lambda _zone, hostname: [
+            {"id": "record-1", "type": "A", "name": hostname,
+             "content": "203.0.113.10", "proxied": True, "ttl": 1}
+        ]
+        prior_records = [
+            {"zone_id": "zone-1", "previous": None, "created_id": "record-1"}
+            for _ in hostnames
+        ]
+        fixture.state["hosts"][fixture.key] = {
+            "records": prior_records,
+        }
+        fixture.apply()
+        saved = fixture.repository.load()["hosts"][fixture.key]["records"]
+        self.assertTrue(len(saved) > 0)
+        for entry in saved:
+            self.assertIsNone(entry["previous"])
+            self.assertEqual(entry["created_id"], "record-1")
+
+    def test_reused_certificate_keeps_the_recorded_id(self):
+        edge = hosting_cmd._NginxHostEdge({"name": "r1"})
+        edge.nginx = MagicMock()
+        edge.nginx.ensure_origin_certificate.return_value = (
+            "c", "k", {"id": None, "hostnames": ["a.test"], "issuer": "origin-ca"}
+        )
+        state_entry = {"certificate": {"id": "cert-1", "hostnames": ["a.test"]}}
+        _cert_path, _key_path, certificate = edge.certificate(
+            True, {}, {"certificate_hostnames": ["a.test"]}, state_entry,
+            None, "", "sandbox-route"
+        )
+        self.assertEqual(certificate["id"], "cert-1")
+
+    def test_reused_certificate_with_other_hostnames_keeps_no_id(self):
+        edge = hosting_cmd._NginxHostEdge({"name": "r1"})
+        edge.nginx = MagicMock()
+        edge.nginx.ensure_origin_certificate.return_value = (
+            "c", "k", {"id": None, "hostnames": ["a.test"], "issuer": "origin-ca"}
+        )
+        state_entry = {"certificate": {"id": "cert-1", "hostnames": ["b.test"]}}
+        _cert_path, _key_path, certificate = edge.certificate(
+            True, {}, {"certificate_hostnames": ["a.test"]}, state_entry,
+            None, "", "sandbox-route"
+        )
+        self.assertIsNone(certificate["id"])
+
+    def test_new_certificate_id_is_not_replaced(self):
+        edge = hosting_cmd._NginxHostEdge({"name": "r1"})
+        edge.nginx = MagicMock()
+        edge.nginx.ensure_origin_certificate.return_value = (
+            "c", "k", {"id": "cert-new", "hostnames": ["a.test"], "issuer": "origin-ca"}
+        )
+        state_entry = {"certificate": {"id": "cert-1", "hostnames": ["a.test"]}}
+        _cert_path, _key_path, certificate = edge.certificate(
+            True, {}, {"certificate_hostnames": ["a.test"]}, state_entry,
+            None, "", "sandbox-route"
+        )
+        self.assertEqual(certificate["id"], "cert-new")
+
+
 class _Response:
     def __init__(self, data):
         self.data = data

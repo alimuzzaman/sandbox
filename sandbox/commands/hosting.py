@@ -1255,7 +1255,14 @@ class _NginxHostEdge:
         hostnames = list(runtime["certificate_hostnames"])
         route = self.route_name(name)
         if proxied:
-            return self.nginx.ensure_origin_certificate(self.entry, route, hostnames, client)
+            cert_path, key_path, certificate = self.nginx.ensure_origin_certificate(
+                self.entry, route, hostnames, client)
+            # A reused certificate reports no id; keep the recorded one so destroy can revoke it.
+            prior = state_entry.get("certificate") if isinstance(state_entry, dict) else None
+            if (certificate.get("id") is None and isinstance(prior, dict) and prior.get("id")
+                    and sorted(prior.get("hostnames") or []) == certificate.get("hostnames")):
+                certificate = {**certificate, "id": prior["id"]}
+            return cert_path, key_path, certificate
         if self.nginx.public_certificate_present(self.entry, route, hostnames):
             cert_path, key_path = self.nginx.public_paths(route)
             return cert_path, key_path, {"id": None, "hostnames": sorted(hostnames),
@@ -3567,6 +3574,21 @@ def _recovery_governance_authorized(validated: dict, remote_name: str) -> bool:
     return False
 
 
+def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
+    """Records for host destroy: keep what the first apply found, per managed record.
+
+    `changes` holds what this run replaced, which rollback needs. Once a record is
+    ours, a later apply sees our own record as "previous", and destroy must not
+    restore that. A record whose id changed was recreated, so it starts over.
+    """
+    known = {
+        (item.get("zone_id"), item.get("created_id")): item
+        for item in (prior if isinstance(prior, list) else [])
+        if isinstance(item, dict) and item.get("zone_id") and item.get("created_id")
+    }
+    return [known.get((change["zone_id"], change["created_id"]), change) for change in changes]
+
+
 def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                              _request: RecoveryRequest, operation: dict) -> dict:
     """Continue only the declared Caddy/Cloudflare edge for a proven runtime."""
@@ -3656,7 +3678,8 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             kwargs["basic_auth_credentials"] = credentials
         _verify_edge(edge_intent["routes"], **kwargs)
         result["record"] = {
-            "certificate": certificate, "records": changes,
+            "certificate": certificate,
+            "records": _first_adoption_records(recorded.get("records"), changes),
             "caddy_name": caddy_name, "edge": {"state": "ready"},
         }
         if edge.mode != "caddy":
@@ -4729,7 +4752,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "loopback_port": runtime["loopback_port"],
             "compose_project": runtime["compose_project"],
             "certificate": certificate,
-            "records": changes,
+            "records": _first_adoption_records(state["hosts"][key].get("records"), changes),
             "commit": sha,
             "recorded_revision": sha,
             "caddy_name": caddy_name,

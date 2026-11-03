@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb secrets ownership` and scoped runs report an invalid local configuration as
+  `input_invalid` (exit 2) instead of `provider_failed` (exit 4).
 - Explicit non-empty `SANDBOX_HOME` runs skip writing the legacy checkout-root
   `.env` compatibility file, preventing isolated state runs from rewriting shared
   checkout state while preserving existing output when `SANDBOX_HOME` is unset

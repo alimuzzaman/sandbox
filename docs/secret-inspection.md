@@ -748,6 +748,7 @@ values or silently adopted.
    - `6`: `cleanup_unknown`.
    Unmapped refusal codes fall back to exit 1. Primary operation failures keep their status when audit or revocation also fails.
    Scoped runs propagate the child command's exit code on success.
+   An invalid local ownership configuration returns `input_invalid` with exit 2 before any provider or credential store is reached, without naming paths or configuration values.
 
 8. **Audit behavior and failure handling**:
    Ownership output never includes values, value fingerprints, lengths, masks, or

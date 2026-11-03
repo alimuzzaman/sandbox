@@ -506,7 +506,10 @@ behavior until the open remote and measured-reclamation gates in Spec 032 pass.
 For scheduled/maintenance cleanup, apply the configured age explicitly with
 `./sb job-retention --retention-days 7 --json`; it removes terminal output,
 metrics, declared artifacts, and retained CI rematerialization archives, then records
-`cleanup_state` in the registry.
+`cleanup_state` in the registry. Repeated sweeps page deterministically through candidates
+ordered oldest finished first; sweeps can also resume explicitly via `--cursor <job_id>`.
+The envelope explicitly returns `"cursor"` (string or null), `"limit"` (integer), and `"truncated"` (boolean)
+to support deterministic cross-process continuation (control protocol 14).
 If the host is below its configured free-disk reserve, use
 `./sb job-retention --storage-pressure --json`; only the oldest terminal jobs
 are reclaimed until pressure clears. Active jobs and retained failed workspaces

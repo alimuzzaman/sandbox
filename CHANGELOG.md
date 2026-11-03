@@ -8,6 +8,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Retention sweep now excludes no-op retained jobs and completed retired CI
+  rows from consuming candidate scan limits, supports cross-process keyset
+  continuation via `--cursor` CLI and envelope `cursor`, `limit`, and `truncated`
+  fields (control protocol 14), safely handles malformed timestamps without
+  crashing, filters already-swept jobs without unexpired data while preserving
+  eligible logs/artifacts/CI materialization retirement, and truthfully
+  propagates terminal materialization retirement failures instead of
+  swallowing them.
 - Local-image transfer now strictly decodes byte acknowledgements after remote
   receipt publication instead of crashing without JSON. Malformed replies stay
   publication-unknown; unexpected transfer exceptions emit the closed

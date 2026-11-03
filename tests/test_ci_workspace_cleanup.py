@@ -8,11 +8,13 @@ import fcntl
 import os
 import signal
 import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.subprocess_support import synthetic_environment
 from sandbox.application.job_service import JobService
 from sandbox.application.workspace_service import WorkspaceService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -856,32 +858,66 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
 
     def test_background_process_group_blocks_cleanup_after_shell_leader_exits(self):
         checkout = self._checkout("background-group")
-        descriptors = []
-        service = self._service(descriptors.append)
-        submission = self._submission(
-            checkout, request_id="background-group-request")
-        submission = JobSubmission(**{
-            **submission.__dict__,
-            "argv": ("/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 &"),
-        })
-        accepted = service.submit(submission)
-        pgid = None
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="background-group-request"))
+        job_id = accepted["job_id"]
+
+        # run_test_process blocks until process completion and cannot return an active
+        # process handle. Captured Popen with an explicit synthetic environment
+        # is necessary to verify the surviving live process group seam.
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"],
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+            env=synthetic_environment({"PATH": "/bin:/usr/bin"}),
+        )
+        leader_pid = proc.pid
+        out, _ = proc.communicate(timeout=2)
+        descendant_pid = int(out.strip())
+        self.assertEqual(os.getpgid(descendant_pid), leader_pid)
+
         try:
+            self.job_repository.transition(job_id, "running")
+            self.job_repository.put_process_identity(
+                job_id, host_boot_id="boot", supervisor_pid=101,
+                supervisor_start_identity="gone-supervisor",
+                supervisor_nonce_hash="nonce", child_pid=leader_pid,
+                child_pgid=leader_pid, child_start_identity="gone-child",
+            )
+            self.job_repository.transition(
+                job_id, "succeeded", exit_code=0)
+
             with patch(
                     "sandbox.application.workspace_service._observe_cleanup_references",
-                    return_value={"containers": 0, "mounts": 0}):
-                run_descriptor(descriptors[0])
-            row = self.job_repository.get(accepted["job_id"])
-            pgid = self.job_repository.snapshot(
-                accepted["job_id"])["process"]["child_pgid"]
+                    return_value={"containers": 0, "mounts": 0}), patch.object(
+                    self.job_repository, "append_event",
+                    wraps=self.job_repository.append_event) as append_event_spy:
+                row = service.get(job_id)
             self.assertEqual(row["cleanup_state"], "failed")
             self.assertTrue(checkout.exists())
+            cleanup_calls = [
+                call for call in append_event_spy.call_args_list
+                if (call.args[1] if len(call.args) > 1 else call.kwargs.get("kind")) == "workspace_cleanup"
+            ]
+            self.assertTrue(cleanup_calls)
+            call_args = cleanup_calls[-1].args
+            call_kwargs = cleanup_calls[-1].kwargs
+            call_job_id = call_args[0] if len(call_args) > 0 else call_kwargs.get("job_id")
+            call_kind = call_args[1] if len(call_args) > 1 else call_kwargs.get("kind")
+            call_payload = call_args[2] if len(call_args) > 2 else call_kwargs.get("payload", {})
+            self.assertEqual(call_job_id, job_id)
+            self.assertEqual(call_kind, "workspace_cleanup")
+            self.assertEqual(call_payload.get("code"), "workspace_busy")
         finally:
-            if pgid:
-                try:
-                    os.killpg(int(pgid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            try:
+                if os.getpgid(descendant_pid) == leader_pid:
+                    try:
+                        os.killpg(leader_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            except ProcessLookupError:
+                pass
 
     def test_owned_child_cgroup_must_be_proven_empty_before_cleanup(self):
         checkout = self._checkout("owned-cgroup")

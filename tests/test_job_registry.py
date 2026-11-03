@@ -368,6 +368,64 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(snapshot["compatibility_differences"][0]["difference_id"], "act.safe-mode")
         self.assertEqual(snapshot["compatibility_differences"][0]["accepted"], 1)
 
+    def test_list_retention_candidates_orders_oldest_first_and_breaks_ties_deterministically(self):
+        repo = self.repository()
+        sub1, _ = repo.accept(submission("sub-1"))
+        sub2, _ = repo.accept(submission("sub-2"))
+        sub3, _ = repo.accept(submission("sub-3"))
+        sub4, _ = repo.accept(submission("sub-4"))
+        sub_active, _ = repo.accept(submission("sub-active"))
+
+        # Transition to running then succeeded
+        for sub in (sub1, sub2, sub3, sub4):
+            repo.transition(sub["job_id"], "running")
+            repo.transition(sub["job_id"], "succeeded", exit_code=0)
+        repo.transition(sub_active["job_id"], "running")
+
+        # sub1 and sub2 have same finished_at (tie); sub3 is older; sub4 is already completed cleanup
+        repo.connection.execute("UPDATE jobs SET finished_at='2026-10-01T10:00:00Z' WHERE job_id=?", (sub3["job_id"],))
+        repo.connection.execute("UPDATE jobs SET finished_at='2026-10-02T10:00:00Z' WHERE job_id=?", (sub1["job_id"],))
+        repo.connection.execute("UPDATE jobs SET finished_at='2026-10-02T10:00:00Z' WHERE job_id=?", (sub2["job_id"],))
+        repo.connection.execute("UPDATE jobs SET finished_at='2026-09-01T10:00:00Z', cleanup_state='completed' WHERE job_id=?", (sub4["job_id"],))
+
+        candidates = repo.list_retention_candidates(limit=10)
+        candidate_ids = [c["job_id"] for c in candidates]
+        # sub4 is completed -> excluded. sub_active is running -> excluded.
+        # sub3 is oldest (10-01) -> 1st.
+        # sub1 and sub2 tie on finished (10-02) -> sub1 accepted earlier than sub2 -> sub1 before sub2.
+        self.assertEqual(candidate_ids, [sub3["job_id"], sub1["job_id"], sub2["job_id"]])
+
+    def test_list_retention_candidates_cursor_pagination_and_validation(self):
+        repo = self.repository()
+        with self.assertRaisesRegex(ValueError, "retention candidate limit"):
+            repo.list_retention_candidates(limit=0)
+        with self.assertRaisesRegex(ValueError, "retention candidate limit"):
+            repo.list_retention_candidates(limit=201)
+
+        subs = []
+        for i in range(5):
+            sub, _ = repo.accept(submission(f"paged-{i}"))
+            subs.append(sub)
+            repo.transition(sub["job_id"], "running")
+            repo.transition(sub["job_id"], "succeeded", exit_code=0)
+            repo.connection.execute(
+                "UPDATE jobs SET finished_at=? WHERE job_id=?",
+                (f"2026-10-0{i+1}T00:00:00Z", sub["job_id"]),
+            )
+
+        page1 = repo.list_retention_candidates(limit=2)
+        self.assertEqual(len(page1), 2)
+        self.assertEqual(page1[0]["job_id"], subs[0]["job_id"])
+        self.assertEqual(page1[1]["job_id"], subs[1]["job_id"])
+
+        page2 = repo.list_retention_candidates(limit=2, cursor_job_id=page1[-1]["job_id"])
+        self.assertEqual(len(page2), 2)
+        self.assertEqual(page2[0]["job_id"], subs[2]["job_id"])
+        self.assertEqual(page2[1]["job_id"], subs[3]["job_id"])
+
+        with self.assertRaisesRegex(ValueError, "cursor is stale"):
+            repo.list_retention_candidates(limit=2, cursor_job_id="f" * 32)
+
 
 if __name__ == "__main__":
     unittest.main()

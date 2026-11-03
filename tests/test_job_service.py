@@ -958,3 +958,448 @@ class JobServiceTests(unittest.TestCase):
             self.assertTrue(result["storage_pressure"])
             self.assertEqual(len(result["cleaned"]), 1)
             repository.close()
+
+    def test_retention_sweep_progresses_to_older_eligible_jobs_across_pages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # 60 eligible terminal jobs older than 7 days (> 1 batch page of 50)
+            eligible_ids = []
+            for i in range(60):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"eligible-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-el-{i}",
+                ))
+                jid = row["job_id"]
+                eligible_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=60 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                job_dir = storage.job_dir(jid, create=True)
+                (job_dir / "output").mkdir()
+                (job_dir / "output" / "log").write_text("data")
+
+            # 10 newer running jobs (active, protected)
+            running_ids = []
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"running-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-run-{i}",
+                ))
+                jid = row["job_id"]
+                running_ids.append(jid)
+                repository.transition(jid, "running")
+                job_dir = storage.job_dir(jid, create=True)
+                (job_dir / "output").mkdir()
+                (job_dir / "output" / "log").write_text("live")
+
+            # 10 newer completed jobs (cleanup_state='completed')
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"completed-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-comp-{i}",
+                ))
+                jid = row["job_id"]
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='completed' WHERE job_id=?",
+                    (fin_time, jid),
+                )
+
+            sweep = service.retention_sweep(retention_days=7, limit=60)
+            self.assertEqual(len(sweep["cleaned"]), 60)
+            cleaned_set = {c["job_id"] for c in sweep["cleaned"]}
+            self.assertEqual(cleaned_set, set(eligible_ids))
+
+            # Active jobs remain protected and untouched
+            for jid in running_ids:
+                self.assertEqual(repository.get(jid)["lifecycle"], "running")
+                self.assertTrue((storage.job_dir(jid) / "output").exists())
+
+            repository.close()
+
+    def test_retention_sweep_under_pressure_reclaims_oldest_until_cleared(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            job_ids = []
+            for i in range(4):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"pressure-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-p-{i}",
+                ))
+                jid = row["job_id"]
+                job_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin = (now - timedelta(days=4 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("log")
+
+            cleaned_count = 0
+            real_cleanup = service.cleanup
+
+            def dynamic_cleanup(job_id):
+                nonlocal cleaned_count
+                cleaned_count += 1
+                if cleaned_count >= 2:
+                    storage.is_under_pressure = lambda: False
+                return real_cleanup(job_id)
+
+            storage.is_under_pressure = lambda: True
+            service.cleanup = dynamic_cleanup
+
+            sweep = service.retention_sweep(retention_days=30, storage_pressure=True)
+            self.assertEqual(len(sweep["cleaned"]), 2)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], job_ids[0])
+            self.assertEqual(sweep["cleaned"][1]["job_id"], job_ids[1])
+            self.assertEqual(repository.get(job_ids[2])["cleanup_state"], "not_requested")
+            self.assertEqual(repository.get(job_ids[3])["cleanup_state"], "not_requested")
+            repository.close()
+
+    def test_retention_sweep_preserves_active_retry_and_cleans_original(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            orig_row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "orig",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-orig",
+            ))
+            orig_id = orig_row["job_id"]
+            repository.transition(orig_id, "running")
+            repository.transition(orig_id, "failed", exit_code=1)
+            fin_orig = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_orig, orig_id))
+            (storage.job_dir(orig_id, create=True) / "output").mkdir()
+            (storage.job_dir(orig_id) / "output" / "data").write_text("orig")
+
+            retry_row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "retry",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-retry", retry_of_job_id=orig_id,
+            ))
+            retry_id = retry_row["job_id"]
+            repository.transition(retry_id, "running")
+            (storage.job_dir(retry_id, create=True) / "output").mkdir()
+            (storage.job_dir(retry_id) / "output" / "data").write_text("retry")
+
+            sweep = service.retention_sweep(retention_days=7)
+            cleaned_ids = {c["job_id"] for c in sweep["cleaned"]}
+            self.assertIn(orig_id, cleaned_ids)
+            self.assertNotIn(retry_id, cleaned_ids)
+            self.assertEqual(repository.get(retry_id)["lifecycle"], "running")
+            self.assertTrue((storage.job_dir(retry_id) / "output").exists())
+            repository.close()
+
+    def test_retention_sweep_repeated_calls_progress_past_page_of_retained_and_noop_jobs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # 55 terminal jobs already in 'retained' state with no remaining data (page of no-ops)
+            noop_ids = []
+            for i in range(55):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"noop-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-noop-{i}",
+                ))
+                jid = row["job_id"]
+                noop_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=20, seconds=100 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='retained' WHERE job_id=?",
+                    (fin_time, jid),
+                )
+
+            # 10 eligible jobs older than 7 days
+            batch1_ids = []
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"b1-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-b1-{i}",
+                ))
+                jid = row["job_id"]
+                batch1_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=15, seconds=100 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("b1")
+
+            # 10 more eligible jobs older than 7 days
+            batch2_ids = []
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"b2-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-b2-{i}",
+                ))
+                jid = row["job_id"]
+                batch2_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=100 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("b2")
+
+            # First sweep: should skip no-ops and clean first 10 eligible
+            sweep1 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep1["cleaned"]), 10)
+            cleaned1 = [c["job_id"] for c in sweep1["cleaned"]]
+            self.assertEqual(cleaned1, batch1_ids)
+
+            # Second sweep: should progress to next 10 eligible
+            sweep2 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep2["cleaned"]), 10)
+            cleaned2 = [c["job_id"] for c in sweep2["cleaned"]]
+            self.assertEqual(cleaned2, batch2_ids)
+
+            # Third sweep: no more eligible jobs, returns 0 cleaned
+            sweep3 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep3["cleaned"]), 0)
+
+            repository.close()
+
+    def test_retention_sweep_truthfully_propagates_materialization_broker_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            class MockWorkspaceRegistry:
+                def has_retained_materialization(self, job):
+                    return True
+                def retire_terminal_materialization(self, job):
+                    raise RuntimeError("simulated broker failure")
+            service = JobService(repository, storage, None, launcher=lambda _desc: None, workspace_registry=MockWorkspaceRegistry())
+            now = datetime.now(timezone.utc)
+
+            row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "failing-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-failing",
+            ))
+            jid = row["job_id"]
+            repository.transition(jid, "running")
+            repository.transition(jid, "succeeded", exit_code=0)
+            fin_time = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute(
+                "UPDATE jobs SET finished_at=?, kind='ci', workspace_authority_digest='sha256:' || hex(randomblob(32)) WHERE job_id=?",
+                (fin_time, jid),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "simulated broker failure"):
+                service.retention_sweep(retention_days=7)
+
+            repository.close()
+
+    def test_retention_sweep_explicit_cursor_and_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            subs = []
+            for i in range(5):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"cur-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-cur-{i}",
+                ))
+                jid = row["job_id"]
+                subs.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=5 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("ok")
+
+            with self.assertRaisesRegex(ValueError, "limit must be a positive whole number"):
+                service.retention_sweep(limit=0)
+            with self.assertRaisesRegex(ValueError, "retention_days must be a non-negative whole number"):
+                service.retention_sweep(retention_days=-1)
+
+            # Pass cursor explicitly to skip subs[0]
+            sweep = service.retention_sweep(retention_days=7, limit=2, cursor_job_id=subs[0])
+            self.assertEqual(len(sweep["cleaned"]), 2)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], subs[1])
+            self.assertEqual(sweep["cleaned"][1]["job_id"], subs[2])
+
+            repository.close()
+
+    def test_retention_sweep_completed_ci_rows_do_not_starve_scan_budget(self):
+        """200 completed CI rows do not starve scan budget for eligible jobs."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # Insert 200 completed CI jobs with older timestamps and authority digest
+            for i in range(200):
+                row, _ = repository.accept(JobSubmission(
+                    "ci", temp, "p", "local", f"ci-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-ci-{i}",
+                ))
+                jid = row["job_id"]
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=20, seconds=i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='completed', "
+                    "workspace_authority_digest='digest-auth' WHERE job_id=?",
+                    (fin_time, jid),
+                )
+
+            # Insert 1 newer eligible job
+            newer_row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "eligible-target",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-eligible-target",
+            ))
+            newer_jid = newer_row["job_id"]
+            repository.transition(newer_jid, "running")
+            repository.transition(newer_jid, "succeeded", exit_code=0)
+            fin_time = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, newer_jid))
+            (storage.job_dir(newer_jid, create=True) / "output").mkdir()
+            (storage.job_dir(newer_jid) / "output" / "data").write_text("ok")
+
+            # First sweep: scans up to scan budget over no-op prefix, returns truncated and cursor
+            sweep1 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep1["cleaned"]), 0)
+            self.assertTrue(sweep1["truncated"])
+            self.assertIsNotNone(sweep1["cursor"])
+
+            # Second sweep: resumes from cursor past no-op prefix and cleans the eligible job
+            sweep2 = service.retention_sweep(retention_days=7, limit=10, cursor_job_id=sweep1["cursor"])
+            self.assertEqual(len(sweep2["cleaned"]), 1)
+            self.assertEqual(sweep2["cleaned"][0]["job_id"], newer_jid)
+            self.assertFalse(sweep2["truncated"])
+            self.assertIsNone(sweep2["cursor"])
+
+            repository.close()
+
+    def test_retention_sweep_cross_process_keyset_continuation(self):
+        """Cross-process keyset pagination resumes deterministically via returned cursor."""
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "registry.sqlite"
+            repository = JobRepository(db_path)
+            storage = JobStorage(temp, free_disk_reserve=0)
+            now = datetime.now(timezone.utc)
+
+            jids = []
+            for i in range(5):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"page-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-page-{i}",
+                ))
+                jid = row["job_id"]
+                jids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=100 - i * 10)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("ok")
+            repository.close()
+
+            # Process 1: Page 1 with limit=2
+            repo1 = JobRepository(db_path)
+            svc1 = JobService(repo1, storage, None, launcher=lambda _desc: None)
+            sweep1 = svc1.retention_sweep(retention_days=7, limit=2)
+            self.assertEqual(len(sweep1["cleaned"]), 2)
+            self.assertEqual([c["job_id"] for c in sweep1["cleaned"]], jids[0:2])
+            self.assertTrue(sweep1["truncated"])
+            cursor1 = sweep1["cursor"]
+            self.assertIsNotNone(cursor1)
+            repo1.close()
+
+            # Process 2: Page 2 using cursor from Process 1
+            repo2 = JobRepository(db_path)
+            svc2 = JobService(repo2, storage, None, launcher=lambda _desc: None)
+            sweep2 = svc2.retention_sweep(retention_days=7, limit=2, cursor_job_id=cursor1)
+            self.assertEqual(len(sweep2["cleaned"]), 2)
+            self.assertEqual([c["job_id"] for c in sweep2["cleaned"]], jids[2:4])
+            self.assertTrue(sweep2["truncated"])
+            cursor2 = sweep2["cursor"]
+            self.assertIsNotNone(cursor2)
+            repo2.close()
+
+            # Process 3: Page 3 using cursor from Process 2, reaching exhaustion
+            repo3 = JobRepository(db_path)
+            svc3 = JobService(repo3, storage, None, launcher=lambda _desc: None)
+            sweep3 = svc3.retention_sweep(retention_days=7, limit=2, cursor_job_id=cursor2)
+            self.assertEqual(len(sweep3["cleaned"]), 1)
+            self.assertEqual([c["job_id"] for c in sweep3["cleaned"]], [jids[4]])
+            self.assertFalse(sweep3["truncated"])
+            self.assertIsNone(sweep3["cursor"])
+            repo3.close()
+
+    def test_retention_sweep_safely_handles_malformed_finished_at_timestamp(self):
+        """Malformed or corrupt finished_at timestamps do not crash the sweep."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # Job 1: malformed finished_at timestamp
+            row1, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "bad-ts",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-bad-ts",
+            ))
+            j1 = row1["job_id"]
+            repository.transition(j1, "running")
+            repository.transition(j1, "succeeded", exit_code=0)
+            repository.connection.execute("UPDATE jobs SET finished_at='corrupt-timestamp-not-iso' WHERE job_id=?", (j1,))
+
+            # Job 2: valid finished_at timestamp older than 7 days
+            row2, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "good-ts",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-good-ts",
+            ))
+            j2 = row2["job_id"]
+            repository.transition(j2, "running")
+            repository.transition(j2, "succeeded", exit_code=0)
+            fin_time = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, j2))
+            (storage.job_dir(j2, create=True) / "output").mkdir()
+            (storage.job_dir(j2) / "output" / "data").write_text("ok")
+
+            # Sweep should not raise ValueError and should clean job 2
+            sweep = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep["cleaned"]), 1)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], j2)
+
+            repository.close()

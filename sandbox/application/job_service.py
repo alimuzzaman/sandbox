@@ -49,6 +49,22 @@ def _launch_failure(stage: str, exc: BaseException) -> dict:
 CHILD_IDENTITY_PUBLISH_WAIT_SECONDS = 1.0
 
 
+def _parse_retention_timestamp(ts: Any) -> datetime | None:
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+
+
+
+
 class JobServiceProtocol(Protocol):
     def submit(self, submission): ...
     def get(self, job_id: str, *, reconcile: bool = True): ...
@@ -1270,8 +1286,10 @@ class JobService:
             if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
             if (self.workspace_registry is not None and
                     hasattr(self.workspace_registry, "retire_terminal_materialization") and
-                    self.workspace_registry.retire_terminal_materialization(state)):
-                removed.append("workspace_materialization")
+                    (not hasattr(self.workspace_registry, "has_retained_materialization") or
+                     self.workspace_registry.has_retained_materialization(state))):
+                if self.workspace_registry.retire_terminal_materialization(state):
+                    removed.append("workspace_materialization")
             if (self.workspace_registry is not None and
                     hasattr(self.workspace_registry, "release_terminal_job") and
                     state.get("cleanup_state") != "completed"):
@@ -1308,39 +1326,95 @@ class JobService:
         return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
 
     def retention_sweep(self, *, retention_days: int = 7, limit: int = 200,
-                        storage_pressure: bool = False) -> dict:
+                        storage_pressure: bool = False,
+                        cursor: str | None = None,
+                        cursor_job_id: str | None = None) -> dict:
         if isinstance(retention_days, bool) or not isinstance(retention_days, int) or retention_days < 0:
             raise ValueError("retention_days must be a non-negative whole number")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive whole number")
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         cleaned = []
-        rows = self.repository.list(limit=limit)
         if storage_pressure and not self.storage.is_under_pressure():
             storage_pressure = False
-        if storage_pressure:
-            rows.sort(key=lambda item: item.get("finished_at") or item.get("accepted_at") or "")
-        for row in rows:
-            if row["lifecycle"] not in {item.value for item in (
-                Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
-                Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
-            )} or not row.get("finished_at"):
-                continue
-            try:
-                finished = datetime.fromisoformat(row["finished_at"].replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            retained_materialization = (
-                self.workspace_registry is not None and
-                hasattr(self.workspace_registry, "has_retained_materialization") and
-                self.workspace_registry.has_retained_materialization(row)
+        before_finished_at = None if storage_pressure else cutoff.isoformat().replace("+00:00", "Z")
+        max_scanned = max(limit * 2, 200)
+        total_scanned = 0
+        current_cursor = cursor if cursor is not None else cursor_job_id
+        truncated = False
+        exhausted = False
+
+        if not hasattr(self.repository, "list_retention_candidates"):
+            raise NotImplementedError(
+                "Job repository must support list_retention_candidates for retention sweeps"
             )
-            if ((storage_pressure or finished <= cutoff) and
-                    (row.get("cleanup_state") != "completed" or
-                     retained_materialization)):
-                cleaned.append(self.cleanup(row["job_id"]))
-            if storage_pressure and not self.storage.is_under_pressure():
+
+        while len(cleaned) < limit and total_scanned < max_scanned:
+            batch_limit = min(limit - len(cleaned), 50)
+            rows = self.repository.list_retention_candidates(
+                limit=batch_limit,
+                before_finished_at=before_finished_at,
+                cursor_job_id=current_cursor,
+            )
+            if not rows:
+                exhausted = True
                 break
-        return {"ok": True, "retention_days": retention_days,
-                "storage_pressure": storage_pressure, "cleaned": cleaned}
+            if len(rows) < batch_limit:
+                exhausted = True
+            total_scanned += len(rows)
+            for row in rows:
+                current_cursor = row["job_id"]
+                if row.get("lifecycle") not in {item.value for item in (
+                    Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                    Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
+                )}:
+                    continue
+                finished = _parse_retention_timestamp(row.get("finished_at"))
+                if finished is None:
+                    finished = _parse_retention_timestamp(row.get("accepted_at"))
+                if finished is None:
+                    if not storage_pressure:
+                        continue
+                elif not storage_pressure and finished > cutoff:
+                    # Do not declare entire sweep exhausted on a single row!
+                    # Skip future/anomalous row and continue scanning.
+                    continue
+
+                retained_materialization = (
+                    self.workspace_registry is not None and
+                    hasattr(self.workspace_registry, "has_retained_materialization") and
+                    self.workspace_registry.has_retained_materialization(row)
+                )
+                if ((storage_pressure or finished is None or finished <= cutoff) and
+                        (row.get("cleanup_state") != "completed" or
+                         retained_materialization)):
+                    outcome = self.cleanup(row["job_id"])
+                    if outcome.get("removed") or outcome.get("cleanup_state") == "completed":
+                        cleaned.append(outcome)
+                if storage_pressure and not self.storage.is_under_pressure():
+                    exhausted = True
+                    break
+                if len(cleaned) >= limit:
+                    break
+            if exhausted:
+                break
+
+        if not exhausted and (len(cleaned) >= limit or total_scanned >= max_scanned):
+            truncated = True
+            out_cursor = current_cursor
+        else:
+            truncated = False
+            out_cursor = None
+
+        return {
+            "ok": True,
+            "retention_days": retention_days,
+            "storage_pressure": storage_pressure,
+            "cleaned": cleaned,
+            "limit": limit,
+            "cursor": out_cursor,
+            "truncated": truncated,
+        }
 
     def submit_matrix(self, submissions: list[JobSubmission], *, allow_project_variants: bool = False) -> dict:
         if not submissions:

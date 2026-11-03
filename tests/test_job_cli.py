@@ -635,3 +635,188 @@ class JobIdPrefixRefusalTests(unittest.TestCase):
         for bad in ("cdc3a491", "A" * 32, "a" * 31, ""):
             with self.assertRaises(argparse.ArgumentTypeError):
                 _job_id_argument(bad)
+
+    def test_job_retention_cli_parser_and_cursor_invocation(self):
+        import argparse
+        from sandbox.commands.jobs_runtime import configure_retention_parser, cmd_job_retention
+        parser = argparse.ArgumentParser()
+        configure_retention_parser(parser)
+        args = parser.parse_args(["--retention-days", "14", "--limit", "50", "--cursor", "a" * 32, "--storage-pressure", "--json"])
+        self.assertEqual(args.retention_days, 14)
+        self.assertEqual(args.limit, 50)
+        self.assertEqual(args.cursor_job_id, "a" * 32)
+        self.assertTrue(args.storage_pressure)
+
+        captured = {}
+        fake_service = SimpleNamespace(
+            retention_sweep=lambda **kwargs: captured.update(kwargs) or {
+                "ok": True, "retention_days": kwargs.get("retention_days", 7),
+                "storage_pressure": kwargs.get("storage_pressure", False), "cleaned": []
+            }
+        )
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={"job_service": fake_service}), redirect_stdout(output):
+            cmd_job_retention(None, args)
+        self.assertEqual(captured, {
+            "retention_days": 14,
+            "limit": 50,
+            "storage_pressure": True,
+            "cursor_job_id": "a" * 32,
+        })
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["cleaned"], [])
+
+
+class JobRetentionCliAcceptanceTests(unittest.TestCase):
+    """End-to-end multi-process CLI acceptance for job retention and cursor continuation."""
+
+    def test_job_retention_cli_two_child_processes_keyset_continuation_acceptance(self):
+        """TWO separate OS child invocations must consume emitted CLI cursor over same disposable registry."""
+        from datetime import datetime, timezone, timedelta
+        from tests.subprocess_support import run_test_process
+        from sandbox.jobs.registry import JobRepository
+        from sandbox.jobs.storage import JobStorage
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+        with tempfile.TemporaryDirectory() as temp:
+            rt = Path(temp) / "runtime"
+            (rt / "jobs").mkdir(parents=True)
+            db_path = rt / "jobs" / "registry.sqlite3"
+            repo = JobRepository(db_path)
+            storage = JobStorage(rt, free_disk_reserve=0)
+            now = datetime.now(timezone.utc)
+
+            # 1. >= 200 completed/retained CI no-op prefix
+            for i in range(205):
+                row, _ = repo.accept(JobSubmission(
+                    "ci", temp, "p", "local", f"ci-prefix-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-ci-{i}",
+                ))
+                jid = row["job_id"]
+                repo.transition(jid, "running")
+                repo.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=20, seconds=i)).isoformat().replace("+00:00", "Z")
+                repo.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='completed', "
+                    "workspace_authority_digest='digest-auth' WHERE job_id=?",
+                    (fin_time, jid),
+                )
+
+            # 2. Older eligible target job
+            target_row, _ = repo.accept(JobSubmission(
+                "test", temp, "p", "local", "eligible-target",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-target",
+            ))
+            target_jid = target_row["job_id"]
+            repo.transition(target_jid, "running")
+            repo.transition(target_jid, "succeeded", exit_code=0)
+            fin_time = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repo.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, target_jid))
+            (storage.job_dir(target_jid, create=True) / "output").mkdir()
+            (storage.job_dir(target_jid) / "output" / "data").write_text("ok")
+
+            # 3. Active running job (must remain untouched)
+            active_row, _ = repo.accept(JobSubmission(
+                "test", temp, "p", "local", "active-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-active",
+            ))
+            active_jid = active_row["job_id"]
+            repo.transition(active_jid, "running")
+            (storage.job_dir(active_jid, create=True) / "output").mkdir()
+            (storage.job_dir(active_jid) / "output" / "live").write_text("active-log")
+
+            repo.close()
+
+            # Child process 1: scans no-op prefix, reaches budget, returns cursor and truncated
+            p1 = run_test_process(
+                [sys.executable, "-m", "sandbox.cli", "job-retention", "--json", "--limit", "10", "--retention-days", "7"],
+                env={"SANDBOX_RUNTIME": str(rt)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(p1.returncode, 0, p1.stderr)
+            res1 = json.loads(p1.stdout)
+            self.assertTrue(res1["ok"])
+            self.assertTrue(res1["truncated"])
+            self.assertIsNotNone(res1["cursor"])
+            self.assertEqual(len(res1["cleaned"]), 0)
+
+            # Child process 2: separate OS process consuming the emitted cursor
+            p2 = run_test_process(
+                [sys.executable, "-m", "sandbox.cli", "job-retention", "--json", "--limit", "10", "--retention-days", "7", "--cursor", res1["cursor"]],
+                env={"SANDBOX_RUNTIME": str(rt)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(p2.returncode, 0, p2.stderr)
+            res2 = json.loads(p2.stdout)
+            self.assertTrue(res2["ok"])
+            self.assertFalse(res2["truncated"])
+            self.assertIsNone(res2["cursor"])
+            self.assertEqual(len(res2["cleaned"]), 1)
+            self.assertEqual(res2["cleaned"][0]["job_id"], target_jid)
+
+            # Verify active job was not touched
+            repo2 = JobRepository(db_path)
+            self.assertEqual(repo2.get(active_jid)["lifecycle"], "running")
+            self.assertTrue((storage.job_dir(active_jid) / "output" / "live").exists())
+            repo2.close()
+
+    def test_job_retention_sqlite_parameter_limit_safety(self):
+        """Safe SQLite parameter limit via connection.setlimit without variable overflow."""
+        import sqlite3
+        from datetime import datetime, timezone, timedelta
+        from sandbox.jobs.registry import JobRepository
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "registry.sqlite3"
+            repo = JobRepository(db_path)
+            now = datetime.now(timezone.utc)
+
+            # If setlimit is supported on this SQLite build, restrict variable limit to 999
+            if hasattr(repo.connection, "setlimit") and hasattr(sqlite3, "SQLITE_LIMIT_VARIABLE_NUMBER"):
+                repo.connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+            # Populate rows
+            for i in range(50):
+                row, _ = repo.accept(JobSubmission(
+                    "test", temp, "p", "local", f"lim-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-lim-{i}",
+                ))
+                repo.transition(row["job_id"], "running")
+                repo.transition(row["job_id"], "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=i)).isoformat().replace("+00:00", "Z")
+                repo.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, row["job_id"]))
+
+            # list_retention_candidates must execute safely without OperationalError
+            cands = repo.list_retention_candidates(limit=20)
+            self.assertEqual(len(cands), 20)
+            repo.close()
+
+    def test_job_retention_cli_missing_or_invalid_cursor_semantics(self):
+        """Unknown or invalid cursor fails with clean validation error without crashing registry."""
+        from tests.subprocess_support import run_test_process
+        from sandbox.jobs.registry import JobRepository
+
+        with tempfile.TemporaryDirectory() as temp:
+            rt = Path(temp) / "runtime"
+            (rt / "jobs").mkdir(parents=True)
+            db_path = rt / "jobs" / "registry.sqlite3"
+            repo = JobRepository(db_path)
+            repo.close()
+
+            # Non-existent cursor
+            p = run_test_process(
+                [sys.executable, "-m", "sandbox.cli", "job-retention", "--json", "--cursor", "0" * 32],
+                env={"SANDBOX_RUNTIME": str(rt)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(p.returncode, 0)
+

@@ -362,6 +362,8 @@ def configure_reconcile_parser(parser) -> None:
 def configure_retention_parser(parser) -> None:
     parser.add_argument("--retention-days", type=int, default=7)
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--cursor", dest="cursor_job_id", default=None,
+                        help="job ID cursor to paginate retention sweep")
     parser.add_argument("--storage-pressure", action="store_true",
                         help="reclaim oldest terminal data only when below the disk reserve")
     parser.add_argument("--json", action="store_true")
@@ -1001,11 +1003,14 @@ def cmd_declared_test_plan(_cfg, args) -> None:
 def cmd_job_retention(_cfg, args) -> None:
     result = durable_job_dependencies()["job_service"].retention_sweep(
         retention_days=args.retention_days, limit=args.limit,
-        storage_pressure=args.storage_pressure)
+        storage_pressure=args.storage_pressure,
+        cursor_job_id=getattr(args, "cursor_job_id", None))
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
-        print(f"cleaned={len(result['cleaned'])} retention_days={result['retention_days']}")
+        cursor_part = f" cursor={result.get('cursor')}" if result.get("cursor") else ""
+        truncated_part = " truncated=true" if result.get("truncated") else ""
+        print(f"cleaned={len(result['cleaned'])} retention_days={result['retention_days']}{cursor_part}{truncated_part}")
 
 
 def cmd_job_matrix(_cfg, args) -> None:

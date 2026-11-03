@@ -341,6 +341,30 @@ os._exit(0)
             with self.subTest(argv=argv, env=env, timeout=timeout), self.assertRaises(ValueError):
                 runner.run(argv, env=env, timeout=timeout)
 
+    def test_child_does_not_inherit_stdin(self):
+        saved_stdin = os.dup(0)
+
+        def _restore_stdin():
+            os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+
+        self.addCleanup(_restore_stdin)
+        r_fd, w_fd = os.pipe()
+        try:
+            os.write(w_fd, b"line-1\nline-2\n")
+        finally:
+            os.close(w_fd)
+        os.dup2(r_fd, 0)
+        os.close(r_fd)
+
+        runner = BoundedProcessRunner()
+        result = runner.run([
+            sys.executable, "-c", "import sys; print(len(sys.stdin.read()))",
+        ], timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "0")
+        self.assertEqual(os.read(0, 100), b"line-1\nline-2\n")
+
 
 if __name__ == "__main__":
     unittest.main()

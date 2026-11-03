@@ -1027,9 +1027,12 @@ def ssh_process(remote_or_target, command: str, *, input_data=None,
     # A timeout is ambiguous: the remote command may still be running after the
     # local SSH client is terminated. Never replay it automatically, because a
     # second launch can race a stateful operation such as `sb ensure`.
+    # With no input, the child must not read the caller's stdin: ssh would swallow
+    # the rest of a `while read` loop around this command.
+    stdin = {} if input_data is not None else {"stdin": subprocess.DEVNULL}
     return subprocess.run(
         args, input=input_data, capture_output=True, text=is_text,
-        timeout=timeout, check=False,
+        timeout=timeout, check=False, **stdin,
     )
 
 

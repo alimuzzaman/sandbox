@@ -497,6 +497,36 @@ class TestSshRun(unittest.TestCase):
         self.assertNotIn("ubuntu@1.2.3.4", error)
         self.assertIn("[redacted SSH target]", error)
 
+    def test_ssh_process_without_input_does_not_read_caller_stdin(self):
+        saved_stdin = os.dup(0)
+
+        def _restore_stdin():
+            os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+
+        self.addCleanup(_restore_stdin)
+        r_fd, w_fd = os.pipe()
+        try:
+            os.write(w_fd, b"line-1\nline-2\n")
+        finally:
+            os.close(w_fd)
+        os.dup2(r_fd, 0)
+        os.close(r_fd)
+
+        cmd = [sys.executable, "-c", "import sys; print(len(sys.stdin.read()))"]
+        with patch.object(sr, "ssh_command_args", return_value=cmd):
+            result = sr.ssh_process({"ssh": "u@h"}, "true", timeout=10)
+
+        self.assertEqual(result.stdout.strip(), "0")
+        self.assertEqual(os.read(0, 100), b"line-1\nline-2\n")
+
+    def test_ssh_process_with_input_still_sends_it(self):
+        cmd = [sys.executable, "-c", "import sys; print(len(sys.stdin.read()))"]
+        with patch.object(sr, "ssh_command_args", return_value=cmd):
+            result = sr.ssh_process({"ssh": "u@h"}, "true", input_data="abc", timeout=10)
+
+        self.assertEqual(result.stdout.strip(), "3")
+
 
 class TestSafeRemoteDiagnostics(unittest.TestCase):
     def test_redacts_both_openssh_host_port_messages(self):

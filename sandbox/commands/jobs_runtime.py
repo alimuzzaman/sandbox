@@ -1146,18 +1146,24 @@ def cmd_job_matrix(_cfg, args) -> None:
         for child in result["children"]: print(child["job_id"])
 
 
+def _remote_control_predispatch(args) -> bool:
+    """A --remote control command needs no local Compose files or legacy env, and it
+    must keep working when the local disk is full, because that is when it is needed."""
+    return bool(getattr(args, "remote", None))
+
+
 register_specs((
     CommandSpec("job-start", cmd_job_start, configure=configure_start_parser, owner=__name__, scope="global"),
-    CommandSpec("job-status", cmd_job_status, configure=configure_status_parser, owner=__name__, scope="global"),
-    CommandSpec("job-output", cmd_job_output, configure=configure_output_parser, owner=__name__, scope="global"),
-    CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global"),
-    CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
-    CommandSpec("job-retry", cmd_job_retry, configure=configure_retry_parser, owner=__name__, scope="global"),
-    CommandSpec("job-cleanup", cmd_job_cleanup, configure=configure_cleanup_parser, owner=__name__, scope="global"),
-    CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global"),
-    CommandSpec("job-artifacts", cmd_job_artifacts, configure=configure_artifacts_parser, owner=__name__, scope="global"),
-    CommandSpec("job-artifact-get", cmd_job_artifact_get, configure=configure_artifact_get_parser, owner=__name__, scope="global"),
-    CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global"),
+    CommandSpec("job-status", cmd_job_status, configure=configure_status_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-output", cmd_job_output, configure=configure_output_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-retry", cmd_job_retry, configure=configure_retry_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-cleanup", cmd_job_cleanup, configure=configure_cleanup_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-artifacts", cmd_job_artifacts, configure=configure_artifacts_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-artifact-get", cmd_job_artifact_get, configure=configure_artifact_get_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
     CommandSpec("job-retention", cmd_job_retention, configure=configure_retention_parser, owner=__name__, scope="global"),
     CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),
 ))

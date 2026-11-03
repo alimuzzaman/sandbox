@@ -389,6 +389,75 @@ class TestResolutionGate(unittest.TestCase):
         auto_migrate.assert_not_called()
         finalize.assert_not_called()
 
+    def test_remote_job_control_skips_local_writes_and_survives_a_full_disk(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        cases = [
+            ("job-list", ["sb", "job-list", "--remote", "prod"]),
+            ("job-status", ["sb", "job-status", "0123456789abcdef", "--remote", "prod"]),
+            ("job-cleanup", ["sb", "job-cleanup", "0123456789abcdef", "--remote", "prod"]),
+            ("job-reconcile", ["sb", "job-reconcile", "--remote", "prod"]),
+        ]
+        for cmd_name, argv in cases:
+            with self.subTest(command=cmd_name):
+                observed = []
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch.object(cli, "COMMANDS", {
+                            cmd_name: lambda cfg, args: observed.append((cfg, args)),
+                        }), \
+                        mock.patch.object(cli, "load_config", return_value={}), \
+                        mock.patch.object(cli, "resolve_instances", return_value={}), \
+                        mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                        mock.patch.object(cli, "write_compose_files",
+                                          side_effect=OSError(28, "No space left on device")) as compose, \
+                        mock.patch.object(cli, "write_env_for_compose",
+                                          side_effect=OSError(28, "No space left on device")) as env, \
+                        mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                        mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+                    cli.main()
+
+                self.assertEqual(len(observed), 1)
+                compose.assert_not_called()
+                env.assert_not_called()
+                auto_migrate.assert_not_called()
+                finalize.assert_not_called()
+
+    def test_local_job_control_keeps_its_predispatch(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        with mock.patch.object(sys, "argv", ["sb", "job-list"]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "job-list": lambda cfg, args: observed.append((cfg, args)),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env, \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False):
+            cli.main()
+
+        self.assertEqual(len(observed), 1)
+        compose.assert_called_once()
+        env.assert_called_once()
+
+    def test_job_start_keeps_its_predispatch(self):
+        from sandbox.commands.manifest import load_builtin_commands
+        from sandbox.registry import COMMAND_SPECS
+
+        load_builtin_commands()
+        job_start = COMMAND_SPECS.get("job-start")
+        self.assertIsNotNone(job_start)
+        self.assertIsNone(job_start.predispatch_policy)
+
+        job_matrix = COMMAND_SPECS.get("job-matrix")
+        self.assertIsNotNone(job_matrix)
+        self.assertIsNone(job_matrix.predispatch_policy)
+
     def test_archive_plugin_check_skips_global_writes_before_handler(self):
         """Archive mode owns its run-local lifecycle from the first dispatch."""
         import sandbox.cli as cli

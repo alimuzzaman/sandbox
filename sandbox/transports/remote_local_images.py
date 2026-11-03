@@ -463,6 +463,36 @@ def _reconcile_reservations(entry: dict, receipt: dict, *, timeout: float = 30) 
     return json.loads(output) == {"safe": True}
 
 
+def inspect_storage(remote_name: str, *, receipt_path_value=None, project=None, environment=None) -> dict:
+    """Read storage admission without leases, reservations, or Docker mutations."""
+    from sandbox.resources.storage_floor import remote_storage_floor_inspection
+    entry = _entry(remote_name)
+    archive_bytes = None
+    multiplier = 3
+    if receipt_path_value is not None:
+        receipt, _ = local_images.load_receipt(receipt_path_value)
+        if ((project is not None and project != receipt["project"])
+                or (environment is not None and environment != receipt["environment"])):
+            raise RemoteLocalImageError("local_images_target_mismatch")
+        project = receipt["project"]
+        bundle = receipt["schema"] == local_images.RECEIPT_SCHEMA_V2
+        archive_bytes = sum(item["archive_bytes"] for item in
+                            receipt["bundles" if bundle else "artifacts"].values())
+        multiplier = 3 if bundle else 2
+    if not isinstance(project, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project) is None:
+        raise RemoteLocalImageError("local_images_receipt_invalid")
+    if multiplier == 2 and entry.get("storage_floor_gb") in (None, 0):
+        return remote_storage_floor_inspection(entry, "", archive_bytes=archive_bytes, multiplier=multiplier)
+    try:
+        home = _remote.resolve_sandbox_home(entry)
+    except (RuntimeError, FileNotFoundError, _remote.RemoteHomeResolutionTimeout, ValueError):
+        raise RemoteLocalImageError("local_images_remote_unavailable") from None
+    if not isinstance(home, str) or not home.startswith("/"):
+        raise RemoteLocalImageError("local_images_remote_unavailable")
+    return remote_storage_floor_inspection(entry, posixpath.join(home, "deploy-src", project),
+                                           archive_bytes=archive_bytes, multiplier=multiplier)
+
+
 def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
                        timeout: float = 60, before_write=None) -> str | None:
     """Reserve remote storage before image upload."""

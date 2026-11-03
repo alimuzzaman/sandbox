@@ -78,8 +78,12 @@ def _bounded_call(callback):
     handler has returned, so neither ``__context__`` nor ``__cause__`` can point
     back to the original exception or its frame locals.
     """
+    from sandbox.application.context import ProjectRootNotAllowedError
     try:
         return callback(), None
+    except ProjectRootNotAllowedError:
+        public = ("project_root_not_allowed", "project context is outside the allowed roots", False,
+                  "Run from an allowed project checkout or configure its approved parent in SANDBOX_PROJECT_ROOTS, then retry with the same --project-dir.")
     except SecretBrokerError as exc:
         public = (exc.code, exc.message, exc.retryable, exc.remedy)
     except Exception:
@@ -87,6 +91,22 @@ def _bounded_call(callback):
     return None, SecretBrokerError(
         public[0], public[1], retryable=public[2], remedy=public[3],
     )
+
+
+def validate_secret_project_context(root):
+    from sandbox.application.context import validate_project_root
+    _, error = _bounded_call(lambda: validate_project_root(root))
+    if error is not None:
+        raise error
+    return {"ok": True, "operation": "project_context", "allowed": True}
+
+
+def load_secret_project_descriptor(root):
+    from sandbox.application.context import load_project_descriptor
+    result, error = _bounded_call(lambda: load_project_descriptor(root))
+    if error is not None:
+        raise error
+    return result
 
 
 class SecretService:

@@ -855,3 +855,37 @@ class SecretSessionCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ProjectContextCommandTests(unittest.TestCase):
+    def test_source_info_denial_prints_fixed_remedy_without_denied_path(self):
+        import argparse
+        from sandbox.application.context import ProjectRootNotAllowedError
+        parser = argparse.ArgumentParser()
+        command.configure_parser(parser)
+        args = parser.parse_args(['source-info', '--source', 'personal', '--project-dir', '/denied/private', '--json'])
+        out = io.StringIO()
+        with patch('sandbox.application.context.load_project_descriptor', side_effect=ProjectRootNotAllowedError('/denied/private SYNTHETIC_VALUE')), redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                command.cmd_secrets({}, args)
+        value = json.loads(out.getvalue())
+        self.assertEqual(value['error']['code'], 'project_root_not_allowed')
+        self.assertIn('SANDBOX_PROJECT_ROOTS', value['error']['remedy'])
+        self.assertNotIn('/denied', out.getvalue())
+        self.assertNotIn('SYNTHETIC_VALUE', out.getvalue())
+
+class ProspectiveProjectContextTests(unittest.TestCase):
+    def test_context_check_requires_no_descriptor_or_source_file(self):
+        import argparse
+        import sandbox_core as sc
+        parser = argparse.ArgumentParser()
+        command.configure_parser(parser)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'not-created'
+            args = parser.parse_args(['project-context', '--project-dir', str(root), '--json'])
+            output = io.StringIO()
+            with patch.object(sc, '_allowed_roots', return_value=[Path(tmp)]), \
+                 patch.object(command, '_service', side_effect=AssertionError('no secret service')), redirect_stdout(output):
+                command.cmd_secrets({}, args)
+            self.assertEqual(json.loads(output.getvalue()), {'ok': True, 'operation': 'project_context', 'allowed': True})
+            self.assertFalse(root.exists())
+            self.assertNotIn(str(root), output.getvalue())

@@ -71,10 +71,24 @@ class ApplicationDependencies:
     clock: Any | None = None
 
 
+class ProjectRootNotAllowedError(ValueError):
+    """Policy refused the project context; its path is intentionally omitted."""
+
+
+def validate_project_root(project_dir: str | Path) -> Path:
+    """Validate an existing or prospective context without loading configuration."""
+    import sandbox_core as sc
+    root = Path(project_dir).expanduser().resolve()
+    if not sc._is_allowed(root):
+        raise ProjectRootNotAllowedError("project root is not allowed")
+    return root
+
+
 def load_project_descriptor(project_dir: str | Path) -> dict:
     """Load one normalized project descriptor behind the composition seam."""
     import sandbox_core as sc
-    return sc.load_project_config(str(Path(project_dir).expanduser().resolve()))
+    root = validate_project_root(project_dir)
+    return sc.load_project_config(str(root))
 
 
 def runtime_neutral_dependencies(

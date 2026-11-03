@@ -2450,13 +2450,40 @@ class WorkspaceService:
                     not isinstance(expected_size, int)):
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift", "workspace artifact proof changed")
-            _unlink_verified_artifact(
-                artifact, authority.get("artifact_digest"), expected_size)
-            repo.mark_lifecycle(
-                workspace_id, record.lifecycle, status=record.status,
-                metadata={"ci_materialization_retired": True},
-            )
-            return True
+            # Absence alone proves nothing: an unmounted volume leaves an empty
+            # mountpoint. Record the attempt while the archive is present; only a
+            # recorded attempt lets a later absence count as retired. Any other
+            # observation falls through to verification and stays a refusal.
+            attempted = bool(record.metadata.get("ci_materialization_retiring", False))
+            exists = absent = False
+            try:
+                artifact.lstat()
+                exists = True
+            except FileNotFoundError:
+                absent = True
+            except OSError:
+                pass
+            missing = absent and attempted and artifact_root.is_dir()
+            if not missing:
+                if exists and not attempted:
+                    repo.mark_lifecycle(
+                        workspace_id, record.lifecycle, status=record.status,
+                        metadata={"ci_materialization_retiring": True},
+                    )
+                _unlink_verified_artifact(
+                    artifact, authority.get("artifact_digest"), expected_size)
+            try:
+                repo.mark_lifecycle(
+                    workspace_id, record.lifecycle, status=record.status,
+                    metadata={"ci_materialization_retired": True},
+                )
+            except Exception:
+                # The archive is gone only if this call removed it: report that
+                # and let the next retirement record it. With nothing removed
+                # here, the failure stays visible.
+                if missing:
+                    raise
+            return not missing
 
     def _release_terminal_job_without_journal(self, job: dict, job_repository) -> dict[str, Any]:
         """Attempt fail-closed disposal of one exact terminal CI checkout."""

@@ -494,7 +494,12 @@ free-space reserve; it does not accumulate a new archive per
 attempt. The ownership projection reports its retained byte count, and explicit/age or
 pressure cleanup requests retirement of the exact digest-verified archive. Restore hashes,
 sizes, and extracts one open archive identity. Where identity-bound removal is unavailable,
-retirement fails closed without unlinking or marking the archive retired. A path
+retirement fails closed without unlinking or marking the archive retired. Retirement records
+its attempt while the archive is present. If the archive is removed but recording
+that fails, the result still lists it and the job stays `retained`; a later cleanup
+records the retirement once the registry accepts the write. An archive missing with
+no recorded attempt keeps refusing, because an unmounted volume looks the same, and
+it needs an operator's review. A path
 replacement fails closed and a failed restore removes staging without publishing a checkout.
 Generic jobs, reusable/index/legacy
 workspaces, `retain`, failed `on-success`, missing authority, unknown observations,
@@ -519,7 +524,7 @@ job ID cursor intentionally does not enforce policy options across calls; mainta
 no-op prefix. The envelope explicitly returns `"ok"`
 (truthfully reflecting whether all attempted candidate cleanups succeeded), `"cursor"`
 (string or null), `"limit"` (integer), and `"truncated"` (boolean) to support
-deterministic cross-process continuation (control protocol 20; includes additive read shape verification on cleanup state kind and sweep candidate outcomes).
+deterministic cross-process continuation (control protocol 21; includes additive read shape verification on cleanup state kind and sweep candidate outcomes).
 If the host is below its configured free-disk reserve, use
 `./sb job-retention --storage-pressure --json`; only the oldest terminal jobs
 are reclaimed until pressure clears. Active jobs and retained failed workspaces

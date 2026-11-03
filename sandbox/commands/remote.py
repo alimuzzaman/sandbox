@@ -967,7 +967,7 @@ def _cmd_service(args, as_json: bool) -> None:
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
     if as_json:
         print(json.dumps(payload))
-        if operation == "status" and not payload["ok"]:
+        if operation in ("status", "capability") and not payload["ok"]:
             raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")

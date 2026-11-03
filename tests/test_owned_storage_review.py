@@ -6,6 +6,7 @@ import datetime
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.owned_storage_lifecycle.models import (
@@ -19,7 +20,7 @@ from sandbox.owned_storage_lifecycle.models import (
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import (
-from sandbox.owned_storage_lifecycle.repository import LifecycleError
+    LifecycleError,
     StorageAuthorityLifecycleRepository,
 )
 from sandbox.owned_storage_lifecycle.service import (
@@ -466,17 +467,19 @@ class TestOwnedStorageReview(unittest.TestCase):
                 self.assertIsNone(self._check(self._state(**overrides))[0])
 
     def test_expiry_is_judged_after_the_state_read(self):
-        self._record_chain()
-        real = self.lifecycle_repo.load_state
+        """The clock before the read is before expiry; the clock after it is past expiry."""
+        start = datetime.datetime.now(datetime.timezone.utc)
+        self._record_chain(expires_at=(start + datetime.timedelta(hours=1)).isoformat())
+        ticks = [start, start + datetime.timedelta(hours=2)]
 
-        def expires_while_waiting_for_the_lock():
-            state = real()
-            state["promotions"]["prom_1"]["expires_at"] = (
-                datetime.datetime.now(datetime.timezone.utc).isoformat())
-            return state
+        class SteppedClock(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return ticks.pop(0) if len(ticks) > 1 else ticks[0]
 
-        with patch.object(self.lifecycle_repo, "load_state",
-                          side_effect=expires_while_waiting_for_the_lock):
+        clock = SimpleNamespace(datetime=SteppedClock, timezone=datetime.timezone,
+                                timedelta=datetime.timedelta)
+        with patch("sandbox.owned_storage_lifecycle.service.datetime", clock):
             report = self._evaluate()
         self.assertFalse(report["adoptable"])
         self.assertEqual(report["reason_code"], "authority_expired")

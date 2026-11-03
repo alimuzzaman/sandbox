@@ -8,10 +8,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
-- Storage authority capability evaluation only reports `proven` through a complete acceptance whose
-  promotion names the requested remote, the same binding and both observed revisions, and is unexpired
-  and unrevoked. Repeated revision drift stays refused, and a caller that observed nothing reports
-  `unknown` checks.
+- Storage authority capability evaluation only reports `proven` through a
+  complete acceptance whose promotion names the requested remote, the same
+  binding and both observed revisions, and is unexpired and unrevoked. Malformed
+  values never prove anything, and a revocation that lands during an evaluation
+  is not missed. Checks report `unknown` unless the chain proves them, and
+  `human_review` always reports `unknown`.
 - Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only
   `main` rule, `specs/README.md` indexes specs 066-069, and release guidance no longer
   requires the `app.py` helper namespace.

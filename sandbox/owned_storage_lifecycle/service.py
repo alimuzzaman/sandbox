@@ -16,6 +16,7 @@ from sandbox.owned_storage_lifecycle.models import (
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import (
+    LifecycleCASError,
     LifecycleError,
     StorageAuthorityLifecycleRepository,
 )
@@ -31,9 +32,11 @@ def utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-# The default when a caller observed nothing. It must never prove anything. The value
-# stays "rev_installed" so already-recorded capabilities do not read as drifted.
-UNOBSERVED_REVISION = "rev_installed"
+MAX_EVALUATION_ATTEMPTS = 3
+
+
+def _text(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _authority_check(state, remote_identity, service_revision, source_revision, now):
@@ -43,24 +46,27 @@ def _authority_check(state, remote_identity, service_revision, source_revision, 
     supported adoptable promotion, the same binding, unexpired, unrevoked, and both
     observed revisions. Missing or malformed data never proves anything.
     """
-    observed = service_revision != UNOBSERVED_REVISION and bool(source_revision)
+    observed = _text(service_revision) and _text(source_revision)
     promotions = state.get("promotions", {})
-    revocations = state.get("revocations", {}).values()
+    revocations = list(state.get("revocations", {}).values())
     reasons = set()
     for acceptance in state.get("acceptances", {}).values():
-        if acceptance.get("outcome") != AcceptanceOutcome.COMPLETE.value:
+        if (not isinstance(acceptance, dict)
+                or acceptance.get("outcome") != AcceptanceOutcome.COMPLETE.value):
             continue
         promotion = promotions.get(acceptance.get("promotion_id"))
         if not isinstance(promotion, dict) or promotion.get("remote_identity") != remote_identity:
             continue
-        if (promotion.get("authority_binding_id") != acceptance.get("authority_binding_id")
+        binding = promotion.get("authority_binding_id")
+        if (not _text(binding) or binding != acceptance.get("authority_binding_id")
                 or promotion.get("phase") != PromotionPhase.SUPPORTED.value
                 or promotion.get("adoptable") is not True):
             reasons.add("authority_binding_mismatch")
             continue
-        if any(item.get("remote_identity") == remote_identity
-               and (item.get("promotion_id") == promotion.get("promotion_id")
-                    or item.get("authority_binding_id") == promotion.get("authority_binding_id"))
+        if any(not isinstance(item, dict)
+               or (item.get("remote_identity") == remote_identity
+                   and (item.get("promotion_id") == promotion.get("promotion_id")
+                        or item.get("authority_binding_id") == binding))
                for item in revocations):
             reasons.add("authority_revoked")
             continue
@@ -69,7 +75,9 @@ def _authority_check(state, remote_identity, service_revision, source_revision, 
             continue
         if not observed:
             continue
-        if (promotion.get("service_revision") != service_revision
+        if (not _text(promotion.get("service_revision"))
+                or not _text(promotion.get("source_revision"))
+                or promotion.get("service_revision") != service_revision
                 or promotion.get("source_revision") != source_revision):
             reasons.add("authority_revision_mismatch")
             continue
@@ -100,7 +108,27 @@ class AuthorityLifecycleService:
         *,
         remote_identity: str,
         platform_mode: str = "ubuntu-24.04-systemd-255-private-root-v1",
-        service_revision: str = UNOBSERVED_REVISION,
+        service_revision: Optional[str] = None,
+        source_revision: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        for _ in range(MAX_EVALUATION_ATTEMPTS):
+            try:
+                return self._evaluate_once(
+                    remote_identity=remote_identity, platform_mode=platform_mode,
+                    service_revision=service_revision, source_revision=source_revision)
+            except LifecycleCASError:
+                # State changed after the decision was made (possibly a revocation).
+                # Never report a decision taken from stale state: decide again.
+                continue
+        raise LifecycleServiceError(
+            "storage authority state kept changing during evaluation", code="authority_unavailable")
+
+    def _evaluate_once(
+        self,
+        *,
+        remote_identity: str,
+        platform_mode: str = "ubuntu-24.04-systemd-255-private-root-v1",
+        service_revision: Optional[str] = None,
         source_revision: Optional[str] = None,
     ) -> Dict[str, Any]:
         now_dt = datetime.datetime.now(datetime.timezone.utc)
@@ -156,20 +184,16 @@ class AuthorityLifecycleService:
             }
 
         state = self.repository.load_state()
+        snapshot_generation = state.get("generation", 0)
         completed_acc, reason_code = _authority_check(
             state, remote_identity, service_revision, source_revision, now_dt)
-        existing_cap = self.repository.get_capability(remote_identity)
-        changed = (existing_cap is not None
-                   and service_revision != UNOBSERVED_REVISION
-                   and existing_cap.service_revision != service_revision)
         if completed_acc is not None:
             support_tier = SupportTier.PROVEN
             adoptable = True
             acceptance_state = AcceptanceState.COMPLETE
-        elif reason_code == "authority_revision_mismatch" or changed:
+        elif reason_code == "authority_revision_mismatch":
             support_tier = SupportTier.DRIFTED
             adoptable = False
-            reason_code = "authority_revision_mismatch"
             acceptance_state = AcceptanceState.FAILED
         elif reason_code == "implemented_unproven":
             support_tier = SupportTier.IMPLEMENTED_UNPROVEN
@@ -180,28 +204,21 @@ class AuthorityLifecycleService:
             adoptable = False
             acceptance_state = AcceptanceState.FAILED
 
-        checks = {
-            "dedicated_identity": "pass",
-            "private_root": "pass",
-            "caller_non_mutation": "pass",
-            "canonical_peer_auth": "pass",
-            "controller_process_identity": "pass",
-            "mount_controller_identity": "pass",
-            "descriptor_only_mount_channel": "pass",
-            "no_arbitrary_path_protocol": "pass",
-            "no_replace_publication": "pass",
-            "durable_restart_recovery": "pass",
-            "private_workload_mount": "pass",
-            "read_only_generation_mount": "pass",
-            "active_reference_observation": "pass",
-            "identity_bound_final_removal": "pass",
-            "bounded_secret_free_evidence": "pass",
-            "packaging_revision_parity": "pass" if support_tier != SupportTier.DRIFTED else "fail",
-            "human_review": "pass" if support_tier == SupportTier.PROVEN else "unknown",
-        }
-        if service_revision == UNOBSERVED_REVISION:
-            # Nothing was observed, so no primitive can be reported as passing.
-            checks = {name: "unknown" for name in checks}
+        # Nothing here observes these primitives, so only a proven chain may vouch for them.
+        check_state = "pass" if support_tier == SupportTier.PROVEN else "unknown"
+        checks = {name: check_state for name in (
+            "dedicated_identity", "private_root", "caller_non_mutation", "canonical_peer_auth",
+            "controller_process_identity", "mount_controller_identity",
+            "descriptor_only_mount_channel", "no_arbitrary_path_protocol",
+            "no_replace_publication", "durable_restart_recovery", "private_workload_mount",
+            "read_only_generation_mount", "active_reference_observation",
+            "identity_bound_final_removal", "bounded_secret_free_evidence",
+            "packaging_revision_parity",
+        )}
+        if support_tier == SupportTier.DRIFTED:
+            checks["packaging_revision_parity"] = "fail"
+        # No review decision is inspected here.
+        checks["human_review"] = "unknown"
 
         cap_record = AuthorityCapability(
             capability_id="owned-storage-authority-v1",
@@ -224,8 +241,7 @@ class AuthorityLifecycleService:
             binding_generation=completed_acc.get("lifecycle_generation") if completed_acc else None,
         )
 
-        cur_gen = self.repository.get_generation()
-        self.repository.save_capability(cap_record, expected_generation=cur_gen)
+        self.repository.save_capability(cap_record, expected_generation=snapshot_generation)
 
         return {
             "ok": True,

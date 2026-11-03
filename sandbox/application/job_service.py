@@ -1278,28 +1278,37 @@ class JobService:
         directory = self.storage.job_dir(job_id)
         removed = []
         workspace_cleanup_pending = False
+        workspace_cleanup_failed = False
+        retired_materialization = False
+        # Retire the materialization before deleting anything: if retirement
+        # refuses, the job's files stay in place and nothing is reported removed.
+        if (artifacts and self.workspace_registry is not None and
+                hasattr(self.workspace_registry, "retire_terminal_materialization") and
+                (not hasattr(self.workspace_registry, "has_retained_materialization") or
+                 self.workspace_registry.has_retained_materialization(state))):
+            retired_materialization = self.workspace_registry.retire_terminal_materialization(state)
         if logs:
             output = directory / "output"
             if output.exists(): shutil.rmtree(output); removed.append("logs")
         if artifacts:
             artifact_dir = directory / "artifacts"
             if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
-            if (self.workspace_registry is not None and
-                    hasattr(self.workspace_registry, "retire_terminal_materialization") and
-                    (not hasattr(self.workspace_registry, "has_retained_materialization") or
-                     self.workspace_registry.has_retained_materialization(state))):
-                if self.workspace_registry.retire_terminal_materialization(state):
-                    removed.append("workspace_materialization")
+            if retired_materialization:
+                removed.append("workspace_materialization")
             if (self.workspace_registry is not None and
                     hasattr(self.workspace_registry, "release_terminal_job") and
+                    state.get("kind") == "ci" and
                     state.get("cleanup_state") != "completed"):
                 try:
                     rel_res = self.workspace_registry.release_terminal_job(state, self.repository)
-                    if rel_res.get("ok"):
-                        removed.append("workspace_cleanup")
                     from sandbox.resources.ci_teardown import cleanup_completed
+                    if cleanup_completed(rel_res):
+                        removed.append("workspace_cleanup")
+                    elif not (isinstance(rel_res, dict) and rel_res.get("ok") is True):
+                        workspace_cleanup_failed = True
                     workspace_cleanup_pending = not cleanup_completed(rel_res)
                 except Exception:
+                    workspace_cleanup_failed = True
                     workspace_cleanup_pending = True
 
         if metrics:
@@ -1317,13 +1326,18 @@ class JobService:
         self.repository.mark_retained_metadata_unavailable(
             job_id, logs=logs, artifacts=artifacts, metrics=metrics)
         remaining = any((directory / name).exists() for name in ("output", "artifacts", "metrics", "metrics.jsonl"))
-        if (self.workspace_registry is not None and
+        if (not remaining and self.workspace_registry is not None and
                 hasattr(self.workspace_registry, "has_retained_materialization")):
-            remaining = (remaining or
-                         self.workspace_registry.has_retained_materialization(state))
+            try:
+                remaining = self.workspace_registry.has_retained_materialization(state)
+            except Exception:
+                # Files may already be gone, so report what was removed and
+                # treat the unobservable materialization as still retained.
+                remaining = True
+                workspace_cleanup_failed = True
         cleanup_state = "retained" if remaining or workspace_cleanup_pending else "completed"
         self.repository.set_cleanup_state(job_id, cleanup_state)
-        return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
+        return {"ok": not workspace_cleanup_failed, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
 
     def retention_sweep(self, *, retention_days: int = 7, limit: int = 200,
                         storage_pressure: bool = False,
@@ -1335,6 +1349,7 @@ class JobService:
             raise ValueError("limit must be a positive whole number")
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         cleaned = []
+        sweep_ok = True
         if storage_pressure and not self.storage.is_under_pressure():
             storage_pressure = False
         before_finished_at = None if storage_pressure else cutoff.isoformat().replace("+00:00", "Z")
@@ -1380,16 +1395,40 @@ class JobService:
                     # Skip future/anomalous row and continue scanning.
                     continue
 
-                retained_materialization = (
-                    self.workspace_registry is not None and
-                    hasattr(self.workspace_registry, "has_retained_materialization") and
-                    self.workspace_registry.has_retained_materialization(row)
-                )
-                if ((storage_pressure or finished is None or finished <= cutoff) and
+                retained_materialization = False
+                materialization_error = False
+                if (self.workspace_registry is not None and
+                        hasattr(self.workspace_registry, "has_retained_materialization")):
+                    try:
+                        retained_materialization = self.workspace_registry.has_retained_materialization(row)
+                    except Exception:
+                        materialization_error = True
+
+                if materialization_error:
+                    sweep_ok = False
+                    cleaned.append({
+                        "cleanup_state": "retained",
+                        "job_id": row["job_id"],
+                        "ok": False,
+                        "removed": [],
+                    })
+                elif ((storage_pressure or finished is None or finished <= cutoff) and
                         (row.get("cleanup_state") != "completed" or
                          retained_materialization)):
-                    outcome = self.cleanup(row["job_id"])
-                    if outcome.get("removed") or outcome.get("cleanup_state") == "completed":
+                    try:
+                        outcome = self.cleanup(row["job_id"])
+                    except Exception:
+                        sweep_ok = False
+                        outcome = {
+                            "cleanup_state": "retained",
+                            "job_id": row["job_id"],
+                            "ok": False,
+                            "removed": [],
+                        }
+                    else:
+                        if not outcome.get("ok", True):
+                            sweep_ok = False
+                    if outcome.get("removed") or not outcome.get("ok", True):
                         cleaned.append(outcome)
                 if storage_pressure and not self.storage.is_under_pressure():
                     exhausted = True
@@ -1407,7 +1446,7 @@ class JobService:
             out_cursor = None
 
         return {
-            "ok": True,
+            "ok": sweep_ok,
             "retention_days": retention_days,
             "storage_pressure": storage_pressure,
             "cleaned": cleaned,

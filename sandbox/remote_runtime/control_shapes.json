@@ -509,6 +509,7 @@
    "JobService.cancel:return#2={signal_delivery}",
    "JobService.cancel:return={cancelled_children}",
    "JobService.cleanup:read[cleanup_state]",
+   "JobService.cleanup:read[kind]",
    "JobService.cleanup:read[lifecycle]",
    "JobService.cleanup:read[ok]",
    "JobService.cleanup:return={cleanup_state,job_id,ok,removed}",
@@ -570,11 +571,14 @@
    "JobService.reconcile_startup:read[sync_relationship_id]",
    "JobService.reconcile_startup:read[updated_at]",
    "JobService.reconcile_startup:return={interrupted,ok,released_leases}",
+   "JobService.retention_sweep:cleaned.append(0)={cleanup_state,job_id,ok,removed}",
+   "JobService.retention_sweep:outcome={cleanup_state,job_id,ok,removed}",
    "JobService.retention_sweep:read[accepted_at]",
    "JobService.retention_sweep:read[cleanup_state]",
    "JobService.retention_sweep:read[finished_at]",
    "JobService.retention_sweep:read[job_id]",
    "JobService.retention_sweep:read[lifecycle]",
+   "JobService.retention_sweep:read[ok]",
    "JobService.retention_sweep:read[removed]",
    "JobService.retention_sweep:return={cleaned,cursor,limit,ok,retention_days,storage_pressure,truncated}",
    "JobService.retry:read[accepted]",
@@ -4329,5 +4333,5 @@
    "stage"
   ]
  },
- "spoken": 18
+ "spoken": 20
 }

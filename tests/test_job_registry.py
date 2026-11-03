@@ -426,6 +426,47 @@ class JobRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cursor is stale"):
             repo.list_retention_candidates(limit=2, cursor_job_id="f" * 32)
 
+    def test_list_retention_candidates_includes_unindexed_retained_non_ci_terminal_output(self):
+        """Unindexed retained terminal non-CI jobs remain reachable candidates for reclamation."""
+        repo = self.repository()
+        # Old terminal non-CI job in cleanup_state='retained' without stream/artifact/metric index rows
+        old_unindexed, _ = repo.accept(submission("old-unindexed"))
+        repo.transition(old_unindexed["job_id"], "running")
+        repo.transition(old_unindexed["job_id"], "succeeded", exit_code=0)
+        repo.connection.execute(
+            "UPDATE jobs SET finished_at='2026-09-01T10:00:00Z', cleanup_state='retained' WHERE job_id=?",
+            (old_unindexed["job_id"],),
+        )
+
+        # Recent terminal non-CI job
+        recent_unindexed, _ = repo.accept(submission("recent-unindexed"))
+        repo.transition(recent_unindexed["job_id"], "running")
+        repo.transition(recent_unindexed["job_id"], "succeeded", exit_code=0)
+        repo.connection.execute(
+            "UPDATE jobs SET finished_at='2026-11-01T10:00:00Z', cleanup_state='retained' WHERE job_id=?",
+            (recent_unindexed["job_id"],),
+        )
+
+        # Active running job - must never be a candidate
+        active_job, _ = repo.accept(submission("active-running"))
+        repo.transition(active_job["job_id"], "running")
+
+        # Completed non-CI job - excluded
+        completed_job, _ = repo.accept(submission("completed-job"))
+        repo.transition(completed_job["job_id"], "running")
+        repo.transition(completed_job["job_id"], "succeeded", exit_code=0)
+        repo.connection.execute(
+            "UPDATE jobs SET finished_at='2026-08-01T10:00:00Z', cleanup_state='completed' WHERE job_id=?",
+            (completed_job["job_id"],),
+        )
+
+        candidates = repo.list_retention_candidates(limit=10)
+        cand_ids = [c["job_id"] for c in candidates]
+        self.assertIn(old_unindexed["job_id"], cand_ids)
+        self.assertIn(recent_unindexed["job_id"], cand_ids)
+        self.assertNotIn(active_job["job_id"], cand_ids)
+        self.assertNotIn(completed_job["job_id"], cand_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

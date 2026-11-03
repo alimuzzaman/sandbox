@@ -483,10 +483,8 @@ class SessionBoundTests(unittest.TestCase):
                 popen.assert_not_called()
 
     def test_escalating_command_refused_before_launch(self):
-        real = subprocess.Popen
-        calls = []
         with mock.patch.object(self.session.subprocess, "Popen",
-                               side_effect=lambda *a, **k: calls.append(a) or real(*a, **k)):
+                               side_effect=AssertionError("escalating command reached launch")) as popen:
             for argv in (["sudo", "true"], ["/usr/bin/doas", "true"], ["su", "-c", "true"],
                          ["pkexec", "true"], ["run0", "true"], ["sudo-rs", "true"],
                          ["sudoedit", "f"], ["env", "sudo", "true"],
@@ -507,7 +505,7 @@ class SessionBoundTests(unittest.TestCase):
                             argv, secrets={"API_TOKEN": SECRET}, lifetime_seconds=5,
                             display=Sink())
                     self.assertEqual(raised.exception.code, "escalation_unsupported")
-        self.assertEqual(calls, [])
+            popen.assert_not_called()
         # A non-wrapper's ordinary argument is not interpreted as a command.
         result, _sink = self.run_child("import sys; print(sys.argv)")
         self.assertEqual(result.end_reason, "child_exited")

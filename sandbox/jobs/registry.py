@@ -943,6 +943,55 @@ class JobRepository:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_retention_candidates(
+        self,
+        *,
+        limit: int = 50,
+        before_finished_at: str | None = None,
+        cursor_job_id: str | None = None,
+        active_ci_workspace_ids: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Return terminal uncompleted jobs ordered deterministically by oldest finished first."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("job retention candidate limit must be between 1 and 200")
+        values: list[Any] = []
+        clauses = [
+            "lifecycle IN ('succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted')",
+            "finished_at IS NOT NULL",
+            "finished_at != ''",
+            "(cleanup_state != 'completed' OR (kind = 'ci' AND workspace_authority_digest IS NOT NULL))",
+        ]
+        if before_finished_at is not None:
+            clauses.append("finished_at <= ?")
+            values.append(before_finished_at)
+        if cursor_job_id is not None:
+            validate_job_id(cursor_job_id)
+            cursor = self.connection.execute(
+                "SELECT finished_at, accepted_at, job_id FROM jobs WHERE job_id=?",
+                (cursor_job_id,),
+            ).fetchone()
+            if cursor is None:
+                raise ValueError("retention candidate cursor is stale")
+            cursor_finished, cursor_accepted, cursor_jid = cursor[0], cursor[1], cursor[2]
+            if cursor_finished is None or cursor_finished == "":
+                raise ValueError("retention candidate cursor lacks finished timestamp")
+            clauses.append(
+                "(finished_at > ? OR (finished_at = ? AND (accepted_at > ? OR (accepted_at = ? AND job_id > ?))))"
+            )
+            values.extend((
+                cursor_finished,
+                cursor_finished,
+                cursor_accepted,
+                cursor_accepted,
+                cursor_jid,
+            ))
+        where = " WHERE " + " AND ".join(clauses)
+        rows = self.connection.execute(
+            f"SELECT * FROM jobs{where} ORDER BY finished_at ASC, accepted_at ASC, job_id ASC LIMIT ?",
+            (*values, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def children(self, parent_job_id: str) -> list[dict[str, Any]]:
         """Return one parent's children in stable acceptance order."""
         parent_job_id = validate_job_id(parent_job_id)

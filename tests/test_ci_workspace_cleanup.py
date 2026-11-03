@@ -8,11 +8,14 @@ import fcntl
 import os
 import signal
 import shutil
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.subprocess_support import synthetic_environment
 from sandbox.application.job_service import JobService
 from sandbox.application.workspace_service import WorkspaceService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -130,6 +133,18 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
             cleanup_id, workspace_id, authority_digest, encoded_request = args
             request = decode_request(encoded_request)
             config = self.broker_configs[cleanup_id]
+        elif action == "retire-artifact":
+            if not getattr(self, "broker_retire_artifact", False):
+                raise broker.CiCleanupBrokerError("cleanup_broker_unsupported")
+            name, device, inode, digest, size_bytes = args
+            artifact_root = (self.workspace_repository.index_path.parent /
+                             "ci-materializations").resolve()
+            if not artifact_root.exists():
+                artifact_root.mkdir(parents=True, exist_ok=True)
+            config = {"roots": {
+                "artifacts": (artifact_root,
+                              (artifact_root.stat().st_dev, artifact_root.stat().st_ino))
+            }}
         else:
             raise broker.CiCleanupBrokerError("cleanup_broker_unsupported")
 
@@ -151,9 +166,15 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 return broker._resume_checkout(config, os.getuid(), cleanup_id)
             if action == "resume-metadata":
                 return broker._resume_metadata(config, os.getuid(), cleanup_id)
-            return broker._acknowledge_cleanup(
-                config, os.getuid(), cleanup_id, workspace_id,
-                authority_digest, request)
+            if action == "ack-cleanup":
+                return broker._acknowledge_cleanup(
+                    config, os.getuid(), cleanup_id, workspace_id,
+                    authority_digest, request)
+            if action == "retire-artifact":
+                result = broker._retire_artifact(
+                    config, os.getuid(), name,
+                    (int(device), int(inode)), digest, int(size_bytes))
+                return {**result, "reclaimed_bytes": result.get("reclaimed_bytes", int(size_bytes))}
 
     def _fd_path(self, descriptor):
         if sys.platform.startswith("linux"):
@@ -854,34 +875,115 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(row["cleanup_state"], "failed")
         self.assertTrue(checkout.exists())
 
+    def _reap_process_group(self, proc, leader_pid, descendant_pid=None):
+        try:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=2)
+        except (subprocess.TimeoutExpired, ProcessLookupError):
+            pass
+        if descendant_pid is not None:
+            try:
+                if os.getpgid(descendant_pid) == leader_pid:
+                    try:
+                        os.killpg(leader_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(descendant_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+        else:
+            try:
+                os.killpg(leader_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
     def test_background_process_group_blocks_cleanup_after_shell_leader_exits(self):
         checkout = self._checkout("background-group")
-        descriptors = []
-        service = self._service(descriptors.append)
-        submission = self._submission(
-            checkout, request_id="background-group-request")
-        submission = JobSubmission(**{
-            **submission.__dict__,
-            "argv": ("/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 &"),
-        })
-        accepted = service.submit(submission)
-        pgid = None
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="background-group-request"))
+        job_id = accepted["job_id"]
+
+        # run_test_process blocks until process completion and cannot return an active
+        # process handle. Captured Popen with an explicit synthetic environment
+        # is necessary to verify the surviving live process group seam.
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"],
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+            env=synthetic_environment({"PATH": "/bin:/usr/bin"}),
+        )
+        leader_pid = proc.pid
+        descendant_pid = None
         try:
+            out, _ = proc.communicate(timeout=2)
+            descendant_pid = int(out.strip())
+            self.assertEqual(os.getpgid(descendant_pid), leader_pid)
+
+            self.job_repository.transition(job_id, "running")
+            self.job_repository.put_process_identity(
+                job_id, host_boot_id="boot", supervisor_pid=101,
+                supervisor_start_identity="gone-supervisor",
+                supervisor_nonce_hash="nonce", child_pid=leader_pid,
+                child_pgid=leader_pid, child_start_identity="gone-child",
+            )
+            self.job_repository.transition(
+                job_id, "succeeded", exit_code=0)
+
             with patch(
                     "sandbox.application.workspace_service._observe_cleanup_references",
-                    return_value={"containers": 0, "mounts": 0}):
-                run_descriptor(descriptors[0])
-            row = self.job_repository.get(accepted["job_id"])
-            pgid = self.job_repository.snapshot(
-                accepted["job_id"])["process"]["child_pgid"]
+                    return_value={"containers": 0, "mounts": 0}), patch.object(
+                    self.job_repository, "append_event",
+                    wraps=self.job_repository.append_event) as append_event_spy:
+                row = service.get(job_id)
             self.assertEqual(row["cleanup_state"], "failed")
             self.assertTrue(checkout.exists())
+            cleanup_calls = [
+                call for call in append_event_spy.call_args_list
+                if (call.args[1] if len(call.args) > 1 else call.kwargs.get("kind")) == "workspace_cleanup"
+            ]
+            self.assertTrue(cleanup_calls)
+            call_args = cleanup_calls[-1].args
+            call_kwargs = cleanup_calls[-1].kwargs
+            call_job_id = call_args[0] if len(call_args) > 0 else call_kwargs.get("job_id")
+            call_kind = call_args[1] if len(call_args) > 1 else call_kwargs.get("kind")
+            call_payload = call_args[2] if len(call_args) > 2 else call_kwargs.get("payload", {})
+            self.assertEqual(call_job_id, job_id)
+            self.assertEqual(call_kind, "workspace_cleanup")
+            self.assertEqual(call_payload.get("code"), "workspace_busy")
         finally:
-            if pgid:
-                try:
-                    os.killpg(int(pgid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            self._reap_process_group(proc, leader_pid, descendant_pid)
+
+    def test_background_process_group_fixture_reaps_owned_group_on_early_error(self):
+        """Forced early error before try block or assertions properly reaps owned process group."""
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"],
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+            env=synthetic_environment({"PATH": "/bin:/usr/bin"}),
+        )
+        leader_pid = proc.pid
+        descendant_pid = None
+        with self.assertRaisesRegex(RuntimeError, "forced_early_fixture_error"):
+            try:
+                out, _ = proc.communicate(timeout=2)
+                descendant_pid = int(out.strip())
+                self.assertEqual(os.getpgid(descendant_pid), leader_pid)
+                # Forced early error before any simulated CI job state or service assertion
+                raise RuntimeError("forced_early_fixture_error")
+            finally:
+                self._reap_process_group(proc, leader_pid, descendant_pid)
+
+        self.assertIsNotNone(descendant_pid)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(descendant_pid, 0)
 
     def test_owned_child_cgroup_must_be_proven_empty_before_cleanup(self):
         checkout = self._checkout("owned-cgroup")
@@ -1369,9 +1471,8 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         owned = next(item for item in projection
                      if item["workspace_id"] == accepted_row["workspace_id"])
         self.assertEqual(owned["retained_materializations"]["count"], 1)
-        with self.assertRaisesRegex(
-                Exception, "cleanup broker did not prove removal"):
-            service.retention_sweep(retention_days=0)
+        sweep = service.retention_sweep(retention_days=0)
+        self.assertFalse(sweep["ok"])
         self.assertEqual(len(tuple(
             self.workspace_repository.index_path.parent.glob(
                 "ci-materializations/*.tar.gz"))), 1)
@@ -1460,6 +1561,7 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
                 patch.object(self.workspaces, "has_retained_materialization", return_value=False), \
                 patch.object(self.workspaces, "release_terminal_job", side_effect=RuntimeError("stack_teardown_incomplete")):
             result = service.cleanup(accepted["job_id"])
+        self.assertFalse(result["ok"])
         self.assertEqual(result["cleanup_state"], "retained")
         self.assertTrue(checkout.exists())
 
@@ -1478,6 +1580,76 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
 
         self.assertEqual(row["cleanup_state"], "retained")
         self.assertTrue(checkout.exists())
+
+    def test_ci_workspace_cleanup_refuses_drifted_authority_or_locator_without_deleting_sibling(self):
+        """REAL WorkspaceService refuses release on authority or locator drift without touching siblings."""
+        from sandbox.workspaces.repository import WorkspaceIndexError
+
+        self.broker_retire_artifact = True
+        checkout = self._checkout("drifted-ci")
+        sibling_checkout = self._checkout("sibling-ci")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(
+            checkout, request_id="drifted-ci-request"))
+        job_id = accepted["job_id"]
+        self.job_repository.transition(job_id, "running")
+        self.job_repository.transition(job_id, "succeeded", exit_code=0)
+
+        # 1. Authority digest drift: mutate job row's workspace_authority_digest
+        with self.job_repository.transaction(immediate=True) as cx:
+            cx.execute(
+                "UPDATE jobs SET workspace_authority_digest='sha256:driftedauthority000000000000000000000000000000000000000000000000' WHERE job_id=?",
+                (job_id,),
+            )
+
+        # Real WorkspaceService.release_terminal_job directly raises workspace_ownership_drift
+        job_row = self.job_repository.get(job_id)
+        with self.assertRaises(WorkspaceIndexError) as cm:
+            self.workspaces.release_terminal_job(job_row, self.job_repository)
+        self.assertEqual(cm.exception.code, "workspace_ownership_drift")
+
+        # service.cleanup reports incomplete/failed truthfully and leaves row retained
+        result = service.cleanup(job_id)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["cleanup_state"], "retained")
+        self.assertTrue(checkout.exists())
+        self.assertTrue(sibling_checkout.exists())
+
+        # 2. Locator drift: restore job authority digest, but mutate workspace checkout_locator
+        row = self.job_repository.get(job_id)
+        record = self.workspace_repository.get(row["workspace_id"])
+        real_authority_digest = record.metadata["ci_cleanup_authority"]["digest"]
+        with self.job_repository.transaction(immediate=True) as cx:
+            cx.execute(
+                "UPDATE jobs SET workspace_authority_digest=? WHERE job_id=?",
+                (real_authority_digest, job_id),
+            )
+        drifted_meta = dict(record.metadata)
+        drifted_meta["checkout_locator"] = str(self.deploy_root / "different-locator")
+        self.workspace_repository.mark_lifecycle(
+            row["workspace_id"], record.lifecycle, metadata=drifted_meta)
+
+        job_row2 = self.job_repository.get(job_id)
+        with self.assertRaises(WorkspaceIndexError) as cm2:
+            self.workspaces.release_terminal_job(job_row2, self.job_repository)
+        self.assertEqual(cm2.exception.code, "workspace_ownership_drift")
+
+        result2 = service.cleanup(job_id)
+        self.assertFalse(result2["ok"])
+        self.assertEqual(result2["cleanup_state"], "retained")
+        self.assertTrue(checkout.exists())
+        self.assertTrue(sibling_checkout.exists())
+
+        # 3. Positive control: restore valid matching locator and authority
+        drifted_meta["checkout_locator"] = str(checkout)
+        self.workspace_repository.mark_lifecycle(
+            row["workspace_id"], record.lifecycle, metadata=drifted_meta)
+        result3 = service.cleanup(job_id)
+        self.assertTrue(result3["ok"])
+        self.assertIn("workspace_cleanup", result3["removed"])
+        self.assertEqual(result3["cleanup_state"], "completed")
+        self.assertFalse(checkout.exists())
+        self.assertTrue(sibling_checkout.exists())
 
     def test_supported_index_workspace_remains_compatible_and_is_not_reclassified(self):
         checkout = self._checkout("supported-index")

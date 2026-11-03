@@ -503,10 +503,23 @@ from lifecycle, exit code, result, logs, metrics, and artifacts. This is local c
 behavior until the open remote and measured-reclamation gates in Spec 032 pass.
 
 `job-cleanup` is terminal-only and reports which logs/artifacts were removed.
-For scheduled/maintenance cleanup, apply the configured age explicitly with
+Cleanup failure (such as workspace release errors or release exceptions) reports
+`ok: false` truthfully, while valid policy retention (such as intentional workspace retention where the release result is `ok: true`) remains `ok: true` with cleanup state `retained`. Direct cleanup retires the CI materialization before removing any file, so a retirement failure raises fail-closed with nothing removed, while `retention_sweep` handles candidate retirement and cleanup failures at the per-row boundary to preserve an `ok: false` structured outcome without aborting the sweep page; a retirement or materialization-check failure removes nothing and reports `cleanup_state: retained` with `removed: []`. A workspace release failure, or a materialization check that fails after files were removed, reports `ok: false` and `cleanup_state: retained` and lists what was removed. Both `job-cleanup` and `job-retention` print an `ok: false` envelope and still exit 0, so local callers must read `ok`; the remote control transport parses the envelope and raises on `ok: false`. For scheduled/maintenance cleanup, apply the configured age explicitly with
 `./sb job-retention --retention-days 7 --json`; it removes terminal output,
 metrics, declared artifacts, and retained CI rematerialization archives, then records
-`cleanup_state` in the registry.
+`cleanup_state` in the registry. Candidate selection reaches noncompleted terminal
+jobs with a present `finished_at` timestamp (jobs without `finished_at` are excluded), ensuring unindexed output directories on disk can be reclaimed. Candidates are
+ordered oldest finished first. No-op candidates, including completed CI rows with
+authority records, still consume the bounded scan budget. When `truncated` is true,
+scheduled and manual callers must pass the returned `cursor` to the next invocation:
+`./sb job-retention --retention-days 7 --cursor <returned_cursor> --json`.
+Keep the same retention options and continue until `truncated` is false (the opaque
+job ID cursor intentionally does not enforce policy options across calls; maintaining matching options is a caller responsibility). A call without
+`--cursor` starts from the beginning; repeated cursorless calls restart from the beginning and do not advance past a
+no-op prefix. The envelope explicitly returns `"ok"`
+(truthfully reflecting whether all attempted candidate cleanups succeeded), `"cursor"`
+(string or null), `"limit"` (integer), and `"truncated"` (boolean) to support
+deterministic cross-process continuation (control protocol 20; includes additive read shape verification on cleanup state kind and sweep candidate outcomes).
 If the host is below its configured free-disk reserve, use
 `./sb job-retention --storage-pressure --json`; only the oldest terminal jobs
 are reclaimed until pressure clears. Active jobs and retained failed workspaces

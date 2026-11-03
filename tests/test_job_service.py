@@ -22,6 +22,24 @@ from sandbox.sync.repository import SyncRepository
 BOOT = "11111111-2222-3333-4444-555555555555"
 
 
+class _CiReleaseRegistry:
+    def __init__(self, mode):
+        self.mode = mode
+        self.calls = 0
+
+    def release_terminal_job(self, job, repo):
+        self.calls += 1
+        if self.mode == "raise":
+            raise RuntimeError("stack_teardown_incomplete")
+        if self.mode == "failed":
+            return {"ok": False, "status": "failed"}
+        if self.mode == "retained":
+            return {"ok": True, "status": "retained"}
+        if self.mode == "released":
+            return {"ok": True, "status": "released"}
+        raise AssertionError(self.mode)
+
+
 class JobServiceTests(unittest.TestCase):
     def test_synchronized_submission_requires_authoritative_gateway_before_acceptance(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -957,4 +975,1123 @@ class JobServiceTests(unittest.TestCase):
             result = service.retention_sweep(retention_days=7, storage_pressure=True)
             self.assertTrue(result["storage_pressure"])
             self.assertEqual(len(result["cleaned"]), 1)
+            repository.close()
+
+    def test_retention_sweep_progresses_to_older_eligible_jobs_across_pages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # 60 eligible terminal jobs older than 7 days (> 1 batch page of 50)
+            eligible_ids = []
+            for i in range(60):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"eligible-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-el-{i}",
+                ))
+                jid = row["job_id"]
+                eligible_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=60 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                job_dir = storage.job_dir(jid, create=True)
+                (job_dir / "output").mkdir()
+                (job_dir / "output" / "log").write_text("data")
+
+            # 10 newer running jobs (active, protected)
+            running_ids = []
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"running-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-run-{i}",
+                ))
+                jid = row["job_id"]
+                running_ids.append(jid)
+                repository.transition(jid, "running")
+                job_dir = storage.job_dir(jid, create=True)
+                (job_dir / "output").mkdir()
+                (job_dir / "output" / "log").write_text("live")
+
+            # 10 newer completed jobs (cleanup_state='completed')
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"completed-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-comp-{i}",
+                ))
+                jid = row["job_id"]
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='completed' WHERE job_id=?",
+                    (fin_time, jid),
+                )
+
+            sweep = service.retention_sweep(retention_days=7, limit=60)
+            self.assertEqual(len(sweep["cleaned"]), 60)
+            cleaned_set = {c["job_id"] for c in sweep["cleaned"]}
+            self.assertEqual(cleaned_set, set(eligible_ids))
+
+            # Active jobs remain protected and untouched
+            for jid in running_ids:
+                self.assertEqual(repository.get(jid)["lifecycle"], "running")
+                self.assertTrue((storage.job_dir(jid) / "output").exists())
+
+            repository.close()
+
+    def test_retention_sweep_under_pressure_reclaims_oldest_until_cleared(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            job_ids = []
+            for i in range(4):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"pressure-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-p-{i}",
+                ))
+                jid = row["job_id"]
+                job_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin = (now - timedelta(days=4 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("log")
+
+            cleaned_count = 0
+            real_cleanup = service.cleanup
+
+            def dynamic_cleanup(job_id):
+                nonlocal cleaned_count
+                cleaned_count += 1
+                if cleaned_count >= 2:
+                    storage.is_under_pressure = lambda: False
+                return real_cleanup(job_id)
+
+            storage.is_under_pressure = lambda: True
+            service.cleanup = dynamic_cleanup
+
+            sweep = service.retention_sweep(retention_days=30, storage_pressure=True)
+            self.assertEqual(len(sweep["cleaned"]), 2)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], job_ids[0])
+            self.assertEqual(sweep["cleaned"][1]["job_id"], job_ids[1])
+            self.assertEqual(repository.get(job_ids[2])["cleanup_state"], "not_requested")
+            self.assertEqual(repository.get(job_ids[3])["cleanup_state"], "not_requested")
+            repository.close()
+
+    def test_retention_sweep_preserves_active_retry_and_cleans_original(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            orig_row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "orig",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-orig",
+            ))
+            orig_id = orig_row["job_id"]
+            repository.transition(orig_id, "running")
+            repository.transition(orig_id, "failed", exit_code=1)
+            fin_orig = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_orig, orig_id))
+            (storage.job_dir(orig_id, create=True) / "output").mkdir()
+            (storage.job_dir(orig_id) / "output" / "data").write_text("orig")
+
+            retry_row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "retry",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-retry", retry_of_job_id=orig_id,
+            ))
+            retry_id = retry_row["job_id"]
+            repository.transition(retry_id, "running")
+            (storage.job_dir(retry_id, create=True) / "output").mkdir()
+            (storage.job_dir(retry_id) / "output" / "data").write_text("retry")
+
+            sweep = service.retention_sweep(retention_days=7)
+            cleaned_ids = {c["job_id"] for c in sweep["cleaned"]}
+            self.assertIn(orig_id, cleaned_ids)
+            self.assertNotIn(retry_id, cleaned_ids)
+            self.assertEqual(repository.get(retry_id)["lifecycle"], "running")
+            self.assertTrue((storage.job_dir(retry_id) / "output").exists())
+            repository.close()
+
+    def test_retention_sweep_repeated_calls_progress_past_page_of_retained_and_noop_jobs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # 55 terminal jobs already in 'retained' state with no remaining data (page of no-ops)
+            noop_ids = []
+            for i in range(55):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"noop-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-noop-{i}",
+                ))
+                jid = row["job_id"]
+                noop_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=20, seconds=100 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='retained' WHERE job_id=?",
+                    (fin_time, jid),
+                )
+
+            # 10 eligible jobs older than 7 days
+            batch1_ids = []
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"b1-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-b1-{i}",
+                ))
+                jid = row["job_id"]
+                batch1_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=15, seconds=100 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("b1")
+
+            # 10 more eligible jobs older than 7 days
+            batch2_ids = []
+            for i in range(10):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"b2-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-b2-{i}",
+                ))
+                jid = row["job_id"]
+                batch2_ids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=100 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("b2")
+
+            # First sweep: should skip no-ops and clean first 10 eligible
+            sweep1 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep1["cleaned"]), 10)
+            cleaned1 = [c["job_id"] for c in sweep1["cleaned"]]
+            self.assertEqual(cleaned1, batch1_ids)
+
+            # Second sweep: should progress to next 10 eligible
+            sweep2 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep2["cleaned"]), 10)
+            cleaned2 = [c["job_id"] for c in sweep2["cleaned"]]
+            self.assertEqual(cleaned2, batch2_ids)
+
+            # Third sweep: no more eligible jobs, returns 0 cleaned
+            sweep3 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep3["cleaned"]), 0)
+
+            repository.close()
+
+    def test_retention_sweep_truthfully_propagates_materialization_broker_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            class MockWorkspaceRegistry:
+                def has_retained_materialization(self, job):
+                    return True
+                def retire_terminal_materialization(self, job):
+                    raise RuntimeError("simulated broker failure")
+            service = JobService(repository, storage, None, launcher=lambda _desc: None, workspace_registry=MockWorkspaceRegistry())
+            now = datetime.now(timezone.utc)
+
+            row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "failing-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-failing",
+            ))
+            jid = row["job_id"]
+            repository.transition(jid, "running")
+            repository.transition(jid, "succeeded", exit_code=0)
+            fin_time = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute(
+                "UPDATE jobs SET finished_at=?, kind='ci', workspace_authority_digest='sha256:' || hex(randomblob(32)) WHERE job_id=?",
+                (fin_time, jid),
+            )
+            # A refused retirement must leave the job's files in place, so the
+            # reported `removed: []` stays true.
+            job_dir = storage.job_dir(jid, create=True)
+            for name in ("output", "artifacts"):
+                (job_dir / name).mkdir(parents=True, exist_ok=True)
+                (job_dir / name / "kept.txt").write_text("synthetic")
+
+            sweep = service.retention_sweep(retention_days=7)
+            self.assertFalse(sweep["ok"])
+            self.assertEqual(len(sweep["cleaned"]), 1)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], jid)
+            self.assertFalse(sweep["cleaned"][0]["ok"])
+            self.assertEqual(sweep["cleaned"][0]["cleanup_state"], "retained")
+            self.assertEqual(sweep["cleaned"][0]["removed"], [])
+            for name in ("output", "artifacts"):
+                self.assertTrue((job_dir / name / "kept.txt").exists(), name)
+
+            # Direct cleanup maintains fail-closed retirement exception contract
+            with self.assertRaisesRegex(RuntimeError, "simulated broker failure"):
+                service.cleanup(jid)
+            for name in ("output", "artifacts"):
+                self.assertTrue((job_dir / name / "kept.txt").exists(), name)
+
+            repository.close()
+
+    def test_retention_sweep_explicit_cursor_and_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            subs = []
+            for i in range(5):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"cur-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-cur-{i}",
+                ))
+                jid = row["job_id"]
+                subs.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=5 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("ok")
+
+            with self.assertRaisesRegex(ValueError, "limit must be a positive whole number"):
+                service.retention_sweep(limit=0)
+            with self.assertRaisesRegex(ValueError, "retention_days must be a non-negative whole number"):
+                service.retention_sweep(retention_days=-1)
+
+            # Pass cursor explicitly to skip subs[0]
+            sweep = service.retention_sweep(retention_days=7, limit=2, cursor_job_id=subs[0])
+            self.assertEqual(len(sweep["cleaned"]), 2)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], subs[1])
+            self.assertEqual(sweep["cleaned"][1]["job_id"], subs[2])
+
+            repository.close()
+
+    def test_retention_sweep_completed_ci_rows_do_not_starve_scan_budget(self):
+        """200 completed CI rows do not starve scan budget for eligible jobs."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # Insert 200 completed CI jobs with older timestamps and authority digest
+            for i in range(200):
+                row, _ = repository.accept(JobSubmission(
+                    "ci", temp, "p", "local", f"ci-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-ci-{i}",
+                ))
+                jid = row["job_id"]
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=20, seconds=i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute(
+                    "UPDATE jobs SET finished_at=?, cleanup_state='completed', "
+                    "workspace_authority_digest='digest-auth' WHERE job_id=?",
+                    (fin_time, jid),
+                )
+
+            # Insert 1 newer eligible job
+            newer_row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "eligible-target",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-eligible-target",
+            ))
+            newer_jid = newer_row["job_id"]
+            repository.transition(newer_jid, "running")
+            repository.transition(newer_jid, "succeeded", exit_code=0)
+            fin_time = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, newer_jid))
+            (storage.job_dir(newer_jid, create=True) / "output").mkdir()
+            (storage.job_dir(newer_jid) / "output" / "data").write_text("ok")
+
+            # First sweep: scans up to scan budget over no-op prefix, returns truncated and cursor
+            sweep1 = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep1["cleaned"]), 0)
+            self.assertTrue(sweep1["truncated"])
+            self.assertIsNotNone(sweep1["cursor"])
+
+            # Second sweep: resumes from cursor past no-op prefix and cleans the eligible job
+            sweep2 = service.retention_sweep(retention_days=7, limit=10, cursor_job_id=sweep1["cursor"])
+            self.assertEqual(len(sweep2["cleaned"]), 1)
+            self.assertEqual(sweep2["cleaned"][0]["job_id"], newer_jid)
+            self.assertFalse(sweep2["truncated"])
+            self.assertIsNone(sweep2["cursor"])
+
+            repository.close()
+
+    def test_retention_sweep_cross_process_keyset_continuation(self):
+        """Cross-process keyset pagination resumes deterministically via returned cursor."""
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "registry.sqlite"
+            repository = JobRepository(db_path)
+            storage = JobStorage(temp, free_disk_reserve=0)
+            now = datetime.now(timezone.utc)
+
+            jids = []
+            for i in range(5):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"page-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-page-{i}",
+                ))
+                jid = row["job_id"]
+                jids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                fin_time = (now - timedelta(days=10, seconds=100 - i * 10)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, jid))
+                (storage.job_dir(jid, create=True) / "output").mkdir()
+                (storage.job_dir(jid) / "output" / "data").write_text("ok")
+            repository.close()
+
+            # Process 1: Page 1 with limit=2
+            repo1 = JobRepository(db_path)
+            svc1 = JobService(repo1, storage, None, launcher=lambda _desc: None)
+            sweep1 = svc1.retention_sweep(retention_days=7, limit=2)
+            self.assertEqual(len(sweep1["cleaned"]), 2)
+            self.assertEqual([c["job_id"] for c in sweep1["cleaned"]], jids[0:2])
+            self.assertTrue(sweep1["truncated"])
+            cursor1 = sweep1["cursor"]
+            self.assertIsNotNone(cursor1)
+            repo1.close()
+
+            # Process 2: Page 2 using cursor from Process 1
+            repo2 = JobRepository(db_path)
+            svc2 = JobService(repo2, storage, None, launcher=lambda _desc: None)
+            sweep2 = svc2.retention_sweep(retention_days=7, limit=2, cursor_job_id=cursor1)
+            self.assertEqual(len(sweep2["cleaned"]), 2)
+            self.assertEqual([c["job_id"] for c in sweep2["cleaned"]], jids[2:4])
+            self.assertTrue(sweep2["truncated"])
+            cursor2 = sweep2["cursor"]
+            self.assertIsNotNone(cursor2)
+            repo2.close()
+
+            # Process 3: Page 3 using cursor from Process 2, reaching exhaustion
+            repo3 = JobRepository(db_path)
+            svc3 = JobService(repo3, storage, None, launcher=lambda _desc: None)
+            sweep3 = svc3.retention_sweep(retention_days=7, limit=2, cursor_job_id=cursor2)
+            self.assertEqual(len(sweep3["cleaned"]), 1)
+            self.assertEqual([c["job_id"] for c in sweep3["cleaned"]], [jids[4]])
+            self.assertFalse(sweep3["truncated"])
+            self.assertIsNone(sweep3["cursor"])
+            repo3.close()
+
+    def test_retention_sweep_safely_handles_malformed_finished_at_timestamp(self):
+        """Malformed or corrupt finished_at timestamps do not crash the sweep."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            # Job 1: malformed finished_at timestamp
+            row1, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "bad-ts",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-bad-ts",
+            ))
+            j1 = row1["job_id"]
+            repository.transition(j1, "running")
+            repository.transition(j1, "succeeded", exit_code=0)
+            repository.connection.execute("UPDATE jobs SET finished_at='corrupt-timestamp-not-iso' WHERE job_id=?", (j1,))
+
+            # Job 2: valid finished_at timestamp older than 7 days
+            row2, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "good-ts",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-good-ts",
+            ))
+            j2 = row2["job_id"]
+            repository.transition(j2, "running")
+            repository.transition(j2, "succeeded", exit_code=0)
+            fin_time = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (fin_time, j2))
+            (storage.job_dir(j2, create=True) / "output").mkdir()
+            (storage.job_dir(j2) / "output" / "data").write_text("ok")
+
+            # Sweep should not raise ValueError and should clean job 2
+            sweep = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual(len(sweep["cleaned"]), 1)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], j2)
+
+            repository.close()
+
+    def test_ci_release_failure_reports_truthful_failure_and_exposes_in_sweep_envelope(self):
+        """CI release failure (raise or ok:False) with no files is reported truthfully and retryable."""
+        for mode in ("raise", "failed"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                db_path = Path(temp) / "registry.sqlite"
+                repo = JobRepository(db_path)
+                storage = JobStorage(temp, free_disk_reserve=0)
+                reg = _CiReleaseRegistry(mode)
+                sub = JobSubmission(
+                    "ci", temp, "proj-ci", "local", "ci-fail",
+                    ("true",), 60, SourceIdentity("source"),
+                    workspace_mode="isolated", cleanup_policy="always",
+                    request_id=f"req-ci-fail-{mode}",
+                )
+                row, _ = repo.accept(
+                    sub,
+                    workspace_id="ws_" + "1" * 32,
+                    workspace_authority_digest="sha256:" + "1" * 64,
+                )
+                jid = row["job_id"]
+                repo.transition(jid, "running")
+                repo.transition(jid, "succeeded", exit_code=0)
+                fin_time = "2020-01-01T00:00:00Z"
+                repo.connection.execute("UPDATE jobs SET finished_at=?, accepted_at=? WHERE job_id=?", (fin_time, fin_time, jid))
+                repo.set_cleanup_state(jid, "retained")
+
+                service = JobService(repo, storage, None, launcher=lambda _desc: None, workspace_registry=reg)
+
+                # 1. Direct cleanup
+                cleanup_res = service.cleanup(jid)
+                self.assertFalse(cleanup_res["ok"])
+                self.assertEqual(cleanup_res["removed"], [])
+                self.assertEqual(cleanup_res["cleanup_state"], "retained")
+                self.assertEqual(repo.get(jid)["cleanup_state"], "retained")
+
+                # 2. Retention sweep exposes failure in envelope and cleaned list
+                sweep = service.retention_sweep(retention_days=0)
+                self.assertFalse(sweep["ok"])
+                hits = [x for x in sweep["cleaned"] if x["job_id"] == jid]
+                self.assertEqual(len(hits), 1)
+                self.assertFalse(hits[0]["ok"])
+                self.assertEqual(hits[0]["removed"], [])
+                self.assertEqual(hits[0]["cleanup_state"], "retained")
+                self.assertEqual(repo.get(jid)["cleanup_state"], "retained")
+
+                # 3. Fresh second sweep still retries release and still reports failure
+                sweep2 = JobService(repo, storage, None, launcher=lambda _desc: None, workspace_registry=reg).retention_sweep(retention_days=0)
+                self.assertFalse(sweep2["ok"])
+                hits2 = [x for x in sweep2["cleaned"] if x["job_id"] == jid]
+                self.assertEqual(len(hits2), 1)
+                self.assertFalse(hits2[0]["ok"])
+                self.assertEqual(reg.calls, 3)
+
+                repo.close()
+
+    def test_cleanup_final_materialization_check_failure_reports_removed_truthfully(self):
+        """A check that fails after removal reports what was removed, retained and ok:False."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+
+            class FlakyRegistry:
+                calls = 0
+                def has_retained_materialization(self, job):
+                    self.calls += 1
+                    if self.calls > 1:
+                        raise RuntimeError("index unavailable")
+                    return True
+                def retire_terminal_materialization(self, job):
+                    return True
+
+            registry = FlakyRegistry()
+            service = JobService(repository, storage, None, launcher=lambda _desc: None,
+                                 workspace_registry=registry)
+            row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "late-check-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-late-check",
+            ))
+            jid = row["job_id"]
+            repository.transition(jid, "running")
+            repository.transition(jid, "succeeded", exit_code=0)
+            output = storage.job_dir(jid, create=True) / "output"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "log.txt").write_text("synthetic")
+
+            result = service.cleanup(jid)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["cleanup_state"], "retained")
+            self.assertEqual(result["removed"], ["logs", "workspace_materialization"])
+            self.assertFalse(output.exists())
+            self.assertEqual(registry.calls, 2)
+
+            repository.close()
+
+    def test_ci_prior_log_removal_with_subsequent_release_failure_retains_truthful_removed_and_failure(self):
+        """Physical logs removed before workspace release failure preserves truthful removed and ok:False."""
+        for mode in ("raise", "failed"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                db_path = Path(temp) / "registry.sqlite"
+                repo = JobRepository(db_path)
+                storage = JobStorage(temp, free_disk_reserve=0)
+                reg = _CiReleaseRegistry(mode)
+                sub = JobSubmission(
+                    "ci", temp, "proj-ci", "local", "ci-partial",
+                    ("true",), 60, SourceIdentity("source"),
+                    workspace_mode="isolated", cleanup_policy="always",
+                    request_id=f"req-ci-partial-{mode}",
+                )
+                row, _ = repo.accept(
+                    sub,
+                    workspace_id="ws_" + "2" * 32,
+                    workspace_authority_digest="sha256:" + "2" * 64,
+                )
+                jid = row["job_id"]
+                repo.transition(jid, "running")
+                repo.transition(jid, "succeeded", exit_code=0)
+                fin_time = "2020-01-01T00:00:00Z"
+                repo.connection.execute("UPDATE jobs SET finished_at=?, accepted_at=? WHERE job_id=?", (fin_time, fin_time, jid))
+                repo.set_cleanup_state(jid, "retained")
+
+                # Put physical output logs
+                out_dir = storage.job_dir(jid, create=True) / "output"
+                out_dir.mkdir(parents=True)
+                (out_dir / "data.bin").write_bytes(b"test-logs")
+
+                service = JobService(repo, storage, None, launcher=lambda _desc: None, workspace_registry=reg)
+                res = service.cleanup(jid)
+                self.assertFalse(res["ok"])
+                self.assertEqual(res["removed"], ["logs"])
+                self.assertEqual(res["cleanup_state"], "retained")
+                self.assertFalse(out_dir.exists())
+                self.assertEqual(repo.get(jid)["cleanup_state"], "retained")
+
+                sweep = service.retention_sweep(retention_days=0)
+                self.assertFalse(sweep["ok"])
+                hits = [x for x in sweep["cleaned"] if x["job_id"] == jid]
+                self.assertEqual(len(hits), 1)
+                self.assertFalse(hits[0]["ok"])
+                self.assertEqual(hits[0]["removed"], [])
+
+                repo.close()
+
+    def test_ci_legitimate_policy_retention_and_completed_positive_control(self):
+        """Policy retention returns ok:True without workspace_cleanup; released positive control claims workspace_cleanup."""
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "registry.sqlite"
+            repo = JobRepository(db_path)
+            storage = JobStorage(temp, free_disk_reserve=0)
+
+            # Policy retain
+            reg_retain = _CiReleaseRegistry("retained")
+            sub_retain = JobSubmission(
+                "ci", temp, "proj-ci", "local", "ci-retained",
+                ("true",), 60, SourceIdentity("source"),
+                workspace_mode="isolated", cleanup_policy="retain",
+                request_id="req-ci-retained",
+            )
+            row_ret, _ = repo.accept(
+                sub_retain,
+                workspace_id="ws_" + "3" * 32,
+                workspace_authority_digest="sha256:" + "3" * 64,
+            )
+            j_ret = row_ret["job_id"]
+            repo.transition(j_ret, "running")
+            repo.transition(j_ret, "succeeded", exit_code=0)
+            fin_time = "2020-01-01T00:00:00Z"
+            repo.connection.execute("UPDATE jobs SET finished_at=?, accepted_at=? WHERE job_id=?", (fin_time, fin_time, j_ret))
+            repo.set_cleanup_state(j_ret, "retained")
+
+            svc_retain = JobService(repo, storage, None, launcher=lambda _desc: None, workspace_registry=reg_retain)
+            res_ret = svc_retain.cleanup(j_ret)
+            self.assertTrue(res_ret["ok"])
+            self.assertEqual(res_ret["removed"], [])
+            self.assertNotIn("workspace_cleanup", res_ret["removed"])
+            self.assertEqual(res_ret["cleanup_state"], "retained")
+            self.assertEqual(repo.get(j_ret)["cleanup_state"], "retained")
+
+            sw_ret = svc_retain.retention_sweep(retention_days=0)
+            self.assertTrue(sw_ret["ok"])
+            self.assertEqual(sw_ret["cleaned"], [])
+            self.assertEqual(reg_retain.calls, 2)
+
+            # Released positive control
+            reg_release = _CiReleaseRegistry("released")
+            sub_rel = JobSubmission(
+                "ci", temp, "proj-ci", "local", "ci-released",
+                ("true",), 60, SourceIdentity("source"),
+                workspace_mode="isolated", cleanup_policy="always",
+                request_id="req-ci-released",
+            )
+            row_rel, _ = repo.accept(
+                sub_rel,
+                workspace_id="ws_" + "4" * 32,
+                workspace_authority_digest="sha256:" + "4" * 64,
+            )
+            j_rel = row_rel["job_id"]
+            repo.transition(j_rel, "running")
+            repo.transition(j_rel, "succeeded", exit_code=0)
+            repo.connection.execute("UPDATE jobs SET finished_at=?, accepted_at=? WHERE job_id=?", (fin_time, fin_time, j_rel))
+            repo.set_cleanup_state(j_rel, "retained")
+
+            svc_rel = JobService(repo, storage, None, launcher=lambda _desc: None, workspace_registry=reg_release)
+            res_rel = svc_rel.cleanup(j_rel)
+            self.assertTrue(res_rel["ok"])
+            self.assertEqual(res_rel["removed"], ["workspace_cleanup"])
+            self.assertEqual(res_rel["cleanup_state"], "completed")
+            self.assertEqual(repo.get(j_rel)["cleanup_state"], "completed")
+
+            repo.close()
+
+    def test_retained_unindexed_non_ci_output_reclaimed_under_age_and_pressure_sweeps(self):
+        """Retained non-CI physical output with no stream index is swept by age and pressure while active is protected."""
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "registry.sqlite"
+            repo = JobRepository(db_path)
+            storage = JobStorage(temp, free_disk_reserve=0)
+            now = datetime.now(timezone.utc)
+            reg = _CiReleaseRegistry("retained")
+
+            # 1. Old unindexed non-CI job
+            sub_old = JobSubmission(
+                "test", temp, "proj-test", "local", "lbl-old",
+                ("true",), 60, SourceIdentity("source"),
+                request_id="req-old-unindexed",
+            )
+            row_old, _ = repo.accept(sub_old)
+            j_old = row_old["job_id"]
+            repo.transition(j_old, "running")
+            repo.transition(j_old, "succeeded", exit_code=0)
+            fin_old = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repo.connection.execute("UPDATE jobs SET finished_at=?, accepted_at=? WHERE job_id=?", (fin_old, fin_old, j_old))
+            repo.set_cleanup_state(j_old, "retained")
+            out_old = storage.job_dir(j_old, create=True) / "output"
+            out_old.mkdir(parents=True)
+            (out_old / "data.bin").write_bytes(b"old-output")
+
+            # 2. Active running job with physical output
+            sub_act = JobSubmission(
+                "test", temp, "proj-test", "local", "lbl-act",
+                ("true",), 60, SourceIdentity("source"),
+                request_id="req-act-unindexed",
+            )
+            row_act, _ = repo.accept(sub_act)
+            j_act = row_act["job_id"]
+            repo.transition(j_act, "running")
+            out_act = storage.job_dir(j_act, create=True) / "output"
+            out_act.mkdir(parents=True)
+            (out_act / "data.bin").write_bytes(b"active-output")
+
+            # 3. Recent non-CI job with physical output
+            sub_rec = JobSubmission(
+                "test", temp, "proj-test", "local", "lbl-rec",
+                ("true",), 60, SourceIdentity("source"),
+                request_id="req-rec-unindexed",
+            )
+            row_rec, _ = repo.accept(sub_rec)
+            j_rec = row_rec["job_id"]
+            repo.transition(j_rec, "running")
+            repo.transition(j_rec, "succeeded", exit_code=0)
+            fin_rec = now.isoformat().replace("+00:00", "Z")
+            repo.connection.execute("UPDATE jobs SET finished_at=?, accepted_at=? WHERE job_id=?", (fin_rec, fin_rec, j_rec))
+            repo.set_cleanup_state(j_rec, "retained")
+            out_rec = storage.job_dir(j_rec, create=True) / "output"
+            out_rec.mkdir(parents=True)
+            (out_rec / "data.bin").write_bytes(b"recent-output")
+
+            svc = JobService(repo, storage, None, launcher=lambda _desc: None, workspace_registry=reg)
+
+            # Active job cleanup refused
+            with self.assertRaisesRegex(RuntimeError, "active_job_protected"):
+                svc.cleanup(j_act)
+
+            # Age sweep cleans only old job
+            age_sweep = svc.retention_sweep(retention_days=7)
+            self.assertTrue(age_sweep["ok"])
+            self.assertEqual([x["job_id"] for x in age_sweep["cleaned"]], [j_old])
+            self.assertEqual(age_sweep["cleaned"][0]["removed"], ["logs"])
+            self.assertFalse(out_old.exists())
+            self.assertEqual(repo.get(j_old)["cleanup_state"], "completed")
+            self.assertTrue(out_rec.exists())
+            self.assertTrue(out_act.exists())
+
+            # Storage pressure sweep cleans recent job, still spares active job
+            with patch.object(storage, "is_under_pressure", return_value=True):
+                pres_sweep = svc.retention_sweep(retention_days=30, storage_pressure=True)
+            self.assertTrue(pres_sweep["ok"])
+            self.assertTrue(pres_sweep["storage_pressure"])
+            self.assertEqual([x["job_id"] for x in pres_sweep["cleaned"]], [j_rec])
+            self.assertEqual(pres_sweep["cleaned"][0]["removed"], ["logs"])
+            self.assertFalse(out_rec.exists())
+            self.assertEqual(repo.get(j_rec)["cleanup_state"], "completed")
+            self.assertTrue(out_act.exists())
+            self.assertEqual(repo.get(j_act)["lifecycle"], "running")
+
+            # Non-CI jobs never call release_terminal_job
+            self.assertEqual(reg.calls, 0)
+
+            repo.close()
+
+    def test_keyset_bounded_progress_with_no_ops_and_continuation(self):
+        """Keyset sweep skips no-ops without count pollution, returns exact output jobs, and ends on continuation."""
+        with tempfile.TemporaryDirectory() as temp:
+            db_path = Path(temp) / "registry.sqlite"
+            repo = JobRepository(db_path)
+            storage = JobStorage(temp, free_disk_reserve=0)
+            reg = _CiReleaseRegistry("retained")
+
+            noops = []
+            outs = []
+            for i in range(65):
+                sub = JobSubmission(
+                    "test", temp, "proj-test", "local", f"lbl-{i}",
+                    ("true",), 60, SourceIdentity("source"),
+                    request_id=f"req-progress-{i}",
+                )
+                row, _ = repo.accept(sub)
+                jid = row["job_id"]
+                repo.transition(jid, "running")
+                repo.transition(jid, "succeeded", exit_code=0)
+                fin_time = f"2020-01-01T{i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z"
+                repo.connection.execute("UPDATE jobs SET finished_at=?, accepted_at=? WHERE job_id=?", (fin_time, fin_time, jid))
+                repo.set_cleanup_state(jid, "retained")
+                if i < 55:
+                    noops.append(jid)
+                else:
+                    out = storage.job_dir(jid, create=True) / "output"
+                    out.mkdir(parents=True)
+                    (out / "data.bin").write_bytes(b"data")
+                    outs.append(jid)
+
+            svc = JobService(repo, storage, None, launcher=lambda _desc: None, workspace_registry=reg)
+
+            # Page 1: limit 10 cleans exactly the 10 jobs with output
+            p1 = svc.retention_sweep(retention_days=7, limit=10)
+            self.assertTrue(p1["ok"])
+            cleaned_ids = [x["job_id"] for x in p1["cleaned"]]
+            self.assertEqual(cleaned_ids, outs)
+            self.assertTrue(all(x["removed"] == ["logs"] and x["ok"] is True for x in p1["cleaned"]))
+            self.assertFalse(any(j in cleaned_ids for j in noops))
+            self.assertTrue(p1["truncated"])
+            self.assertIsNotNone(p1["cursor"])
+
+            # Page 2: continuation with cursor cleans nothing more
+            p2 = svc.retention_sweep(retention_days=7, limit=10, cursor=p1["cursor"])
+            self.assertTrue(p2["ok"])
+            self.assertEqual(p2["cleaned"], [])
+
+            # All 55 no-ops completed, all 10 outputs removed, 0 release calls
+            self.assertEqual(sum(repo.get(j)["cleanup_state"] == "completed" for j in noops), 55)
+            self.assertFalse(any((storage.job_dir(j) / "output").exists() for j in outs))
+            self.assertEqual(reg.calls, 0)
+
+            repo.close()
+
+    def test_retention_sweep_progresses_past_failing_materialization_to_newer_job(self):
+        """Old failing CI materialization does not abort sweep; newer eligible output is cleaned."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            class MockWorkspaceRegistry:
+                def has_retained_materialization(self, job):
+                    return job.get("job_id") == j1
+                def retire_terminal_materialization(self, job):
+                    if job.get("job_id") == j1:
+                        raise RuntimeError("persistent retirement failure")
+                    return True
+            service = JobService(repository, storage, None, launcher=lambda _desc: None,
+                               workspace_registry=MockWorkspaceRegistry())
+            now = datetime.now(timezone.utc)
+
+            # Job 1: older, persistently failing CI materialization
+            row1, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "failing-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-failing-1",
+            ))
+            j1 = row1["job_id"]
+            repository.transition(j1, "running")
+            repository.transition(j1, "succeeded", exit_code=0)
+            t1 = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute(
+                "UPDATE jobs SET finished_at=?, kind='ci', workspace_authority_digest='sha256:fail' WHERE job_id=?",
+                (t1, j1),
+            )
+            repository.set_cleanup_state(j1, "retained")
+
+            # Job 2: newer, eligible job with physical output
+            row2, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "eligible-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-eligible-2",
+            ))
+            j2 = row2["job_id"]
+            repository.transition(j2, "running")
+            repository.transition(j2, "succeeded", exit_code=0)
+            t2 = (now - timedelta(days=8)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (t2, j2))
+            out_dir = storage.job_dir(j2, create=True) / "output"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "log.txt").write_text("eligible output")
+
+            sweep = service.retention_sweep(retention_days=7)
+            self.assertFalse(sweep["ok"])
+            self.assertFalse(sweep["truncated"])
+            self.assertEqual(len(sweep["cleaned"]), 2)
+            # Job 1 reported ok: False, cleanup_state: retained, removed: []
+            self.assertEqual(sweep["cleaned"][0]["job_id"], j1)
+            self.assertFalse(sweep["cleaned"][0]["ok"])
+            self.assertEqual(sweep["cleaned"][0]["cleanup_state"], "retained")
+            self.assertEqual(sweep["cleaned"][0]["removed"], [])
+            # Job 2 reached and cleaned
+            self.assertEqual(sweep["cleaned"][1]["job_id"], j2)
+            self.assertTrue(sweep["cleaned"][1]["ok"])
+            self.assertIn("logs", sweep["cleaned"][1]["removed"])
+            self.assertFalse(out_dir.exists())
+
+            repository.close()
+
+    def test_retention_sweep_limit_one_exposes_failure_with_cursor_and_continuation_reaches_newer_row(self):
+        """Limit=1 stops after failing row, returns cursor; next call with cursor reaches newer row."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            class MockWorkspaceRegistry:
+                def has_retained_materialization(self, job):
+                    return job.get("job_id") == j1
+                def retire_terminal_materialization(self, job):
+                    if job.get("job_id") == j1:
+                        raise RuntimeError("persistent retirement failure")
+                    return True
+            service = JobService(repository, storage, None, launcher=lambda _desc: None,
+                               workspace_registry=MockWorkspaceRegistry())
+            now = datetime.now(timezone.utc)
+
+            row1, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "failing-job-cur",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-failing-cur",
+            ))
+            j1 = row1["job_id"]
+            repository.transition(j1, "running")
+            repository.transition(j1, "succeeded", exit_code=0)
+            t1 = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute(
+                "UPDATE jobs SET finished_at=?, kind='ci', workspace_authority_digest='sha256:failcur' WHERE job_id=?",
+                (t1, j1),
+            )
+            repository.set_cleanup_state(j1, "retained")
+
+            row2, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "eligible-job-cur",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-eligible-cur",
+            ))
+            j2 = row2["job_id"]
+            repository.transition(j2, "running")
+            repository.transition(j2, "succeeded", exit_code=0)
+            t2 = (now - timedelta(days=8)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (t2, j2))
+            out_dir = storage.job_dir(j2, create=True) / "output"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "log.txt").write_text("output")
+
+            # Page 1: limit=1 returns failing row with truncated=True and cursor
+            sweep1 = service.retention_sweep(retention_days=7, limit=1)
+            self.assertFalse(sweep1["ok"])
+            self.assertTrue(sweep1["truncated"])
+            self.assertEqual(sweep1["cursor"], j1)
+            self.assertEqual(len(sweep1["cleaned"]), 1)
+            self.assertEqual(sweep1["cleaned"][0]["job_id"], j1)
+            self.assertFalse(sweep1["cleaned"][0]["ok"])
+
+            # Page 2: continue with cursor; reaches Job 2
+            sweep2 = service.retention_sweep(retention_days=7, limit=1, cursor=sweep1["cursor"])
+            self.assertTrue(sweep2["ok"])
+            self.assertEqual(len(sweep2["cleaned"]), 1)
+            self.assertEqual(sweep2["cleaned"][0]["job_id"], j2)
+            self.assertTrue(sweep2["cleaned"][0]["ok"])
+            self.assertFalse(out_dir.exists())
+            if sweep2["truncated"]:
+                self.assertEqual(sweep2["cursor"], j2)
+                exhausted = service.retention_sweep(
+                    retention_days=7, limit=1, cursor=sweep2["cursor"])
+                self.assertTrue(exhausted["ok"])
+                self.assertFalse(exhausted["truncated"])
+                self.assertEqual(exhausted["cleaned"], [])
+                self.assertIsNone(exhausted["cursor"])
+
+            repository.close()
+
+    def test_retention_sweep_repeat_refusal_preserves_artifact_and_authority(self):
+        """Repeated sweeps against failing retirement preserve artifact file and authority digest."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            artifact_file = Path(temp) / "retained-artifact.tar.gz"
+            artifact_file.write_text("artifact payload")
+
+            class MockWorkspaceRegistry:
+                def has_retained_materialization(self, job):
+                    return True
+                def retire_terminal_materialization(self, job):
+                    raise RuntimeError("broker refusal: checksum drift")
+
+            service = JobService(repository, storage, None, launcher=lambda _desc: None,
+                               workspace_registry=MockWorkspaceRegistry())
+            now = datetime.now(timezone.utc)
+
+            row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "protected-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-protected",
+            ))
+            jid = row["job_id"]
+            repository.transition(jid, "running")
+            repository.transition(jid, "succeeded", exit_code=0)
+            t = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            authority_digest = "sha256:preservedauthority1234567890"
+            repository.connection.execute(
+                "UPDATE jobs SET finished_at=?, kind='ci', workspace_authority_digest=? WHERE job_id=?",
+                (t, authority_digest, jid),
+            )
+            repository.set_cleanup_state(jid, "retained")
+
+            # Sweep 1
+            s1 = service.retention_sweep(retention_days=7)
+            self.assertFalse(s1["ok"])
+            self.assertTrue(artifact_file.exists())
+            r1 = repository.get(jid)
+            self.assertEqual(r1["workspace_authority_digest"], authority_digest)
+            self.assertEqual(r1["cleanup_state"], "retained")
+
+            # Sweep 2
+            s2 = service.retention_sweep(retention_days=7)
+            self.assertFalse(s2["ok"])
+            self.assertTrue(artifact_file.exists())
+            r2 = repository.get(jid)
+            self.assertEqual(r2["workspace_authority_digest"], authority_digest)
+            self.assertEqual(r2["cleanup_state"], "retained")
+
+            repository.close()
+
+    def test_retention_sweep_storage_pressure_with_cursor_pagination(self):
+        """Storage pressure sweep paginates correctly with cursor across terminal jobs."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            class PressureStorage:
+                def __init__(self, root):
+                    self.root = Path(root)
+                    self.pressure = True
+                def is_under_pressure(self):
+                    return self.pressure
+                def job_dir(self, job_id, create=False):
+                    d = self.root / job_id
+                    if create:
+                        d.mkdir(parents=True, exist_ok=True)
+                    return d
+
+            storage = PressureStorage(temp)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+
+            jids = []
+            for i in range(3):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"press-{i}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-press-{i}",
+                ))
+                jid = row["job_id"]
+                jids.append(jid)
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                t = (now - timedelta(days=20 - i)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (t, jid))
+                out = storage.job_dir(jid, create=True) / "output"
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "log.txt").write_text("data")
+
+            # Page 1 under pressure: limit=1
+            p1 = service.retention_sweep(retention_days=30, limit=1, storage_pressure=True)
+            self.assertTrue(p1["ok"])
+            self.assertTrue(p1["truncated"])
+            self.assertEqual(p1["cursor"], jids[0])
+            self.assertEqual(len(p1["cleaned"]), 1)
+            self.assertEqual(p1["cleaned"][0]["job_id"], jids[0])
+
+            # Pressure clears before page 2
+            storage.pressure = False
+            p2 = service.retention_sweep(retention_days=30, limit=10, storage_pressure=True, cursor=p1["cursor"])
+            # Pressure cleared: storage_pressure becomes False, jobs finished 18-19 days ago not older than 30 days
+            self.assertTrue(p2["ok"])
+            self.assertFalse(p2["storage_pressure"])
+            self.assertEqual(len(p2["cleaned"]), 0)
+
+            repository.close()
+
+    def test_retention_sweep_has_retained_materialization_raising_does_not_abort_page(self):
+        """has_retained_materialization error is caught per-row and does not abort page."""
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            class MockWorkspaceRegistry:
+                def has_retained_materialization(self, job):
+                    if job.get("job_id") == j1:
+                        raise RuntimeError("corrupt workspace projection")
+                    return False
+            service = JobService(repository, storage, None, launcher=lambda _desc: None,
+                               workspace_registry=MockWorkspaceRegistry())
+            now = datetime.now(timezone.utc)
+
+            row1, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "bad-obs-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-bad-obs",
+            ))
+            j1 = row1["job_id"]
+            repository.transition(j1, "running")
+            repository.transition(j1, "succeeded", exit_code=0)
+            t1 = (now - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+            # A completed CI row with authority stays a candidate; a failed
+            # check must still report it retained, not its stored state.
+            repository.connection.execute(
+                "UPDATE jobs SET finished_at=?, kind='ci', cleanup_state='completed', "
+                "workspace_authority_digest='sha256:' || hex(randomblob(32)) WHERE job_id=?",
+                (t1, j1))
+
+            row2, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "good-job",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-good",
+            ))
+            j2 = row2["job_id"]
+            repository.transition(j2, "running")
+            repository.transition(j2, "succeeded", exit_code=0)
+            t2 = (now - timedelta(days=8)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (t2, j2))
+            out_dir = storage.job_dir(j2, create=True) / "output"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "log.txt").write_text("output")
+
+            sweep = service.retention_sweep(retention_days=7)
+            self.assertFalse(sweep["ok"])
+            self.assertEqual(len(sweep["cleaned"]), 2)
+            self.assertEqual(sweep["cleaned"][0]["job_id"], j1)
+            self.assertFalse(sweep["cleaned"][0]["ok"])
+            self.assertEqual(sweep["cleaned"][0]["cleanup_state"], "retained")
+            self.assertEqual(sweep["cleaned"][0]["removed"], [])
+            self.assertEqual(sweep["cleaned"][1]["job_id"], j2)
+            self.assertTrue(sweep["cleaned"][1]["ok"])
+            self.assertFalse(out_dir.exists())
+
             repository.close()

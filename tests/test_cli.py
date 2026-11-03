@@ -1432,6 +1432,98 @@ class TestResolutionGate(unittest.TestCase):
         self.assertNotIn(" main ", (r.stdout + r.stderr))
 
 
+class TestExplicitHomeLegacyEnv(unittest.TestCase):
+    def test_writer_skips_under_explicit_home(self):
+        from sandbox.core import _docker
+
+        with tempfile.TemporaryDirectory() as checkout_dir, \
+             tempfile.TemporaryDirectory() as home_dir:
+            checkout = Path(checkout_dir)
+            home = Path(home_dir)
+            env_file = checkout / ".env"
+            env_file.write_bytes(b"FOREIGN_MARKER=keep\n")
+
+            plugins_mock = mock.Mock()
+            environment = synthetic_environment({"SANDBOX_HOME": str(home)})
+
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                 mock.patch.object(_docker, "ROOT", checkout), \
+                 mock.patch.object(_docker, "_plugins_home", plugins_mock):
+                _docker.write_env_for_compose({"runtime": {"wordpress_port": 1}})
+                _docker.write_env_for_compose({"runtime": {"wordpress_port": 1}})
+
+            self.assertEqual(env_file.read_bytes(), b"FOREIGN_MARKER=keep\n")
+            plugins_mock.assert_not_called()
+            self.assertFalse((home / ".env").exists())
+
+    def test_writer_keeps_legacy_output_without_explicit_home(self):
+        from sandbox.core import _docker
+
+        for sandbox_home in (None, ""):
+            with self.subTest(sandbox_home=sandbox_home), \
+                 tempfile.TemporaryDirectory() as checkout_dir, \
+                 tempfile.TemporaryDirectory() as plugins_dir:
+                checkout = Path(checkout_dir)
+                plugins_path = Path(plugins_dir)
+                env_file = checkout / ".env"
+
+                if sandbox_home is None:
+                    environment = synthetic_environment()
+                    environment.pop("SANDBOX_HOME", None)
+                else:
+                    environment = synthetic_environment({"SANDBOX_HOME": sandbox_home})
+
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                     mock.patch.object(_docker, "ROOT", checkout), \
+                     mock.patch.object(_docker, "_plugins_home", return_value=plugins_path):
+                    _docker.write_env_for_compose({})
+
+                expected = (
+                    "WP_PORT=8088\n"
+                    "DB_PORT=3307\n"
+                    "MAILPIT_PORT=8025\n"
+                    f"SANDBOX_PLUGINS_HOST={plugins_path}\n"
+                )
+                self.assertEqual(env_file.read_text(), expected)
+
+    def test_cli_explicit_home_preserves_shared_env_and_still_dispatches(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+        from sandbox.core import _docker
+
+        for explicit_home in (False, True):
+            with self.subTest(explicit_home=explicit_home), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                sentinel_bytes = b"PRESERVE_SHARED=keep\n"
+                if explicit_home:
+                    (root / ".env").write_bytes(sentinel_bytes)
+
+                environment = synthetic_environment({
+                    "SANDBOX_HOME": str(root / "isolated-state") if explicit_home else "",
+                })
+                handler = mock.Mock()
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                     mock.patch.object(sys, "argv", ["sb", "up", "--instance", "fixture"]), \
+                     mock.patch.object(cli, "COMMANDS", {"up": handler}), \
+                     mock.patch.object(cli, "load_config", return_value={}), \
+                     mock.patch.object(cli, "resolve_instances", return_value={"fixture": {}}), \
+                     mock.patch.object(cli, "_core", return_value=SimpleNamespace(registry_all=lambda: {})), \
+                     mock.patch.object(cli, "preflight_instance_capability", return_value=None), \
+                     mock.patch.object(cli, "write_compose_files") as compose, \
+                     mock.patch.object(migrate, "maybe_auto_migrate"), \
+                     mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                     mock.patch.object(_docker, "ROOT", root), \
+                     mock.patch.object(_docker, "_plugins_home", return_value=root / "plugins"):
+                    cli.main()
+
+                if explicit_home:
+                    self.assertEqual((root / ".env").read_bytes(), sentinel_bytes)
+                else:
+                    self.assertTrue((root / ".env").exists())
+                handler.assert_called_once()
+                compose.assert_called_once()
+
+
 class TestRemoteAdmissionCLI(unittest.TestCase):
     @staticmethod
     def _admission_error():

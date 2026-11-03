@@ -303,3 +303,101 @@ class StorageReviewTests(unittest.TestCase):
                 self.assertEqual(len(receipts), 1)
                 stored = json.loads(receipts[0].read_text())
                 self.assertEqual(stored['outcomes'], receipt['data']['outcomes'])
+
+    def test_review_redacts_bearer_and_known_prefix_families(self):
+        from sandbox.resources.engine_review import review_metadata
+        ns = remote_tests.TestRemoteProbeResilience()._probe_namespace()
+        tail = 'A1b2C3d4E5f6G7h8J9k0'
+        values = ('Bearer ' + tail, 'gho_' + tail, 'ghu_' + tail, 'ghs_' + tail, 'ghr_' + tail,
+                  'github_pat_' + tail, 'sk-' + tail, 'sk-proj-' + tail, 'sk_live_' + tail,
+                  'xoxb-' + tail, 'xoxp-' + tail, 'AIza' + tail, 'AKIA' + 'ABCDEFGHIJ234567',
+                  'ASIA' + 'ABCDEFGHIJ234567', 'https://user:pw-fixture@registry.example/v2',
+                  'token=' + tail, 'password: ' + tail)
+        for factory in (review_metadata, ns['review_metadata']):
+            for value in values:
+                with self.subTest(value=value[:12], factory=factory.__name__):
+                    image = factory('image', {'Id': 'image', 'Config': {'Labels': {'trace': value}}}, [], True)
+                    self.assertTrue(image['labels_redacted'])
+                    self.assertNotIn(tail, image['labels']['trace'])
+                    self.assertNotIn('ABCDEFGHIJ234567', image['labels']['trace'])
+                    self.assertNotIn('pw-fixture', image['labels']['trace'])
+                    volume = factory('volume', {'Name': 'vol', 'Options': {'device': value}}, [], True)
+                    self.assertTrue(volume['labels_redacted'])
+                    self.assertIn('[redacted]', volume['options']['device'])
+                    self.assertNotIn(tail, volume['options']['device'])
+            with self.subTest(benign=True, factory=factory.__name__):
+                plain = factory('volume', {'Name': 'vol', 'Options': {'type': 'none', 'o': 'bind'}}, [], True)
+                self.assertFalse(plain['labels_redacted'])
+                self.assertEqual(plain['options'], {'type': 'none', 'o': 'bind'})
+
+
+class ScopeSelectionCliTests(unittest.TestCase):
+    class Service:
+        def __init__(self):
+            self.calls = []
+
+        def plan(self, scope, **kwargs):
+            kwargs.pop('progress', None)
+            self.calls.append(('plan', scope, kwargs))
+            return {'ok': True, 'action': 'plan', 'status': 'planned', 'data': {'plan_id': 'plan-1'}}
+
+        def cleanup(self, plan_id, **kwargs):
+            self.calls.append(('cleanup', plan_id, kwargs))
+            return {'ok': True, 'action': 'cleanup', 'status': 'completed', 'data': {}}
+
+    def run_cli(self, argv):
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from sandbox.commands import resources
+        parser = argparse.ArgumentParser()
+        resources.configure_parser(parser)
+        args = parser.parse_args(argv)
+        service = self.Service()
+        output = io.StringIO()
+        exit_code = 0
+        with patch.object(resources, 'resource_service', return_value=service) as factory, \
+             redirect_stdout(output):
+            try:
+                resources.cmd_resources({}, args)
+            except SystemExit as exc:
+                exit_code = exc.code
+        return service, factory, exit_code, json.loads(output.getvalue())
+
+    def test_scope_selection_and_stop_flags_reach_service(self):
+        stop = ['--stop-at-available-bytes', '42949672960', '--capacity-scope-id', 'scope-data']
+        service, _, code, _ = self.run_cli(['plan', '--scope', 'cache', '--resource-id', 'b',
+                                            '--resource-id', 'a', '--json'])
+        self.assertEqual(code, 0)
+        self.assertEqual(service.calls, [('plan', 'cache', {'thorough': False, 'budget_seconds': 60,
+                                                            'resource_ids': ('b', 'a')})])
+        service, _, code, _ = self.run_cli(['cleanup', '--plan-id', 'plan-9', '--confirm', *stop, '--json'])
+        self.assertEqual(code, 0)
+        self.assertEqual(service.calls, [('cleanup', 'plan-9', {
+            'confirm': True, 'stop_at_available_bytes': 42949672960, 'capacity_scope_id': 'scope-data'})])
+        service, _, code, _ = self.run_cli(['cleanup', '--scope', 'cache', '--resource-id', 'b',
+                                            '--resource-id', 'a', '--confirm', *stop, '--json'])
+        self.assertEqual(code, 0)
+        self.assertEqual([call[0] for call in service.calls], ['plan', 'cleanup'])
+        self.assertEqual(service.calls[0][2]['resource_ids'], ('b', 'a'))
+        self.assertEqual(service.calls[1], ('cleanup', 'plan-1', {
+            'confirm': True, 'resource_ids': ('b', 'a'),
+            'stop_at_available_bytes': 42949672960, 'capacity_scope_id': 'scope-data'}))
+
+    def test_selection_and_stop_flags_refuse_other_routes_before_service(self):
+        for argv, code_name in (
+            (['status', '--resource-id', 'a', '--json'], 'invalid_selection'),
+            (['cleanup', '--tier', 'safe', '--resource-id', 'a', '--json'], 'invalid_selection'),
+            (['plan', '--scope', 'cache', '--stop-at-available-bytes', '1', '--json'], 'invalid_capacity_target'),
+            (['status', '--capacity-scope-id', 'root', '--json'], 'invalid_capacity_target'),
+            (['cleanup', '--tier', 'safe', '--stop-at-available-bytes', '1', '--json'], 'invalid_capacity_target'),
+        ):
+            with self.subTest(argv=argv):
+                service, factory, code, payload = self.run_cli(argv)
+                self.assertEqual(code, 1)
+                self.assertFalse(payload['ok'])
+                self.assertEqual(payload['status'], 'refused')
+                self.assertEqual(payload['error']['code'], code_name)
+                self.assertEqual(service.calls, [])
+                factory.assert_not_called()

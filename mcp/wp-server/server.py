@@ -348,10 +348,8 @@ def _run_remote_wp_process(command: list[str], *, cwd: str, timeout: int,
 
 def _remote_wp_may_stage_host_files(argv) -> bool:
     """Refuse command families whose local boundary can copy host operands."""
-    return (
-        tuple(argv[:2]) in (("plugin", "install"), ("theme", "install"), ("media", "import"))
-        or tuple(argv[:1]) == ("eval-file",)
-    )
+    from sandbox.wp_argv import staging_command
+    return staging_command(argv) is not None
 
 
 def _remote_wp_contract(payload: dict) -> dict:

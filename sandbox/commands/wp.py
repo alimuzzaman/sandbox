@@ -23,6 +23,7 @@ from sandbox.application.context import (
     preflight_project_capability,
 )
 import sandbox.core._remote as _remote
+from sandbox.wp_argv import staging_command
 
 
 def _timeout_stream(value) -> str:
@@ -212,27 +213,24 @@ def _stage_host_package_paths(
     argv: list[str], instance: str, project_root: str | Path | None = None,
 ) -> tuple[list[str], list[Path]]:
     """Expose supported host file paths through the Docker download-cache mount."""
-    supported = {
-        ("plugin", "install"),
-        ("theme", "install"),
-        ("media", "import"),
-        ("eval-file",),
-    }
-    command = (
-        tuple(argv[:2])
-        if argv[:2] in (["plugin", "install"], ["theme", "install"], ["media", "import"])
-        else tuple(argv[:1])
-    )
-    if _is_herd_instance(instance) or len(argv) < 2 or command not in supported:
+    found = staging_command(argv)
+    if _is_herd_instance(instance) or found is None:
         return list(argv), []
+    command, operand_start = found
     staged: list[Path] = []
     rewritten = list(argv)
     cache = Path(RUNTIME_DIR) / "dl-cache" / "wp-http"
     base = Path(project_root).expanduser() if project_root else Path.cwd()
-    operand_start = 1 if command == ("eval-file",) else 2
-    for index, token in enumerate(argv[operand_start:], start=operand_start):
-        if token == "--" or token.startswith("-"):
-            continue
+    operands = [index for index in range(operand_start, len(argv))
+                if argv[index] != "--" and not argv[index].startswith("-")]
+    if command == ("eval-file",):
+        # Only the script is a host file; what follows belongs to the script,
+        # and `eval-file -` reads the script from stdin.
+        first = next((index for index in range(operand_start, len(argv))
+                      if argv[index] == "-" or not argv[index].startswith("-")), None)
+        operands = [first] if first is not None and argv[first] != "-" else []
+    for index in operands:
+        token = argv[index]
         source = Path(token).expanduser()
         if not source.is_absolute():
             source = (base / source).resolve()

@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb wp` stages host files for `plugin install`, `theme install`, `media import`
+  and `eval-file` when WP-CLI global options precede the command, and the remote
+  host-file refusal recognises the same forms. `eval-file` no longer rewrites
+  arguments passed to the script.
 - Explicit non-empty `SANDBOX_HOME` runs skip writing the legacy checkout-root
   `.env` compatibility file, preventing isolated state runs from rewriting shared
   checkout state while preserving existing output when `SANDBOX_HOME` is unset

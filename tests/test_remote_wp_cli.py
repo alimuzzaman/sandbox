@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from sandbox.commands import wp as command
 from sandbox.core import _remote
+from sandbox.wp_argv import staging_command
 
 
 class TestRemoteWpCliTransport(unittest.TestCase):
@@ -322,6 +323,199 @@ class TestRemoteWpCliCommand(unittest.TestCase):
             finally:
                 for path in staged:
                     path.unlink(missing_ok=True)
+
+    def _stage(self, root, project, argv, *, herd=False):
+        with patch.object(command, "RUNTIME_DIR", root / "runtime"), \
+                patch.object(command, "_is_herd_instance", return_value=herd):
+            rewritten, staged = command._stage_host_package_paths(
+                argv, "local-instance", project)
+        self.addCleanup(lambda: [path.unlink(missing_ok=True) for path in staged])
+        return rewritten, staged
+
+    def test_staging_finds_command_after_equals_global_option(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            (project / "plugin.zip").write_bytes(b"synthetic")
+            rewritten, staged = self._stage(
+                root, project, ["--url=https://site.test", "plugin", "install", "plugin.zip"],
+            )
+            self.assertEqual(rewritten[0], "--url=https://site.test")
+            self.assertEqual(rewritten[1:3], ["plugin", "install"])
+            self.assertTrue(rewritten[3].startswith("/sandbox-dl-cache/"))
+            self.assertEqual(len(staged), 1)
+            self.assertEqual(staged[0].read_bytes(), b"synthetic")
+
+    def test_staging_finds_command_after_split_global_option(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            (project / "plugin.zip").write_bytes(b"synthetic")
+            rewritten, staged = self._stage(
+                root, project, ["--url", "https://site.test", "plugin", "install", "plugin.zip"],
+            )
+            self.assertEqual(rewritten[1], "https://site.test")
+            self.assertTrue(rewritten[4].startswith("/sandbox-dl-cache/"))
+            self.assertEqual(len(staged), 1)
+            self.assertEqual(staged[0].read_bytes(), b"synthetic")
+
+            (project / "boot.php").write_bytes(b"synthetic-boot")
+            (project / "script.php").write_bytes(b"synthetic-script")
+            rewritten_eval, staged_eval = self._stage(
+                root, project, ["--require", "boot.php", "eval-file", "script.php"],
+            )
+            self.assertEqual(rewritten_eval[1], "boot.php")
+            self.assertTrue(rewritten_eval[3].startswith("/sandbox-dl-cache/"))
+            self.assertEqual(len(staged_eval), 1)
+            self.assertEqual(staged_eval[0].read_bytes(), b"synthetic-script")
+
+    def test_staging_honours_delimiter_after_global_options(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            (project / "script.php").write_bytes(b"synthetic")
+            rewritten, staged = self._stage(
+                root, project, ["--url=https://site.test", "--", "eval-file", "script.php"],
+            )
+            self.assertEqual(rewritten[1], "--")
+            self.assertTrue(rewritten[3].startswith("/sandbox-dl-cache/"))
+            self.assertEqual(len(staged), 1)
+            self.assertEqual(staged[0].read_bytes(), b"synthetic")
+
+    def test_staging_eval_file_outside_project_with_require(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            script = outside / "check.php"
+            script.write_bytes(b"synthetic")
+            rewritten, staged = self._stage(
+                root, project, ["--require=boot.php", "eval-file", str(script)],
+            )
+            self.assertEqual(rewritten[0], "--require=boot.php")
+            self.assertTrue(rewritten[2].startswith("/sandbox-dl-cache/"))
+            self.assertEqual(len(staged), 1)
+            self.assertEqual(staged[0].read_bytes(), b"synthetic")
+
+    def test_staging_command_ignores_how_many_delimiters_survive(self):
+        for argv, expected in (
+            (["eval-file", "x"], (("eval-file",), 1)),
+            (["--url=https://site.test", "plugin", "install", "x"], (("plugin", "install"), 3)),
+            (["--url", "https://site.test", "media", "import", "x"], (("media", "import"), 4)),
+        ):
+            for count in range(4):
+                with self.subTest(argv=argv, count=count):
+                    found = staging_command(["--"] * count + argv)
+                    self.assertEqual(found[0], expected[0])
+                    self.assertEqual(found[1], expected[1] + count)
+        self.assertEqual(staging_command(["--", "--url=x", "--", "eval-file", "x"]),
+                         (("eval-file",), 4))
+        self.assertIsNone(staging_command(["--", "--", "option", "get", "x"]))
+
+    def test_staging_leaves_unrelated_arguments_untouched(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            (project / "script.php").write_bytes(b"synthetic-script")
+            (project / "data.txt").write_bytes(b"synthetic-data")
+            (project / "plugin.zip").write_bytes(b"synthetic-plugin")
+
+            with self.subTest(case="eval-file with argument"):
+                rewritten, staged = self._stage(
+                    root, project, ["eval-file", "script.php", "data.txt"],
+                )
+                self.assertTrue(rewritten[1].startswith("/sandbox-dl-cache/"))
+                self.assertEqual(rewritten[2], "data.txt")
+                self.assertEqual(len(staged), 1)
+                self.assertEqual(staged[0].read_bytes(), b"synthetic-script")
+
+            with self.subTest(case="eval-file from stdin"):
+                rewritten, staged = self._stage(
+                    root, project, ["eval-file", "-", "data.txt"],
+                )
+                self.assertEqual(rewritten, ["eval-file", "-", "data.txt"])
+                self.assertEqual(staged, [])
+
+            with self.subTest(case="non-staging command"):
+                argv = ["--url=https://site.test", "option", "get", "plugin.zip"]
+                rewritten, staged = self._stage(root, project, argv)
+                self.assertEqual(rewritten, argv)
+                self.assertEqual(staged, [])
+
+            with self.subTest(case="option after command"):
+                argv = ["plugin", "--url=https://site.test", "install", "plugin.zip"]
+                rewritten, staged = self._stage(root, project, argv)
+                self.assertEqual(rewritten, argv)
+                self.assertEqual(staged, [])
+
+    def test_staging_keeps_herd_passthrough_with_global_options(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            (project / "plugin.zip").write_bytes(b"synthetic")
+            argv = ["--url=https://site.test", "plugin", "install", "plugin.zip"]
+            rewritten, staged = self._stage(root, project, argv, herd=True)
+            self.assertEqual(rewritten, argv)
+            self.assertEqual(staged, [])
+
+    def test_staging_failure_after_global_options_removes_staged_files(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            (project / "a.zip").write_bytes(b"synthetic-a")
+            (project / "b.zip").write_bytes(b"synthetic-b")
+            real_copyfile = command.shutil.copyfile
+            calls = 0
+
+            def failing_copyfile(src, dst):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return real_copyfile(src, dst)
+                raise OSError("synthetic")
+
+            argv = ["--url=https://site.test", "plugin", "install", "a.zip", "b.zip"]
+            with patch.object(command.shutil, "copyfile", side_effect=failing_copyfile), \
+                    patch.object(command, "RUNTIME_DIR", root / "runtime"), \
+                    patch.object(command, "_is_herd_instance", return_value=False), \
+                    redirect_stderr(StringIO()), \
+                    self.assertRaises(SystemExit):
+                command._stage_host_package_paths(argv, "local-instance", project)
+
+            leftover = list((root / "runtime/dl-cache/wp-http").glob(".sandbox-host-package-*"))
+            self.assertEqual(leftover, [])
+
+    def test_cmd_wp_runs_once_with_rewritten_argv_after_global_options(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            project = root / "project"
+            project.mkdir()
+            (project / "plugin.zip").write_bytes(b"synthetic")
+            fake_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch("sandbox.commands.wp.preflight_instance_capability", return_value=None), \
+                    patch.object(command, "_is_herd_instance", return_value=False), \
+                    patch.object(command, "RUNTIME_DIR", root / "runtime"), \
+                    patch("sandbox.commands.wp.wpcli", return_value=fake_result) as wpcli_mock, \
+                    redirect_stdout(StringIO()):
+                command.cmd_wp({}, self._args(
+                    remote=None, resolved_instance="local-instance",
+                    project_dir=str(project),
+                    passthrough=["--", "--url=https://site.test", "plugin", "install", "plugin.zip"],
+                ))
+            wpcli_mock.assert_called_once()
+            called_argv = wpcli_mock.call_args[0][0]
+            self.assertEqual(called_argv[0], "--url=https://site.test")
+            self.assertTrue(called_argv[-1].startswith("/sandbox-dl-cache/"))
+            leftover = list((root / "runtime/dl-cache/wp-http").glob(".sandbox-host-package-*"))
+            self.assertEqual(leftover, [])
 
     @patch("sandbox.commands.wp._remote.remote_wp_cli")
     @patch("sandbox.commands.wp._remote.get_remote")

@@ -70,6 +70,10 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 063 | Remote Development Execution Readiness | In progress (16 of 31 done) | Roadmap 2026-10-08 #5 | Feedback cef740dd, cebec97a, 5598f2d0 |
 | 064 | Transactional Edge and DNS Changes | Planned; tasks ready (0 of 31 done) | Roadmap 2026-10-08 #4 | Feedback 6bd6bd1d, 50735fc8, 83cca354, 34af9b95, 075c6caf |
 | 065 | Remote Server Health Monitoring | PRD draft (not ready: owner decisions Q1-Q2, then readiness review) | User request 2026-10-10; learned from xCloud's monitor on xcloud-london | Feedback 6bba550f; research `docs/research/xcloud-server-monitoring-review.md` |
+| 066 | Remote Storage Reservation | Open (1 of 16) | — | Internal |
+| 067 | Cross-Platform Open-Source Secret Manager | Open (2 of 39) | — | Internal |
+| 068 | Local Images for Hosted Deployments | Open (4 of 35) | — | Internal |
+| 069 | Secret Profiles and Create-Only Manager Migration | Open (3 of 67) | — | Internal |
 
 Statuses are counted from each feature's `tasks.md` (reconciled 2026-10-08). `Ledger closed`
 means no unchecked task; `Open (n of m)` counts unchecked tasks, which are mostly

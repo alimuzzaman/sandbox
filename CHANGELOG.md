@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only
+  `main` rule, `specs/README.md` indexes specs 066-069, and release guidance no longer
+  requires the `app.py` helper namespace.
 - Explicit non-empty `SANDBOX_HOME` runs skip writing the legacy checkout-root
   `.env` compatibility file, preventing isolated state runs from rewriting shared
   checkout state while preserving existing output when `SANDBOX_HOME` is unset

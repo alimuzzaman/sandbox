@@ -3710,12 +3710,11 @@ def remove():
         if not isinstance(expected_identity, str) or not re.fullmatch(
             r"volume-[0-9a-f]{20}", expected_identity
         ):
-            return {"status": "failed", "reason": "volume_identity_required"}
+            return {"status": "skipped", "reason": "volume_identity_required"}
         code, out, _err = run(["docker", "volume", "inspect", locator], 20)
         if code != 0:
             return {
-                "status": "timed_out" if code == 124 else "failed",
-                "reason": "cleanup_timed_out" if code == 124 else "volume_identity_unavailable",
+                "status": "skipped", "reason": "revalidation_unavailable",
             }
         try:
             inspected = json.loads(out)
@@ -3726,12 +3725,12 @@ def remove():
                 raise ValueError
             created_at = current.get("CreatedAt")
             if not isinstance(created_at, str) or not created_at:
-                return {"status": "failed", "reason": "volume_identity_unavailable"}
+                return {"status": "skipped", "reason": "revalidation_unavailable"}
             current_identity = rid("volume", locator + "\0" + created_at)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return {"status": "failed", "reason": "volume_identity_unavailable"}
+            return {"status": "skipped", "reason": "revalidation_unavailable"}
         if current_identity != expected_identity:
-            return {"status": "failed", "reason": "volume_identity_changed"}
+            return {"status": "skipped", "reason": "volume_identity_changed"}
     commands = {
         "volume": ["docker", "volume", "rm", locator],
         "container": ["docker", "container", "rm", locator],
@@ -4290,7 +4289,11 @@ class RemoteResourceAdapter:
                 status = payload.get("status")
                 reason = payload.get("reason")
                 if status not in {
-                    "removed", "already_absent", "failed", "timed_out",
+                    "removed", "already_absent", "failed", "timed_out", "skipped",
+                }:
+                    raise ValueError
+                if status == "skipped" and reason not in {
+                    "revalidation_unavailable", "volume_identity_changed", "volume_identity_required",
                 }:
                     raise ValueError
             except (TypeError, ValueError, json.JSONDecodeError):

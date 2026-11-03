@@ -857,7 +857,8 @@ are skipped at apply time too.
 Repeat `--resource-id <id>` on `resources plan --scope cache` or on scope cleanup
 to select exact resource IDs. Every selected ID must be unique and present in the
 fresh eligible plan or stored candidate list. A bad selection refuses without
-consuming a stored plan. Apply follows the caller's selected order. Omitting the
+consuming a stored plan. The stored plan preserves the caller's selection order;
+apply keeps that order unless the caller supplies a new exact subset. Omitting the
 selector retains the plan's candidate list. A singleton still requires ownership,
 non-use evidence, target binding, expiry, confirmation and fresh revalidation.
 
@@ -890,6 +891,10 @@ observation; inspect `status` and category coverage for completeness. Receipts
 include signed `available_bytes_delta`; the existing nonnegative reclaim estimate
 remains backward compatible. Failed read-only revalidation is
 `skipped/revalidation_unavailable`, never confirmed absence or a deletion failure.
+This includes a failed volume identity inspect immediately before removal.
+Missing or malformed final capacity makes the run `indeterminate` and retains
+known item outcomes; it cannot turn a removed-item receipt into successful
+completion without a final observation.
 
 Normal deep scans retry incomplete directory caches; `--fast` stays cache-only.
 This is a fresh bounded walk, not checkpoint resume. For a larger walk use

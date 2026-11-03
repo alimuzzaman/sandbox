@@ -3574,6 +3574,13 @@ def _recovery_governance_authorized(validated: dict, remote_name: str) -> bool:
     return False
 
 
+def _applied_record(record) -> dict | None:
+    """What this apply wrote, so destroy can tell whether the record is still ours."""
+    if not isinstance(record, dict):
+        return None
+    return {key: record.get(key) for key in ("name", "type", "content")}
+
+
 def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
     """Records for host destroy: keep what the first apply found, per managed record.
 
@@ -3585,8 +3592,13 @@ def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
         (item.get("zone_id"), item.get("created_id")): item
         for item in (prior if isinstance(prior, list) else [])
         if isinstance(item, dict) and item.get("zone_id") and item.get("created_id")
+        and "previous" in item
     }
-    return [known.get((change["zone_id"], change["created_id"]), change) for change in changes]
+    saved = []
+    for change in changes:
+        first = known.get((change["zone_id"], change["created_id"]))
+        saved.append(change if first is None else {**change, "previous": first["previous"]})
+    return saved
 
 
 def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
@@ -3664,7 +3676,8 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             created = client.upsert_address(
                 zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous,
-                            "created_id": created.get("id")})
+                            "created_id": created.get("id"),
+                            "applied": _applied_record(created)})
         certificate = edge.after_dns(
             validated, port, secret_values, cert_path, certificate, caddy_name,
             log_path=apply_log)
@@ -4670,14 +4683,16 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 cname_target = hosting.normalize_hostname(str(cname.get("content") or ""), wildcard=False)
                 if cname_target == target_host:
                     updated = client.update_record(zone["id"], cname, proxied=proxied)
-                    changes.append({"zone_id": zone["id"], "previous": cname, "created_id": updated.get("id")})
+                    changes.append({"zone_id": zone["id"], "previous": cname, "created_id": updated.get("id"),
+                                    "applied": _applied_record(updated)})
                     continue
                 raise RuntimeError(f"declared hostname {hostname} has a conflicting CNAME to {cname_target}")
             previous = next((record for record in all_records if record.get("type") == kind), None)
             if previous is None:
                 fresh_hostnames.add(hostname)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
-            changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
+            changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id"),
+                            "applied": _applied_record(created)})
         certificate = edge.after_dns(
             validated, runtime["loopback_port"], secret_values, cert_path, certificate,
             caddy_name, log_path=apply_log)

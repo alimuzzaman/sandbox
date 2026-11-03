@@ -8,9 +8,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
-- `host apply` keeps first-adoption DNS provenance across re-applies, so `host
-  destroy` deletes a record Sandbox created instead of restoring it, and a
-  reused nginx Origin CA certificate keeps its ID so destroy can revoke it.
+- `host destroy` reads each DNS record first and only touches one that still
+  matches what Sandbox last wrote and that no other hosted target holds, and its
+  dry run lists each DNS action. `host apply` keeps first-adoption provenance
+  across re-applies, so a record Sandbox created is deleted rather than restored,
+  and a reused nginx Origin CA certificate keeps its ID.
 - `sb visit` repairs a missing headless Chromium instead of failing before navigation
   when the browser cache was cleared, and install progress no longer reaches stdout.
 - Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only

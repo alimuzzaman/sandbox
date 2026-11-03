@@ -4129,16 +4129,25 @@ class TestHostDnsFirstAdoption(unittest.TestCase):
         self.assertEqual(result, changes)
 
     def test_reapply_keeps_the_original_absence_so_destroy_deletes(self):
-        prior = [{"zone_id": "z", "previous": None, "created_id": "x"}]
-        changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.1"}, "created_id": "x"}]
+        prior = [{"zone_id": "z", "previous": None, "created_id": "x",
+                  "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"}}]
+        changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.2"}, "created_id": "x",
+                    "applied": {"name": "a.test", "type": "A", "content": "192.0.2.2"}}]
         result = hosting_cmd._first_adoption_records(prior, changes)
-        self.assertEqual(result, prior)
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0]["previous"])
+        self.assertEqual(result[0]["applied"], {"name": "a.test", "type": "A", "content": "192.0.2.2"})
 
     def test_reapply_keeps_the_original_adopted_record(self):
-        prior = [{"zone_id": "z", "previous": {"id": "x", "content": "198.51.100.9"}, "created_id": "x"}]
-        changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.1"}, "created_id": "x"}]
+        first_prev = {"id": "x", "content": "198.51.100.9"}
+        prior = [{"zone_id": "z", "previous": first_prev, "created_id": "x",
+                  "applied": {"name": "a.test", "type": "A", "content": "198.51.100.9"}}]
+        changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.1"}, "created_id": "x",
+                    "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"}}]
         result = hosting_cmd._first_adoption_records(prior, changes)
-        self.assertEqual(result, prior)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["previous"], first_prev)
+        self.assertEqual(result[0]["applied"], {"name": "a.test", "type": "A", "content": "192.0.2.1"})
 
     def test_recreated_record_starts_over(self):
         prior = [{"zone_id": "z", "previous": None, "created_id": "old"}]
@@ -4154,7 +4163,7 @@ class TestHostDnsFirstAdoption(unittest.TestCase):
 
     def test_malformed_prior_is_ignored(self):
         changes = [{"zone_id": "z", "previous": None, "created_id": "x"}]
-        for prior in ("x", [None, "x"], [{"zone_id": "z"}], {"a": 1}):
+        for prior in ("x", [None, "x"], [{"zone_id": "z"}], [{"zone_id": "z", "created_id": "x"}], {"a": 1}):
             with self.subTest(prior=prior):
                 result = hosting_cmd._first_adoption_records(prior, changes)
                 self.assertEqual(result, changes)
@@ -4182,29 +4191,39 @@ class TestHostDnsFirstAdoption(unittest.TestCase):
             planned = destroy.plan(state, entry, "r1", "site", "sandbox", probe=probe)
         self.assertEqual(
             planned["dns_records"],
-            [{"zone_id": "z", "action": "delete", "record_id": "x"}],
+            [{"zone_id": "z", "action": "delete", "record_id": "x", "verifiable": False}],
         )
 
     def test_second_apply_keeps_first_adoption_in_saved_state(self):
         fixture = _HostingOwnerFixture(self)
         hostnames = [record["hostname"] for record in fixture.runtime["records"]]
+        ids = {hostname: f"record-{index}" for index, hostname in enumerate(hostnames)}
         fixture.client.records.side_effect = lambda _zone, hostname: [
-            {"id": "record-1", "type": "A", "name": hostname,
+            {"id": ids[hostname], "type": "A", "name": hostname,
              "content": "203.0.113.10", "proxied": True, "ttl": 1}
         ]
         prior_records = [
-            {"zone_id": "zone-1", "previous": None, "created_id": "record-1"}
-            for _ in hostnames
+            {"zone_id": "zone-1", "previous": None, "created_id": ids[hostname]}
+            for hostname in hostnames
         ]
         fixture.state["hosts"][fixture.key] = {
             "records": prior_records,
+        }
+        fixture.client.upsert_address.side_effect = lambda _zone, hostname, address, proxied=False: {
+            "id": ids[hostname], "name": hostname, "type": "A", "content": address, "proxied": proxied,
         }
         fixture.apply()
         saved = fixture.repository.load()["hosts"][fixture.key]["records"]
         self.assertTrue(len(saved) > 0)
         for entry in saved:
             self.assertIsNone(entry["previous"])
-            self.assertEqual(entry["created_id"], "record-1")
+            expected_hostname = next(h for h, rec_id in ids.items() if rec_id == entry["created_id"])
+            self.assertEqual(entry["created_id"], ids[expected_hostname])
+            self.assertEqual(entry["applied"]["name"], expected_hostname)
+
+    def test_applied_record_handles_non_dict(self):
+        self.assertIsNone(hosting_cmd._applied_record(None))
+        self.assertIsNone(hosting_cmd._applied_record(MagicMock()))
 
     def test_reused_certificate_keeps_the_recorded_id(self):
         edge = hosting_cmd._NginxHostEdge({"name": "r1"})

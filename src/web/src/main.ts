@@ -185,7 +185,8 @@ function boot(): void {
   // flight. Passive navigation/visibility events simply share that request.
   setActionDeps({ refresh: () => refresh(true), render });
   setConsoleRefresh(() => refresh(true));
-  setConsoleRepaint(() => render());
+  // Passive, like the refresh tick: must not wipe a form someone is typing in.
+  setConsoleRepaint(() => { renderSidebar(false); renderDetail(false); });
   initModal();
   initConsole();
   initCselOutsideClose();

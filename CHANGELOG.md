@@ -33,9 +33,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - V2 readiness reads stdout only; SSH stderr warnings are captured separately
   in bounded diagnostics and cannot block a valid worker acknowledgement.
   Garbage on stdout still refuses before upload. Protocol 17 is unchanged.
-- Local-image receipt publication decodes byte acknowledgements correctly;
-  malformed replies remain publication-unknown and unexpected exceptions return
-  a closed JSON error without exposing details.
+- Local-image receipt publication strictly parses publisher acknowledgements
+  with exact integer schema checking, duplicate key refusal, and bounded UTF-8
+  frames; transport loss, subprocess timeouts, and malformed frames fail closed
+  as typed publication-unknown without exposing diagnostic details.
 - Shared-bundle reservations now start under the engine lease after proven
   orphans for that target are reconciled. A reservation-verified worker readiness
   acknowledgement precedes upload; early failures release their reservation.

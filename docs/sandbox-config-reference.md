@@ -380,6 +380,11 @@ the variable in every shell. A normal first command automatically migrates old
 repo/config-only state only when that selected base is empty; if both sides hold state,
 Sandbox stops without merging or deleting either source.
 
+A non-empty `SANDBOX_HOME` means Sandbox does not write the legacy
+checkout-root `.env`. Instance Compose files still come from the selected state
+home. With `SANDBOX_HOME` unset or empty, the legacy compatibility write is
+unchanged; other checkout-local state is not covered by this change.
+
 It sits **under** the project in priority:
 
 - **Scalars** (`phpVersion`, `server`, `port`, …): the project wins; the

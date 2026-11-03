@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Explicit non-empty `SANDBOX_HOME` runs skip writing the legacy checkout-root
+  `.env` compatibility file, preventing isolated state runs from rewriting shared
+  checkout state while preserving existing output when `SANDBOX_HOME` is unset
+  or empty.
 - Retention sweep now excludes no-op retained jobs and completed retired CI
   rows from consuming candidate scan limits, supports cross-process keyset
   continuation via `--cursor` CLI and envelope `cursor`, `limit`, and `truncated`

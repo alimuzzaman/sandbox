@@ -991,7 +991,12 @@ def write_env_for_compose(cfg: dict) -> None:
     file with values baked in. We keep this function so anyone calling
     it from out-of-tree code (or older skills) still gets a valid
     `.env`, but the multi-instance code path doesn't depend on it.
+
+    When SANDBOX_HOME is explicitly set to a non-empty value, no checkout
+    `.env` is written so isolated state runs do not mutate the shared checkout.
     """
+    if os.environ.get("SANDBOX_HOME"):
+        return
     rt = cfg.get("runtime", {})
     plugins_home = _plugins_home(cfg)
     env = ROOT / ".env"

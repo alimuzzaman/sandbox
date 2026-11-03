@@ -280,7 +280,9 @@ def remote_storage_floor_inspection(remote: dict, target: str, *, archive_bytes:
     decision.update(reserve_bytes=DEFAULT_ESTIMATE_BYTES, archive_bytes=archive_bytes,
                     margin_bytes=margin, provisional=archive_bytes is None,
                     live_reservations=payload.get("live_reservations") if isinstance(payload, dict) else None,
-                    reservation_created=False, advisory=True)
+                    reservation_created=False, advisory=True,
+                    snapshot_kind="point_in_time",
+                    snapshot_at=payload.get("snapshot_at") if isinstance(payload, dict) else None)
     for key in ("free", "floor", "reserve", "reserved", "archive", "estimate", "margin"):
         value = decision.get(key + "_bytes")
         decision[key + "_gib"] = value / GB if value is not None else None
@@ -337,72 +339,91 @@ def storage_estimate(deploy, target, request):
     return history, estimate, estimate_source
 
 
-def inspect_storage_floor(home, deploy, target, request, free):
-    """Read an advisory snapshot, without creating locks or pruning the ledger."""
-    import fcntl, json, math, os, stat, time
-    from pathlib import Path
-    descriptors = []
-    def checked(path, *, directory=False):
-        state = path.lstat()
+def storage_free_bytes(paths):
+    import os
+    values = []
+    for path in paths:
+        try:
+            state = os.statvfs(path)
+        except OSError:
+            return None
+        values.append(state.f_bavail * state.f_frsize)
+    return min(values) if values else None
+
+
+def inspect_storage_floor(home, deploy, target, request, roots):
+    """Lock-free optimistic snapshot. Never contends with admission or reclaim."""
+    import json, math, os, stat, time
+    store = home / "runtime" / "storage"
+    ledger = store / "reservations.json"
+    paths = ((home / "runtime", True, None),
+             (home / "runtime" / "resources", True, False),
+             (store, True, True),
+             (home / "runtime" / "resources" / "reclaim-host.lock", False, True),
+             (store / "reservations.lock", False, True),
+             (ledger, False, False))
+
+    def signature(path, directory, private):
+        try:
+            state = path.lstat()
+        except FileNotFoundError:
+            return None
         if (not (stat.S_ISDIR(state.st_mode) if directory else stat.S_ISREG(state.st_mode))
-                or state.st_uid != os.geteuid() or state.st_mode & 0o022
+                or state.st_uid != os.geteuid()
+                or (private is not None and state.st_mode & (0o077 if private else 0o022))
                 or (not directory and state.st_nlink != 1)):
             raise ValueError("unsafe storage evidence")
-        return state
-    try:
-        # No O_CREAT, chmod, mkdir, pruning, lease, or reconciliation in this path.
-        for lock_path in (home / "runtime" / "resources" / "reclaim-host.lock",
-                          home / "runtime" / "storage" / "reservations.lock"):
-            try:
-                checked(lock_path.parent, directory=True)
-                checked(lock_path)
-                descriptor = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            except FileNotFoundError:
-                continue
-            descriptors.append(descriptor)
-            state = os.fstat(descriptor)
-            if (not stat.S_ISREG(state.st_mode) or state.st_uid != os.geteuid()
-                    or state.st_mode & 0o077 or state.st_nlink != 1):
-                raise ValueError("unsafe storage lock")
-            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        store = home / "runtime" / "storage"
-        entries = []
-        try:
-            if checked(store, directory=True).st_mode & 0o077:
-                raise ValueError("unsafe storage store")
-            ledger = store / "reservations.json"
-            checked(ledger)
+        return (state.st_dev, state.st_ino, state.st_mode, state.st_size,
+                state.st_mtime_ns, state.st_ctime_ns)
+
+    def snapshot():
+        before = tuple(signature(*item) for item in paths)
+        raw = b"[]"
+        if before[-1] is not None:
             descriptor = os.open(ledger, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(descriptor, "rb") as handle:
                 state = os.fstat(handle.fileno())
                 if (not stat.S_ISREG(state.st_mode) or state.st_uid != os.geteuid()
                         or state.st_mode & 0o022 or state.st_nlink != 1 or state.st_size > 8 * 1024**2):
                     raise ValueError("unsafe storage ledger")
-                entries = json.loads(handle.read(8 * 1024**2 + 1))
-        except FileNotFoundError:
-            pass
+                raw = handle.read(8 * 1024**2 + 1)
+                if len(raw) > 8 * 1024**2:
+                    raise ValueError("oversized storage ledger")
+        after = tuple(signature(*item) for item in paths)
+        if before != after:
+            raise ValueError("storage snapshot changed")
+        return before, raw
+
+    try:
+        # The slow history scan precedes the measurement and holds no locks.
+        history, estimate, source = storage_estimate(deploy, target, request)
+        before = snapshot()
+        measured_at = time.time()
+        free = storage_free_bytes(roots)
+        after = snapshot()
+        if before != after:
+            return {"status": "unavailable", "reason": "storage_snapshot_changed"}
+        if free is None:
+            return {"status": "unavailable", "reason": "statvfs_failed"}
+        entries = json.loads(before[1])
         if not isinstance(entries, list) or any(
                 not isinstance(e, dict) or type(e.get("expires_at")) not in (int, float)
                 or not math.isfinite(e["expires_at"]) or type(e.get("estimate_bytes")) is not int
                 or e["estimate_bytes"] < 0 for e in entries):
             raise ValueError("invalid storage ledger")
-        live = [e for e in entries if e["expires_at"] > time.time()]
-        history, estimate, source = storage_estimate(deploy, target, request)
+        live = [e for e in entries if e["expires_at"] > measured_at]
         return {"status": "complete", "free_bytes": free,
                 "reserved_bytes": sum(e["estimate_bytes"] for e in live),
                 "live_reservations": len(live), "estimate_bytes": estimate,
-                "estimate_source": source, "history_bytes": history}
-    except BlockingIOError:
-        return {"status": "unavailable", "reason": "storage_lock_busy"}
+                "estimate_source": source, "history_bytes": history,
+                "snapshot_at": measured_at, "snapshot_kind": "point_in_time"}
     except Exception:
         return {"status": "unavailable", "reason": "storage_evidence_unavailable"}
-    finally:
-        for descriptor in descriptors:
-            os.close(descriptor)
 
 
 # Runs on the remote with ``REQUEST`` bound. Prints exactly one JSON line.
 _PROGRAM = (RESERVATION_RELEASE_PROGRAM + "\n" + inspect.getsource(storage_estimate)
+            + "\n" + inspect.getsource(storage_free_bytes)
             + "\n" + inspect.getsource(inspect_storage_floor)) + r'''
 import fcntl, json, math, os, stat, subprocess, time
 from pathlib import Path
@@ -410,15 +431,7 @@ from pathlib import Path
 def emit(payload):
     print(json.dumps(payload, sort_keys=True))
 
-def free_bytes(paths):
-    values = []
-    for path in paths:
-        try:
-            stat = os.statvfs(path)
-        except OSError:
-            return None
-        values.append(stat.f_bavail * stat.f_frsize)
-    return min(values) if values else None
+free_bytes = storage_free_bytes
 
 def main():
     target = REQUEST.get("target")
@@ -433,13 +446,13 @@ def main():
     for docker_root in ("/var/lib/docker",):
         if os.path.isdir(docker_root):
             roots.append(docker_root)
+    if REQUEST.get("inspect_only"):
+        return emit(inspect_storage_floor(home, deploy, target, REQUEST, roots))
     free = free_bytes(roots)
     if free is None:
         return emit({"status": "unavailable", "reason": "statvfs_failed"})
     if REQUEST.get("measure_only"):
         return emit({"status": "complete", "free_bytes": free})
-    if REQUEST.get("inspect_only"):
-        return emit(inspect_storage_floor(home, deploy, target, REQUEST, free))
     # Serialize admission with reclaim. The reservation protects the source
     # family after this guard is released, throughout staging/job registration.
     guard_path = home / "runtime" / "resources" / "reclaim-host.lock"

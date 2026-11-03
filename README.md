@@ -1431,9 +1431,12 @@ bundle estimate; v1 conservatively counts all archives at 2x. The same bounded
 workspace-history estimate as admission is included. No Docker inventory or
 nominal image sizes are used to infer recoverable space.
 
-Inspection opens only existing locks and ledger files, ignores expired entries
-without pruning them, and fails closed on unsafe/unavailable evidence or busy
-locks. It creates no reservation, file, directory or lease. Results are advisory;
+Inspection never takes reclaim or reservation locks. It scans history first,
+then brackets one free-space measurement with matching ledger contents and
+file/directory identities (including absent lock paths). A changed snapshot or
+unsafe/unavailable evidence fails closed; an existing writer can continue freely.
+Expired entries are counted against one sample time without pruning. The report
+is explicitly an advisory point-in-time snapshot, not an admission or lease. It creates no reservation, file, directory or lease. Results are advisory;
 the actual push must recheck and reserve. No cleanup runs automatically. This is
 a controller-side additive CLI capability; it does not change the runtime wire
 protocol or authorize a runtime update.

@@ -526,7 +526,7 @@ def _cmd_host_image_storage_admission(args) -> None:
         storage = payload.get("storage", {})
         for key in ("free", "floor", "reserve", "reserved", "archive", "estimate", "margin"):
             print(f"{key}: {storage.get(key + '_bytes')} bytes ({storage.get(key + '_gib')} GiB)")
-        print(f"live reservations: {storage.get('live_reservations')}; provisional: {storage.get('provisional')}; no reservation created")
+        print(f"live reservations: {storage.get('live_reservations')}; provisional: {storage.get('provisional')}; advisory point-in-time snapshot: {storage.get('snapshot_at')}; no reservation created")
     if not payload["ok"]:
         raise SystemExit(1)
 

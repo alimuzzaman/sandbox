@@ -136,14 +136,16 @@ class RemoteLocalImageTests(unittest.TestCase):
                               side_effect=local_command), \
                  patch.object(remote_local_images._remote, "subprocess",
                               SimpleNamespace(run=run_test_process)):
+                path = Path(directory, "runtime/host-local-images/receipts",
+                            want.split(":", 1)[1] + ".json")
+                expected = json.dumps({**document, "remote_receipt_digest": want},
+                                      sort_keys=True, separators=(",", ":")).encode()
                 for _ in range(2):
                     self.assertEqual(remote_local_images.publish(
                         "target", document, entry=entry), want)
-            path = Path(directory, "runtime/host-local-images/receipts",
-                        want.split(":", 1)[1] + ".json")
-            self.assertEqual(json.loads(path.read_bytes()), {
-                **document, "remote_receipt_digest": want})
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                    # Exact canonical bytes after each publish: the second is idempotent.
+                    self.assertEqual(path.read_bytes(), expected)
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_publish_invalid_acknowledgement_can_follow_receipt_write(self):
         document = {"synthetic": "publication"}

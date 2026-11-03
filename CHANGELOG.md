@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb visit` reports the final document's status after redirects, so a redirect to a
+  404 fails the visit, and a navigation during the login step no longer decides the
+  result.
 - Explicit non-empty `SANDBOX_HOME` runs skip writing the legacy checkout-root
   `.env` compatibility file, preventing isolated state runs from rewriting shared
   checkout state while preserving existing output when `SANDBOX_HOME` is unset

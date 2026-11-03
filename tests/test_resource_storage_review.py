@@ -303,6 +303,13 @@ class StorageReviewTests(unittest.TestCase):
                 self.assertEqual(len(receipts), 1)
                 stored = json.loads(receipts[0].read_text())
                 self.assertEqual(stored['outcomes'], receipt['data']['outcomes'])
+                self.assertEqual(receipt['status'], 'partial')
+                self.assertEqual(service.plan_store.load(plan['data']['plan_id']).state, 'completed')
+                replay = service.cleanup(plan['data']['plan_id'], confirm=True,
+                                         stop_at_available_bytes=40000, capacity_scope_id='root')
+                self.assertFalse(replay['ok'])
+                self.assertEqual(adapter.removed, ['a'])
+                self.assertEqual(len(list(Path(temp).glob('*.run.json'))), 1)
 
     def test_review_redacts_bearer_and_known_prefix_families(self):
         from sandbox.resources.engine_review import review_metadata
@@ -384,6 +391,10 @@ class ScopeSelectionCliTests(unittest.TestCase):
         self.assertEqual(service.calls[1], ('cleanup', 'plan-1', {
             'confirm': True, 'resource_ids': ('b', 'a'),
             'stop_at_available_bytes': 42949672960, 'capacity_scope_id': 'scope-data'}))
+        service, _, code, _ = self.run_cli(['cleanup', '--plan-id', 'plan-9', '--resource-id', 'b',
+                                            '--resource-id', 'a', '--confirm', '--json'])
+        self.assertEqual(code, 0)
+        self.assertEqual(service.calls, [('cleanup', 'plan-9', {'confirm': True, 'resource_ids': ('b', 'a')})])
 
     def test_selection_and_stop_flags_refuse_other_routes_before_service(self):
         for argv, code_name in (
@@ -392,6 +403,9 @@ class ScopeSelectionCliTests(unittest.TestCase):
             (['plan', '--scope', 'cache', '--stop-at-available-bytes', '1', '--json'], 'invalid_capacity_target'),
             (['status', '--capacity-scope-id', 'root', '--json'], 'invalid_capacity_target'),
             (['cleanup', '--tier', 'safe', '--stop-at-available-bytes', '1', '--json'], 'invalid_capacity_target'),
+            (['plan', '--node-store-family', 'fam', '--resource-id', 'a', '--json'], 'invalid_selection'),
+            (['cleanup', '--node-store-family', 'fam', '--capacity-scope-id', 'root', '--json'],
+             'invalid_capacity_target'),
         ):
             with self.subTest(argv=argv):
                 service, factory, code, payload = self.run_cli(argv)

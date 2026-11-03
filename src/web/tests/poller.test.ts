@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startPoll, MAX_CONSECUTIVE_FAILURES } from "../src/ui/poller.ts";
+import { jobFlags, startPoll, MAX_CONSECUTIVE_FAILURES } from "../src/ui/poller.ts";
 
 const INTERVAL = 1;
 const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,16 +20,15 @@ function recorder() {
       onSnapshot: (s: { chunk?: string }) => { events.push("snapshot:" + (s.chunk ?? "")); },
       onDone: () => { events.push("done"); },
       onLost: () => { events.push("lost"); },
-      onCancel: () => { events.push("cancel"); },
     },
   };
 }
 
 test("only one request is in flight", async () => {
   let calls = 0;
-  let def = deferred<{ offset?: number; chunk?: string }>();
+  let def = deferred<{ offset?: number; chunk?: string; done?: boolean }>();
   const rec = recorder();
-  const handle = startPoll(
+  startPoll(
     async () => {
       calls += 1;
       return def.promise;
@@ -37,14 +36,14 @@ test("only one request is in flight", async () => {
     INTERVAL,
     rec.handlers,
   );
-  await settle();
+  while (calls === 0) await settle(1);
   assert.equal(calls, 1);
-  const nextDef = deferred<{ offset?: number; chunk?: string }>();
+  const nextDef = deferred<{ offset?: number; chunk?: string; done?: boolean }>();
   def.resolve({ offset: 1, chunk: "a" });
   def = nextDef;
-  await settle();
+  while (calls === 1) await settle(1);
   assert.equal(calls, 2);
-  handle.cancel();
+  def.resolve({ done: true });
 });
 
 test("slow response is not written twice and the offset advances", async () => {
@@ -72,7 +71,7 @@ test("slow response is not written twice and the offset advances", async () => {
 test("done stops polling", async () => {
   let calls = 0;
   const rec = recorder();
-  const handle = startPoll(
+  startPoll(
     async () => {
       calls += 1;
       return { done: true, chunk: "end" };
@@ -80,13 +79,12 @@ test("done stops polling", async () => {
     INTERVAL,
     rec.handlers,
   );
-  await settle();
+  while (calls === 0) await settle(1);
   assert.equal(calls, 1);
   assert.deepEqual(rec.events, ["snapshot:end", "done"]);
   const callsAfterDone = calls;
   await settle();
   assert.equal(calls, callsAfterDone);
-  handle.cancel();
   assert.deepEqual(rec.events, ["snapshot:end", "done"]);
 });
 
@@ -148,68 +146,24 @@ test("invalid snapshot counts as a failure", async () => {
   assert.equal(calls, MAX_CONSECUTIVE_FAILURES);
 });
 
-test("cancel during a request ignores its response", async () => {
-  const def = deferred<{ chunk?: string; done?: boolean }>();
-  const rec = recorder();
-  const handle = startPoll(
-    async () => def.promise,
-    INTERVAL,
-    rec.handlers,
-  );
-  await settle();
-  handle.cancel();
-  def.resolve({ chunk: "late", done: true });
-  await settle();
-  assert.deepEqual(rec.events, ["cancel"]);
-});
-
-test("cancel during a failing request ignores the failure", async () => {
-  const def = deferred<{ chunk?: string }>();
-  const rec = recorder();
-  const handle = startPoll(
-    async () => def.promise,
-    INTERVAL,
-    rec.handlers,
-  );
-  await settle();
-  handle.cancel();
-  def.reject(new Error("late failure"));
-  await settle();
-  assert.deepEqual(rec.events, ["cancel"]);
-});
-
-test("cancel between requests stops the timer", async () => {
+test("lost is reported once even with a late success impossible", async () => {
   let calls = 0;
-  let def = deferred<{ chunk?: string }>();
   const rec = recorder();
-  const handle = startPoll(
+  startPoll(
     async () => {
       calls += 1;
-      return def.promise;
+      throw new Error("always reject");
     },
-    20,
-    rec.handlers,
-  );
-  await settle(5);
-  def.resolve({ chunk: "one" });
-  await settle(5);
-  handle.cancel();
-  const callsAtCancel = calls;
-  await settle(30);
-  assert.equal(calls, callsAtCancel);
-  assert.deepEqual(rec.events, ["snapshot:one", "cancel"]);
-});
-
-test("a second cancel is a no-op", async () => {
-  const rec = recorder();
-  const handle = startPoll(
-    async () => ({ chunk: "a" }),
     INTERVAL,
     rec.handlers,
   );
-  handle.cancel();
-  handle.cancel();
-  assert.deepEqual(rec.events, ["cancel"]);
+  await settle(60);
+  assert.deepEqual(rec.events, ["lost"]);
+  assert.equal(calls, MAX_CONSECUTIVE_FAILURES);
+  const callsAtLost = calls;
+  await settle(20);
+  assert.equal(calls, callsAtLost);
+  assert.deepEqual(rec.events, ["lost"]);
 });
 
 test("a throwing onSnapshot reports lost and stops", async () => {
@@ -228,12 +182,63 @@ test("a throwing onSnapshot reports lost and stops", async () => {
       },
       onDone: () => { events.push("done"); },
       onLost: () => { events.push("lost"); },
-      onCancel: () => { events.push("cancel"); },
     },
   );
-  await settle();
+  while (calls === 0) await settle(1);
   assert.equal(calls, 1);
   assert.deepEqual(events, ["snapshot", "lost"]);
   await settle();
   assert.equal(calls, 1);
+});
+
+test("jobFlags pauses until the last job ends", () => {
+  const store = { paused: false, busy: {} };
+  const flags = jobFlags(store);
+  const first = flags.begin(null);
+  assert.equal(store.paused, true);
+  const second = flags.begin(null);
+  assert.equal(store.paused, true);
+  first();
+  assert.equal(store.paused, true);
+  second();
+  assert.equal(store.paused, false);
+});
+
+test("jobFlags clears busy only for the newest job on an instance", () => {
+  const store = { paused: false, busy: {} as Record<string, unknown> };
+  const flags = jobFlags(store);
+  store.busy.a = "start";
+  const first = flags.begin("a");
+  store.busy.a = "restart";
+  const second = flags.begin("a");
+  first();
+  assert.equal(store.busy.a, "restart");
+  second();
+  assert.equal("a" in store.busy, false);
+});
+
+test("jobFlags keeps other instances", () => {
+  const store = { paused: false, busy: {} as Record<string, unknown> };
+  const flags = jobFlags(store);
+  store.busy.a = "work_a";
+  store.busy.b = "work_b";
+  const relA = flags.begin("a");
+  const relB = flags.begin("b");
+  relA();
+  assert.equal("a" in store.busy, false);
+  assert.equal(store.busy.b, "work_b");
+  relB();
+  assert.equal("b" in store.busy, false);
+});
+
+test("jobFlags release is idempotent", () => {
+  const store = { paused: false, busy: {} as Record<string, unknown> };
+  const flags = jobFlags(store);
+  const first = flags.begin(null);
+  const second = flags.begin(null);
+  first();
+  first();
+  assert.equal(store.paused, true);
+  second();
+  assert.equal(store.paused, false);
 });

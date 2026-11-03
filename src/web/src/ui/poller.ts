@@ -1,5 +1,5 @@
-// Single-owner polling for dashboard jobs. Free of DOM and store access so it can be
-// tested directly with `node --test`.
+// Polling for dashboard jobs. Free of DOM access so it can be tested directly with
+// `node --test`. A poll always ends, by completion or lost contact, so it can always report.
 
 export interface PollSnapshot {
   offset?: number;
@@ -10,11 +10,6 @@ export interface PollHandlers<T extends PollSnapshot> {
   onSnapshot(snapshot: T): void;
   onDone(snapshot: T): void;
   onLost(): void;
-  onCancel(): void;
-}
-
-export interface PollHandle {
-  cancel(): void;
 }
 
 export const MAX_CONSECUTIVE_FAILURES = 5;
@@ -23,54 +18,65 @@ export function startPoll<T extends PollSnapshot>(
   fetchSnapshot: (offset: number) => Promise<T>,
   intervalMs: number,
   handlers: PollHandlers<T>,
-): PollHandle {
+): void {
   let offset = 0;
   let failures = 0;
-  let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-
-  const lose = (): void => {
-    stopped = true;
-    handlers.onLost();
-  };
 
   const tick = async (): Promise<void> => {
-    timer = null;
     let snapshot: T;
     try {
       snapshot = await fetchSnapshot(offset);
       if (snapshot === null || typeof snapshot !== "object") throw new Error("invalid snapshot");
     } catch {
-      if (stopped) return;
       failures += 1;
-      if (failures >= MAX_CONSECUTIVE_FAILURES) lose();
-      else timer = setTimeout(tick, intervalMs);
+      if (failures >= MAX_CONSECUTIVE_FAILURES) handlers.onLost();
+      else setTimeout(tick, intervalMs);
       return;
     }
-    if (stopped) return;
     failures = 0;
     if (typeof snapshot.offset === "number") offset = snapshot.offset;
     try {
       handlers.onSnapshot(snapshot);
     } catch {
-      lose();
+      handlers.onLost();
       return;
     }
     if (snapshot.done) {
-      stopped = true;
       handlers.onDone(snapshot);
       return;
     }
-    timer = setTimeout(tick, intervalMs);
+    setTimeout(tick, intervalMs);
   };
 
-  timer = setTimeout(tick, intervalMs);
+  setTimeout(tick, intervalMs);
+}
+
+export interface JobFlagStore {
+  paused: boolean;
+  busy: Record<string, unknown>;
+}
+
+// Tracks the flags job polls hold. begin() returns the release for that one job.
+export function jobFlags(store: JobFlagStore): { begin(instance: string | null): () => void } {
+  let running = 0;
+  const owners = new Map<string, object>();
   return {
-    cancel(): void {
-      if (stopped) return;
-      stopped = true;
-      if (timer !== null) clearTimeout(timer);
-      handlers.onCancel();
+    begin(instance) {
+      const owner = {};
+      let released = false;
+      running += 1;
+      store.paused = true;
+      if (instance) owners.set(instance, owner);
+      return () => {
+        if (released) return;
+        released = true;
+        running -= 1;
+        store.paused = running > 0;
+        if (instance && owners.get(instance) === owner) {
+          owners.delete(instance);
+          delete store.busy[instance];
+        }
+      };
     },
   };
 }

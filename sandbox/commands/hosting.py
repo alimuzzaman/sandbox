@@ -524,9 +524,18 @@ def _cmd_host_image_storage_admission(args) -> None:
         print(json.dumps(payload, sort_keys=True))
     else:
         storage = payload.get("storage", {})
-        for key in ("free", "floor", "reserve", "reserved", "archive", "estimate", "margin"):
-            print(f"{key}: {storage.get(key + '_bytes')} bytes ({storage.get(key + '_gib')} GiB)")
-        print(f"live reservations: {storage.get('live_reservations')}; provisional: {storage.get('provisional')}; advisory point-in-time snapshot: {storage.get('snapshot_at')}; no reservation created")
+        verdict = "not required" if storage.get("floor_applied") is False else "passed" if payload["ok"] else "blocked"
+        reason = storage.get("reason") or payload.get("code") or "none"
+        print(f"Storage admission: {verdict}; reason: {reason}")
+        if payload.get("message"):
+            print(payload["message"])
+        if storage:
+            for key in ("free", "floor", "reserve", "reserved", "archive", "estimate", "margin"):
+                value, gib = storage.get(key + "_bytes"), storage.get(key + "_gib")
+                print(f"{key}: unknown" if value is None else f"{key}: {value} bytes ({gib} GiB)")
+            print(f"live reservations: {storage.get('live_reservations')}; provisional: {storage.get('provisional')}; advisory; no reservation created")
+            if storage.get("snapshot_at") is not None:
+                print(f"point-in-time snapshot: {storage['snapshot_at']}")
     if not payload["ok"]:
         raise SystemExit(1)
 

@@ -481,7 +481,12 @@ def inspect_storage(remote_name: str, *, receipt_path_value=None, project=None, 
         multiplier = 3 if bundle else 2
     if not isinstance(project, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project) is None:
         raise RemoteLocalImageError("local_images_receipt_invalid")
-    home = _remote.resolve_sandbox_home(entry)
+    if multiplier == 2 and entry.get("storage_floor_gb") in (None, 0):
+        return remote_storage_floor_inspection(entry, "", archive_bytes=archive_bytes, multiplier=multiplier)
+    try:
+        home = _remote.resolve_sandbox_home(entry)
+    except (RuntimeError, FileNotFoundError, _remote.RemoteHomeResolutionTimeout, ValueError):
+        raise RemoteLocalImageError("local_images_remote_unavailable") from None
     if not isinstance(home, str) or not home.startswith("/"):
         raise RemoteLocalImageError("local_images_remote_unavailable")
     return remote_storage_floor_inspection(entry, posixpath.join(home, "deploy-src", project),

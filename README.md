@@ -1449,3 +1449,12 @@ and secret values are omitted; unclassified failures remain generic.
 `./sb secrets project-context --project-dir /approved/prospective/checkout --json`
 checks the same canonical root policy without loading a descriptor or secrets.
 It supports a source checkout that has not been created yet and returns no paths.
+
+Storage inspection converts home-resolution failures into a fixed
+`storage_inspection_unavailable` response without transport diagnostics or paths.
+Text output states passed/blocked/not-required and a bounded reason. Complete
+measurements require a nonnegative integer live-reservation count and a positive
+finite snapshot timestamp. V1 receipts with no configured floor skip measurement
+and report `floor_applied: false`, matching push. V2 retains its default floor.
+The inspection minimum uses the push's existing `MAX_RECEIPT_BYTES` constant;
+the actual push policy is unchanged.

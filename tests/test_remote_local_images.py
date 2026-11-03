@@ -1079,3 +1079,70 @@ class StorageInspectionTests(unittest.TestCase):
             hosting_cmd.cmd_host({}, args)
         self.assertFalse(json.loads(out.getvalue())['storage']['reservation_created'])
         inspect.assert_called_once_with('target', receipt_path_value=None, project='lenzora', environment='development')
+
+class StorageInspectionRoundThreeTests(unittest.TestCase):
+    @staticmethod
+    def args(as_json=True, receipt=None):
+        return SimpleNamespace(action='image', image_action='storage-admission', remote='fixture',
+            project='app', environment='development', json=as_json, receipt=receipt, confirm=False)
+
+    def test_command_bounds_actual_home_resolution_failures_without_mocking_inspection(self):
+        cases = [SimpleNamespace(returncode=255, stdout='', stderr='SB_SYNTHETIC_PRIVATE /forbidden'),
+                 RuntimeError('SB_SYNTHETIC_PRIVATE /forbidden'),
+                 FileNotFoundError('SB_SYNTHETIC_PRIVATE /forbidden'),
+                 subprocess.TimeoutExpired('SB_SYNTHETIC_PRIVATE', 15),
+                 remote_local_images._remote.RemoteHomeResolutionTimeout(15),
+                 SimpleNamespace(returncode=0, stdout='/a/../SB_SYNTHETIC_PRIVATE\n')]
+        for failure in cases:
+            for as_json in (True, False):
+                with self.subTest(failure=type(failure).__name__, json=as_json), \
+                     patch.object(remote_local_images, '_entry', return_value={'provisioned': True, 'ssh': 'fixture'}), \
+                     patch('sandbox.resources.storage_floor._run_probe', side_effect=AssertionError('failed home must not probe')), \
+                     patch.object(remote_local_images._remote, 'ssh_run', **({'side_effect': failure} if isinstance(failure, Exception) else {'return_value': failure})) as ssh, \
+                     redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as exited:
+                        hosting_cmd.cmd_host({}, self.args(as_json))
+                    self.assertEqual(exited.exception.code, 1)
+                    ssh.assert_called_once()
+                    output = out.getvalue()
+                    self.assertIn('storage_inspection_unavailable', output)
+                    self.assertIn('no reservation created', output)
+                    self.assertNotIn('SB_SYNTHETIC_PRIVATE', output + err.getvalue())
+                    self.assertNotIn('Traceback', output + err.getvalue())
+                    if as_json:
+                        self.assertEqual(json.loads(output), {'ok': False, 'code': 'storage_inspection_unavailable',
+                            'message': 'storage admission evidence unavailable; no reservation created'})
+                    else:
+                        self.assertIn('Storage admission: blocked', output)
+
+    def test_v1_without_floor_skips_the_same_admission_as_push(self):
+        for floor in (None, 0):
+            entry = {'storage_floor_gb': floor}
+            with self.subTest(floor=floor), patch.object(remote_local_images, '_entry', return_value=entry), \
+                 patch.object(local_images, 'load_receipt', return_value=(_receipt(), Path('/receipt'))), \
+                 patch.object(remote_local_images._remote, 'ssh_run', side_effect=AssertionError('no SSH needed')), \
+                 patch('sandbox.resources.storage_floor._run_probe', side_effect=AssertionError('no probe needed')):
+                report = remote_local_images.inspect_storage('fixture', receipt_path_value='/receipt')
+                self.assertTrue(report['ok'])
+                self.assertFalse(report['floor_applied'])
+                self.assertEqual(report['reason'], 'floor_not_configured')
+                self.assertEqual(report['floor_bytes'], 0)
+                self.assertIsNone(report['snapshot_at'])
+                self.assertIsNone(remote_local_images._storage_admission(entry, _receipt(), {'images': {}}))
+                with redirect_stdout(io.StringIO()) as out:
+                    hosting_cmd.cmd_host({}, self.args(False, '/receipt'))
+                self.assertIn('Storage admission: not required; reason: floor_not_configured', out.getvalue())
+
+    def test_text_verdict_and_safe_specific_snapshot_reason(self):
+        from sandbox.resources import storage_floor as sf
+        cases = [({'status': 'unavailable', 'reason': 'storage_snapshot_changed'}, 'storage_snapshot_changed'),
+                 ({'status': 'complete', 'free_bytes': 0, 'reserved_bytes': 0, 'estimate_bytes': 1,
+                   'estimate_source': 'minimum', 'live_reservations': 0, 'snapshot_at': 12345.0}, 'below_floor')]
+        for payload, reason in cases:
+            with self.subTest(reason=reason), patch.object(remote_local_images, '_entry', return_value={'storage_floor_gb': 1}), \
+                 patch.object(remote_local_images._remote, 'resolve_sandbox_home', return_value='/srv/sandbox'), \
+                 patch.object(sf, '_run_probe', return_value=payload), redirect_stdout(io.StringIO()) as out:
+                with self.assertRaises(SystemExit):
+                    hosting_cmd.cmd_host({}, self.args(False))
+                self.assertIn('Storage admission: blocked; reason: ' + reason, out.getvalue())
+                self.assertNotIn('None bytes', out.getvalue())

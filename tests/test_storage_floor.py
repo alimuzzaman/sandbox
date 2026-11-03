@@ -657,7 +657,7 @@ class ReadOnlyInspectionTests(unittest.TestCase):
 
     def test_report_units_margin_full_archive_and_provisional(self):
         measured = {'status': 'complete', 'free_bytes': 40 * GB, 'reserved_bytes': 2 * GB,
-                    'live_reservations': 1, 'estimate_bytes': 6 * GB, 'estimate_source': 'minimum'}
+                    'live_reservations': 1, 'snapshot_at': 12345.0, 'estimate_bytes': 6 * GB, 'estimate_source': 'minimum'}
         with mock.patch.object(sf, '_run_probe', return_value=measured) as run:
             value = sf.remote_storage_floor_inspection({'storage_floor_gb': 30}, '/s/deploy-src/p', archive_bytes=2 * GB)
         self.assertEqual(value['archive_bytes'], 2 * GB)
@@ -798,3 +798,37 @@ class LockFreeSnapshotReviewTests(unittest.TestCase):
             self.assertEqual(result['status'], 'complete')
             self.assertEqual(result['reserved_bytes'], 0)
             self.assertGreater(result['snapshot_at'], 0)
+
+class InspectionMetadataRoundThreeTests(unittest.TestCase):
+    def test_rejects_unvalidated_live_counts_and_snapshot_timestamps(self):
+        complete = {'status': 'complete', 'free_bytes': 40 * GB, 'reserved_bytes': 0,
+                    'estimate_bytes': GB, 'estimate_source': 'minimum', 'live_reservations': 0, 'snapshot_at': 12345.0}
+        cases = [('live_reservations', value) for value in (None, True, -1, 1.5, 'SB_SYNTHETIC_PRIVATE')]
+        cases += [('snapshot_at', value) for value in (None, True, -1, 0, float('nan'), float('inf'), 'SB_SYNTHETIC_PRIVATE', 10**400)]
+        for key, value in cases:
+            with self.subTest(key=key, kind=type(value).__name__), mock.patch.object(sf, '_run_probe', return_value={**complete, key: value}):
+                result = sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app')
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['reason'], 'measurement_unavailable')
+                self.assertIsNone(result['live_reservations'])
+                self.assertIsNone(result['snapshot_at'])
+                self.assertNotIn('SB_SYNTHETIC_PRIVATE', json.dumps(result))
+        with mock.patch.object(sf, '_run_probe', return_value=complete):
+            self.assertTrue(sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app')['ok'])
+
+    def test_inspection_uses_the_existing_push_minimum_without_changing_push(self):
+        from sandbox.hosting.local_images import MAX_RECEIPT_BYTES
+        complete = {'status': 'complete', 'free_bytes': 40 * GB, 'reserved_bytes': 0,
+                    'estimate_bytes': MAX_RECEIPT_BYTES, 'estimate_source': 'minimum', 'live_reservations': 0, 'snapshot_at': 12345.0}
+        with mock.patch.object(sf, '_run_probe', return_value=complete) as probe:
+            result = sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app', archive_bytes=1)
+        self.assertTrue(result['ok'])
+        self.assertEqual(probe.call_args.args[1]['minimum_estimate'], MAX_RECEIPT_BYTES)
+
+    def test_preserves_only_allowlisted_unavailable_reasons(self):
+        for reason, expected in [('storage_snapshot_changed', 'storage_snapshot_changed'),
+                                 ('SB_SYNTHETIC_PRIVATE', 'measurement_unavailable')]:
+            with mock.patch.object(sf, '_run_probe', return_value={'status': 'unavailable', 'reason': reason}):
+                result = sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app')
+            self.assertEqual(result['reason'], expected)
+            self.assertNotIn('SB_SYNTHETIC_PRIVATE', json.dumps(result))

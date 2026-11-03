@@ -16,6 +16,7 @@ import json
 import shlex
 import re
 import inspect
+import math
 
 from sandbox.core._remote import ssh_run
 
@@ -262,27 +263,48 @@ def remote_storage_floor_admission(remote: dict, target: str, *,
 def remote_storage_floor_inspection(remote: dict, target: str, *, archive_bytes: int | None = None,
                                     multiplier: int = 3, timeout: int = 60) -> dict:
     """Advisory admission only. The later push must reserve and recheck."""
+    from sandbox.hosting.local_images import MAX_RECEIPT_BYTES
     floor_value = remote.get("storage_floor_gb")
-    floor = 1 if floor_value is None or (type(floor_value) is int and floor_value == 0) else floor_value
+    absent_floor = floor_value is None or (type(floor_value) is int and floor_value == 0)
+    floor = 1 if absent_floor else floor_value
     valid = type(floor) is int and 0 < floor <= MAX_FLOOR_GB
     valid = valid and (archive_bytes is None or _count(archive_bytes) is not None)
     valid = valid and type(multiplier) is int and multiplier in (2, 3)
-    minimum = max(multiplier * (archive_bytes or 0), 2 * 1024**2) if valid else 0
+    minimum = max(multiplier * (archive_bytes or 0), MAX_RECEIPT_BYTES) if valid else 0
     archive_bytes = _count(archive_bytes)
+    skipped = valid and multiplier == 2 and absent_floor
     request = {"target": target, "floor_bytes": floor * GB if valid else 0,
                "default_estimate": DEFAULT_ESTIMATE_BYTES, "minimum_estimate": minimum,
                "inspect_only": True}
-    payload = _run_probe(remote, request, timeout=timeout) if valid else None
-    decision = evaluate_storage_floor(payload, floor_gb=floor if valid else 0)
+    payload = _run_probe(remote, request, timeout=timeout) if valid and not skipped else None
+    live = _count(payload.get("live_reservations")) if isinstance(payload, dict) else None
+    snapshot_at = payload.get("snapshot_at") if isinstance(payload, dict) else None
+    try:
+        timestamp_valid = type(snapshot_at) in (int, float) and math.isfinite(snapshot_at) and snapshot_at > 0
+    except OverflowError:
+        timestamp_valid = False
+    if not timestamp_valid:
+        snapshot_at = None
+    complete = isinstance(payload, dict) and payload.get("status") == "complete"
+    evidence_valid = live is not None and timestamp_valid
+    decision = evaluate_storage_floor(payload if not complete or evidence_valid else None, floor_gb=floor if valid else 0)
+    if decision["reason"] == "measurement_unavailable" and isinstance(payload, dict):
+        reason = payload.get("reason")
+        if reason in ("storage_snapshot_changed", "storage_evidence_unavailable", "statvfs_failed"):
+            decision["reason"] = reason
     margin = (decision["free_bytes"] - decision["reserved_bytes"]
               - decision["estimate_bytes"] - decision["floor_bytes"]
               if decision["free_bytes"] is not None else None)
     decision.update(reserve_bytes=DEFAULT_ESTIMATE_BYTES, archive_bytes=archive_bytes,
                     margin_bytes=margin, provisional=archive_bytes is None,
-                    live_reservations=payload.get("live_reservations") if isinstance(payload, dict) else None,
-                    reservation_created=False, advisory=True,
-                    snapshot_kind="point_in_time",
-                    snapshot_at=payload.get("snapshot_at") if isinstance(payload, dict) else None)
+                    live_reservations=live if evidence_valid else None,
+                    reservation_created=False, advisory=True, floor_applied=True,
+                    snapshot_kind="point_in_time", snapshot_at=snapshot_at if evidence_valid else None)
+    if skipped:
+        # V1 push performs no storage admission at all when no floor is configured.
+        decision.update(ok=True, reason="floor_not_configured", floor_applied=False,
+                        floor_bytes=0, reserve_bytes=0, estimate_bytes=None, estimate_source=None)
+        decision.pop("snapshot_kind")
     for key in ("free", "floor", "reserve", "reserved", "archive", "estimate", "margin"):
         value = decision.get(key + "_bytes")
         decision[key + "_gib"] = value / GB if value is not None else None

@@ -844,3 +844,61 @@ Telemetry records and observation envelopes adhere to strict privacy rules:
 Feature 047 (host observations and autonomous decisions) may consume only `HostMemoryStatusProjection`.
 It receives read-only status and telemetry history projections; it is granted **no planning, provider,
 repository, apply, rollback, or disable authority**.
+
+### Exact scope plans and incomplete evidence
+
+Ordinary `--scope cache` plans include only eligible images, build cache, and
+positively idle download cache. They exclude containers, networks, volumes, and
+worktrees. Download cache currently has no supported positive idle proof, so both
+providers keep it `unverified` with `download_cache_idle_unverified`. Name, age and
+size do not authorize removal. Old cache plans containing containers or networks
+are skipped at apply time too.
+
+Repeat `--resource-id <id>` on `resources plan --scope cache` or on scope cleanup
+to select exact resource IDs. Every selected ID must be unique and present in the
+fresh eligible plan or stored candidate list. A bad selection refuses without
+consuming a stored plan. Apply follows the caller's selected order. Omitting the
+selector retains the plan's candidate list. A singleton still requires ownership,
+non-use evidence, target binding, expiry, confirmation and fresh revalidation.
+
+A cleanup may also specify `--stop-at-available-bytes <integer>` together with
+`--capacity-scope-id <exact-id>`. The ID must match the capacity observation or a
+filesystem ID in deep attribution. Capacity is re-observed before each removal;
+missing or changed scope evidence stops effects. Once the threshold is reached,
+remaining selected items are skipped with `capacity_target_reached`, and that
+intentional stop can complete successfully. Top-level host capacity describes
+`/`; do not call it Docker capacity without an explicit filesystem binding.
+
+Resource observations may carry additive `engine` review metadata: exact engine
+ID, all image tags/digests, labels, creation identity, container Image ID and
+allowlisted State fields, restart count and health status, volume driver/options,
+and referencing container IDs including stopped containers. `references_complete`
+is false unless container enumeration completed. `labels_redacted` identifies
+credential-redacted labels/options. No Env, command, health logs or raw inspect
+blob is projected. Redacted or incomplete evidence cannot prove an absence claim.
+Image inventory uses `docker image ls --all -q`. Metadata changes invalidate
+candidate evidence digests. Volume deep measurements join on the same name plus
+creation identity used for the resource ID; measurement does not grant deletion
+authority. Filesystem observations preserve `container_data_root`, `device`, and
+`mount_point` even when Docker shares the root filesystem. Engine breakdown paths
+come from DockerRootDir rather than an assumed `/var/lib/docker`.
+
+Categories with unmeasured sizes report `partial` even when metadata enumeration
+succeeded. A partial cleanup has `ok=false`; a partial detached scan exits nonzero
+while retaining its result event. Inline scan `ok` still indicates a usable
+observation; inspect `status` and category coverage for completeness. Receipts
+include signed `available_bytes_delta`; the existing nonnegative reclaim estimate
+remains backward compatible. Failed read-only revalidation is
+`skipped/revalidation_unavailable`, never confirmed absence or a deletion failure.
+
+Normal deep scans retry incomplete directory caches; `--fast` stays cache-only.
+This is a fresh bounded walk, not checkpoint resume. For a larger walk use
+`resources status --deep --refresh --budget 1800 --detach
+--request-id <stable-request-id> --json`. Retain the request identity and accepted
+job ID and use the returned polling commands. A compatibility refusal with no job
+ID precedes acceptance. Inspect `remote service status <name>` and its readiness
+remedy. The supported reconcile path is `remote service migrate <name> --confirm`,
+only with separate lifecycle authority. Overlapping `oldest_served` ranges do not
+provide a controller downgrade serializer. These additive resource fields do not
+change the durable job control protocol. Remote projections require the updated
+runtime; controller-side plan selection does not install it.

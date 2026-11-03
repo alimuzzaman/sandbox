@@ -15,6 +15,8 @@ from typing import Any, Callable, Mapping, Protocol
 
 from sandbox.services.process import BoundedProcessRunner, ProcessResult
 
+from .engine_review import review_metadata
+
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
@@ -676,7 +678,7 @@ class LocalResourceAdapter:
             state = "timed_out" if network_ids_result.returncode == 124 else "unavailable"
             outcomes.append({"category": "docker_networks", "status": state})
         image_ids_result = self._run(
-            ("docker", "image", "ls", "-q"), remaining(3), cancellation,
+            ("docker", "image", "ls", "--all", "-q"), remaining(3), cancellation,
         )
         images = []
         if image_ids_result.returncode == 0:
@@ -713,6 +715,8 @@ class LocalResourceAdapter:
             )
         outcomes.append({"category": "docker_build_cache", "status": state})
         return {
+            "containers_complete": any(row.get("category") == "docker_containers"
+                                       and row.get("status") == "complete" for row in outcomes),
             "containers": containers or [],
             "volumes": volumes or [],
             "networks": networks or [],
@@ -875,8 +879,8 @@ class LocalResourceAdapter:
                     ))
                 else:
                     if path.name == "dl-cache":
-                        classification = "disposable_cache"
-                        evidence = ("sandbox_runtime_root", "download_cache")
+                        classification = "unverified"
+                        evidence = ("sandbox_runtime_root", "download_cache", "download_cache_idle_unverified")
                         kind = "download_cache"
                     elif path.name in {"hermes-backups", "backups", "recovery"}:
                         classification = "retained"
@@ -906,7 +910,8 @@ class LocalResourceAdapter:
                         thorough=thorough or path.name == "dl-cache",
                         timeout=min(remaining, 5),
                         evidence=evidence,
-                        references=("retention_policy",) if classification == "retained" else (),
+                        references=(("download_cache_idle_unverified",) if kind == "download_cache"
+                                    else ("retention_policy",) if classification == "retained" else ()) ,
                         cancellation=cancellation,
                     ))
             outcomes.append({"category": category, "status": category_state})
@@ -942,8 +947,6 @@ class LocalResourceAdapter:
         }
         for container in inventory.get("containers", ()):
             owner = self._compose_owner(container.get("Config", {}).get("Labels"))
-            if not owner:
-                continue
             workspace_owner = self._workspace_owner_for(
                 workspace_ownership, owner, protected_projects,
             )
@@ -956,6 +959,7 @@ class LocalResourceAdapter:
                 continue
             resources.append(ResourceObservation(
                 resource_id=_resource_id("container", locator),
+                engine=review_metadata("container", container, inventory.get("containers", []), inventory.get("containers_complete", False)),
                 kind="container", locator=locator,
                 display_name=str(container.get("Name") or locator).lstrip("/"),
                 owner_kind=workspace_owner.owner_kind,
@@ -964,13 +968,13 @@ class LocalResourceAdapter:
                     "active" if running or workspace_owner.active else
                     "retained" if workspace_owner.protected else
                     "unverified" if _is_unknown_workspace_owner(workspace_owner) else
-                    "disposable_cache"
+                    "unmanaged" if not owner else "disposable_cache"
                 ),
                 size_state="measured" if size is not None else "unavailable",
                 size_bytes=size,
                 reclaimable_bytes=(
                     size or 0
-                    if not running and not _is_unknown_workspace_owner(workspace_owner)
+                    if owner and not running and not _is_unknown_workspace_owner(workspace_owner)
                     and not workspace_owner.protected
                     and size is not None
                     else 0
@@ -1029,6 +1033,7 @@ class LocalResourceAdapter:
                 resource_id=_resource_id(
                     "volume", name + "\0" + str(volume.get("CreatedAt") or ""),
                 ),
+                engine=review_metadata("volume", volume, inventory.get("containers", []), inventory.get("containers_complete", False)),
                 kind="volume", locator=name, display_name=name,
                 owner_kind=owner_kind, owner_id=owner_id,
                 classification=classification,
@@ -1169,8 +1174,8 @@ class LocalResourceAdapter:
                 classification = (
                     "active" if used or workspace_owner.active else
                     "retained" if workspace_owner.protected else
-                    "unverified" if _is_unknown_workspace_owner(workspace_owner) else
-                    "disposable_cache"
+                    "unverified" if _is_unknown_workspace_owner(workspace_owner)
+                    or not inventory.get("containers_complete") else "disposable_cache"
                 )
                 evidence = workspace_owner.evidence
                 references = (
@@ -1184,6 +1189,7 @@ class LocalResourceAdapter:
                 )
             resources.append(ResourceObservation(
                 resource_id=_resource_id("image", locator),
+                engine=review_metadata("image", image, inventory.get("containers", []), inventory.get("containers_complete", False)),
                 kind="image", locator=locator, display_name=str(display),
                 owner_kind=owner_kind,
                 owner_id=owner_id,
@@ -1519,7 +1525,7 @@ class LocalResourceAdapter:
             managed_roots.extend({
                 "path": str(volume.get("Mountpoint") or ""),
                 "kind": "volume",
-                "owner_id": _resource_id("volume", str(volume.get("Name"))),
+                "owner_id": _resource_id("volume", str(volume.get("Name")) + "\0" + str(volume.get("CreatedAt") or "")),
             } for volume in inventory.get("volumes", ())
                 if volume.get("Name") and volume.get("Mountpoint"))
             try:
@@ -1600,11 +1606,18 @@ class LocalResourceAdapter:
         )
 
     def _find_current(self, candidate: CleanupCandidate) -> ResourceObservation | None:
+        from .service import CATEGORY_KINDS, RevalidationUnavailable
         snapshot = self.observe(thorough=True, budget_seconds=30)
-        return next((
-            item for item in snapshot.resources
-            if item.resource_id == candidate.resource_id
-        ), None)
+        category = next((name for name, kinds in CATEGORY_KINDS.items()
+                         if candidate.kind in kinds), None)
+        if not category or not any(
+            isinstance(row, dict) and row.get("category") == category
+            and row.get("status") == "complete" for row in snapshot.category_outcomes
+        ):
+            raise RevalidationUnavailable("cleanup revalidation evidence is unavailable",
+                                "measurement_unavailable", retryable=True)
+        return next((item for item in snapshot.resources
+                     if item.resource_id == candidate.resource_id), None)
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:
         return self._find_current(candidate)

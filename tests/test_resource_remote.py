@@ -273,7 +273,7 @@ class TestRemoteResourceAdapter(unittest.TestCase):
                 "available_bytes": 20, "reserved_bytes": 0,
             },
             "resources": [item.internal_dict()],
-            "category_outcomes": [],
+            "category_outcomes": [{"category": "docker_build_cache", "status": "complete"}],
         }
 
         def ssh(_remote, command, *, input_data=None, timeout=0):

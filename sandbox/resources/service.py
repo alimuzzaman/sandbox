@@ -65,8 +65,11 @@ def enrich_outcomes(outcomes, resources) -> tuple:
             enriched.append(outcome)
             continue
         rows = [totals.get(name, [0, 0, 0]) for name in selected]
+        unmeasured = sum(row[2] for row in rows)
         enriched.append({
             **outcome,
+            **({"status": "partial", "reason": "resource_sizes_incomplete"}
+               if unmeasured and outcome.get("status") == "complete" else {}),
             "measured_bytes": sum(row[0] for row in rows),
             "measured_count": sum(row[1] for row in rows),
             "unmeasured_count": sum(row[2] for row in rows),
@@ -97,6 +100,10 @@ class ResourceError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+class RevalidationUnavailable(ResourceError):
+    """A read-only pre-removal observation failed; no deletion was attempted."""
 
 
 def result(
@@ -476,6 +483,7 @@ class ResourceService:
         thorough: bool = True,
         budget_seconds: float = 60,
         progress=None,
+        resource_ids: tuple[str, ...] | None = None,
     ) -> dict:
         if scope not in {"cache", "stale"}:
             return result(
@@ -483,6 +491,13 @@ class ResourceService:
                 error=ResourceError("scope must be cache or stale", "invalid_scope"),
             )
         try:
+            selected = None
+            if resource_ids is not None:
+                if (not isinstance(resource_ids, (tuple, list)) or not resource_ids
+                        or any(not isinstance(value, str) or not value for value in resource_ids)
+                        or len(set(resource_ids)) != len(resource_ids)):
+                    raise ResourceError("resource ids must be a non-empty unique list", "invalid_selection")
+                selected = frozenset(resource_ids)
             scan = self._scan(
                 thorough=thorough,
                 budget_seconds=budget_seconds,
@@ -496,7 +511,7 @@ class ResourceService:
                 eligible = (
                     scope == "cache"
                     and item.classification == "disposable_cache"
-                    and item.kind not in {"volume", "worktree"}
+                    and item.kind in {"image", "build_cache", "download_cache"}
                     and item.size_state == "measured"
                     and item.reclaimable_bytes > 0
                 ) or (
@@ -506,19 +521,25 @@ class ResourceService:
                     and item.size_state == "measured"
                     and item.reclaimable_bytes > 0
                 )
-                if eligible:
+                if item.kind == "image" and not self._image_review_complete(item):
+                    eligible = False
+                if eligible and (selected is None or item.resource_id in selected):
                     candidates.append(CleanupCandidate.from_observation(item))
                 else:
                     exclusions.append({
                         "resource_id": item.resource_id,
                         "reason": (
-                            "persistent_resource_requires_stale_scope"
+                            "image_review_evidence_incomplete" if item.kind == "image" and not self._image_review_complete(item)
+                            else "not_selected" if selected is not None and item.resource_id not in selected
+                            else "persistent_resource_requires_stale_scope"
                             if scope == "cache" and item.kind in {"volume", "worktree"}
                             else item.classification
                             if item.size_state == "measured"
                             else item.size_state
                         ),
                     })
+            if selected is not None and {item.resource_id for item in candidates} != selected:
+                raise ResourceError("every selected resource must be present and eligible", "invalid_selection")
             plan = CleanupPlan.create(
                 scan.target, scope, candidates, exclusions,
                 scan_id=scan.scan_id, now=self.clock(),
@@ -537,7 +558,19 @@ class ResourceService:
             return result(False, "plan", status="failed", error=error)
 
     @staticmethod
+    def _image_review_complete(item) -> bool:
+        engine = item.engine
+        return bool(engine and engine.get("references_complete") is True
+                    and engine.get("labels_redacted") is False
+                    and engine.get("engine_id") == item.locator
+                    and isinstance(engine.get("created_at"), str) and engine["created_at"]
+                    and "aliases" in engine and "labels" in engine
+                    and engine.get("container_ids") == [])
+
+    @staticmethod
     def _still_matches(candidate: CleanupCandidate, current) -> bool:
+        if current.kind == "image" and not ResourceService._image_review_complete(current):
+            return False
         try:
             refreshed = CleanupCandidate.from_observation(current)
         except (TypeError, ValueError):
@@ -549,7 +582,10 @@ class ResourceService:
             and refreshed.evidence_digest == candidate.evidence_digest
         )
 
-    def cleanup(self, plan_id: str, *, confirm: bool = False) -> dict:
+    def cleanup(self, plan_id: str, *, confirm: bool = False,
+                resource_ids: tuple[str, ...] | None = None,
+                stop_at_available_bytes: int | None = None,
+                capacity_scope_id: str | None = None) -> dict:
         if not confirm:
             return result(
                 False, "cleanup", status="refused",
@@ -558,11 +594,55 @@ class ResourceService:
                     "confirmation_required",
                 ),
             )
+        expected_target = None
+        def observe_capacity():
+            kwargs = dict(thorough=False, budget_seconds=15, progress=None)
+            if stop_at_available_bytes is not None:
+                if self._supports_keyword(self.adapter.observe, "deep"):
+                    kwargs["deep"] = True
+                if self._supports_keyword(self.adapter.observe, "directory_cache"):
+                    kwargs["directory_cache"] = "cache_only"
+            snapshot = self.adapter.observe(**kwargs)
+            if expected_target is not None and snapshot.target != expected_target:
+                raise ResourceError("capacity target identity changed", "target_identity_changed")
+            return snapshot
+
+        def capacity(snapshot):
+            if stop_at_available_bytes is None:
+                return snapshot.capacity
+            if getattr(snapshot, "capacity_scope_id", None) == capacity_scope_id:
+                value = snapshot.capacity
+            else:
+                deep = getattr(snapshot, "deep_attribution", None)
+                value = next((row.to_dict() for row in (deep.filesystems if deep else ())
+                              if row.filesystem_id == capacity_scope_id), None)
+            if (not isinstance(value, dict) or not isinstance(value.get("available_bytes"), int)
+                    or isinstance(value.get("available_bytes"), bool) or value["available_bytes"] < 0):
+                raise ResourceError("capacity scope evidence is unavailable", "capacity_scope_unavailable")
+            return {**value, "capacity_scope_id": capacity_scope_id}
+
         started = self.clock().astimezone(timezone.utc)
         try:
-            before_snapshot = self.adapter.observe(
-                thorough=False, budget_seconds=15, progress=None,
-            )
+            if stop_at_available_bytes is not None and (
+                isinstance(stop_at_available_bytes, bool) or not isinstance(stop_at_available_bytes, int)
+                or stop_at_available_bytes < 0 or not isinstance(capacity_scope_id, str) or not capacity_scope_id
+            ):
+                raise ResourceError("capacity target requires non-negative bytes and an exact capacity scope", "invalid_capacity_target")
+            if capacity_scope_id is not None and stop_at_available_bytes is None:
+                raise ResourceError("capacity scope requires a stop target", "invalid_capacity_target")
+            preview = self.plan_store.load(plan_id)
+            selected = None
+            if resource_ids is not None:
+                if (not isinstance(resource_ids, (tuple, list)) or not resource_ids
+                    or any(not isinstance(value, str) or not value for value in resource_ids)
+                    or len(set(resource_ids)) != len(resource_ids)):
+                    raise ResourceError("resource ids must be non-empty and unique", "invalid_selection")
+                selected = frozenset(resource_ids)
+                if not selected <= {row.resource_id for row in preview.candidates}:
+                    raise ResourceError("selected resource is not in the stored plan", "invalid_selection")
+            expected_target = preview.target
+            before_snapshot = observe_capacity()
+            before_capacity = capacity(before_snapshot)
             target = before_snapshot.target
             if self.adapter.target() != target:
                 raise ResourceError(
@@ -581,9 +661,43 @@ class ResourceService:
         try:
             outcomes = []
             indeterminate = False
-            for candidate in plan.candidates:
+            by_id = {row.resource_id: row for row in plan.candidates}
+            execution_candidates = (tuple(by_id[value] for value in resource_ids)
+                                    if selected is not None else plan.candidates)
+            capacity_stopped = False
+            for index, candidate in enumerate(execution_candidates):
+                if stop_at_available_bytes is not None:
+                    try:
+                        if not capacity_stopped:
+                            current_capacity = before_capacity if index == 0 else capacity(observe_capacity())
+                            capacity_stopped = current_capacity["available_bytes"] >= stop_at_available_bytes
+                    except (ResourceError, OSError, RuntimeError):
+                        outcomes.extend(CleanupItemOutcome(
+                            row.resource_id, "skipped", "capacity_evidence_unavailable",
+                            row.expected_size_bytes, False, self.clock(),
+                        ) for row in execution_candidates[index:])
+                        break
+                    if capacity_stopped:
+                        outcomes.append(CleanupItemOutcome(
+                            candidate.resource_id, "skipped", "capacity_target_reached",
+                            candidate.expected_size_bytes, False, self.clock(),
+                        ))
+                        continue
+                if plan.scope == "cache" and candidate.kind not in {"image", "build_cache", "download_cache"}:
+                    outcomes.append(CleanupItemOutcome(
+                        candidate.resource_id, "skipped", "resource_kind_outside_scope",
+                        candidate.expected_size_bytes, False, self.clock(),
+                    ))
+                    continue
                 try:
-                    current = self.adapter.revalidate(candidate)
+                    try:
+                        current = self.adapter.revalidate(candidate)
+                    except (ResourceError, OSError, RuntimeError):
+                        outcomes.append(CleanupItemOutcome(
+                            candidate.resource_id, "skipped", "revalidation_unavailable",
+                            candidate.expected_size_bytes, False, self.clock(),
+                        ))
+                        continue
                     if current is None:
                         outcomes.append(CleanupItemOutcome(
                             candidate.resource_id, "already_absent",
@@ -602,6 +716,11 @@ class ResourceService:
                     outcomes.append(outcome)
                     if outcome.status == "timed_out":
                         indeterminate = True
+                except RevalidationUnavailable:
+                    outcomes.append(CleanupItemOutcome(
+                        candidate.resource_id, "skipped", "revalidation_unavailable",
+                        candidate.expected_size_bytes, False, self.clock(),
+                    ))
                 except TimeoutError:
                     indeterminate = True
                     outcomes.append(CleanupItemOutcome(
@@ -615,18 +734,20 @@ class ResourceService:
                         "cleanup_failed", candidate.expected_size_bytes,
                         False, self.clock(),
                     ))
-            after_snapshot = self.adapter.observe(
-                thorough=False, budget_seconds=15, progress=None,
-            )
-            before_used = int((before_snapshot.capacity or {}).get("used_bytes") or 0)
-            after_used = int((after_snapshot.capacity or {}).get("used_bytes") or 0)
-            observed_reclaimed = max(before_used - after_used, 0)
+            try:
+                after_capacity = capacity(observe_capacity())
+            except (ResourceError, OSError, RuntimeError):
+                after_capacity = None
+                indeterminate = True
+            before_used = int((before_capacity or {}).get("used_bytes") or 0)
+            after_used = int((after_capacity or {}).get("used_bytes") or 0)
+            observed_reclaimed = max(before_used - after_used, 0) if after_capacity is not None else None
             if indeterminate:
                 run_status = "indeterminate"
             else:
                 run_status = (
                     "partial" if any(item.status in {"skipped", "failed", "timed_out"}
-                                     for item in outcomes)
+                                     and item.reason != "capacity_target_reached" for item in outcomes)
                     else "completed"
                 )
             completed = self.clock().astimezone(timezone.utc)
@@ -636,7 +757,10 @@ class ResourceService:
                 if item.status == "removed"
             )
             drift = None
-            if itemized != observed_reclaimed:
+            if observed_reclaimed is None:
+                drift = {"capacity_delta_bytes": None, "itemized_removed_bytes": itemized,
+                         "reason": "post_cleanup_capacity_unavailable"}
+            elif itemized != observed_reclaimed:
                 drift = {
                     "capacity_delta_bytes": observed_reclaimed,
                     "itemized_removed_bytes": itemized,
@@ -650,11 +774,11 @@ class ResourceService:
                 status=run_status,
                 started_at=started,
                 completed_at=completed,
-                planned_bytes=plan.estimated_reclaimable_bytes,
+                planned_bytes=sum(row.expected_reclaimable_bytes for row in execution_candidates),
                 observed_reclaimed_bytes=observed_reclaimed,
                 outcomes=tuple(outcomes),
-                capacity_before=before_snapshot.capacity,
-                capacity_after=after_snapshot.capacity,
+                capacity_before=before_capacity,
+                capacity_after=after_capacity,
                 drift=drift,
             )
             self.plan_store.record_run(run)
@@ -663,7 +787,7 @@ class ResourceService:
                 "indeterminate" if indeterminate else "completed",
             )
             return result(
-                not indeterminate,
+                run_status == "completed",
                 "cleanup",
                 status=run_status,
                 target=target,

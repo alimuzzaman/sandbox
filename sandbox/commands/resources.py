@@ -332,6 +332,12 @@ def configure_parser(parser) -> None:
     )
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
+    parser.add_argument("--resource-id", action="append", default=None,
+                        help="exact resource id to include in a scope plan or cleanup; repeat for a subset")
+    parser.add_argument("--stop-at-available-bytes", type=int, default=None,
+                        help="stop cleanup when the bound filesystem has this many available bytes")
+    parser.add_argument("--capacity-scope-id", default=None,
+                        help="exact capacity/filesystem id for the cleanup stop target")
     parser.add_argument(
         "--tier",
         choices=("safe", "tmp", "all"),
@@ -1619,6 +1625,22 @@ def _run_tier(args) -> dict:
 
 def cmd_resources(_cfg, args) -> None:
     action = args.action
+    if getattr(args, "resource_id", None) and (
+        action not in {"plan", "cleanup"} or getattr(args, "tier", None)
+        or getattr(args, "node_store_family", None)
+    ):
+        from sandbox.resources.service import ResourceError, result
+        _emit(result(False, action, status="refused", error=ResourceError(
+            "--resource-id requires a scope plan or cleanup", "invalid_selection")), bool(args.json))
+        raise SystemExit(1)
+    if (getattr(args, "stop_at_available_bytes", None) is not None
+        or getattr(args, "capacity_scope_id", None) is not None) and (
+        action != "cleanup" or getattr(args, "tier", None) or getattr(args, "node_store_family", None)
+    ):
+        from sandbox.resources.service import ResourceError, result
+        _emit(result(False, action, status="refused", error=ResourceError(
+            "capacity stop flags require scope cleanup", "invalid_capacity_target")), bool(args.json))
+        raise SystemExit(1)
     if action == "routine":
         payload = _run_routine(args)
         _emit_routine(payload, bool(args.json))
@@ -1887,16 +1909,25 @@ def cmd_resources(_cfg, args) -> None:
                     )
                     raise SystemExit(1)
             service = resource_service(getattr(args, "remote", None))
+            selection = getattr(args, "resource_id", None)
             payload = service.plan(
                 args.scope,
                 thorough=bool(args.thorough),
                 budget_seconds=plan_budget,
                 progress=progress,
+                **({"resource_ids": tuple(selection)} if selection is not None else {}),
             )
             data = payload.get("data")
             if isinstance(data, dict):
                 data["budget_seconds"] = float(requested_budget)
     else:
+        cleanup_options = {}
+        if getattr(args, "resource_id", None) is not None:
+            cleanup_options["resource_ids"] = tuple(args.resource_id)
+        if getattr(args, "stop_at_available_bytes", None) is not None:
+            cleanup_options["stop_at_available_bytes"] = args.stop_at_available_bytes
+        if getattr(args, "capacity_scope_id", None) is not None:
+            cleanup_options["capacity_scope_id"] = args.capacity_scope_id
         service = resource_service(getattr(args, "remote", None))
         if args.cancelled:
             from sandbox.resources.service import ResourceError, result
@@ -1935,6 +1966,7 @@ def cmd_resources(_cfg, args) -> None:
                 thorough=bool(args.thorough),
                 budget_seconds=args.budget if args.budget is not None else 60,
                 progress=progress,
+                **({"resource_ids": tuple(args.resource_id)} if getattr(args, "resource_id", None) else {}),
             )
             plan_data = plan_payload.get("data")
             plan_id = (
@@ -1952,7 +1984,7 @@ def cmd_resources(_cfg, args) -> None:
                     ),
                 )
             else:
-                payload = service.cleanup(plan_id, confirm=True)
+                payload = service.cleanup(plan_id, confirm=True, **cleanup_options)
         elif not args.plan_id:
             from sandbox.resources.service import ResourceError, result
             payload = result(
@@ -1960,7 +1992,7 @@ def cmd_resources(_cfg, args) -> None:
                 error=ResourceError("--plan-id is required", "plan_not_found"),
             )
         else:
-            payload = service.cleanup(args.plan_id, confirm=bool(args.confirm))
+            payload = service.cleanup(args.plan_id, confirm=bool(args.confirm), **cleanup_options)
     if action == "status" and getattr(args, "remote", None):
         from sandbox.core._remote import get_remote
         registration = get_remote(args.remote) or {}

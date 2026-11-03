@@ -242,7 +242,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
     def test_engine_inventory_bounds_scale_with_the_probe_budget(self):
         """A larger probe budget must widen the engine per-call bounds."""
         runner = FakeRunner({
-            ("docker", "image", "ls", "-q"): response("sha256:one\n"),
+            ("docker", "image", "ls", "--all", "-q"): response("sha256:one\n"),
         })
         adapter = LocalResourceAdapter(
             self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
@@ -250,7 +250,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
         adapter.observe(thorough=True, budget_seconds=1800)
         image_ls = next(
             timeout for command, timeout in runner.calls
-            if command == ("docker", "image", "ls", "-q")
+            if command == ("docker", "image", "ls", "--all", "-q")
         )
         image_inspect = next(
             timeout for command, timeout in runner.calls
@@ -263,7 +263,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
     def test_engine_inventory_bounds_are_unchanged_at_the_default_budget(self):
         """The default budget keeps the original bounds, so nothing regresses."""
         runner = FakeRunner({
-            ("docker", "image", "ls", "-q"): response("sha256:one\n"),
+            ("docker", "image", "ls", "--all", "-q"): response("sha256:one\n"),
         })
         adapter = LocalResourceAdapter(
             self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
@@ -271,7 +271,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
         adapter.observe(thorough=True, budget_seconds=15)
         image_ls = next(
             timeout for command, timeout in runner.calls
-            if command == ("docker", "image", "ls", "-q")
+            if command == ("docker", "image", "ls", "--all", "-q")
         )
         image_inspect = next(
             timeout for command, timeout in runner.calls
@@ -671,7 +671,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
                 "unattributed-idle\n",
             ),
             ("docker", "network", "inspect"): response(json.dumps(networks)),
-            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "--all", "-q"): response(""),
             ("docker", "buildx", "du"): response(""),
         })
         adapter = LocalResourceAdapter(
@@ -783,7 +783,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
             ("docker", "volume", "ls", "-q"): response("sandbox-permanent_db\n"),
             ("docker", "volume", "inspect"): response(json.dumps(volumes)),
             ("docker", "network", "ls", "-q"): response(""),
-            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "--all", "-q"): response(""),
             ("du", "-sk"): response("1\t/path\n"),
         })
         adapter = LocalResourceAdapter(
@@ -884,7 +884,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
             ),
             ("docker", "volume", "inspect"): response(json.dumps(volumes)),
             ("docker", "network", "ls", "-q"): response(""),
-            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "--all", "-q"): response(""),
             ("docker", "buildx", "du"): response(""),
             ("du", "-sk"): response("1\t/path\n"),
         })
@@ -923,7 +923,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
             ("docker", "ps", "-aq"): response(""),
             ("docker", "volume", "ls", "-q"): response(""),
             ("docker", "network", "ls", "-q"): response(""),
-            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "--all", "-q"): response(""),
             ("docker", "buildx", "du"): response(json.dumps(record) + "\n"),
             ("du", "-sk"): response("1\t/path\n"),
         })
@@ -951,7 +951,7 @@ class TestLocalResourceAdapter(unittest.TestCase):
             ("docker", "ps", "-aq"): response(""),
             ("docker", "volume", "ls", "-q"): response(""),
             ("docker", "network", "ls", "-q"): response(""),
-            ("docker", "image", "ls", "-q"): response("sha256:unlabelled123456\n"),
+            ("docker", "image", "ls", "--all", "-q"): response("sha256:unlabelled123456\n"),
             ("docker", "image", "inspect", "sha256:unlabelled123456"): response(json.dumps([image_record])),
             ("docker", "buildx", "du"): response(""),
             ("du", "-sk"): response("1\t/path\n"),

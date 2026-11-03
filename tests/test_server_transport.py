@@ -254,6 +254,11 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
             ["media", "import", "/var/tmp/image.jpg"],
             ["plugin", "install", "/var/tmp/plugin.zip"],
             ["theme", "install", "linked-theme.zip"],
+            ["--url=https://site.test", "eval-file", "/etc/passwd"],
+            ["--require", "boot.php", "eval-file", "/etc/passwd"],
+            ["--url=https://site.test", "plugin", "install", "/var/tmp/plugin.zip"],
+            ["--url", "https://site.test", "media", "import", "/var/tmp/image.jpg"],
+            ["--", "theme", "install", "linked-theme.zip"],
         ):
             with self.subTest(argv=argv), patch("server._run_remote_wp_process") as run:
                 result = server._remote_wp_contract({**base, "argv": argv})

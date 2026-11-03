@@ -17,6 +17,12 @@ file inside the project, Sandbox passes its absolute host path, which the
 container sees at the same path through the project mount. Other values pass
 through unchanged.
 
+Host files are staged for `plugin install`, `theme install`, `media import` and
+`eval-file` when the command follows WP-CLI global options in either form
+(`--url=VALUE` or `--url VALUE`). For `eval-file` only the script is staged;
+arguments after it reach the script unchanged. A relative `--require FILE` in
+the split form is not resolved against the project: use `--require=FILE`.
+
 ## `wp eval` and PHP namespaces
 
 The `--` separator ends Sandbox options. After it, the expression is passed

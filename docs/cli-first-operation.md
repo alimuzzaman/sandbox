@@ -256,7 +256,8 @@ drained concurrently into fixed-size edge buffers. Bounded termination on
 timeout or output overflow is limited to the owned process group and returns a
 nonzero unknown result.
 Remote `plugin install`, `theme install`, `media import`, and `eval-file` are
-refused because their local forms can stage host-file operands. Use a
+refused because their local forms can stage host-file operands. Leading WP-CLI
+global options do not change this. Use a
 non-staging WP command or a separately reviewed artifact workflow.
 
 `wp post list` does not support a `--search` query argument: WP-CLI forwards

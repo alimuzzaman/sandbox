@@ -494,6 +494,14 @@ by default.
 Planning is read-only. Cleanup requires a current target-bound plan plus
 `--confirm`, revalidates each exact candidate, and never uses a broad Docker
 prune. Cache and stale persistent-resource cleanup are deliberately separate.
+Cache scope excludes containers and networks; download cache stays unverified
+until positive idle proof exists. Repeat `--resource-id <id>` on a scope plan or
+cleanup for an exact subset. Cleanup can stop before the next removal with
+`--stop-at-available-bytes <bytes> --capacity-scope-id <id>`; it rechecks that
+filesystem's capacity and target identity for every item. Partial cleanup has
+`ok=false`, and a partial detached scan exits nonzero. Review the metadata,
+redaction, filesystem binding, and evidence limits in
+[resource monitoring](docs/resource-monitoring.md#exact-scope-plans-and-incomplete-evidence).
 Deep status uses safe mount topology and opaque capacity-scope identities to
 measure selected root, Sandbox, Docker, and typed managed filesystems once.
 It uses installed `gdu` with allocated-block `du` fallback, deleted-open

@@ -375,15 +375,15 @@ Planning is read-only:
 ./sb resources plan --scope stale --thorough --budget 90 --json
 ```
 
-`cache` may include positively owned download cache, expired terminal-job
-artifacts, stopped temporary containers, unused managed networks, and exact
-unused Sandbox-labelled images. A provisioned named remote may also include
+`cache` includes only eligible exact unused Sandbox-labelled images and build
+cache. Download cache requires positive idle proof and currently stays unverified.
+Containers, networks and terminal-job artifacts are outside this scope.
+A provisioned named remote may include
 immutable build-cache records that its engine explicitly marks reclaimable;
 each record must also be an unused private root record and is planned and
 revalidated by exact build-cache ID. Buildx logical record sizes can overlap,
-so cleanup receipts use the host capacity delta as the authoritative physical
-reclamation result. It never
-includes named persistent volumes,
+so receipts keep logical item bytes separate from the observed filesystem
+capacity delta, which concurrent writes may also affect. It never includes named persistent volumes,
 host logs, package caches, retained backups, active resources, or unmanaged
 data.
 

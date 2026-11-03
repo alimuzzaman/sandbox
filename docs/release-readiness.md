@@ -46,7 +46,11 @@ acceptance gate.
 
 ## MCP subprocess wrapper contract
 
-Every thin MCP wrapper that shells out to `sb --json` must use
-`app._run_sandbox_json` and test its documented timeout, final-JSON selection,
-and parse-failure response. Each wrapper also tests its own redaction of SSH
+Every thin MCP wrapper that shells out to `sb --json` must use one shared subprocess
+boundary and test its documented timeout, final-JSON selection, and parse-failure
+response. A new tool group gets that boundary through `ToolDependencies`
+(`mcp/wp-server/dependencies.py`), not by importing helpers from `mcp/wp-server/app.py`.
+The boundary is not wired in yet: the first such group adds it to the `ToolDependencies` built in
+`mcp/wp-server/server.py`, then reads it with `dependencies.require(...)`.
+Each wrapper also tests its own redaction of SSH
 targets, tokens, and other secrets before returning an error.

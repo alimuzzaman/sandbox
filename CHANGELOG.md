@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only
+  `main` rule, `specs/README.md` indexes specs 066-069, and release guidance no longer
+  requires the `app.py` helper namespace.
 - `sb secrets ownership` and scoped runs report an invalid local configuration as
   `input_invalid` (exit 2) instead of `provider_failed` (exit 4).
 - `sb visit` reports the final document's status after redirects, so a redirect to a

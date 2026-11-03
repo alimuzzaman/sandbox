@@ -10,7 +10,7 @@ import { initModal, modal } from "./ui/modal";
 import { cselToggle, cselPick, cselFilter, initCselOutsideClose } from "./ui/csel";
 import { rowMenuToggle, rowMenuClose, initRowMenuClose } from "./ui/rowmenu";
 import {
-  initConsole, setConsoleRefresh, consoleClose, openTerminal,
+  initConsole, setConsoleRefresh, setConsoleRepaint, consoleClose, openTerminal,
 } from "./ui/console";
 import { toast } from "./ui/toast";
 import {
@@ -185,6 +185,8 @@ function boot(): void {
   // flight. Passive navigation/visibility events simply share that request.
   setActionDeps({ refresh: () => refresh(true), render });
   setConsoleRefresh(() => refresh(true));
+  // Passive, like the refresh tick: must not wipe a form someone is typing in.
+  setConsoleRepaint(() => { renderSidebar(false); renderDetail(false); });
   initModal();
   initConsole();
   initCselOutsideClose();

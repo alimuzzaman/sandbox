@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- The `sb web` dashboard polls each job with one request in flight, so a slow response no longer
+  duplicates output. A failed or stalled poll now ends and frees the dashboard instead of freezing
+  refreshes until reload. Closing the drawer or starting another job no longer stops a job from
+  reporting its end, and polling never resubmits a job.
 - Storage authority capability evaluation only reports `proven` through a complete acceptance whose
   promotion names the requested remote, the same binding and both observed revisions, and is unexpired
   and unrevoked. Malformed values and unreadable revocations never prove anything. Evaluation no longer writes

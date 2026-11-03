@@ -5,10 +5,21 @@ import { $ } from "../dom";
 import { store } from "../state";
 import { postAction, fetchJob } from "../api";
 import { toast } from "./toast";
+import { jobFlags, startPoll } from "./poller";
 
 // main.ts injects refresh() to avoid a circular import.
 let refresh: () => Promise<void> = async () => {};
 export function setConsoleRefresh(fn: () => Promise<void>): void { refresh = fn; }
+// refresh() does nothing while another job still pauses it, so a job that ends then
+// repaints directly; otherwise its busy spinner stays until the last job ends.
+let repaint: () => void = () => {};
+export function setConsoleRepaint(fn: () => void): void { repaint = fn; }
+
+// One owner writes to the drawer. A job that loses it keeps polling silently, so its
+// completion and flags still resolve.
+const TERMINAL = {};
+let drawerOwner: object | null = null;
+const flags = jobFlags(store);
 
 export function consoleOpen(title: string): void {
   $("console").classList.remove("w-0");
@@ -37,24 +48,33 @@ function consoleStatus(s: string, ok: boolean | null | undefined): void {
 }
 
 export function pollJob(id: string, instance: string | null, label?: string): void {
-  store.paused = true;
+  const owner = {};
+  drawerOwner = owner;
+  const release = flags.begin(instance);
   consoleOpen(label || "Working…");
-  let offset = 0;
   let titled = !!label;
-  const t = setInterval(async () => {
-    const j = await fetchJob(id, offset);
-    if (!titled && j.status) { $("conTitle").textContent = j.status.replace(/ [✓✗]$/, ""); titled = true; }
-    if (j.chunk) { consoleWrite(j.chunk); offset = j.offset ?? offset; }
-    else if (typeof j.offset === "number") { offset = j.offset; }
-    if (j.done) {
-      clearInterval(t);
-      store.paused = false;
-      if (instance) delete store.busy[instance];
-      consoleStatus(j.status || "done", j.ok);
+  startPoll((offset) => fetchJob(id, offset), 800, {
+    onSnapshot(j) {
+      if (drawerOwner !== owner) return;
+      if (!titled && j.status) { $("conTitle").textContent = j.status.replace(/ [✓✗]$/, ""); titled = true; }
+      if (j.chunk) consoleWrite(j.chunk);
+    },
+    onDone(j) {
+      release();
+      repaint();
+      if (drawerOwner === owner) consoleStatus(j.status || "done", j.ok);
       toast(j.status || "done", j.ok ? "ok" : "err");
-      await refresh();
-    }
-  }, 800);
+      void refresh();
+    },
+    onLost() {
+      release();
+      repaint();
+      const message = "Lost contact with this job; it may still be running";
+      if (drawerOwner === owner) consoleStatus(message, false);
+      toast(message, "err");
+      void refresh();
+    },
+  });
 }
 
 // ---- interactive terminal ----
@@ -65,6 +85,7 @@ let termBusy = false;
 
 export function openTerminal(name: string): void {
   termInstance = name;
+  drawerOwner = TERMINAL;
   $("console").classList.remove("w-0");
   $("console").classList.add("w-[26rem]");
   $("conTitle").textContent = "Terminal — " + name;
@@ -90,17 +111,26 @@ async function runTerm(): Promise<void> {
   try { r = await postAction({ instance: termInstance, action: "term", cmd }); }
   catch (e) { consoleWrite("error: " + e + "\n"); termBusy = false; return; }
   if (!r.job_id) { consoleWrite((r.output || "failed") + "\n"); termBusy = false; return; }
-  let offset = 0;
-  const t = setInterval(async () => {
-    const j = await fetchJob(r.job_id!, offset);
-    if (j.chunk) { consoleWrite(j.chunk); offset = j.offset ?? offset; }
-    else if (typeof j.offset === "number") offset = j.offset;
-    if (j.done) {
-      clearInterval(t); termBusy = false; consoleWrite("\n");
-      $("conDot").className = "w-2 h-2 rounded-full bg-emerald-500";
+  const ownsDrawer = (): boolean => drawerOwner === TERMINAL;
+  const finish = (color: string): void => {
+    termBusy = false;
+    if (ownsDrawer()) $("conDot").className = "w-2 h-2 rounded-full " + color;
+  };
+  startPoll((offset) => fetchJob(r.job_id!, offset), 500, {
+    onSnapshot(j) {
+      if (j.chunk && ownsDrawer()) consoleWrite(j.chunk);
+    },
+    onDone() {
+      finish("bg-emerald-500");
+      if (!ownsDrawer()) return;
+      consoleWrite("\n");
       input.focus();
-    }
-  }, 500);
+    },
+    onLost() {
+      finish("bg-red-500");
+      if (ownsDrawer()) consoleWrite("\nLost contact with this command; it may still be running\n");
+    },
+  });
 }
 
 function termKey(e: KeyboardEvent): void {

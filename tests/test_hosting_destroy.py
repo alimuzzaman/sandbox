@@ -123,10 +123,10 @@ class FakeClient:
     def __init__(self, missing=()):
         self.calls = []
         self.missing = set(missing)
-        self.current = []
+        self.current = {}
 
-    def records(self, zone_id, hostname):
-        return list(self.current)
+    def record(self, zone_id, record_id):
+        return self.current.get(record_id)
 
     def restore_record(self, zone_id, previous, created_id=None):
         self.calls.append(("dns", zone_id, created_id))
@@ -298,10 +298,14 @@ class Execution(unittest.TestCase):
 
     def test_unchanged_record_is_deleted(self):
         client = FakeClient()
-        client.current = [{"id": "x", "type": "A", "name": "a.test", "content": "192.0.2.1"}]
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client.current = {"x": {"id": "x", **applied}}
         record = _record(records=[{
             "zone_id": "z1", "created_id": "x", "previous": None,
-            "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"},
+            "applied": dict(applied),
         }])
         restored = []
         orig_restore = client.restore_record
@@ -316,11 +320,18 @@ class Execution(unittest.TestCase):
 
     def test_unchanged_adopted_record_is_restored(self):
         client = FakeClient()
-        client.current = [{"id": "x", "type": "A", "name": "a.test", "content": "192.0.2.1"}]
-        prev = {"id": "x", "type": "A", "name": "a.test", "content": "198.51.100.9"}
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client.current = {"x": {"id": "x", **applied}}
+        prev = {
+            "id": "x", "type": "A", "name": "a.test", "content": "198.51.100.9",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
         record = _record(records=[{
             "zone_id": "z1", "created_id": "x", "previous": prev,
-            "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"},
+            "applied": dict(applied),
         }])
         restored = []
         orig_restore = client.restore_record
@@ -334,54 +345,117 @@ class Execution(unittest.TestCase):
         self.assertNotIn(KEY, state["hosts"])
 
     def test_changed_record_is_left_and_reported(self):
-        client = FakeClient()
-        client.current = [{"id": "x", "type": "A", "name": "a.test", "content": "203.0.113.5"}]
-        record = _record(records=[{
-            "zone_id": "z1", "created_id": "x", "previous": None,
-            "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"},
-        }])
-        result, _, state = self._run(record, [self.PROBE, "", "removed\n"], client)
-        self.assertEqual(result["state"], "destroyed")
-        self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
-        self.assertIn({"zone_id": "z1", "state": "kept_changed", "record_id": "x"},
-                      result["cloudflare"])
-        rendered = destroy.render(result, confirmed=True)
-        self.assertIn("left in place", rendered)
-        self.assertNotIn(KEY, state["hosts"])
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        variations = {
+            "content": "203.0.113.5",
+            "type": "AAAA",
+            "name": "renamed.test",
+            "proxied": False,
+            "ttl": 300,
+            "comment": "hand-edited",
+        }
+        for field, new_val in variations.items():
+            with self.subTest(field=field):
+                client = FakeClient()
+                client.current = {"x": {"id": "x", **applied, field: new_val}}
+                record = _record(records=[{
+                    "zone_id": "z1", "created_id": "x", "previous": None,
+                    "applied": dict(applied),
+                }])
+                result, _, state = self._run(record, [self.PROBE, "", "removed\n"], client)
+                self.assertEqual(result["state"], "destroyed")
+                self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
+                self.assertIn({"zone_id": "z1", "state": "kept_changed", "record_id": "x"},
+                              result["cloudflare"])
+                rendered = destroy.render(result, confirmed=True)
+                self.assertIn("left in place", rendered)
+                self.assertIn("x", rendered)
+                self.assertIn("z1", rendered)
+                self.assertNotIn(KEY, state["hosts"])
 
     def test_vanished_record_is_not_recreated(self):
         client = FakeClient()
-        client.current = []
-        prev = {"id": "x", "type": "A", "name": "a.test", "content": "198.51.100.9"}
+        client.current = {}
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        prev = {
+            "id": "x", "type": "A", "name": "a.test", "content": "198.51.100.9",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
         record = _record(records=[{
             "zone_id": "z1", "created_id": "x", "previous": prev,
-            "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"},
+            "applied": dict(applied),
         }])
         result, _, state = self._run(record, [self.PROBE, "", "removed\n"], client)
         self.assertEqual(result["state"], "destroyed")
         self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
-        self.assertIn({"zone_id": "z1", "state": "already_absent"}, result["cloudflare"])
+        self.assertIn({"zone_id": "z1", "state": "already_absent", "record_id": "x"}, result["cloudflare"])
+        rendered = destroy.render(result, confirmed=True)
+        self.assertIn("was already gone", rendered)
+        self.assertIn("x", rendered)
+        self.assertIn("z1", rendered)
+        self.assertNotIn(KEY, state["hosts"])
+
+    def test_renamed_record_is_not_called_absent(self):
+        client = FakeClient()
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client.current = {"x": {"id": "x", **applied, "name": "renamed.test"}}
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "x", "previous": None,
+            "applied": dict(applied),
+        }])
+        result, _, state = self._run(record, [self.PROBE, "", "removed\n"], client)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
+        self.assertIn({"zone_id": "z1", "state": "kept_changed", "record_id": "x"}, result["cloudflare"])
+        states = [row.get("state") for row in result.get("cloudflare", [])]
+        self.assertNotIn("already_absent", states)
+        self.assertNotIn(KEY, state["hosts"])
+
+    def test_incomplete_applied_is_left_alone(self):
+        client = FakeClient()
+        record_called = []
+        client.record = lambda zone_id, record_id: record_called.append((zone_id, record_id)) or None
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "x", "previous": None,
+            "applied": {"name": "a.test", "type": "A"},
+        }])
+        result, _, state = self._run(record, [self.PROBE, "", "removed\n"], client)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertEqual(record_called, [])
+        self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
+        self.assertIn({"zone_id": "z1", "state": "kept_changed", "record_id": "x"}, result["cloudflare"])
         self.assertNotIn(KEY, state["hosts"])
 
     def test_record_without_applied_keeps_the_old_behaviour(self):
         client = FakeClient()
-        records_calls = []
-        client.records = lambda zone_id, hostname: records_calls.append((zone_id, hostname)) or []
+        record_called = []
+        client.record = lambda zone_id, record_id: record_called.append((zone_id, record_id)) or None
         record = _record(records=[{"zone_id": "z1", "created_id": "x", "previous": None}])
         result, _, state = self._run(record, [self.PROBE, "", "removed\n"], client)
         self.assertEqual(result["state"], "destroyed")
-        self.assertEqual(records_calls, [])
+        self.assertEqual(record_called, [])
         self.assertIn(("dns", "z1", "x"), client.calls)
         self.assertNotIn(KEY, state["hosts"])
 
     def test_record_held_by_another_target_is_left_alone(self):
         client = FakeClient()
-        client.current = [{"id": "x", "type": "A", "name": "a.test", "content": "192.0.2.1"}]
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client.current = {"x": {"id": "x", **applied}}
         shared_records = [
-            {"zone_id": "z1", "created_id": "x", "previous": None,
-             "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"}},
-            {"zone_id": "z2", "created_id": "x", "previous": None,
-             "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"}},
+            {"zone_id": "z1", "created_id": "x", "previous": None, "applied": dict(applied)},
+            {"zone_id": "z2", "created_id": "x", "previous": None, "applied": dict(applied)},
         ]
         record = _record(records=shared_records)
         extra_hosts = {
@@ -403,12 +477,64 @@ class Execution(unittest.TestCase):
         self.assertIn(("dns", "z2", "x"), dns_calls)
         self.assertNotIn(KEY, end_state["hosts"])
 
+    def test_previous_only_row_held_elsewhere_is_left_alone(self):
+        # Case 1: this target has previous-only row, other target has created_id
+        client = FakeClient()
+        row_prev = {"zone_id": "z1", "created_id": None, "previous": {"id": "x"}}
+        record = _record(records=[row_prev])
+        extra_hosts = {
+            "r2/other/sandbox": {
+                "records": [{"zone_id": "z1", "created_id": "x", "previous": None}],
+            }
+        }
+        state = {"hosts": {KEY: record, **extra_hosts}}
+        planned = destroy.plan(state, ENTRY, "r1", "site", "sandbox", probe=dict(EMPTY_PROBE))
+        self.assertEqual(planned["dns_records"][0]["action"], "keep_shared")
+        self.assertEqual(planned["dns_records"][0]["record_id"], "x")
+
+        result, _, end_state = self._run(
+            record, [self.PROBE, "", "removed\n"], client, extra_hosts=extra_hosts)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
+        self.assertNotIn(KEY, end_state["hosts"])
+
+        # Case 2 (reverse): this target has created_id, other target has previous-only row
+        client = FakeClient()
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        row_created = {
+            "zone_id": "z1", "created_id": "x", "previous": None,
+            "applied": dict(applied),
+        }
+        record2 = _record(records=[row_created])
+        extra_hosts2 = {
+            "r2/other/sandbox": {
+                "records": [{"zone_id": "z1", "created_id": None, "previous": {"id": "x"}}],
+            }
+        }
+        state2 = {"hosts": {KEY: record2, **extra_hosts2}}
+        planned2 = destroy.plan(state2, ENTRY, "r1", "site", "sandbox", probe=dict(EMPTY_PROBE))
+        self.assertEqual(planned2["dns_records"][0]["action"], "keep_shared")
+        self.assertEqual(planned2["dns_records"][0]["record_id"], "x")
+
+        result2, _, end_state2 = self._run(
+            record2, [self.PROBE, "", "removed\n"], client, extra_hosts=extra_hosts2)
+        self.assertEqual(result2["state"], "destroyed")
+        self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
+        self.assertNotIn(KEY, end_state2["hosts"])
+
     def test_cloudflare_read_failure_keeps_state(self):
         client = FakeClient()
-        client.records = mock.Mock(side_effect=cloudflare.CloudflareError("Cloudflare read failed"))
+        client.record = mock.Mock(side_effect=cloudflare.CloudflareError("Cloudflare read failed"))
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
         record = _record(records=[{
             "zone_id": "z1", "created_id": "x", "previous": None,
-            "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"},
+            "applied": dict(applied),
         }])
         with self.assertRaises(cloudflare.CloudflareError):
             self._run(record, [self.PROBE, "", "removed\n"], client)

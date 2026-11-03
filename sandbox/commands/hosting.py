@@ -3574,11 +3574,19 @@ def _recovery_governance_authorized(validated: dict, remote_name: str) -> bool:
     return False
 
 
+_APPLIED_FIELDS = ("name", "type", "content", "proxied", "ttl", "comment")
+
+
 def _applied_record(record) -> dict | None:
-    """What this apply wrote, so destroy can tell whether the record is still ours."""
+    """What this apply wrote, so destroy can tell whether the record is still ours.
+
+    An incomplete answer is not saved as a snapshot: it could not prove anything later.
+    """
     if not isinstance(record, dict):
         return None
-    return {key: record.get(key) for key in ("name", "type", "content")}
+    if not all(isinstance(record.get(key), str) and record[key] for key in ("name", "type", "content")):
+        return None
+    return {key: record.get(key) for key in _APPLIED_FIELDS}
 
 
 def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:

@@ -4130,24 +4130,34 @@ class TestHostDnsFirstAdoption(unittest.TestCase):
 
     def test_reapply_keeps_the_original_absence_so_destroy_deletes(self):
         prior = [{"zone_id": "z", "previous": None, "created_id": "x",
-                  "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"}}]
+                  "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1",
+                              "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting"}}]
         changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.2"}, "created_id": "x",
-                    "applied": {"name": "a.test", "type": "A", "content": "192.0.2.2"}}]
+                    "applied": {"name": "a.test", "type": "A", "content": "192.0.2.2",
+                                "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting"}}]
         result = hosting_cmd._first_adoption_records(prior, changes)
         self.assertEqual(len(result), 1)
         self.assertIsNone(result[0]["previous"])
-        self.assertEqual(result[0]["applied"], {"name": "a.test", "type": "A", "content": "192.0.2.2"})
+        self.assertEqual(result[0]["applied"], {
+            "name": "a.test", "type": "A", "content": "192.0.2.2",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        })
 
     def test_reapply_keeps_the_original_adopted_record(self):
         first_prev = {"id": "x", "content": "198.51.100.9"}
         prior = [{"zone_id": "z", "previous": first_prev, "created_id": "x",
-                  "applied": {"name": "a.test", "type": "A", "content": "198.51.100.9"}}]
+                  "applied": {"name": "a.test", "type": "A", "content": "198.51.100.9",
+                              "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting"}}]
         changes = [{"zone_id": "z", "previous": {"id": "x", "content": "192.0.2.1"}, "created_id": "x",
-                    "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"}}]
+                    "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1",
+                                "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting"}}]
         result = hosting_cmd._first_adoption_records(prior, changes)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["previous"], first_prev)
-        self.assertEqual(result[0]["applied"], {"name": "a.test", "type": "A", "content": "192.0.2.1"})
+        self.assertEqual(result[0]["applied"], {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        })
 
     def test_recreated_record_starts_over(self):
         prior = [{"zone_id": "z", "previous": None, "created_id": "old"}]
@@ -4211,6 +4221,7 @@ class TestHostDnsFirstAdoption(unittest.TestCase):
         }
         fixture.client.upsert_address.side_effect = lambda _zone, hostname, address, proxied=False: {
             "id": ids[hostname], "name": hostname, "type": "A", "content": address, "proxied": proxied,
+            "ttl": 1 if proxied else 60, "comment": "managed by Sandbox hosting",
         }
         fixture.apply()
         saved = fixture.repository.load()["hosts"][fixture.key]["records"]
@@ -4220,10 +4231,26 @@ class TestHostDnsFirstAdoption(unittest.TestCase):
             expected_hostname = next(h for h, rec_id in ids.items() if rec_id == entry["created_id"])
             self.assertEqual(entry["created_id"], ids[expected_hostname])
             self.assertEqual(entry["applied"]["name"], expected_hostname)
+            self.assertEqual(entry["applied"]["type"], "A")
+            self.assertEqual(entry["applied"]["ttl"], 1 if entry["applied"]["proxied"] else 60)
+            self.assertEqual(entry["applied"]["comment"], "managed by Sandbox hosting")
 
     def test_applied_record_handles_non_dict(self):
         self.assertIsNone(hosting_cmd._applied_record(None))
         self.assertIsNone(hosting_cmd._applied_record(MagicMock()))
+        self.assertIsNone(hosting_cmd._applied_record({"name": "a.test", "type": "A"}))
+        full = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+            "extra": "ignore",
+        }
+        self.assertEqual(
+            hosting_cmd._applied_record(full),
+            {
+                "name": "a.test", "type": "A", "content": "192.0.2.1",
+                "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+            },
+        )
 
     def test_reused_certificate_keeps_the_recorded_id(self):
         edge = hosting_cmd._NginxHostEdge({"name": "r1"})
@@ -4280,6 +4307,32 @@ class _Response:
 
 
 class TestCloudflareClient(unittest.TestCase):
+    @patch("urllib.request.urlopen")
+    def test_record_returns_record_on_success(self, mock_open):
+        mock_open.return_value = _Response({"success": True, "result": {"id": "rec-1", "name": "a.test"}})
+        client = cloudflare.Client("token")
+        self.assertEqual(client.record("zone-1", "rec-1"), {"id": "rec-1", "name": "a.test"})
+        request = mock_open.call_args.args[0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertTrue(request.full_url.endswith("/zones/zone-1/dns_records/rec-1"))
+
+    @patch("urllib.request.urlopen")
+    def test_record_returns_none_on_404(self, mock_open):
+        mock_open.side_effect = urllib.error.HTTPError(
+            "url", 404, "Not Found", {}, io.BytesIO(b'{"errors": [{"message": "record not found"}]}')
+        )
+        client = cloudflare.Client("token")
+        self.assertIsNone(client.record("zone-1", "rec-1"))
+
+    @patch("urllib.request.urlopen")
+    def test_record_reraises_other_cloudflare_errors(self, mock_open):
+        mock_open.side_effect = urllib.error.HTTPError(
+            "url", 500, "Internal Server Error", {}, io.BytesIO(b'{"errors": [{"message": "server error"}]}')
+        )
+        client = cloudflare.Client("token")
+        with self.assertRaises(cloudflare.CloudflareError):
+            client.record("zone-1", "rec-1")
+
     @patch("urllib.request.urlopen")
     def test_account_scoped_discovery_lists_tunnels_and_access_apps(self, mock_open):
         mock_open.side_effect = [

@@ -479,7 +479,7 @@ class HostRecoveryCliContractTests(unittest.TestCase):
         client = Mock()
         client.records.return_value = []
         client.current_ssl_mode.return_value = "strict"
-        client.upsert_address.return_value = {"id": "record-1", "name": "example.test", "type": "A", "content": "192.0.2.1"}
+        client.upsert_address.return_value = {"id": "record-1", "name": "example.test", "type": "A", "content": "192.0.2.1", "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting"}
         certificate_runtime = []
 
         def issue_certificate(_entry, _validated, runtime, state_entry,
@@ -514,8 +514,10 @@ class HostRecoveryCliContractTests(unittest.TestCase):
         verify.assert_called_once()
         self.assertEqual(certificate_runtime[0]["certificate_hostnames"],
                          ["example.test"])
-        self.assertEqual(result["record"]["records"][0]["applied"],
-                         {"name": "example.test", "type": "A", "content": "192.0.2.1"})
+        self.assertEqual(result["record"]["records"][0]["applied"], {
+            "name": "example.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        })
 
 
     def test_continue_host_edge_only_keeps_first_adoption_dns_provenance(self):
@@ -549,6 +551,7 @@ class HostRecoveryCliContractTests(unittest.TestCase):
         client.current_ssl_mode.return_value = "strict"
         client.upsert_address.return_value = {
             "id": "record-1", "name": "example.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
         }
 
         def issue_certificate(_entry, _validated, runtime, _state_entry,
@@ -578,8 +581,10 @@ class HostRecoveryCliContractTests(unittest.TestCase):
         self.assertEqual(result["record"]["edge"], {"state": "ready"})
         self.assertIsNone(result["record"]["records"][0]["previous"])
         self.assertEqual(result["record"]["records"][0]["created_id"], "record-1")
-        self.assertEqual(result["record"]["records"][0]["applied"],
-                         {"name": "example.test", "type": "A", "content": "192.0.2.1"})
+        self.assertEqual(result["record"]["records"][0]["applied"], {
+            "name": "example.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        })
 
 
 if __name__ == "__main__":

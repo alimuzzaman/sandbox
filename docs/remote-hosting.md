@@ -1298,14 +1298,16 @@ route loaded. Destroy waits up to
 that lock across an SSH call.
 
 Destroy undoes the first adoption, but only for a record that is still
-Sandbox's. It reads each record first: one Sandbox created is deleted and one it
-adopted is restored to what the first apply found. A record whose type or content
-changed since the last apply is left in place and reported, and one held by
-another hosted target in local state is kept. Records saved before this check
-show `check it by hand` in the dry run, because they cannot be verified; their
-saved previous value may be Sandbox's own record. Local state cannot see other
-uses of a record outside Sandbox. A reused nginx Origin CA certificate keeps its
-recorded ID so destroy can revoke it.
+Sandbox's. It reads each record by ID first: one Sandbox created is deleted, and
+one it adopted is restored to what the first apply found. A record with any field
+changed since the last apply (including proxied status, TTL or comment) is left
+in place and reported with its ID and zone, and one held by another hosted target
+in local state is kept. Records saved before this check show `check it by hand`
+in the dry run, because they cannot be verified; their saved previous value may
+be Sandbox's own record. Limits: local state cannot see other uses of a record
+outside Sandbox, and another target applying onto the same record while destroy
+runs is not detected. A reused nginx Origin CA certificate keeps its recorded ID
+so destroy can revoke it.
 
 ### Disposable remote previews
 

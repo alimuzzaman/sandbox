@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb visit` reports the final document's status after redirects, so a redirect to a
+  404 fails the visit, and a navigation during the login step no longer decides the
+  result.
 - `sb wp` stages host files for `plugin install`, `theme install`, `media import`
   and `eval-file` when WP-CLI global options precede the command, and the remote
   host-file refusal recognises the same forms. `eval-file` no longer rewrites

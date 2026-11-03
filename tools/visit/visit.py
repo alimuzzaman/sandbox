@@ -16,7 +16,7 @@ shell / agent can verify rendered DOM without writing one-off scripts:
     }
 
 Exit code is non-zero when *real* user-visible problems are detected:
-  - main document returned 4xx/5xx
+  - main document returned 4xx/5xx (the final document after any redirects)
   - a console.error fired (warnings are reported but don't fail)
   - any iframe failed to load (only when --check-iframes is set)
 
@@ -99,11 +99,16 @@ def run(args: argparse.Namespace) -> int:
         )
         page = ctx.new_page()
 
-        main_status: dict = {"value": None}
+        # Only the navigation to the requested URL decides the status, not the
+        # login step or anything the page does afterwards.
+        main_status: dict = {"value": None, "navigating": False}
 
         def on_response(resp):
-            # Capture the status of the top-level document.
-            if main_status["value"] is None and resp.url.rstrip("/") == args.url.rstrip("/"):
+            # Last main-frame navigation response wins, so a redirect chain
+            # reports its final document. The request check comes first because
+            # a service-worker response has no frame.
+            if (main_status["navigating"] and resp.request.is_navigation_request()
+                    and resp.frame == page.main_frame):
                 main_status["value"] = resp.status
             # Track any 4xx/5xx for sub-resources.
             if resp.status >= 400:
@@ -149,8 +154,9 @@ def run(args: argparse.Namespace) -> int:
         try:
             if failed:
                 raise PWError("skipping navigation — pre-navigation step failed")
+            main_status["navigating"] = True
             resp = page.goto(args.url, wait_until=args.wait_until, timeout=args.timeout * 1000)
-            if resp is not None and main_status["value"] is None:
+            if resp is not None:
                 main_status["value"] = resp.status
         except PWTimeout:
             report["errors"].append(f"navigation timeout after {args.timeout}s")
@@ -158,6 +164,8 @@ def run(args: argparse.Namespace) -> int:
         except PWError as e:
             report["errors"].append(f"navigation error: {e}")
             failed = True
+        finally:
+            main_status["navigating"] = False
 
         # Give frames a moment to settle if we asked for iframe checks.
         if args.check_iframes and not failed:

@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb secrets ownership` and scoped runs report an invalid local configuration as
+  `input_invalid` (exit 2) instead of `provider_failed` (exit 4).
 - `sb visit` reports the final document's status after redirects, so a redirect to a
   404 fails the visit, and a navigation during the login step no longer decides the
   result.

@@ -83,21 +83,33 @@ def build_ownership_context(project_dir: object):
     from .ownership.models import OwnershipConfig, OwnershipContext
 
     project_root = Path(project_dir).expanduser().resolve()
-    config = load_project_descriptor(project_root)
-    secret_config = (config or {}).get("secrets", {})
-    ownership = secret_config.get("ownership")
-    if ownership is None:
-        raise SecretBrokerError(
-            "ownership_not_configured", "secret ownership is not configured for this project",
+    try:
+        config = load_project_descriptor(project_root)
+        secret_config = (config or {}).get("secrets", {})
+        ownership = secret_config.get("ownership")
+        if ownership is None:
+            raise SecretBrokerError(
+                "ownership_not_configured", "secret ownership is not configured for this project",
+            )
+        sources = bind_provider_authorities(
+            secret_config.get("sources", {}), secret_config.get("useProfiles", {}),
+            project_root=project_root, ownership=ownership,
         )
-    sources = bind_provider_authorities(
-        secret_config.get("sources", {}), secret_config.get("useProfiles", {}),
-        project_root=project_root, ownership=ownership,
-    )
+        ownership_config = OwnershipConfig.from_normalized(ownership)
+        registry = SourceRegistry(project_root, sources, personal_path=secret_file())
+    except SecretBrokerError:
+        raise
+    except Exception:
+        # Only local config loading runs here (including malformed YAML and a
+        # missing or disallowed project): nothing reached a provider or credential
+        # store, and these errors can name paths, so report only the fixed code.
+        raise SecretBrokerError(
+            "input_invalid", "secret ownership configuration is invalid",
+        ) from None
     runtime_root = Path(BASE) / "runtime" / "secret-ownership"
     return OwnershipContext(
-        config=OwnershipConfig.from_normalized(ownership),
-        registry=SourceRegistry(project_root, sources, personal_path=secret_file()),
+        config=ownership_config,
+        registry=registry,
         project_root=project_root,
         runtime_root=runtime_root,
         controller_id=load_controller_id(runtime_root),

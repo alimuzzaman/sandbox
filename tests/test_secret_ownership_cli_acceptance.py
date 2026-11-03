@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -191,6 +192,88 @@ class SecretOwnershipCLIAcceptanceTests(unittest.TestCase):
         keys, argv, expected = refusal_request(self.synthetic, variant)
         code, body = self.synthetic.cli(*self.synthetic.scoped_args(*keys, argv=argv))
         require(code == 2 and body["code"] == expected, "unsafe CLI request was not refused")
+
+    def _write_raw_config(self, sources=None, ownership=None, text=None):
+        """Write a broken config; self.synthetic keeps its valid state for tearDown."""
+        path = self.synthetic.project / "sandbox.config.json"
+        if text is None:
+            secrets_block = {
+                "sources": self.synthetic.sources if sources is None else sources,
+                "ownership": self.synthetic.block if ownership is None else ownership,
+            }
+            text = json.dumps({"slug": "synthetic-ownership", "secrets": secrets_block})
+        path.write_text(text)
+
+    def _assert_config_refused(self, code, body):
+        require(code == 2, "invalid config did not exit 2")
+        require(body["code"] == "input_invalid", "invalid config was not input_invalid")
+        require(body["ok"] is False, "invalid config reported success")
+        public = json.dumps(body)
+        require(str(self.synthetic.project) not in public, "project path disclosed")
+        require("sandbox.config.json" not in public, "config file name disclosed")
+
+    def test_invalid_source_path_is_input_invalid(self):
+        sources = copy.deepcopy(self.synthetic.sources)
+        sources["synthetic-file"]["path"] = "proof.txt"
+        self._write_raw_config(sources=sources)
+        code, body = self.synthetic.cli_ownership("classify")
+        self._assert_config_refused(code, body)
+
+    def test_unparseable_config_is_input_invalid(self):
+        self._write_raw_config(text="{not json")
+        code, body = self.synthetic.cli_ownership("classify")
+        self._assert_config_refused(code, body)
+
+    def test_non_object_ownership_is_input_invalid(self):
+        self._write_raw_config(ownership=["not", "an", "object"])
+        code, body = self.synthetic.cli_ownership("classify")
+        self._assert_config_refused(code, body)
+
+    def test_invalid_config_on_scoped_run_is_input_invalid(self):
+        sources = copy.deepcopy(self.synthetic.sources)
+        sources["synthetic-file"]["path"] = "proof.txt"
+        self._write_raw_config(sources=sources)
+        code, body = self.synthetic.cli(*self.synthetic.scoped_args("ALPHA"))
+        self._assert_config_refused(code, body)
+
+    def test_invalid_config_reaches_no_credential_store_or_network(self):
+        from sandbox.secrets.context import build_ownership_context
+
+        sources = copy.deepcopy(self.synthetic.sources)
+        sources["synthetic-file"]["path"] = "proof.txt"
+        self._write_raw_config(sources=sources)
+        import sandbox.secrets.credentials.manifest as credentials
+        # Record instead of raising: the config block turns any exception into
+        # input_invalid, so a raising stub could not fail this test.
+        with patch.dict(os.environ, {"SANDBOX_PROJECT_ROOTS": str(self.synthetic.root)}), \
+             patch.object(credentials, "create_credential_store") as store, \
+             patch.object(socket, "create_connection") as connect:
+            expect_error("input_invalid", lambda: build_ownership_context(self.synthetic.project))
+        store.assert_not_called()
+        connect.assert_not_called()
+
+    def test_malformed_yaml_config_is_input_invalid(self):
+        (self.synthetic.project / "sandbox.config.json").unlink(missing_ok=True)
+        (self.synthetic.project / "sandbox.config.yml").write_text("secrets: [unterminated\n")
+        code, body = self.synthetic.cli_ownership("classify")
+        self._assert_config_refused(code, body)
+
+    def test_missing_project_is_input_invalid(self):
+        from sandbox.secrets.context import build_ownership_context
+
+        with patch.dict(os.environ, {"SANDBOX_PROJECT_ROOTS": str(self.synthetic.root)}):
+            expect_error("input_invalid", lambda: build_ownership_context(
+                self.synthetic.root / "missing-project"))
+
+    def test_missing_ownership_block_keeps_its_own_code(self):
+        try:
+            self.synthetic.write_config(ownership=False)
+            code, body = self.synthetic.cli_ownership("classify")
+            require(code == 2, "missing ownership block did not exit 2")
+            require(body["code"] == "ownership_not_configured", "unexpected refusal code")
+            require(body["ok"] is False, "missing ownership block reported success")
+        finally:
+            self.synthetic.write_config()
 
     def test_scoped_refusals_precede_all_source_reads(self, variant=None):
         if variant is None:
@@ -592,6 +675,16 @@ def load_tests(loader, tests, pattern):
     # 8. test_cli_selection_and_escalation_refusals (4 variants)
     for variant in ("cross-domain", "direct", "env-wrapper", "benign-symlink"):
         suite.addTest(test_class("test_cli_selection_and_escalation_refusals", variant=variant))
+
+    # 8b. invalid ownership config tests
+    suite.addTest(test_class("test_invalid_source_path_is_input_invalid"))
+    suite.addTest(test_class("test_unparseable_config_is_input_invalid"))
+    suite.addTest(test_class("test_non_object_ownership_is_input_invalid"))
+    suite.addTest(test_class("test_invalid_config_on_scoped_run_is_input_invalid"))
+    suite.addTest(test_class("test_invalid_config_reaches_no_credential_store_or_network"))
+    suite.addTest(test_class("test_malformed_yaml_config_is_input_invalid"))
+    suite.addTest(test_class("test_missing_project_is_input_invalid"))
+    suite.addTest(test_class("test_missing_ownership_block_keeps_its_own_code"))
 
     # 9. test_scoped_refusals_precede_all_source_reads (4 variants)
     for variant in ("cross-domain", "direct", "env-wrapper", "benign-symlink"):

@@ -420,6 +420,30 @@ class Execution(unittest.TestCase):
         self.assertNotIn("already_absent", states)
         self.assertNotIn(KEY, state["hosts"])
 
+    def _destroy_row(self, row, current):
+        """One saved DNS row through the real removal; returns (client, results)."""
+        client = FakeClient()
+        client.current = current
+        results = destroy._remove_cloudflare({"_records": [row], "origin_certificate": None}, client)
+        return client, results
+
+    def test_previous_id_differing_from_the_verified_record_is_left_alone(self):
+        applied = {"name": "a.test", "type": "A", "content": "192.0.2.1",
+                   "proxied": True, "ttl": 1, "comment": "c"}
+        row = {"zone_id": "z1", "created_id": "b", "applied": applied,
+               "previous": {"id": "a", "type": "A", "name": "a.test", "content": "198.51.100.9"}}
+        client, results = self._destroy_row(row, {"b": dict(applied, id="b")})
+        self.assertEqual(results, [{"zone_id": "z1", "state": "kept_changed", "record_id": "b"}])
+
+    def test_empty_snapshot_and_missing_id_are_left_alone(self):
+        for row in ({"zone_id": "z1", "created_id": "x", "applied": {}, "previous": None},
+                    {"zone_id": "z1", "created_id": None, "applied": {
+                        "name": "a.test", "type": "A", "content": "192.0.2.1"},
+                     "previous": {"id": "x"}}):
+            with self.subTest(row=row):
+                _client, results = self._destroy_row(row, {})
+                self.assertEqual(results[0]["state"], "kept_changed")
+
     def test_incomplete_applied_is_left_alone(self):
         client = FakeClient()
         record_called = []

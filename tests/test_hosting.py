@@ -4236,21 +4236,13 @@ class TestHostDnsFirstAdoption(unittest.TestCase):
             self.assertEqual(entry["applied"]["comment"], "managed by Sandbox hosting")
 
     def test_applied_record_handles_non_dict(self):
-        self.assertIsNone(hosting_cmd._applied_record(None))
-        self.assertIsNone(hosting_cmd._applied_record(MagicMock()))
-        self.assertIsNone(hosting_cmd._applied_record({"name": "a.test", "type": "A"}))
-        full = {
-            "name": "a.test", "type": "A", "content": "192.0.2.1",
-            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
-            "extra": "ignore",
-        }
-        self.assertEqual(
-            hosting_cmd._applied_record(full),
-            {
-                "name": "a.test", "type": "A", "content": "192.0.2.1",
-                "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
-            },
-        )
+        self.assertEqual(hosting_cmd._applied_record(None), {})
+        self.assertEqual(hosting_cmd._applied_record(MagicMock()), {})
+        self.assertEqual(hosting_cmd._applied_record({"name": "a.test", "type": "A"}), {})
+        full = {"id": "x", "name": "a.test", "type": "A", "content": "192.0.2.1",
+                "proxied": True, "ttl": 1, "comment": "c"}
+        self.assertEqual(hosting_cmd._applied_record(full),
+                         {key: full[key] for key in ("name", "type", "content", "proxied", "ttl", "comment")})
 
     def test_reused_certificate_keeps_the_recorded_id(self):
         edge = hosting_cmd._NginxHostEdge({"name": "r1"})
@@ -4315,6 +4307,17 @@ class TestCloudflareClient(unittest.TestCase):
         request = mock_open.call_args.args[0]
         self.assertEqual(request.get_method(), "GET")
         self.assertTrue(request.full_url.endswith("/zones/zone-1/dns_records/rec-1"))
+
+    def test_record_only_treats_a_real_404_as_gone(self):
+        client = cloudflare.Client.__new__(cloudflare.Client)
+        with patch.object(client, "_request", side_effect=cloudflare.CloudflareError(
+                "Cloudflare request failed: HTTP 500: upstream said HTTP 404")):
+            with self.assertRaises(cloudflare.CloudflareError):
+                client.record("zone-1", "rec-1")
+        for body in ({}, {"result": None}, {"result": "x"}):
+            with self.subTest(body=body), patch.object(client, "_request", return_value=body):
+                with self.assertRaises(cloudflare.CloudflareError):
+                    client.record("zone-1", "rec-1")
 
     @patch("urllib.request.urlopen")
     def test_record_returns_none_on_404(self, mock_open):

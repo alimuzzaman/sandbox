@@ -313,7 +313,11 @@ def _remove_cloudflare(found: dict, client) -> list[dict]:
         applied = item.get("applied")
         record_id = item.get("created_id")
         if isinstance(applied, dict):
-            if not all(applied.get(key) for key in ("name", "type", "content")):
+            previous = item.get("previous")
+            # Restoring acts on previous.id, so it must be the record verified below.
+            mismatched = isinstance(previous, dict) and previous.get("id") != record_id
+            if (mismatched or not record_id
+                    or not all(applied.get(key) for key in ("name", "type", "content"))):
                 results.append({"zone_id": zone_id, "state": "kept_changed", "record_id": record_id})
                 continue
             current = client.record(zone_id, record_id)

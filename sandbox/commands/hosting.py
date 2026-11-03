@@ -3577,15 +3577,16 @@ def _recovery_governance_authorized(validated: dict, remote_name: str) -> bool:
 _APPLIED_FIELDS = ("name", "type", "content", "proxied", "ttl", "comment")
 
 
-def _applied_record(record) -> dict | None:
+def _applied_record(record) -> dict:
     """What this apply wrote, so destroy can tell whether the record is still ours.
 
-    An incomplete answer is not saved as a snapshot: it could not prove anything later.
+    An incomplete answer gives an empty snapshot, not a missing one: destroy leaves
+    that record alone, while a missing snapshot means a row saved before this check.
     """
     if not isinstance(record, dict):
-        return None
+        return {}
     if not all(isinstance(record.get(key), str) and record[key] for key in ("name", "type", "content")):
-        return None
+        return {}
     return {key: record.get(key) for key in _APPLIED_FIELDS}
 
 

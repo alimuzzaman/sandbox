@@ -242,7 +242,21 @@ class SecretOwnershipCLIAcceptanceTests(unittest.TestCase):
         sources = copy.deepcopy(self.synthetic.sources)
         sources["synthetic-file"]["path"] = "proof.txt"
         self._write_raw_config(sources=sources)
-        expect_error("input_invalid", lambda: build_ownership_context(self.synthetic.project))
+        with patch.dict(os.environ, {"SANDBOX_PROJECT_ROOTS": str(self.synthetic.root)}):
+            expect_error("input_invalid", lambda: build_ownership_context(self.synthetic.project))
+
+    def test_malformed_yaml_config_is_input_invalid(self):
+        (self.synthetic.project / "sandbox.config.json").unlink(missing_ok=True)
+        (self.synthetic.project / "sandbox.config.yml").write_text("secrets: [unterminated\n")
+        code, body = self.synthetic.cli_ownership("classify")
+        self._assert_config_refused(code, body)
+
+    def test_missing_project_is_input_invalid(self):
+        from sandbox.secrets.context import build_ownership_context
+
+        with patch.dict(os.environ, {"SANDBOX_PROJECT_ROOTS": str(self.synthetic.root)}):
+            expect_error("input_invalid", lambda: build_ownership_context(
+                self.synthetic.root / "missing-project"))
 
     def test_missing_ownership_block_keeps_its_own_code(self):
         try:
@@ -661,6 +675,8 @@ def load_tests(loader, tests, pattern):
     suite.addTest(test_class("test_non_object_ownership_is_input_invalid"))
     suite.addTest(test_class("test_invalid_config_on_scoped_run_is_input_invalid"))
     suite.addTest(test_class("test_invalid_config_reaches_no_credential_store_or_network"))
+    suite.addTest(test_class("test_malformed_yaml_config_is_input_invalid"))
+    suite.addTest(test_class("test_missing_project_is_input_invalid"))
     suite.addTest(test_class("test_missing_ownership_block_keeps_its_own_code"))
 
     # 9. test_scoped_refusals_precede_all_source_reads (4 variants)

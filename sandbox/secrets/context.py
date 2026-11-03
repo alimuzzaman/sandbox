@@ -97,9 +97,12 @@ def build_ownership_context(project_dir: object):
         )
         ownership_config = OwnershipConfig.from_normalized(ownership)
         registry = SourceRegistry(project_root, sources, personal_path=secret_file())
-    except (ValueError, TypeError, KeyError, AttributeError):
-        # A local config mistake: nothing reached a provider or credential store,
-        # and config errors can name paths, so report only the fixed code.
+    except SecretBrokerError:
+        raise
+    except Exception:
+        # Only local config loading runs here (including malformed YAML and a
+        # missing or disallowed project): nothing reached a provider or credential
+        # store, and these errors can name paths, so report only the fixed code.
         raise SecretBrokerError(
             "input_invalid", "secret ownership configuration is invalid",
         ) from None

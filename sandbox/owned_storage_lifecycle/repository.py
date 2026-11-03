@@ -259,3 +259,28 @@ class StorageAuthorityLifecycleRepository:
                 data["outcome"] = AcceptanceOutcome(data["outcome"])
             return CapabilityAcceptance(**data)
 
+    def record_revocation(self, revocation: CapabilityRevocation, expected_generation: int) -> int:
+        with self._lock():
+            state = self._read_state_locked()
+            current_gen = state.get("generation", 0)
+
+            existing = state.get("revocations", {}).get(revocation.revocation_id)
+            if existing:
+                if existing.get("request_digest") == revocation.request_digest:
+                    return current_gen
+                raise LifecycleConflictError(
+                    f"Revocation {revocation.revocation_id} already exists with different digest"
+                )
+
+            if current_gen != expected_generation:
+                raise LifecycleCASError(
+                    f"Generation mismatch: expected {expected_generation}, found {current_gen}"
+                )
+
+            data = dataclasses.asdict(revocation)
+
+            state["revocations"][revocation.revocation_id] = data
+            state["generation"] = current_gen + 1
+            self._write_state_locked(state)
+            return state["generation"]
+

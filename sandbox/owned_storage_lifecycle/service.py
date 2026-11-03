@@ -12,6 +12,7 @@ from sandbox.owned_storage_lifecycle.models import (
     AuthorityCapability,
     CapabilityAcceptance,
     CapabilityPromotion,
+    PromotionPhase,
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import (
@@ -30,6 +31,66 @@ def utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+# The default when a caller observed nothing. It must never prove anything. The value
+# stays "rev_installed" so already-recorded capabilities do not read as drifted.
+UNOBSERVED_REVISION = "rev_installed"
+
+
+def _authority_check(state, remote_identity, service_revision, source_revision, now):
+    """Return (acceptance, reason) for this remote and these observed revisions.
+
+    Every link must hold: complete acceptance -> its promotion -> this remote, a
+    supported adoptable promotion, the same binding, unexpired, unrevoked, and both
+    observed revisions. Missing or malformed data never proves anything.
+    """
+    observed = service_revision != UNOBSERVED_REVISION and bool(source_revision)
+    promotions = state.get("promotions", {})
+    revocations = state.get("revocations", {}).values()
+    reasons = set()
+    for acceptance in state.get("acceptances", {}).values():
+        if acceptance.get("outcome") != AcceptanceOutcome.COMPLETE.value:
+            continue
+        promotion = promotions.get(acceptance.get("promotion_id"))
+        if not isinstance(promotion, dict) or promotion.get("remote_identity") != remote_identity:
+            continue
+        if (promotion.get("authority_binding_id") != acceptance.get("authority_binding_id")
+                or promotion.get("phase") != PromotionPhase.SUPPORTED.value
+                or promotion.get("adoptable") is not True):
+            reasons.add("authority_binding_mismatch")
+            continue
+        if any(item.get("remote_identity") == remote_identity
+               and (item.get("promotion_id") == promotion.get("promotion_id")
+                    or item.get("authority_binding_id") == promotion.get("authority_binding_id"))
+               for item in revocations):
+            reasons.add("authority_revoked")
+            continue
+        if not _unexpired(promotion.get("expires_at"), now):
+            reasons.add("authority_expired")
+            continue
+        if not observed:
+            continue
+        if (promotion.get("service_revision") != service_revision
+                or promotion.get("source_revision") != source_revision):
+            reasons.add("authority_revision_mismatch")
+            continue
+        return acceptance, "proven"
+    for reason in ("authority_revoked", "authority_expired",
+                   "authority_revision_mismatch", "authority_binding_mismatch"):
+        if reason in reasons:
+            return None, reason
+    return None, "implemented_unproven"
+
+
+def _unexpired(value, now) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        expires = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return expires.tzinfo is not None and expires > now
+
+
 class AuthorityLifecycleService:
     def __init__(self, repository: StorageAuthorityLifecycleRepository):
         self.repository = repository
@@ -39,7 +100,7 @@ class AuthorityLifecycleService:
         *,
         remote_identity: str,
         platform_mode: str = "ubuntu-24.04-systemd-255-private-root-v1",
-        service_revision: str = "rev_installed",
+        service_revision: str = UNOBSERVED_REVISION,
         source_revision: Optional[str] = None,
     ) -> Dict[str, Any]:
         now_dt = datetime.datetime.now(datetime.timezone.utc)
@@ -94,34 +155,30 @@ class AuthorityLifecycleService:
                 "reason_code": "authority_unsupported",
             }
 
-        # Check recorded capability in repository
-        existing_cap = self.repository.get_capability(remote_identity)
-
-        # Check recorded acceptances in repository
         state = self.repository.load_state()
-        acceptances = state.get("acceptances", {})
-        completed_acc = None
-        for acc_data in acceptances.values():
-            if acc_data.get("outcome") in (AcceptanceOutcome.COMPLETE.value, "complete"):
-                completed_acc = acc_data
-                break
-
-        # Check drift: if we had a recorded capability with a different service_revision
-        if existing_cap is not None and existing_cap.service_revision != service_revision:
+        completed_acc, reason_code = _authority_check(
+            state, remote_identity, service_revision, source_revision, now_dt)
+        existing_cap = self.repository.get_capability(remote_identity)
+        changed = (existing_cap is not None
+                   and service_revision != UNOBSERVED_REVISION
+                   and existing_cap.service_revision != service_revision)
+        if completed_acc is not None:
+            support_tier = SupportTier.PROVEN
+            adoptable = True
+            acceptance_state = AcceptanceState.COMPLETE
+        elif reason_code == "authority_revision_mismatch" or changed:
             support_tier = SupportTier.DRIFTED
             adoptable = False
             reason_code = "authority_revision_mismatch"
             acceptance_state = AcceptanceState.FAILED
-        elif completed_acc is not None:
-            support_tier = SupportTier.PROVEN
-            adoptable = True
-            reason_code = "proven"
-            acceptance_state = AcceptanceState.COMPLETE
+        elif reason_code == "implemented_unproven":
+            support_tier = SupportTier.IMPLEMENTED_UNPROVEN
+            adoptable = False
+            acceptance_state = AcceptanceState.PENDING_ORDINARY
         else:
             support_tier = SupportTier.IMPLEMENTED_UNPROVEN
             adoptable = False
-            reason_code = "implemented_unproven"
-            acceptance_state = AcceptanceState.PENDING_ORDINARY
+            acceptance_state = AcceptanceState.FAILED
 
         checks = {
             "dedicated_identity": "pass",
@@ -142,6 +199,9 @@ class AuthorityLifecycleService:
             "packaging_revision_parity": "pass" if support_tier != SupportTier.DRIFTED else "fail",
             "human_review": "pass" if support_tier == SupportTier.PROVEN else "unknown",
         }
+        if service_revision == UNOBSERVED_REVISION:
+            # Nothing was observed, so no primitive can be reported as passing.
+            checks = {name: "unknown" for name in checks}
 
         cap_record = AuthorityCapability(
             capability_id="owned-storage-authority-v1",

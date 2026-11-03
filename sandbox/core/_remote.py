@@ -1050,6 +1050,20 @@ def scp_run(remote: dict, local_path: str, remote_path: str,
     )
 
 
+def classify_ssh_failure(text: str) -> str:
+    """Name an SSH client failure from its message."""
+    diagnostic = text.lower()
+    if "permission denied" in diagnostic or "authentication" in diagnostic:
+        return "authentication_failed"
+    if "could not resolve" in diagnostic or "name or service not known" in diagnostic:
+        return "dns_failed"
+    if "connection refused" in diagnostic:
+        return "connection_refused"
+    if "no route" in diagnostic or "network is unreachable" in diagnostic:
+        return "network_unreachable"
+    return "unreachable"
+
+
 def check_reachable_diagnostic(remote: dict) -> dict[str, object]:
     """Run one strict, read-only SSH liveness probe with safe diagnostics.
 
@@ -1097,17 +1111,7 @@ def check_reachable_diagnostic(remote: dict) -> dict[str, object]:
     if res.returncode == 0:
         state = "reachable"
     else:
-        diagnostic = f"{res.stderr or ''} {res.stdout or ''}".lower()
-        if "permission denied" in diagnostic or "authentication" in diagnostic:
-            state = "authentication_failed"
-        elif "could not resolve" in diagnostic or "name or service not known" in diagnostic:
-            state = "dns_failed"
-        elif "connection refused" in diagnostic:
-            state = "connection_refused"
-        elif "no route" in diagnostic or "network is unreachable" in diagnostic:
-            state = "network_unreachable"
-        else:
-            state = "unreachable"
+        state = classify_ssh_failure(f"{res.stderr or ''} {res.stdout or ''}")
     return {"reachable": state == "reachable", "state": state, "latency_ms": latency_ms}
 
 

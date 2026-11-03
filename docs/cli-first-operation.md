@@ -288,7 +288,8 @@ write it to a gitignored descriptor, never to a log or a commit.
 
 Remote `ensure` fails closed when SSH exits successfully but returns no JSON
 document. It emits `error.code=remote_empty_output`; inspect remote state before
-retrying.
+retrying. SSH-level failures (exit 255) now report `remote_authentication_failed`,
+`remote_unreachable`, or `remote_connection_lost`.
 
 If the remote child exits nonzero, Sandbox still parses its single bounded JSON
 stdout document first. The typed child code/message and exit code remain the

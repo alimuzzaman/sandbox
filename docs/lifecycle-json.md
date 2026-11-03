@@ -48,7 +48,10 @@ remain primary evidence. A harmless, redacted stderr warning may be attached as
 bounded `transport.stderr`; it never replaces the typed failure. Empty,
 malformed, multiple-document, and over-64-KiB stdout fail closed with
 `remote_empty_output`, `remote_invalid_output`, or
-`remote_output_too_large`; non-finite JSON constants are invalid too. The SSH
+`remote_output_too_large`; non-finite JSON constants are invalid too. Exit 255
+SSH failures report `remote_authentication_failed`, `remote_unreachable`, or
+`remote_connection_lost`: the first two mean the remote command did not run,
+and the third means completion is unknown. The SSH
 client concurrently drains stdout and stderr into separate 64-KiB caps and
 terminates locally on overflow. Overflow and timeout report unknown completion
 instead of parsing a partial document. Raw tracebacks are omitted. Human output

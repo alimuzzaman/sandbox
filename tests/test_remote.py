@@ -855,6 +855,22 @@ class TestCheckReachable(unittest.TestCase):
     def test_false_on_missing_ssh_config(self):
         self.assertFalse(sr.check_reachable({}))
 
+    def test_classify_ssh_failure(self):
+        cases = (
+            ("Permission denied (publickey).", "authentication_failed"),
+            ("Host key authentication failed.", "authentication_failed"),
+            ("ssh: Could not resolve hostname host.example: nodename nor servname provided", "dns_failed"),
+            ("ssh: connect to host host.example: Name or service not known", "dns_failed"),
+            ("ssh: connect to host host.example port 22: Connection refused", "connection_refused"),
+            ("ssh: connect to host host.example port 22: No route to host", "network_unreachable"),
+            ("ssh: connect to host host.example port 22: Network is unreachable", "network_unreachable"),
+            ("client_loop: send disconnect: Broken pipe", "unreachable"),
+            ("", "unreachable"),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text, expected=expected):
+                self.assertEqual(sr.classify_ssh_failure(text), expected)
+
 
 class TestDeployTargetPath(unittest.TestCase):
     @patch("sandbox.core._remote.deploy_target_path", return_value="/srv/deploy/project")

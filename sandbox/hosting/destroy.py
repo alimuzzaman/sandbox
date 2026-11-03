@@ -233,7 +233,7 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
                       "restore_previous" if item.get("previous") else "delete")
             dns.append({"zone_id": item["zone_id"], "action": action,
                         "record_id": (item.get("previous") or {}).get("id") or item.get("created_id"),
-                        "verifiable": isinstance(item.get("applied"), dict)})
+                        "verifiable": isinstance(item.get("applied"), dict) and not _snapshot_untrusted(item)})
     certificate = (record or {}).get("certificate")
     origin_cert = certificate.get("id") if isinstance(certificate, dict) else None
     fences = [field for field in ("active_operation", "recovery_uncertainty")
@@ -327,7 +327,7 @@ def _remove_cloudflare(found: dict, client) -> list[dict]:
         record_id = item.get("created_id")
         if isinstance(applied, dict):
             if _snapshot_untrusted(item):
-                results.append({"zone_id": zone_id, "state": "kept_changed", "record_id": record_id})
+                results.append({"zone_id": zone_id, "state": "kept_unverifiable", "record_id": record_id})
                 continue
             current = client.record(zone_id, record_id)
             if current is None:
@@ -440,6 +440,8 @@ def render(result: dict, *, confirmed: bool) -> str:
     for row in result.get("cloudflare") or []:
         if row.get("state") == "kept_changed":
             lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} changed since the last apply; left in place")
+        elif row.get("state") == "kept_unverifiable":
+            lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} could not be verified; left in place")
         elif row.get("state") == "already_absent" and row.get("record_id"):
             lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} was already gone")
     if not confirmed:

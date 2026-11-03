@@ -433,7 +433,7 @@ class Execution(unittest.TestCase):
         row = {"zone_id": "z1", "created_id": "b", "applied": applied,
                "previous": {"id": "a", "type": "A", "name": "a.test", "content": "198.51.100.9"}}
         client, results = self._destroy_row(row, {"b": dict(applied, id="b")})
-        self.assertEqual(results, [{"zone_id": "z1", "state": "kept_changed", "record_id": "b"}])
+        self.assertEqual(results, [{"zone_id": "z1", "state": "kept_unverifiable", "record_id": "b"}])
 
     def test_empty_snapshot_and_missing_id_are_left_alone(self):
         for row in ({"zone_id": "z1", "created_id": "x", "applied": {}, "previous": None},
@@ -442,7 +442,7 @@ class Execution(unittest.TestCase):
                      "previous": {"id": "x"}}):
             with self.subTest(row=row):
                 _client, results = self._destroy_row(row, {})
-                self.assertEqual(results[0]["state"], "kept_changed")
+                self.assertEqual(results[0]["state"], "kept_unverifiable")
 
     def test_dry_run_shows_untrusted_snapshots_as_kept(self):
         for row in ({"zone_id": "z1", "created_id": "x", "applied": {}, "previous": None},
@@ -452,6 +452,7 @@ class Execution(unittest.TestCase):
                 found = destroy.plan({"hosts": {KEY: _record(records=[row])}}, ENTRY, "r1", "site",
                                      "sandbox", probe=dict(EMPTY_PROBE))
                 self.assertEqual(found["dns_records"][0]["action"], "keep_unverifiable")
+                self.assertFalse(found["dns_records"][0]["verifiable"])
 
     def test_incomplete_applied_is_left_alone(self):
         client = FakeClient()
@@ -465,7 +466,7 @@ class Execution(unittest.TestCase):
         self.assertEqual(result["state"], "destroyed")
         self.assertEqual(record_called, [])
         self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
-        self.assertIn({"zone_id": "z1", "state": "kept_changed", "record_id": "x"}, result["cloudflare"])
+        self.assertIn({"zone_id": "z1", "state": "kept_unverifiable", "record_id": "x"}, result["cloudflare"])
         self.assertNotIn(KEY, state["hosts"])
 
     def test_record_without_applied_keeps_the_old_behaviour(self):

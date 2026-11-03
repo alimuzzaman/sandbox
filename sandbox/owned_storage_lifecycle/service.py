@@ -178,7 +178,7 @@ class AuthorityLifecycleService:
 
         try:
             state = self.repository.load_state()
-        except LifecycleError:
+        except (LifecycleError, OSError):
             # Unreadable state proves nothing and is left in place for an operator.
             completed_acc, reason_code = None, "authority_unavailable"
         else:
@@ -224,8 +224,8 @@ class AuthorityLifecycleService:
         checks["human_review"] = "unknown"
 
         accepted = completed_acc or {}
-        return {
-            "ok": True,
+        report = {
+            "ok": reason_code != "authority_unavailable",
             "capability": "owned-storage-authority-v1",
             "remote_identity": remote_identity,
             "platform_mode": platform_mode,
@@ -251,6 +251,11 @@ class AuthorityLifecycleService:
             },
             "reason_code": reason_code,
         }
+        if not report["ok"]:
+            # The check itself could not run: a caller must not read this as an answer.
+            report["code"] = reason_code
+            report["message"] = "storage authority state is unreadable"
+        return report
 
     def record_acceptance(self, remote_identity: str, acceptance: CapabilityAcceptance) -> int:
         cur_gen = self.repository.get_generation()

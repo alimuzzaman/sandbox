@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from sandbox.application.owned_storage_service import (
@@ -142,6 +142,26 @@ class TestOwnedStorageCLI(unittest.TestCase):
         self.assertTrue(cap_out["ok"])
         self.assertEqual(cap_out["capability"], "owned-storage-authority-v1")
         self.assertEqual(cap_out["support_tier"], "implemented_unproven")
+
+    def test_cli_capability_prints_a_result_and_fails_on_unreadable_state(self):
+        base = ["authority", "capability", "--remote", self.remote_id,
+                "--project-identity", self.project_id]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cmd_storage(self.parser.parse_args(base))
+        self.assertIn("tier=implemented_unproven", buf.getvalue())
+        self.assertIn("adoptable=False", buf.getvalue())
+
+        from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
+        path = build_authority_lifecycle_service().repository.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{not json")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+            cmd_storage(self.parser.parse_args(base))
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn("authority_unavailable", err.getvalue())
+        self.assertEqual(path.read_bytes(), b"{not json")
     def test_security_screening_absence_of_secrets_and_paths(self):
         # Run capability, status, and preview, and verify that raw strings contain NO host paths, secrets, env vars
         for subcmd in [

@@ -122,7 +122,11 @@ def cmd_storage(args: argparse.Namespace) -> None:
     else:
         if res.get("ok"):
             op = res.get("operation")
-            if op == "preview":
+            if res.get("capability"):
+                print(f"Storage authority capability for {res.get('remote_identity')}: "
+                      f"tier={res.get('support_tier')} adoptable={res.get('adoptable')} "
+                      f"reason={res.get('reason_code')}")
+            elif op == "preview":
                 print(f"Preview {res['preview_id']} generated ({len(res.get('candidates', []))} candidates, "
                       f"{res.get('estimated_reclaimable_bytes', 0)} eligible bytes). Expires: {res.get('expires_at')}")
             elif op == "cleanup":

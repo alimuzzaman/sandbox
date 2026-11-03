@@ -10,9 +10,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 - Storage authority capability evaluation only reports `proven` through a complete acceptance whose
   promotion names the requested remote, the same binding and both observed revisions, and is unexpired
-  and unrevoked. Malformed values and unreadable revocations never prove anything. Evaluation only reads,
-  and unreadable lifecycle state is refused and left in place instead of being reset, which used to
-  erase recorded revocations. On a supported platform, checks report `unknown` unless the chain proves
+  and unrevoked. Malformed values and unreadable revocations never prove anything. Evaluation no longer writes
+  lifecycle state, and unreadable state is refused and left in place instead of being reset, which used to
+  erase recorded revocations; the capability check then fails with `authority_unavailable`. On a supported platform, checks report `unknown` unless the chain proves
   them, and `human_review` reports `unknown`.
 - Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only
   `main` rule, `specs/README.md` indexes specs 066-069, and release guidance no longer

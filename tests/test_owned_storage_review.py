@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +19,7 @@ from sandbox.owned_storage_lifecycle.models import (
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import (
+from sandbox.owned_storage_lifecycle.repository import LifecycleError
     StorageAuthorityLifecycleRepository,
 )
 from sandbox.owned_storage_lifecycle.service import (
@@ -466,15 +466,17 @@ class TestOwnedStorageReview(unittest.TestCase):
                 self.assertIsNone(self._check(self._state(**overrides))[0])
 
     def test_expiry_is_judged_after_the_state_read(self):
-        self._record_chain(expires_at=(datetime.datetime.now(datetime.timezone.utc)
-                                       + datetime.timedelta(milliseconds=30)).isoformat())
+        self._record_chain()
         real = self.lifecycle_repo.load_state
 
-        def slow_read():
-            time.sleep(0.1)  # stands in for waiting on the state lock
-            return real()
+        def expires_while_waiting_for_the_lock():
+            state = real()
+            state["promotions"]["prom_1"]["expires_at"] = (
+                datetime.datetime.now(datetime.timezone.utc).isoformat())
+            return state
 
-        with patch.object(self.lifecycle_repo, "load_state", side_effect=slow_read):
+        with patch.object(self.lifecycle_repo, "load_state",
+                          side_effect=expires_while_waiting_for_the_lock):
             report = self._evaluate()
         self.assertFalse(report["adoptable"])
         self.assertEqual(report["reason_code"], "authority_expired")
@@ -490,17 +492,33 @@ class TestOwnedStorageReview(unittest.TestCase):
             with self.subTest(content=content):
                 self.lifecycle_path.write_bytes(content)
                 report = self._evaluate()
+                self.assertFalse(report["ok"])
                 self.assertEqual(report["support_tier"], "unavailable")
                 self.assertFalse(report["adoptable"])
                 self.assertEqual(report["reason_code"], "authority_unavailable")
                 self.assertEqual(set(report["checks"].values()), {"unknown"})
                 self.assertEqual(self.lifecycle_path.read_bytes(), content)
 
+    def test_lock_failure_reports_unavailable(self):
+        with patch.object(self.lifecycle_repo, "load_state", side_effect=PermissionError("synthetic")):
+            report = self._evaluate()
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["support_tier"], "unavailable")
+        self.assertEqual(report["code"], "authority_unavailable")
+        self.assertNotIn("synthetic", str(report))
+
     def test_writers_refuse_unreadable_state_instead_of_replacing_it(self):
         self.lifecycle_path.write_bytes(b"{not json")
-        with self.assertRaises(LifecycleError):
-            self.lifecycle_repo.get_generation()
-        self.assertEqual(self.lifecycle_path.read_bytes(), b"{not json")
+        acceptance = CapabilityAcceptance(
+            acceptance_id="a", promotion_id="p", sync_operation_id="s", ci_operation_id="c",
+            cleanup_operation_id="d", policy_id="pol", evidence_id="ev", authority_binding_id="b",
+            ordinary_evidence_digest="sha256:o", outcome=AcceptanceOutcome.COMPLETE, reason_code=None,
+            request_id="r", request_digest="sha256:r", lifecycle_generation=1, completed_at=self._future(0))
+        for write in (self.lifecycle_repo.get_generation,
+                      lambda: self.lifecycle_repo.record_acceptance(acceptance, 0)):
+            with self.assertRaises(LifecycleError):
+                write()
+            self.assertEqual(self.lifecycle_path.read_bytes(), b"{not json")
 
     def test_selectorless_revocation_for_another_remote_does_not_apply(self):
         revocation = {"remote_identity": "rem_other"}

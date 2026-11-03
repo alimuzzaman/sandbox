@@ -56,7 +56,10 @@ class TestStorageAuthorityLifecycleRepository(unittest.TestCase):
     def test_initialize_and_permissions(self):
         state = self.repo.load_state()
         self.assertEqual(state["generation"], 0)
-        self.assertTrue(self.repo_path.exists())
+        # Reading never creates the file; the first write does.
+        self.assertFalse(self.repo_path.exists())
+        with self.repo._lock():
+            self.repo._write_state_locked(state)
         # Check permissions 0600 on POSIX
         mode = os.stat(self.repo_path).st_mode & 0o777
         self.assertEqual(mode, 0o600)

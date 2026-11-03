@@ -402,6 +402,21 @@ class TestRemoteWpCliCommand(unittest.TestCase):
             self.assertEqual(len(staged), 1)
             self.assertEqual(staged[0].read_bytes(), b"synthetic")
 
+    def test_staging_command_ignores_how_many_delimiters_survive(self):
+        for argv, expected in (
+            (["eval-file", "x"], (("eval-file",), 1)),
+            (["--url=https://site.test", "plugin", "install", "x"], (("plugin", "install"), 3)),
+            (["--url", "https://site.test", "media", "import", "x"], (("media", "import"), 4)),
+        ):
+            for count in range(4):
+                with self.subTest(argv=argv, count=count):
+                    found = staging_command(["--"] * count + argv)
+                    self.assertEqual(found[0], expected[0])
+                    self.assertEqual(found[1], expected[1] + count)
+        self.assertEqual(staging_command(["--", "--url=x", "--", "eval-file", "x"]),
+                         (("eval-file",), 4))
+        self.assertIsNone(staging_command(["--", "--", "option", "get", "x"]))
+
     def test_staging_leaves_unrelated_arguments_untouched(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

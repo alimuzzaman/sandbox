@@ -16,8 +16,10 @@ def staging_command(argv) -> tuple[tuple[str, ...], int] | None:
     while index < len(argv):
         token = argv[index]
         if token == "--":
+            # Skip every delimiter: callers along the way may add or strip one,
+            # and the answer must not depend on how many survive.
             index += 1
-            break
+            continue
         if not token.startswith("-"):
             break
         index += 1

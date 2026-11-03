@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb ensure --remote` reports SSH failures as `remote_authentication_failed`,
+  `remote_unreachable` or `remote_connection_lost` instead of
+  `remote_empty_output`, naming the likely cause. Completion stays unknown: inspect before retrying.
 - `host destroy` reads a DNS record saved with a complete snapshot before acting, and only touches it if its name,
   type, content, proxied status, TTL and comment still match what Sandbox last wrote and no other hosted target
   holds it. A record with an incomplete snapshot is left in place. Records saved earlier have no snapshot and are still acted on unread; the dry run lists every DNS

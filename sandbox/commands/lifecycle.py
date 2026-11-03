@@ -199,7 +199,27 @@ def _remote_ensure_failure(result) -> dict:
             ),
             "remote_timeout": "remote ensure timed out; completion is unknown",
             "remote_invalid_output": "remote ensure returned invalid JSON output",
+            "remote_authentication_failed": "SSH reported an authentication failure; inspect the remote before retrying",
+            "remote_unreachable": "SSH reported the remote as unreachable; inspect the remote before retrying",
+            "remote_connection_lost": "the SSH connection ended unexpectedly; completion is unknown, inspect before retrying",
         }
+        if getattr(result, "returncode", None) == 255 and parse_code not in (
+            "remote_output_too_large",
+            "remote_timeout",
+        ):
+            # 255 is SSH's own failure status. Only a typed child result above outranks it.
+            from sandbox.core import _remote
+
+            raw_stderr = getattr(result, "stderr", "") or ""
+            if isinstance(raw_stderr, bytes):
+                raw_stderr = raw_stderr.decode("utf-8", errors="replace")
+            kind = _remote.classify_ssh_failure(str(raw_stderr))
+            parse_code = {
+                "authentication_failed": "remote_authentication_failed",
+                "dns_failed": "remote_unreachable",
+                "connection_refused": "remote_unreachable",
+                "network_unreachable": "remote_unreachable",
+            }.get(kind, "remote_connection_lost")
         payload = {
             "ok": False,
             "error": {

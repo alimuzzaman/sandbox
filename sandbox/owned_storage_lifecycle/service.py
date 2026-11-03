@@ -9,14 +9,12 @@ from typing import Any, Dict, Optional
 from sandbox.owned_storage_lifecycle.models import (
     AcceptanceOutcome,
     AcceptanceState,
-    AuthorityCapability,
     CapabilityAcceptance,
     CapabilityPromotion,
     PromotionPhase,
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import (
-    LifecycleCASError,
     LifecycleError,
     StorageAuthorityLifecycleRepository,
 )
@@ -32,11 +30,19 @@ def utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-MAX_EVALUATION_ATTEMPTS = 3
-
-
 def _text(value) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _revocation_applies(item, remote_identity, promotion_id, binding) -> bool:
+    """A revocation that cannot be read counts: it must not grant anything."""
+    if not isinstance(item, dict) or not _text(item.get("remote_identity")):
+        return True
+    selectors = [item.get("promotion_id"), item.get("authority_binding_id")]
+    if not any(_text(value) for value in selectors):
+        return True
+    return item["remote_identity"] == remote_identity and (
+        selectors[0] == promotion_id or selectors[1] == binding)
 
 
 def _authority_check(state, remote_identity, service_revision, source_revision, now):
@@ -47,28 +53,33 @@ def _authority_check(state, remote_identity, service_revision, source_revision, 
     observed revisions. Missing or malformed data never proves anything.
     """
     observed = _text(service_revision) and _text(source_revision)
-    promotions = state.get("promotions", {})
-    revocations = list(state.get("revocations", {}).values())
+    promotions = state.get("promotions")
+    acceptances = state.get("acceptances")
+    revocations = state.get("revocations", {})
+    if not isinstance(promotions, dict) or not isinstance(acceptances, dict):
+        return None, "implemented_unproven"
+    revocations = list(revocations.values()) if isinstance(revocations, dict) else [None]
     reasons = set()
-    for acceptance in state.get("acceptances", {}).values():
+    for acceptance in acceptances.values():
         if (not isinstance(acceptance, dict)
                 or acceptance.get("outcome") != AcceptanceOutcome.COMPLETE.value):
             continue
-        promotion = promotions.get(acceptance.get("promotion_id"))
+        promotion_id = acceptance.get("promotion_id")
+        if not _text(promotion_id):
+            continue
+        promotion = promotions.get(promotion_id)
         if not isinstance(promotion, dict) or promotion.get("remote_identity") != remote_identity:
             continue
         binding = promotion.get("authority_binding_id")
-        if (not _text(binding) or binding != acceptance.get("authority_binding_id")
+        if any(_revocation_applies(item, remote_identity, promotion_id, binding)
+               for item in revocations):
+            reasons.add("authority_revoked")
+            continue
+        if (promotion.get("promotion_id") != promotion_id
+                or not _text(binding) or binding != acceptance.get("authority_binding_id")
                 or promotion.get("phase") != PromotionPhase.SUPPORTED.value
                 or promotion.get("adoptable") is not True):
             reasons.add("authority_binding_mismatch")
-            continue
-        if any(not isinstance(item, dict)
-               or (item.get("remote_identity") == remote_identity
-                   and (item.get("promotion_id") == promotion.get("promotion_id")
-                        or item.get("authority_binding_id") == binding))
-               for item in revocations):
-            reasons.add("authority_revoked")
             continue
         if not _unexpired(promotion.get("expires_at"), now):
             reasons.add("authority_expired")
@@ -111,26 +122,7 @@ class AuthorityLifecycleService:
         service_revision: Optional[str] = None,
         source_revision: Optional[str] = None,
     ) -> Dict[str, Any]:
-        for _ in range(MAX_EVALUATION_ATTEMPTS):
-            try:
-                return self._evaluate_once(
-                    remote_identity=remote_identity, platform_mode=platform_mode,
-                    service_revision=service_revision, source_revision=source_revision)
-            except LifecycleCASError:
-                # State changed after the decision was made (possibly a revocation).
-                # Never report a decision taken from stale state: decide again.
-                continue
-        raise LifecycleServiceError(
-            "storage authority state kept changing during evaluation", code="authority_unavailable")
-
-    def _evaluate_once(
-        self,
-        *,
-        remote_identity: str,
-        platform_mode: str = "ubuntu-24.04-systemd-255-private-root-v1",
-        service_revision: Optional[str] = None,
-        source_revision: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        """Read-only: one snapshot decides, and nothing is written."""
         now_dt = datetime.datetime.now(datetime.timezone.utc)
         observed_at = now_dt.isoformat()
         expires_at = (now_dt + datetime.timedelta(minutes=15)).isoformat()
@@ -184,7 +176,6 @@ class AuthorityLifecycleService:
             }
 
         state = self.repository.load_state()
-        snapshot_generation = state.get("generation", 0)
         completed_acc, reason_code = _authority_check(
             state, remote_identity, service_revision, source_revision, now_dt)
         if completed_acc is not None:
@@ -220,29 +211,7 @@ class AuthorityLifecycleService:
         # No review decision is inspected here.
         checks["human_review"] = "unknown"
 
-        cap_record = AuthorityCapability(
-            capability_id="owned-storage-authority-v1",
-            remote_identity=remote_identity,
-            platform_mode=platform_mode,
-            support_tier=support_tier,
-            adoptable=adoptable,
-            service_revision=service_revision,
-            owner_identity_digest="sha256:owner",
-            root_identity_digest="sha256:root",
-            primitive_states=checks,
-            evidence_id=completed_acc.get("evidence_id") if completed_acc else None,
-            ordinary_evidence_id=completed_acc.get("acceptance_id") if completed_acc else None,
-            acceptance_state=acceptance_state,
-            observed_at=observed_at,
-            expires_at=expires_at,
-            reason_code=reason_code,
-            promotion_id=completed_acc.get("promotion_id") if completed_acc else None,
-            authority_binding_id=completed_acc.get("authority_binding_id") if completed_acc else None,
-            binding_generation=completed_acc.get("lifecycle_generation") if completed_acc else None,
-        )
-
-        self.repository.save_capability(cap_record, expected_generation=snapshot_generation)
-
+        accepted = completed_acc or {}
         return {
             "ok": True,
             "capability": "owned-storage-authority-v1",
@@ -251,12 +220,12 @@ class AuthorityLifecycleService:
             "support_tier": support_tier.value,
             "adoptable": adoptable,
             "service_revision": service_revision,
-            "evidence_id": cap_record.evidence_id,
-            "ordinary_evidence_id": cap_record.ordinary_evidence_id,
+            "evidence_id": accepted.get("evidence_id"),
+            "ordinary_evidence_id": accepted.get("acceptance_id"),
             "acceptance_state": acceptance_state.value if acceptance_state else None,
-            "promotion_id": cap_record.promotion_id,
-            "authority_binding_id": cap_record.authority_binding_id,
-            "binding_generation": cap_record.binding_generation,
+            "promotion_id": accepted.get("promotion_id"),
+            "authority_binding_id": accepted.get("authority_binding_id"),
+            "binding_generation": accepted.get("lifecycle_generation"),
             "observed_at": observed_at,
             "expires_at": expires_at,
             "checks": checks,

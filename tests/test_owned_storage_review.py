@@ -19,13 +19,11 @@ from sandbox.owned_storage_lifecycle.models import (
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import (
-    LifecycleCASError,
     StorageAuthorityLifecycleRepository,
 )
 from sandbox.owned_storage_lifecycle.service import (
     AuthorityLifecycleService,
     LifecycleServiceError,
-    MAX_EVALUATION_ATTEMPTS,
     _authority_check,
 )
 
@@ -412,49 +410,59 @@ class TestOwnedStorageReview(unittest.TestCase):
         self.assertIsNone(acc)
         self.assertEqual(reason, "authority_revoked")
 
-    def test_revocation_racing_the_decision_is_not_missed(self):
+    def test_evaluation_is_read_only(self):
         self._record_chain()
-        orig_load_state = self.lifecycle_repo.load_state
-        first_call = [True]
+        before = self.lifecycle_path.read_bytes()
+        self._evaluate()
+        self._evaluate(service="sha256:other")
+        self.service.evaluate_capability(remote_identity=self.remote_id, platform_mode=self.PLATFORM)
+        self.assertEqual(self.lifecycle_path.read_bytes(), before)
 
-        def fake_load_state():
-            if first_call[0]:
-                first_call[0] = False
-                state = orig_load_state()
-                rev = CapabilityRevocation(
-                    revocation_id="rev_race",
-                    remote_identity=self.remote_id,
-                    project_identity=self.project_id,
-                    promotion_id="prom_1",
-                    authority_binding_id="bind_1",
-                    reviewer_identity_digest="sha256:r",
-                    request_id="req_race",
-                    request_digest="sha256:race",
-                    lifecycle_generation=1,
-                    reason_code="synthetic",
-                    revoked_at=self._future(0),
-                )
-                self.lifecycle_repo.record_revocation(rev, self.lifecycle_repo.get_generation())
-                return state
-            return orig_load_state()
+    def _state(self, **overrides):
+        promotion = {"promotion_id": "p", "remote_identity": self.remote_id,
+                     "authority_binding_id": "b", "phase": PromotionPhase.SUPPORTED.value,
+                     "adoptable": True, "expires_at": self._future(),
+                     "service_revision": self.SERVICE, "source_revision": self.SOURCE}
+        state = {
+            "promotions": {"p": promotion},
+            "acceptances": {"a": {"outcome": AcceptanceOutcome.COMPLETE.value,
+                                  "promotion_id": "p", "authority_binding_id": "b"}},
+            "revocations": {},
+        }
+        state.update(overrides)
+        return state
 
-        with patch.object(self.lifecycle_repo, "load_state", side_effect=fake_load_state):
-            report = self._evaluate()
+    def _check(self, state):
+        return _authority_check(state, self.remote_id, self.SERVICE, self.SOURCE,
+                                datetime.datetime.now(datetime.timezone.utc))
 
-        self.assertFalse(report["adoptable"])
-        self.assertEqual(report["reason_code"], "authority_revoked")
+    def test_state_helper_proves_when_every_link_holds(self):
+        self.assertEqual(self._check(self._state())[1], "proven")
 
-    def test_evaluation_gives_up_cleanly_when_state_keeps_changing(self):
-        self._record_chain()
-        with patch.object(
-            self.lifecycle_repo,
-            "save_capability",
-            side_effect=LifecycleCASError("cas error", generation=1),
-        ) as mock_save:
-            with self.assertRaises(LifecycleServiceError) as cm:
-                self._evaluate()
-            self.assertEqual(cm.exception.code, "authority_unavailable")
-            self.assertEqual(mock_save.call_count, MAX_EVALUATION_ATTEMPTS)
+    def test_revocation_cannot_be_dodged_through_the_promotion_key(self):
+        promotion = dict(self._state()["promotions"]["p"], promotion_id="other")
+        revocation = {"remote_identity": self.remote_id, "promotion_id": "p"}
+        self.assertEqual(self._check(self._state(
+            promotions={"p": promotion}, revocations={"r": revocation})),
+            (None, "authority_revoked"))
+        self.assertEqual(self._check(self._state(promotions={"p": promotion})),
+                         (None, "authority_binding_mismatch"))
+
+    def test_unreadable_revocations_refuse(self):
+        for revocation in ("garbage", {}, {"remote_identity": self.remote_id},
+                           {"promotion_id": "p"}, {"remote_identity": self.remote_id, "promotion_id": ""}):
+            with self.subTest(revocation=revocation):
+                self.assertEqual(self._check(self._state(revocations={"r": revocation})),
+                                 (None, "authority_revoked"))
+        self.assertEqual(self._check(self._state(revocations="garbage")),
+                         (None, "authority_revoked"))
+
+    def test_malformed_containers_and_ids_prove_nothing(self):
+        for overrides in ({"promotions": "x"}, {"acceptances": "x"}, {"promotions": None},
+                          {"acceptances": {"a": {"outcome": AcceptanceOutcome.COMPLETE.value,
+                                                 "promotion_id": ["p"]}}}):
+            with self.subTest(overrides=overrides):
+                self.assertIsNone(self._check(self._state(**overrides))[0])
 
     def test_checks_are_honest_in_each_tier(self):
         # 1. Unproven

@@ -58,7 +58,7 @@ class AuthorityCapability:
     platform_mode: str
     support_tier: SupportTier
     adoptable: bool
-    service_revision: Optional[str]
+    service_revision: str
     owner_identity_digest: Optional[str]
     root_identity_digest: Optional[str]
     primitive_states: Dict[str, str]

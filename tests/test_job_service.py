@@ -1575,13 +1575,49 @@ class JobServiceTests(unittest.TestCase):
                 sweep = service.retention_sweep(retention_days=7)
             self.assertFalse(sweep["ok"])
             rows = {row["job_id"]: row for row in sweep["cleaned"]}
+            # Artifact removal had started when it failed, so it is reported.
             self.assertEqual(rows[failing], {"cleanup_state": "retained", "job_id": failing,
-                                             "ok": False, "removed": ["logs"]})
+                                             "ok": False, "removed": ["logs", "artifacts"]})
             self.assertTrue(rows[healthy]["ok"])
             self.assertEqual(rows[healthy]["removed"], ["logs"])
             self.assertFalse((storage.job_dir(failing) / "output").exists())
             self.assertTrue((artifacts / "kept.txt").exists())
             self.assertEqual(repository.get(failing)["cleanup_state"], "retained")
+            repository.close()
+
+    def test_cleanup_metrics_partial_failure_reports_metrics_removed(self):
+        """metrics.jsonl unlinked, then the metrics dir fails: metrics is reported."""
+        import shutil as shutil_module
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "metrics-partial",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-metrics-partial",
+            ))
+            jid = row["job_id"]
+            repository.transition(jid, "running")
+            repository.transition(jid, "succeeded", exit_code=0)
+            job_dir = storage.job_dir(jid, create=True)
+            (job_dir / "metrics.jsonl").write_text("{}\n")
+            (job_dir / "metrics").mkdir()
+            (job_dir / "metrics" / "sample.json").write_text("{}")
+            real_rmtree = shutil_module.rmtree
+
+            def rmtree(path, *args, **kwargs):
+                if Path(path) == job_dir / "metrics":
+                    raise PermissionError("synthetic")
+                return real_rmtree(path, *args, **kwargs)
+
+            with patch("shutil.rmtree", side_effect=rmtree):
+                result = service.cleanup(jid)
+            self.assertEqual(result, {"ok": False, "job_id": jid, "removed": ["metrics"],
+                                      "cleanup_state": "retained"})
+            self.assertFalse((job_dir / "metrics.jsonl").exists())
+            self.assertTrue((job_dir / "metrics" / "sample.json").exists())
+            self.assertEqual(repository.get(jid)["cleanup_state"], "retained")
             repository.close()
 
     def test_ci_prior_log_removal_with_subsequent_release_failure_retains_truthful_removed_and_failure(self):

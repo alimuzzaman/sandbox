@@ -1280,6 +1280,7 @@ class JobService:
         workspace_cleanup_pending = False
         workspace_cleanup_failed = False
         retired_materialization = False
+        started = []  # kinds whose removal began; a failure may leave them partial
         # Retire the materialization before deleting anything: if retirement
         # refuses, the job's files stay in place and nothing is reported removed.
         if (artifacts and self.workspace_registry is not None and
@@ -1291,10 +1292,12 @@ class JobService:
         try:
             if logs:
                 output = directory / "output"
-                if output.exists(): shutil.rmtree(output); removed.append("logs")
+                if output.exists():
+                    started.append("logs"); shutil.rmtree(output); removed.append("logs")
             if artifacts:
                 artifact_dir = directory / "artifacts"
-                if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
+                if artifact_dir.exists():
+                    started.append("artifacts"); shutil.rmtree(artifact_dir); removed.append("artifacts")
                 if retired_materialization:
                     removed.append("workspace_materialization")
                 if (self.workspace_registry is not None and
@@ -1317,6 +1320,8 @@ class JobService:
                 metric_file = directory / "metrics.jsonl"
                 metric_dir = directory / "metrics"
                 metric_removed = False
+                if metric_file.exists() or metric_dir.exists():
+                    started.append("metrics")
                 if metric_file.exists():
                     metric_file.unlink()
                     metric_removed = True
@@ -1340,6 +1345,7 @@ class JobService:
             cleanup_state = "retained"
             if retired_materialization and "workspace_materialization" not in removed:
                 removed.append("workspace_materialization")
+            removed.extend(kind for kind in started if kind not in removed)
             try:
                 self.repository.mark_retained_metadata_unavailable(
                     job_id, logs="logs" in removed, artifacts="artifacts" in removed,

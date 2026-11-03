@@ -149,3 +149,15 @@ class StorageReviewTests(unittest.TestCase):
                 payload = run.to_dict()
                 self.assertEqual(payload['available_bytes_delta'], delta)
                 self.assertEqual(payload['observed_reclaimed_bytes'], 0)
+
+    def test_credential_shaped_label_values_are_redacted(self):
+        from sandbox.resources.engine_review import review_metadata
+        ns = remote_tests.TestRemoteProbeResilience()._probe_namespace()
+        for factory in (review_metadata, ns['review_metadata']):
+            for labels in ({'auth': 'opaque-credential'}, {'trace': 'Basic ZHVtbXk6ZHVtbXk='},
+                           {'trace': 'ghp_' + 'x'*36},
+                           {'trace': '-----BEGIN PRIVATE KEY----- fixture -----END PRIVATE KEY-----'}):
+                with self.subTest(labels=labels, factory=factory.__name__):
+                    result = factory('image', {'Id': 'image', 'Config': {'Labels': labels}}, [], True)
+                    self.assertTrue(result['labels_redacted'])
+                    self.assertEqual(list(result['labels'].values()), ['[redacted]'])

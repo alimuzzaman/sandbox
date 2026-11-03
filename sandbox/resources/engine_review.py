@@ -24,12 +24,12 @@ class EngineReview(TypedDict, total=False):
 def review_metadata(kind: str, record: dict, containers: list[dict], containers_complete: bool = False) -> EngineReview:
     """Allow only review fields; exclude Env, commands, mounts and health output."""
     import re
-    sensitive = re.compile(r'(?i)(token|password|passphrase|authorization|cookie|credential|secret|key)')
+    sensitive = re.compile(r'(?i)(token|password|passphrase|authorization|cookie|credential|secret|key|(?:^|[._-])auth(?:entication|orization)?(?:$|[._-]))')
     def labels(values):
         if not isinstance(values, dict):
             return {}
-        return {str(key): '[redacted]' if sensitive.search(str(key)) else
-                re.sub(r'(?i)(?:[a-z]+://[^\s/@:]+:[^\s/@]+@|bearer\s+\S+|(?:token|password|secret|credential)\s*[=:]\s*\S+)', '[redacted]', str(value))
+        return {str(key): '[redacted]' if sensitive.search(str(key)) or 'PRIVATE KEY-----' in str(value) else
+                re.sub(r'(?i)(?:[a-z]+://[^\s/@:]+:[^\s/@]+@|(?:bearer|basic)\s+\S+|(?:token|password|secret|credential)\s*[=:]\s*\S+|(?:gh[pousr]_|github_pat_|sk-(?:proj-)?|sk_live_|xox[baprs]-|AIza)[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16})', '[redacted]', str(value))
                 for key, value in values.items() if isinstance(value, (str, int, bool))}
     identity = str(record.get('Id') or record.get('Name') or '')
     result = {'engine_id': identity, 'references_complete': bool(containers_complete),

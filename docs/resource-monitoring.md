@@ -875,7 +875,8 @@ ID, all image tags/digests, labels, creation identity, container Image ID and
 allowlisted State fields, restart count and health status, volume driver/options,
 and referencing container IDs including stopped containers. `references_complete`
 is false unless container enumeration completed. `labels_redacted` identifies
-credential-redacted labels/options. No Env, command, health logs or raw inspect
+credential-redacted labels/options, including auth keys, Basic/Bearer values,
+recognized credential prefixes and private-key markers. No Env, command, health logs or raw inspect
 blob is projected. Redacted or incomplete evidence cannot prove an absence claim.
 Image inventory uses `docker image ls --all -q`. Metadata changes invalidate
 candidate evidence digests. Volume deep measurements join on the same name plus

@@ -698,7 +698,7 @@ class ResourceService:
                 try:
                     try:
                         current = self.adapter.revalidate(candidate)
-                    except (ResourceError, OSError, RuntimeError):
+                    except Exception:
                         outcomes.append(CleanupItemOutcome(
                             candidate.resource_id, "skipped", "revalidation_unavailable",
                             candidate.expected_size_bytes, False, self.clock(),
@@ -720,7 +720,7 @@ class ResourceService:
                         continue
                     outcome = self.adapter.remove(candidate)
                     outcomes.append(outcome)
-                    if outcome.status == "timed_out":
+                    if outcome.status in {"timed_out", "indeterminate"}:
                         indeterminate = True
                 except RevalidationUnavailable:
                     outcomes.append(CleanupItemOutcome(
@@ -735,14 +735,14 @@ class ResourceService:
                         False, self.clock(),
                     ))
                 except Exception:
+                    indeterminate = True
                     outcomes.append(CleanupItemOutcome(
-                        candidate.resource_id, "failed",
-                        "cleanup_failed", candidate.expected_size_bytes,
-                        False, self.clock(),
+                        candidate.resource_id, "indeterminate", "cleanup_outcome_unavailable",
+                        None, False, self.clock(),
                     ))
             try:
                 after_capacity = capacity(observe_capacity())
-            except (ResourceError, OSError, RuntimeError):
+            except Exception:
                 after_capacity = None
                 indeterminate = True
             before_used = int((before_capacity or {}).get("used_bytes") or 0)

@@ -4282,27 +4282,31 @@ class RemoteResourceAdapter:
         if response.returncode == 124:
             status, reason = "timed_out", "cleanup_timed_out"
         elif response.returncode != 0:
-            status, reason = "failed", "cleanup_failed"
+            status, reason = "indeterminate", "cleanup_outcome_unavailable"
         else:
             try:
                 payload = json.loads(response.stdout)
+                if not isinstance(payload, dict):
+                    raise ValueError
                 status = payload.get("status")
                 reason = payload.get("reason")
                 if status not in {
                     "removed", "already_absent", "failed", "timed_out", "skipped",
                 }:
                     raise ValueError
+                if not isinstance(reason, str) or not reason:
+                    raise ValueError
                 if status == "skipped" and reason not in {
                     "revalidation_unavailable", "volume_identity_changed", "volume_identity_required",
                 }:
                     raise ValueError
             except (TypeError, ValueError, json.JSONDecodeError):
-                status, reason = "failed", "cleanup_failed"
+                status, reason = "indeterminate", "cleanup_outcome_unavailable"
         return CleanupItemOutcome(
             candidate.resource_id,
             status,
             reason,
-            candidate.expected_size_bytes,
+            None if status == "indeterminate" else candidate.expected_size_bytes,
             False,
             self.clock(),
         )

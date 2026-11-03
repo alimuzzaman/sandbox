@@ -161,3 +161,68 @@ class StorageReviewTests(unittest.TestCase):
                     result = factory('image', {'Id': 'image', 'Config': {'Labels': labels}}, [], True)
                     self.assertTrue(result['labels_redacted'])
                     self.assertEqual(list(result['labels'].values()), ['[redacted]'])
+
+    def test_final_observation_decoder_errors_preserve_persisted_outcomes(self):
+        for malformed_kind, error_type in (('engine', ValueError), ('deep', TypeError)):
+            with self.subTest(malformed_kind=malformed_kind), tempfile.TemporaryDirectory() as temp:
+                adapter = FakeAdapter((observation('cache'),))
+                adapter._target = target('remote-a', 'host')
+                payload = {'identity': 'host', 'capacity': adapter.observe(thorough=False, budget_seconds=1).capacity,
+                           'resources': [], 'category_outcomes': []}
+                if malformed_kind == 'engine':
+                    bad = observation('bad').internal_dict()
+                    bad['engine'] = {'references_complete': 'unknown'}
+                    payload['resources'] = [bad]
+                else:
+                    payload['deep_attribution'] = deep_attribution().to_dict()
+                    payload['deep_attribution']['filesystems'][0]['mount_flags'] = 1
+                remote = RemoteResourceAdapter('remote-a', remote_lookup=lambda name: {'provisioned': True},
+                    service_request=lambda *a, **kw: ProcessResult(('synthetic',), 0, json.dumps(payload), ''),
+                    clock=lambda: NOW)
+                with self.assertRaises(error_type):
+                    remote.observe(thorough=False, budget_seconds=1)
+                original = adapter.observe
+                def observe(**kw):
+                    if adapter.removed:
+                        return remote.observe(thorough=False, budget_seconds=1)
+                    return original(**{key: value for key, value in kw.items() if key != 'cancelled'})
+                adapter.observe = observe
+                service = self.service(adapter, temp)
+                plan = service.plan('cache')
+                receipt = service.cleanup(plan['data']['plan_id'], confirm=True)
+                self.assertFalse(receipt['ok'])
+                self.assertEqual(receipt['status'], 'indeterminate')
+                self.assertEqual([row['status'] for row in receipt['data'].get('outcomes', [])], ['removed'])
+                receipts = list(Path(temp).glob('*.run.json'))
+                self.assertEqual(len(receipts), 1)
+                self.assertEqual(json.loads(receipts[0].read_text())['outcomes'][0]['status'], 'removed')
+                self.assertEqual(service.plan_store.load(plan['data']['plan_id']).state, 'indeterminate')
+
+    def test_missing_removal_receipt_is_indeterminate_not_deletion_failure(self):
+        candidate = CleanupCandidate.from_observation(observation('cache'))
+        for code, output in ((1, ''), (0, 'invalid json'), (0, '[]'),
+                             (0, json.dumps({'status': 'unknown'})),
+                             (0, json.dumps({'status': 'removed'}))):
+            with self.subTest(code=code, output=output):
+                adapter = RemoteResourceAdapter('remote-a', remote_lookup=lambda name: {'provisioned': True},
+                    service_request=lambda *a, **kw: ProcessResult(('synthetic',), code, output, ''), clock=lambda: NOW)
+                outcome = adapter.remove(candidate)
+                self.assertEqual(outcome.status, 'indeterminate')
+                self.assertEqual(outcome.reason, 'cleanup_outcome_unavailable')
+                self.assertIsNone(outcome.observed_bytes)
+
+    def test_removal_exception_keeps_plan_indeterminate_without_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            adapter = FakeAdapter((observation('cache'),))
+            def remove(candidate):
+                adapter.removed.append(candidate.resource_id)
+                raise ConnectionError('response lost after effect')
+            adapter.remove = remove
+            service = self.service(adapter, temp)
+            plan = service.plan('cache')
+            receipt = service.cleanup(plan['data']['plan_id'], confirm=True)
+            self.assertEqual(receipt['status'], 'indeterminate')
+            self.assertFalse(receipt['ok'])
+            self.assertEqual(receipt['data']['outcomes'][0]['status'], 'indeterminate')
+            self.assertFalse(service.cleanup(plan['data']['plan_id'], confirm=True)['ok'])
+            self.assertEqual(adapter.removed, ['cache'])

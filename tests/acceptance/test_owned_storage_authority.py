@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import io
 import json
@@ -31,6 +32,8 @@ from sandbox.owned_storage.service import OwnedStorageService
 from sandbox.owned_storage_lifecycle.models import (
     AcceptanceOutcome,
     CapabilityAcceptance,
+    CapabilityPromotion,
+    PromotionPhase,
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import StorageAuthorityLifecycleRepository
@@ -72,7 +75,32 @@ class TestOwnedStorageAuthorityAcceptance(unittest.TestCase):
         self.assertEqual(cap["support_tier"], SupportTier.IMPLEMENTED_UNPROVEN.value)
         self.assertFalse(cap["adoptable"])
 
-        # Record acceptance receipt to promote to proven
+        # Record promotion and acceptance receipt to promote to proven
+        expires_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)).isoformat()
+        promotion = CapabilityPromotion(
+            promotion_id="prom-001",
+            review_decision_id="dec-001",
+            evidence_candidate_id="cand-001",
+            capability_id="owned-storage-authority-v1",
+            remote_identity=remote,
+            project_identity=project,
+            fixture_identity="fix-001",
+            source_revision="sha256:src_1",
+            service_revision="sha256:srv_1",
+            contract_revision="contract-001",
+            evidence_digest="sha256:ev",
+            authority_binding_id="bind-001",
+            binding_generation=1,
+            phase=PromotionPhase.SUPPORTED,
+            support_tier=SupportTier.PROVEN,
+            adoptable=True,
+            request_id="req-prom-001",
+            request_digest="sha256:req_prom",
+            promoted_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            expires_at=expires_at,
+        )
+        self.lifecycle_repo.record_promotion(promotion, expected_generation=self.lifecycle_repo.get_generation())
+
         acceptance = CapabilityAcceptance(
             acceptance_id="acc-001",
             promotion_id="prom-001",
@@ -96,6 +124,7 @@ class TestOwnedStorageAuthorityAcceptance(unittest.TestCase):
             remote_identity=remote,
             platform_mode="ubuntu-24.04-systemd-255-private-root-v1",
             service_revision="sha256:srv_1",
+            source_revision="sha256:src_1",
         )
         self.assertEqual(cap_proven["support_tier"], SupportTier.PROVEN.value)
         self.assertTrue(cap_proven["adoptable"])

@@ -76,17 +76,18 @@ class StorageAuthorityLifecycleRepository:
             return self._read_state_locked()
 
     def _read_state_locked(self) -> Dict[str, Any]:
+        # Reading never writes. Unreadable state is refused, not reset: replacing it
+        # would erase recorded revocations and acceptance history.
         if not self.path.exists():
-            state = self._default_state()
-            self._write_state_locked(state)
-            return state
+            return self._default_state()
         try:
             with open(self.path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            state = self._default_state()
-            self._write_state_locked(state)
-            return state
+                state = json.load(f)
+        except (ValueError, OSError):
+            raise LifecycleError("lifecycle state is unreadable") from None
+        if not isinstance(state, dict):
+            raise LifecycleError("lifecycle state is unreadable")
+        return state
 
     def _write_state_locked(self, state: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -258,4 +259,29 @@ class StorageAuthorityLifecycleRepository:
             if data.get("outcome"):
                 data["outcome"] = AcceptanceOutcome(data["outcome"])
             return CapabilityAcceptance(**data)
+
+    def record_revocation(self, revocation: CapabilityRevocation, expected_generation: int) -> int:
+        with self._lock():
+            state = self._read_state_locked()
+            current_gen = state.get("generation", 0)
+
+            existing = state.get("revocations", {}).get(revocation.revocation_id)
+            if existing:
+                if existing.get("request_digest") == revocation.request_digest:
+                    return current_gen
+                raise LifecycleConflictError(
+                    f"Revocation {revocation.revocation_id} already exists with different digest"
+                )
+
+            if current_gen != expected_generation:
+                raise LifecycleCASError(
+                    f"Generation mismatch: expected {expected_generation}, found {current_gen}"
+                )
+
+            data = dataclasses.asdict(revocation)
+
+            state["revocations"][revocation.revocation_id] = data
+            state["generation"] = current_gen + 1
+            self._write_state_locked(state)
+            return state["generation"]
 

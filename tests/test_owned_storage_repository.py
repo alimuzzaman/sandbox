@@ -13,6 +13,7 @@ from sandbox.owned_storage_lifecycle.models import (
     CapabilityPromotion,
     CapabilityReviewDecision,
     CapabilityReviewRequest,
+    CapabilityRevocation,
     PromotionPhase,
     ReviewDecision,
     ReviewPhase,
@@ -55,7 +56,10 @@ class TestStorageAuthorityLifecycleRepository(unittest.TestCase):
     def test_initialize_and_permissions(self):
         state = self.repo.load_state()
         self.assertEqual(state["generation"], 0)
-        self.assertTrue(self.repo_path.exists())
+        # Reading never creates the file; the first write does.
+        self.assertFalse(self.repo_path.exists())
+        with self.repo._lock():
+            self.repo._write_state_locked(state)
         # Check permissions 0600 on POSIX
         mode = os.stat(self.repo_path).st_mode & 0o777
         self.assertEqual(mode, 0o600)
@@ -147,6 +151,41 @@ class TestStorageAuthorityLifecycleRepository(unittest.TestCase):
         )
         with self.assertRaises(LifecycleConflictError):
             self.repo.record_review_request(conflict_req, expected_generation=1)
+
+    def test_record_revocation_replay_and_cas(self):
+        rev = CapabilityRevocation(
+            revocation_id="rev_1",
+            remote_identity="rem_1",
+            project_identity="proj_1",
+            promotion_id="prom_1",
+            authority_binding_id="bind_1",
+            reviewer_identity_digest="sha256:rev",
+            request_id="req_r_1",
+            request_digest="sha256:digest_r1",
+            lifecycle_generation=0,
+            reason_code="synthetic",
+            revoked_at="2026-09-04T00:00:00Z",
+        )
+        gen = self.repo.record_revocation(rev, expected_generation=0)
+        self.assertEqual(gen, 1)
+
+        # Exact replay succeeds
+        replayed = self.repo.record_revocation(rev, expected_generation=1)
+        self.assertEqual(replayed, 1)
+
+        # Conflicting request with same ID but different digest raises ConflictError
+        conflict_rev = CapabilityRevocation(
+            **{**rev.__dict__, "request_digest": "sha256:different"}
+        )
+        with self.assertRaises(LifecycleConflictError):
+            self.repo.record_revocation(conflict_rev, expected_generation=1)
+
+        # Stale generation raises LifecycleCASError
+        rev2 = CapabilityRevocation(
+            **{**rev.__dict__, "revocation_id": "rev_2", "request_digest": "sha256:digest_r2"}
+        )
+        with self.assertRaises(LifecycleCASError):
+            self.repo.record_revocation(rev2, expected_generation=0)
 
 
 class TestStorageAuthorityRepository(unittest.TestCase):

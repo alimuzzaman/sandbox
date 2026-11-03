@@ -8,6 +8,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Storage authority capability evaluation only reports `proven` through a complete acceptance whose
+  promotion names the requested remote, the same binding and both observed revisions, and is unexpired
+  and unrevoked. Malformed values and unreadable revocations never prove anything. Evaluation no longer writes
+  lifecycle state, and unreadable state is refused and left in place instead of being reset, which used to
+  erase recorded revocations; the capability check then fails with `authority_unavailable`. On a supported platform, checks report `unknown` unless the chain proves
+  them, and `human_review` reports `unknown`.
 - `sb visit` repairs a missing headless Chromium instead of failing before navigation
   when the browser cache was cleared, and install progress no longer reaches stdout.
 - Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only

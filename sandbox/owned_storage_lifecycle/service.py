@@ -9,9 +9,9 @@ from typing import Any, Dict, Optional
 from sandbox.owned_storage_lifecycle.models import (
     AcceptanceOutcome,
     AcceptanceState,
-    AuthorityCapability,
     CapabilityAcceptance,
     CapabilityPromotion,
+    PromotionPhase,
     SupportTier,
 )
 from sandbox.owned_storage_lifecycle.repository import (
@@ -30,6 +30,87 @@ def utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def _text(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _revocation_applies(item, remote_identity, promotion_id, binding) -> bool:
+    """A revocation that cannot be read counts: it must not grant anything."""
+    if not isinstance(item, dict) or not _text(item.get("remote_identity")):
+        return True
+    if item["remote_identity"] != remote_identity:
+        return False
+    selectors = [item.get("promotion_id"), item.get("authority_binding_id")]
+    if not any(_text(value) for value in selectors):
+        return True
+    return selectors[0] == promotion_id or selectors[1] == binding
+
+
+def _authority_check(state, remote_identity, service_revision, source_revision, now):
+    """Return (acceptance, reason) for this remote and these observed revisions.
+
+    Every link must hold: complete acceptance -> its promotion -> this remote, a
+    supported adoptable promotion, the same binding, unexpired, unrevoked, and both
+    observed revisions. Missing or malformed data never proves anything.
+    """
+    observed = _text(service_revision) and _text(source_revision)
+    promotions = state.get("promotions")
+    acceptances = state.get("acceptances")
+    revocations = state.get("revocations", {})
+    if not isinstance(promotions, dict) or not isinstance(acceptances, dict):
+        return None, "implemented_unproven"
+    revocations = list(revocations.values()) if isinstance(revocations, dict) else [None]
+    reasons = set()
+    for acceptance in acceptances.values():
+        if (not isinstance(acceptance, dict)
+                or acceptance.get("outcome") != AcceptanceOutcome.COMPLETE.value):
+            continue
+        promotion_id = acceptance.get("promotion_id")
+        if not _text(promotion_id):
+            continue
+        promotion = promotions.get(promotion_id)
+        if not isinstance(promotion, dict) or promotion.get("remote_identity") != remote_identity:
+            continue
+        binding = promotion.get("authority_binding_id")
+        if any(_revocation_applies(item, remote_identity, promotion_id, binding)
+               for item in revocations):
+            reasons.add("authority_revoked")
+            continue
+        if (promotion.get("promotion_id") != promotion_id
+                or not _text(binding) or binding != acceptance.get("authority_binding_id")
+                or promotion.get("phase") != PromotionPhase.SUPPORTED.value
+                or promotion.get("adoptable") is not True):
+            reasons.add("authority_binding_mismatch")
+            continue
+        if not _unexpired(promotion.get("expires_at"), now):
+            reasons.add("authority_expired")
+            continue
+        if not observed:
+            continue
+        if (not _text(promotion.get("service_revision"))
+                or not _text(promotion.get("source_revision"))
+                or promotion.get("service_revision") != service_revision
+                or promotion.get("source_revision") != source_revision):
+            reasons.add("authority_revision_mismatch")
+            continue
+        return acceptance, "proven"
+    for reason in ("authority_revoked", "authority_expired",
+                   "authority_revision_mismatch", "authority_binding_mismatch"):
+        if reason in reasons:
+            return None, reason
+    return None, "implemented_unproven"
+
+
+def _unexpired(value, now) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        expires = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return expires.tzinfo is not None and expires > now
+
+
 class AuthorityLifecycleService:
     def __init__(self, repository: StorageAuthorityLifecycleRepository):
         self.repository = repository
@@ -39,9 +120,10 @@ class AuthorityLifecycleService:
         *,
         remote_identity: str,
         platform_mode: str = "ubuntu-24.04-systemd-255-private-root-v1",
-        service_revision: str = "rev_installed",
+        service_revision: Optional[str] = None,
         source_revision: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Read-only: one snapshot decides, and nothing is written."""
         now_dt = datetime.datetime.now(datetime.timezone.utc)
         observed_at = now_dt.isoformat()
         expires_at = (now_dt + datetime.timedelta(minutes=15)).isoformat()
@@ -94,93 +176,68 @@ class AuthorityLifecycleService:
                 "reason_code": "authority_unsupported",
             }
 
-        # Check recorded capability in repository
-        existing_cap = self.repository.get_capability(remote_identity)
-
-        # Check recorded acceptances in repository
-        state = self.repository.load_state()
-        acceptances = state.get("acceptances", {})
-        completed_acc = None
-        for acc_data in acceptances.values():
-            if acc_data.get("outcome") in (AcceptanceOutcome.COMPLETE.value, "complete"):
-                completed_acc = acc_data
-                break
-
-        # Check drift: if we had a recorded capability with a different service_revision
-        if existing_cap is not None and existing_cap.service_revision != service_revision:
-            support_tier = SupportTier.DRIFTED
-            adoptable = False
-            reason_code = "authority_revision_mismatch"
-            acceptance_state = AcceptanceState.FAILED
-        elif completed_acc is not None:
+        try:
+            state = self.repository.load_state()
+        except (LifecycleError, OSError):
+            # Unreadable state proves nothing and is left in place for an operator.
+            completed_acc, reason_code = None, "authority_unavailable"
+        else:
+            # Taken after the read: the lock wait must not outlast a promotion's expiry.
+            completed_acc, reason_code = _authority_check(
+                state, remote_identity, service_revision, source_revision,
+                datetime.datetime.now(datetime.timezone.utc))
+        if completed_acc is not None:
             support_tier = SupportTier.PROVEN
             adoptable = True
-            reason_code = "proven"
             acceptance_state = AcceptanceState.COMPLETE
+        elif reason_code == "authority_revision_mismatch":
+            support_tier = SupportTier.DRIFTED
+            adoptable = False
+            acceptance_state = AcceptanceState.FAILED
+        elif reason_code == "authority_unavailable":
+            support_tier = SupportTier.UNAVAILABLE
+            adoptable = False
+            acceptance_state = AcceptanceState.FAILED
+        elif reason_code == "implemented_unproven":
+            support_tier = SupportTier.IMPLEMENTED_UNPROVEN
+            adoptable = False
+            acceptance_state = AcceptanceState.PENDING_ORDINARY
         else:
             support_tier = SupportTier.IMPLEMENTED_UNPROVEN
             adoptable = False
-            reason_code = "implemented_unproven"
-            acceptance_state = AcceptanceState.PENDING_ORDINARY
+            acceptance_state = AcceptanceState.FAILED
 
-        checks = {
-            "dedicated_identity": "pass",
-            "private_root": "pass",
-            "caller_non_mutation": "pass",
-            "canonical_peer_auth": "pass",
-            "controller_process_identity": "pass",
-            "mount_controller_identity": "pass",
-            "descriptor_only_mount_channel": "pass",
-            "no_arbitrary_path_protocol": "pass",
-            "no_replace_publication": "pass",
-            "durable_restart_recovery": "pass",
-            "private_workload_mount": "pass",
-            "read_only_generation_mount": "pass",
-            "active_reference_observation": "pass",
-            "identity_bound_final_removal": "pass",
-            "bounded_secret_free_evidence": "pass",
-            "packaging_revision_parity": "pass" if support_tier != SupportTier.DRIFTED else "fail",
-            "human_review": "pass" if support_tier == SupportTier.PROVEN else "unknown",
-        }
+        # Nothing here observes these primitives, so only a proven chain may vouch for them.
+        check_state = "pass" if support_tier == SupportTier.PROVEN else "unknown"
+        checks = {name: check_state for name in (
+            "dedicated_identity", "private_root", "caller_non_mutation", "canonical_peer_auth",
+            "controller_process_identity", "mount_controller_identity",
+            "descriptor_only_mount_channel", "no_arbitrary_path_protocol",
+            "no_replace_publication", "durable_restart_recovery", "private_workload_mount",
+            "read_only_generation_mount", "active_reference_observation",
+            "identity_bound_final_removal", "bounded_secret_free_evidence",
+            "packaging_revision_parity",
+        )}
+        if support_tier == SupportTier.DRIFTED:
+            checks["packaging_revision_parity"] = "fail"
+        # No review decision is inspected here.
+        checks["human_review"] = "unknown"
 
-        cap_record = AuthorityCapability(
-            capability_id="owned-storage-authority-v1",
-            remote_identity=remote_identity,
-            platform_mode=platform_mode,
-            support_tier=support_tier,
-            adoptable=adoptable,
-            service_revision=service_revision,
-            owner_identity_digest="sha256:owner",
-            root_identity_digest="sha256:root",
-            primitive_states=checks,
-            evidence_id=completed_acc.get("evidence_id") if completed_acc else None,
-            ordinary_evidence_id=completed_acc.get("acceptance_id") if completed_acc else None,
-            acceptance_state=acceptance_state,
-            observed_at=observed_at,
-            expires_at=expires_at,
-            reason_code=reason_code,
-            promotion_id=completed_acc.get("promotion_id") if completed_acc else None,
-            authority_binding_id=completed_acc.get("authority_binding_id") if completed_acc else None,
-            binding_generation=completed_acc.get("lifecycle_generation") if completed_acc else None,
-        )
-
-        cur_gen = self.repository.get_generation()
-        self.repository.save_capability(cap_record, expected_generation=cur_gen)
-
-        return {
-            "ok": True,
+        accepted = completed_acc or {}
+        report = {
+            "ok": reason_code != "authority_unavailable",
             "capability": "owned-storage-authority-v1",
             "remote_identity": remote_identity,
             "platform_mode": platform_mode,
             "support_tier": support_tier.value,
             "adoptable": adoptable,
             "service_revision": service_revision,
-            "evidence_id": cap_record.evidence_id,
-            "ordinary_evidence_id": cap_record.ordinary_evidence_id,
+            "evidence_id": accepted.get("evidence_id"),
+            "ordinary_evidence_id": accepted.get("acceptance_id"),
             "acceptance_state": acceptance_state.value if acceptance_state else None,
-            "promotion_id": cap_record.promotion_id,
-            "authority_binding_id": cap_record.authority_binding_id,
-            "binding_generation": cap_record.binding_generation,
+            "promotion_id": accepted.get("promotion_id"),
+            "authority_binding_id": accepted.get("authority_binding_id"),
+            "binding_generation": accepted.get("lifecycle_generation"),
             "observed_at": observed_at,
             "expires_at": expires_at,
             "checks": checks,
@@ -194,6 +251,11 @@ class AuthorityLifecycleService:
             },
             "reason_code": reason_code,
         }
+        if not report["ok"]:
+            # The check itself could not run: a caller must not read this as an answer.
+            report["code"] = reason_code
+            report["message"] = "storage authority state is unreadable"
+        return report
 
     def record_acceptance(self, remote_identity: str, acceptance: CapabilityAcceptance) -> int:
         cur_gen = self.repository.get_generation()

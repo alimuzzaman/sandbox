@@ -785,8 +785,12 @@ def _cmd_service(args, as_json: bool) -> None:
             from sandbox.owned_storage_lifecycle.service import build_authority_lifecycle_service
             lifecycle_service = build_authority_lifecycle_service()
             cap = lifecycle_service.evaluate_capability(remote_identity=name)
-            payload = {"ok": True, "name": name, "status": "observed",
-                       "data": cap, "error": None}
+            available = cap.get("ok") is True
+            payload = {"ok": available, "name": name,
+                       "status": "observed" if available else "degraded",
+                       "data": cap,
+                       "error": None if available else {
+                           "code": cap.get("code"), "message": cap.get("message")}}
         elif operation == "status":
             service = sr.remote_mcp_service_status(entry)
             available = service.get("probe_state", "complete") == "complete"
@@ -963,7 +967,7 @@ def _cmd_service(args, as_json: bool) -> None:
                    "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
     if as_json:
         print(json.dumps(payload))
-        if operation == "status" and not payload["ok"]:
+        if operation in ("status", "capability") and not payload["ok"]:
             raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")

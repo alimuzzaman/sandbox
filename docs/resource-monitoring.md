@@ -894,8 +894,11 @@ remains backward compatible. Failed read-only revalidation is
 `skipped/revalidation_unavailable`, never confirmed absence or a deletion failure.
 This includes a failed volume identity inspect immediately before removal.
 Missing or malformed final capacity, including observation decoder exceptions,
-makes the run `indeterminate` and retains and persists known item outcomes;
-missing removal receipts or removal exceptions produce an `indeterminate` item
+makes the run `indeterminate` and retains and persists known item outcomes.
+An unavailable between-item capacity observation skips remaining items and
+persists outcomes already known. An unavailable initial observation refuses
+before accepting the plan, leaving it available for a later attempt.
+Missing removal receipts or removal exceptions produce an `indeterminate` item
 with unknown observed bytes and consume the plan as indeterminate, preventing replay.
 Known removals cannot be reported as successful completion without a final observation.
 
@@ -910,3 +913,47 @@ only with separate lifecycle authority. Overlapping `oldest_served` ranges do no
 provide a controller downgrade serializer. These additive resource fields do not
 change the durable job control protocol. Remote projections require the updated
 runtime; controller-side plan selection does not install it.
+
+### Repeatable remote cache cleanup
+
+Start with a durable scan and save its returned job ID. Choose one request ID for
+this scan and retain it for any acceptance recovery, rather than submitting a new
+identity when a response is missing. Use the returned polling commands until the
+job ends, then review its result and category coverage.
+
+```sh
+./sb resources status --remote <remote> --deep --refresh --budget 1800 \
+  --detach --request-id <scan-request-id> --json
+```
+
+From fresh inventory, select the exact eligible resource IDs in the desired
+removal order. Review the saved plan before applying it. The following example
+stops when the chosen filesystem has 40 GiB available. Copy its exact capacity
+scope ID from the observation, checking Docker's filesystem binding when needed.
+
+```sh
+./sb resources plan --remote <remote> --scope cache \
+  --resource-id <first-id> --resource-id <second-id> --json
+./sb resources cleanup --remote <remote> --plan-id <returned-plan-id> \
+  --stop-at-available-bytes 42949672960 --capacity-scope-id <scope-id> \
+  --confirm --json
+```
+
+An already exact singleton needs only one ID. Apply without selectors uses the
+reviewed plan's IDs and order. Capacity changes from other processes mean this
+threshold is a stop condition, not a promise of reclaimed bytes.
+
+| Result | Next step |
+|---|---|
+| Accepted scan | Poll its returned job ID with `./sb job-status <job-id> --remote <remote> --json` and read bounded `job-output`. |
+| Missing submission output | Read `./sb job-list --remote <remote> --project-dir . --json`, following `page.next_cursor` with `--cursor-job-id` as needed. Match the retained request ID before replaying it; poll the existing job if found. |
+| Compatibility refusal before acceptance | Read `./sb remote service status <remote>`. Use its supported lifecycle remedy with the required authority, then retry. No job was accepted. |
+| Partial or timed-out scan | Keep the partial evidence, inspect missing categories, then use a larger bounded scan budget. A retry starts a fresh walk. |
+| Expired plan or changed resource evidence | Scan again and review a new exact plan. |
+| Cleanup with unavailable evidence | Read persisted item outcomes, refresh evidence, and plan only what remains. An indeterminate plan cannot replay effects. |
+| No eligible cache candidates | Inspect eligibility reasons. Containers, named volumes and other persistent data require their own reviewed scope and authority. |
+
+The inventory projection fixes require an authorized runtime update before a
+remote host can supply them. Do that once through the supported lifecycle and
+verify the installed revision. Ordinary future cache cleanup then uses the
+commands above; it does not require a new source patch or a broad Docker prune.

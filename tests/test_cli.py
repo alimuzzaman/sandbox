@@ -423,7 +423,7 @@ class TestResolutionGate(unittest.TestCase):
                 mock.patch.object(cli, "write_compose_files") as compose, \
                 mock.patch.object(cli, "write_env_for_compose") as env, \
                 mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate, \
-                mock.patch.object(migrate, "finalize_auto_migration") as finalize:
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False):
             cli.main()
 
         self.assertEqual(len(observed), 1)

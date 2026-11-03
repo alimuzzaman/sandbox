@@ -1164,6 +1164,6 @@ register_specs((
     CommandSpec("job-artifacts", cmd_job_artifacts, configure=configure_artifacts_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
     CommandSpec("job-artifact-get", cmd_job_artifact_get, configure=configure_artifact_get_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
     CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
-    CommandSpec("job-retention", cmd_job_retention, configure=configure_retention_parser, owner=__name__, scope="global", predispatch_policy=_remote_control_predispatch),
+    CommandSpec("job-retention", cmd_job_retention, configure=configure_retention_parser, owner=__name__, scope="global"),
     CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),
 ))

@@ -149,9 +149,6 @@ class RemoteProgramTest(unittest.TestCase):
             self.assertFalse((root / "runtime" / "storage" / "reservations.json").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class WiringTest(unittest.TestCase):
     def test_deploy_refuses_before_any_remote_write(self):
@@ -298,3 +295,280 @@ class ConfigurationTest(unittest.TestCase):
                 mock.patch('builtins.print') as output:
             remote._cmd_list(args, True)
         self.assertEqual(json.loads(output.call_args.args[0])['remotes'][0]['storage_floor_gb'],30)
+
+
+class OperationReservationTests(unittest.TestCase):
+    def run_at(self, root, now, *, token=None, estimate=300):
+        import contextlib,io
+        request = {'target':str(root/'deploy-src'/'app'),'floor_bytes':100,
+                   'default_estimate':0,'minimum_estimate':estimate,
+                   'window_seconds':sf.RESERVATION_WINDOW_SECONDS,'reservations':None}
+        if token is not None:
+            request.update(reservation_id=token,operation_expiry=sf.OPERATION_RESERVATION_EXPIRY)
+        out = io.StringIO()
+        with mock.patch('time.time',return_value=now), \
+             mock.patch('os.statvfs',return_value=SimpleNamespace(f_bavail=1000,f_frsize=1)), \
+             mock.patch('subprocess.run',side_effect=AssertionError('unexpected child')), \
+             contextlib.redirect_stdout(out):
+            exec(sf._PROGRAM,{'REQUEST':request})
+        return json.loads(out.getvalue())
+
+    def test_operation_survives_expiry_then_explicit_release_frees_only_it(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);(root/'deploy-src').mkdir()
+            first = self.run_at(root,10000,token='a'*32)
+            self.assertTrue(first['admitted'])
+            ledger = root/'runtime'/'storage'/'reservations.json'
+            entries = json.loads(ledger.read_text())
+            self.assertEqual(entries[0]['expires_at'],sf.OPERATION_RESERVATION_EXPIRY)
+            # An ordinary 45-minute reservation expires, while this import does not.
+            ordinary = {'id':'ordinary','estimate_bytes':111,'expires_at':10000+2700}
+            ledger.write_text(json.dumps(entries+[ordinary]))
+            later = self.run_at(root,10000+48*3600,estimate=700)
+            self.assertEqual(later['reserved_bytes'],300)
+            self.assertFalse(later['admitted'])
+            sf.release_storage_reservation(str(ledger.parent),'a'*32)
+            self.assertEqual(json.loads(ledger.read_text()),[ordinary])
+            sf.release_storage_reservation(str(ledger.parent),'a'*32)  # Idempotent.
+            final = self.run_at(root,10000+48*3600,estimate=700)
+            self.assertTrue(final['admitted'])
+            self.assertEqual(final['reserved_bytes'],0)
+
+    def test_replay_cannot_shorten_or_duplicate_capacity_and_peer_release_is_scoped(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'deploy-src').mkdir()
+            self.run_at(root,10000,token='a'*32)
+            replay=self.run_at(root,20000,token='a'*32,estimate=100)
+            self.assertEqual(replay['estimate_bytes'],300)
+            self.run_at(root,20000,token='b'*32,estimate=200)
+            ledger=root/'runtime'/'storage'/'reservations.json'
+            self.assertEqual(len(json.loads(ledger.read_text())),2)
+            sf.release_storage_reservation(str(ledger.parent),'a'*32)
+            remaining=json.loads(ledger.read_text())
+            self.assertEqual([e['id'] for e in remaining],['b'*32])
+            self.assertEqual(remaining[0]['expires_at'],sf.OPERATION_RESERVATION_EXPIRY)
+
+    def test_quarantined_worker_reservation_is_not_reused_after_controller_expiry(self):
+        import contextlib,hashlib,io,os,sys,tempfile
+        from pathlib import Path
+        from sandbox.transports import remote_local_images as transfer
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'deploy-src').mkdir()
+            self.run_at(root,10000,token='a'*32)
+            data=b'archive';chunks=[data,b''];scope={}
+            args=['worker',str(root/'runtime'/'host-local-images'/'uploads'),'bundle-1.tar',
+                  'sha256:'+hashlib.sha256(data).hexdigest(),str(len(data)),'37','a'*32]
+            with mock.patch.object(sys,'argv',args),mock.patch('os.read',side_effect=lambda *_:chunks.pop(0)), \
+                 mock.patch('subprocess.run',side_effect=__import__('subprocess').TimeoutExpired('docker',37)), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as exit_state:
+                    exec(transfer._STAGE_PROGRAM,scope)
+            self.assertEqual(exit_state.exception.code,34)
+            os.close(scope['fence'])  # Worker gone; persistence must still protect capacity.
+            marker=root/'runtime'/'host-local-images'/'load-unverified'
+            self.assertEqual(json.loads(marker.read_text())['reservation_id'],'a'*32)
+            decision=self.run_at(root,10000+48*3600,estimate=700)
+            self.assertFalse(decision['admitted'])
+            self.assertEqual(decision['reserved_bytes'],300)
+
+    def test_successful_worker_releases_before_acknowledgement(self):
+        import contextlib,hashlib,io,os,sys,tempfile
+        from pathlib import Path
+        from sandbox.transports import remote_local_images as transfer
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'deploy-src').mkdir()
+            self.run_at(root,10000,token='a'*32)
+            data=b'archive';chunks=[data,b''];scope={};out=io.StringIO()
+            args=['worker',str(root/'runtime'/'host-local-images'/'uploads'),'bundle-1.tar',
+                  'sha256:'+hashlib.sha256(data).hexdigest(),str(len(data)),'37','a'*32]
+            with mock.patch.object(sys,'argv',args),mock.patch('os.read',side_effect=lambda *_:chunks.pop(0)), \
+                 mock.patch('subprocess.run',return_value=SimpleNamespace(returncode=0)), \
+                 contextlib.redirect_stdout(out):
+                exec(transfer._STAGE_PROGRAM,scope)
+            os.close(scope['fence'])
+            self.assertEqual(json.loads(out.getvalue().splitlines()[-1])['state'],'loaded')
+            self.assertEqual(json.loads((root/'runtime'/'storage'/'reservations.json').read_text()),[])
+            self.assertFalse((root/'runtime'/'host-local-images'/'load-unverified').exists())
+
+
+
+class FinalReleaseCompatibilityTests(unittest.TestCase):
+    def test_old_client_rewrite_during_load_is_released_and_tightened(self):
+        import contextlib,hashlib,io,os,stat,sys,tempfile
+        from pathlib import Path
+        from sandbox.transports import remote_local_images as transfer
+        from tests.fixtures.local_image_legacy_programs import STORAGE_ADMISSION_V1
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'deploy-src').mkdir()
+            OperationReservationTests().run_at(root,10000,token='a'*32)
+            ledger=root/'runtime'/'storage'/'reservations.json'
+            data=b'archive';chunks=[data,b''];scope={};out=io.StringIO()
+            args=['worker',str(root/'runtime'/'host-local-images'/'uploads'),'bundle-1.tar',
+                  'sha256:'+hashlib.sha256(data).hexdigest(),str(len(data)),'37','a'*32]
+            def old_client(*args,**kwargs):
+                request={'target':str(root/'deploy-src'/'app'),'floor_bytes':1,'default_estimate':100,
+                         'window_seconds':2700,'reservations':None}
+                previous=os.umask(0o022)
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):exec(STORAGE_ADMISSION_V1,{'REQUEST':request})
+                finally:os.umask(previous)
+                self.assertEqual(stat.S_IMODE(ledger.stat().st_mode),0o644)
+                return SimpleNamespace(returncode=0)
+            with mock.patch.object(sys,'argv',args),mock.patch('os.read',side_effect=lambda *_:chunks.pop(0)), \
+                 mock.patch('subprocess.run',side_effect=old_client),contextlib.redirect_stdout(out):
+                exec(transfer._STAGE_PROGRAM,scope)
+            os.close(scope['fence'])
+            self.assertEqual(json.loads(out.getvalue().splitlines()[-1])['state'],'loaded')
+            retained=json.loads(ledger.read_text())
+            self.assertEqual(len(retained),1);self.assertEqual(retained[0]['estimate_bytes'],100)
+            self.assertNotEqual(retained[0]['id'],'a'*32)
+            self.assertEqual(stat.S_IMODE(ledger.stat().st_mode),0o600)
+            self.assertFalse((root/'runtime'/'host-local-images'/'load-unverified').exists())
+
+    def test_release_waits_for_contention_but_has_a_bound(self):
+        import fcntl,os,tempfile,threading
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'deploy-src').mkdir()
+            OperationReservationTests().run_at(root,10000,token='a'*32)
+            store=root/'runtime'/'storage';ledger=store/'reservations.json';ledger.chmod(0o644)
+            with (store/'reservations.lock').open('r+b') as holder:
+                fcntl.flock(holder,fcntl.LOCK_EX)
+                with self.assertRaises(TimeoutError):sf.release_storage_reservation(str(store),'a'*32,lock_timeout=0.01)
+                timer=threading.Timer(0.1,holder.close);timer.start()
+                try:sf.release_storage_reservation(str(store),'a'*32,lock_timeout=1)
+                finally:timer.join()
+            self.assertEqual(json.loads(ledger.read_text()),[])
+            self.assertEqual(ledger.stat().st_mode & 0o777,0o600)
+
+    def test_reconcile_killed_upload_and_reject_delayed_worker(self):
+        import fcntl,hashlib,os,selectors,subprocess,sys,tempfile
+        from pathlib import Path
+        from sandbox.transports import remote_local_images as transfer
+        from tests.subprocess_support import run_test_process,synthetic_environment
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'deploy-src').mkdir()
+            OperationReservationTests().run_at(root,10000,token='a'*32)
+            ledger=root/'runtime'/'storage'/'reservations.json'
+            entries=json.loads(ledger.read_text())
+            peer={**entries[0],'id':'b'*32,'target':str(root/'deploy-src'/'peer')}
+            ordinary={'id':'ordinary','estimate_bytes':1,'expires_at':sf.OPERATION_RESERVATION_EXPIRY,'target':str(root/'deploy-src'/'app')}
+            ledger.write_text(json.dumps(entries+[peer,ordinary]))
+            engine=root/'runtime'/'host-local-images';engine.mkdir(mode=0o700)
+            (engine/'engine.lock').touch(mode=0o600);(engine/'load-fence.lock').touch(mode=0o600)
+            args=[sys.executable,'-c',transfer._STAGE_PROGRAM,str(engine/'uploads'),'bundle-1.tar',
+                  'sha256:'+hashlib.sha256(b'archive').hexdigest(),'7','37','a'*32]
+            with (engine/'engine.lock').open('r+b') as lease:
+                fcntl.flock(lease,fcntl.LOCK_EX)
+                process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                    env=synthetic_environment({'PATH':'/nonexistent'}))
+                try:
+                    selector=selectors.DefaultSelector();selector.register(process.stdout,selectors.EVENT_READ)
+                    self.assertTrue(selector.select(2));selector.close()
+                    self.assertEqual(json.loads(process.stdout.readline())['state'],'ready')
+                    def reconcile():
+                        q=run_test_process([sys.executable,'-c',transfer._RECONCILE_PROGRAM,str(engine),str(root/'deploy-src'/'app')],capture_output=True,text=True,timeout=2)
+                        self.assertEqual(q.returncode,0,q.stderr);return json.loads(q.stdout)['safe']
+                    self.assertFalse(reconcile())  # Live acknowledged worker owns fence.
+                    process.kill();process.wait(timeout=2)
+                    self.assertFalse((engine/'load-unverified').exists())
+                    (engine/'load-unverified').write_text('uncertain')
+                    self.assertFalse(reconcile());(engine/'load-unverified').unlink()
+                    self.assertTrue(reconcile())
+                    self.assertEqual(json.loads(ledger.read_text()),[peer,ordinary])
+                    delayed=run_test_process(args,input=b'archive',capture_output=True,timeout=2,env={'PATH':'/nonexistent'})
+                    self.assertNotEqual(delayed.returncode,0)
+                    self.assertNotIn(b'"state":"ready"',delayed.stdout)
+                    self.assertFalse((engine/'load-unverified').exists())
+                    self.assertEqual(json.loads(ledger.read_text()),[peer,ordinary])
+                finally:
+                    if process.poll() is None:process.kill();process.wait(timeout=2)
+                    process.stdin.close();process.stdout.close();process.stderr.close()
+
+    def test_worker_early_checks_release_without_marker(self):
+        import hashlib,os,sys,tempfile
+        from pathlib import Path
+        from sandbox.transports import remote_local_images as transfer
+        from tests.subprocess_support import run_test_process
+        for failure in ('name','unsafe-root','unsafe-fence','marker'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'deploy-src').mkdir()
+                OperationReservationTests().run_at(root,10000,token='a'*32)
+                engine=root/'runtime'/'host-local-images';engine.mkdir(mode=0o700)
+                uploads=engine/'uploads';uploads.mkdir(mode=0o777 if failure=='unsafe-root' else 0o700)
+                if failure=='unsafe-root':uploads.chmod(0o777)
+                if failure=='unsafe-fence':(engine/'load-fence.lock').touch(mode=0o644)
+                if failure=='marker':(engine/'load-unverified').write_text('other operation')
+                argv=[sys.executable,'-c',transfer._STAGE_PROGRAM,str(uploads),'../bad' if failure=='name' else 'bundle-1.tar',
+                      'sha256:'+hashlib.sha256(b'archive').hexdigest(),'7','37','a'*32]
+                q=run_test_process(argv,input=b'archive',capture_output=True,timeout=2,env={'PATH':'/nonexistent'})
+                self.assertNotEqual(q.returncode,0)
+                self.assertNotIn(b'"state":"ready"',q.stdout)
+                self.assertEqual(json.loads((root/'runtime'/'storage'/'reservations.json').read_text()),[])
+
+
+
+class FinalRecoveryDocumentationTests(unittest.TestCase):
+    def test_runbook_recovers_0644_ledger_without_importable_sandbox(self):
+        import sys,tempfile
+        from pathlib import Path
+        from tests.subprocess_support import run_test_process
+        repo=Path(__file__).resolve().parent.parent
+        section=(repo/'docs/remote-hosting.md').read_text().split('### V2 reservation lifecycle and quarantine recovery')[1]
+        command=section.split('```sh\n')[1].split('```')[0]
+        self.assertIn(sf.RESERVATION_RELEASE_PROGRAM,command)
+        self.assertNotIn('from sandbox',command)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'deploy-src').mkdir()
+            OperationReservationTests().run_at(root,10000,token='a'*32)
+            ledger=root/'runtime'/'storage'/'reservations.json';ledger.chmod(0o644)
+            engine=root/'runtime'/'host-local-images';engine.mkdir(mode=0o700)
+            (engine/'engine.lock').touch(mode=0o600)
+            (engine/'load-fence.lock').touch(mode=0o400)
+            (engine/'load-unverified').write_text(json.dumps({'reservation_id':'a'*32}))
+            result=run_test_process(['sh','-c',command],cwd=root,capture_output=True,text=True,timeout=2,
+                env={'SANDBOX_HOME':str(root),'PYTHONPATH':'/nonexistent','PATH':'/usr/bin:/bin'})
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertFalse((engine/'load-unverified').exists())
+            self.assertEqual((engine/'load-fence.lock').stat().st_mode & 0o777,0o600)
+            self.assertEqual(ledger.stat().st_mode & 0o777,0o600)
+            self.assertEqual(json.loads(ledger.read_text()),[])
+
+
+
+class UnsafeReservationLedgerTests(unittest.TestCase):
+    def test_symlink_writable_foreign_and_hardlinked_ledgers_refuse(self):
+        import os,tempfile
+        from pathlib import Path
+        for case in ('symlink','group-write','world-write','both-write','foreign-owner','hardlink'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);(root/'deploy-src').mkdir()
+                OperationReservationTests().run_at(root,10000,token='a'*32)
+                store=root/'runtime'/'storage';ledger=store/'reservations.json'
+                before=ledger.read_bytes();target=ledger
+                if case in ('symlink','hardlink'):
+                    target=store/'original.json';ledger.rename(target)
+                    if case=='symlink':ledger.symlink_to(target.name)
+                    else:os.link(target,ledger)
+                mode={'group-write':0o620,'world-write':0o602,'both-write':0o666,'foreign-owner':0o644}.get(case,0o600)
+                target.chmod(mode)
+                info=target.stat();real_fstat=os.fstat
+                def fstat(fd):
+                    value=real_fstat(fd)
+                    if case=='foreign-owner' and value.st_ino==info.st_ino and value.st_dev==info.st_dev:
+                        fields=list(value);fields[4]=value.st_uid+1;return os.stat_result(fields)
+                    return value
+                with mock.patch('os.fstat',side_effect=fstat):
+                    with self.assertRaises((ValueError,OSError)):
+                        sf.release_storage_reservation(str(store),'a'*32)
+                self.assertEqual(target.read_bytes(),before)
+                self.assertEqual(target.stat().st_mode & 0o777,mode)
+                if case=='symlink':self.assertTrue(ledger.is_symlink())
+
+
+if __name__ == "__main__":
+    unittest.main()

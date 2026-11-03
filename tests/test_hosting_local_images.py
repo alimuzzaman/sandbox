@@ -212,11 +212,13 @@ class LocalImageReceiptTests(unittest.TestCase):
                     "compose": {"build": False, "files": ["compose.yml"],
                                 "service": "web", "background_services": [],
                                 "init_services": ["migrate"]},
-                    "secrets": {"required": {}, "generated": {}},
+                    "secrets": {"values": {"BROWSER_DSN": "synthetic-fingerprint-dsn"}, "required": {}, "generated": {}},
+                    "deploy": {"derived_environment": {"BUILD_FP": {"provider": "hmac_sha256_v1", "inputs": {"BROWSER_DSN": "value"}}}},
                 }
 
             def build(**kwargs):
                 captured.update(kwargs)
+                captured["rendered_environment"] = Path(kwargs["runtime_dir"], "environment.env").read_text()
                 return {"project": "app", "environment": "development",
                         "commit": commit, "platform": "linux/amd64",
                         "receipt_digest": "sha256:" + "c" * 64,
@@ -237,7 +239,6 @@ class LocalImageReceiptTests(unittest.TestCase):
                  patch.object(hosting_cmd.remote, "_source_tree_commit",
                               return_value=(published, checkout)) as source_commit, \
                  patch.object(hosting_cmd, "_secret_status", return_value=({}, [])), \
-                 patch.object(hosting_cmd.hosting, "render_env_file", return_value=""), \
                  patch.object(hosting_cmd.hosting, "compose_project_name",
                               return_value="sandbox-host-app-development"), \
                  patch.object(local_images, "default_output_directory",
@@ -251,9 +252,361 @@ class LocalImageReceiptTests(unittest.TestCase):
             self.assertEqual(source_commit.call_args.args[1], source)
             self.assertEqual(captured["source_dir"], str(source))
             self.assertEqual(captured["source_root_relative"], "site")
+            fingerprint = captured["environment"]["BUILD_FP"]
+            self.assertRegex(fingerprint, r"^[0-9a-f]{32}$")
+            self.assertIn("BUILD_FP=" + fingerprint, captured["rendered_environment"])
+            self.assertIn("--env-file", captured["config_command"])
+            self.assertIn("--env-file", captured["build_command"](["web"]))
             self.assertIn("--profile '*' config --format json",
                           captured["config_command"])
             self.assertIn(str(source / "compose.yml"), captured["config_command"])
+
+
+class SharedBundleReceiptTests(unittest.TestCase):
+    @staticmethod
+    def receipt():
+        value = _receipt()
+        artifact = value['artifacts']['image-1']
+        bundle = {k: artifact.pop(k) for k in ('archive', 'archive_sha256', 'archive_bytes')}
+        bundle.update(archive='bundle-1.tar', members=['image-1'])
+        return local_images.seal_receipt({**value, 'schema': local_images.RECEIPT_SCHEMA_V2,
+                                          'bundles': {'bundle-1': bundle}})
+
+    def test_v2_separates_transport_and_preserves_exact_identity_comparison(self):
+        value = self.receipt()
+        self.assertEqual(local_images.validate_receipt(value), value)
+        self.assertEqual(local_images.accepted_ids(value['artifacts']['image-1']),
+                         {'sha256:' + '1' * 64})
+        remote = local_images.remote_receipt_document(value, {}, verified_at='synthetic')
+        self.assertEqual(remote['schema'], local_images.REMOTE_RECEIPT_SCHEMA_V2)
+        self.assertEqual(remote['local_receipt'], value)
+
+    def test_v2_rejects_incomplete_duplicate_extra_or_unbounded_members(self):
+        import copy
+        for field, bad in (('members', []), ('members', ['image-1', 'image-1']),
+                           ('members', ['image-1', 'image-2']), ('archive', '../bundle-1.tar'),
+                           ('archive_bytes', True), ('archive_bytes', 2**50),
+                           ('extra', 'field')):
+            value = copy.deepcopy(self.receipt())
+            value['bundles']['bundle-1'][field] = bad
+            with self.subTest(field=field, bad=bad), self.assertRaises(local_images.LocalImageError):
+                local_images.validate_receipt(local_images.seal_receipt(value))
+
+    def test_v2_rejects_extra_image_refs_and_digest_tampering(self):
+        value = self.receipt()
+        value['artifacts']['image-1']['refs'].append('unreceipted:tag')
+        with self.assertRaises(local_images.LocalImageError):
+            local_images.validate_receipt(local_images.seal_receipt(value))
+        value = self.receipt()
+        value['bundles']['bundle-1']['archive_bytes'] += 1
+        with self.assertRaises(local_images.LocalImageError):
+            local_images.validate_receipt(value)
+
+    def test_bundle_resolves_configs_and_refuses_extra_tags_platform_and_members(self):
+        import hashlib
+        import io
+        import tarfile
+        config = json.dumps({'os':'linux','architecture':'amd64',
+                             'rootfs':{'diff_ids':[]}}).encode()
+        digest = hashlib.sha256(config).hexdigest()
+        image = {'refs':['app:test'], 'config_digest':'sha256:'+digest,
+                 'layers_digest':local_images.canonical_digest([]),
+                 'manifest_digest':None, 'platform':'linux/amd64'}
+        with tempfile.TemporaryDirectory() as directory:
+            for change in ('valid', 'extra-tag', 'extra-member', 'wrong-platform', 'missing-config'):
+                path = Path(directory, change+'.tar')
+                manifest = [{'Config':digest+'.json', 'RepoTags':['app:test'], 'Layers':[]}]
+                selected = dict(image)
+                if change == 'extra-tag': manifest[0]['RepoTags'].append('extra:test')
+                if change == 'wrong-platform': selected['platform'] = 'linux/arm64'
+                entries = {'manifest.json':json.dumps(manifest).encode(), digest+'.json':config}
+                if change == 'extra-member': entries['unbound.json'] = b'{}'
+                if change == 'missing-config': del entries[digest+'.json']
+                with tarfile.open(path, 'w') as archive:
+                    for name, data in entries.items():
+                        member = tarfile.TarInfo(name); member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+                if change == 'valid':
+                    self.assertEqual(local_images.bundle_identities(path, {'image-1':selected})
+                                     ['image-1']['config_digest'], 'sha256:'+digest)
+                else:
+                    with self.subTest(change=change), self.assertRaises(local_images.LocalImageError):
+                        local_images.bundle_identities(path, {'image-1':selected})
+
+    def test_v2_rejects_repeated_config_identity_even_with_different_refs(self):
+        import copy
+        value = self.receipt()
+        second = copy.deepcopy(value['artifacts']['image-1'])
+        second['refs'] = ['second:test']
+        value['artifacts']['image-2'] = second
+        value['services']['second'] = {**value['services']['web'], 'role':'background',
+                                       'image':'second:test', 'artifact':'image-2'}
+        value['bundles']['bundle-1']['members'].append('image-2')
+        value['build_config_digest'] = local_images.canonical_digest(
+            {k:v['build_digest'] for k,v in value['services'].items()})
+        with self.assertRaises(local_images.LocalImageError):
+            local_images.validate_receipt(local_images.seal_receipt(value))
+
+    def test_v2_malformed_service_reference_refuses_with_receipt_error(self):
+        value = self.receipt()
+        value['services']['web']['artifact'] = []
+        with self.assertRaises(local_images.LocalImageError) as raised:
+            local_images.validate_receipt(local_images.seal_receipt(value))
+        self.assertEqual(raised.exception.code, 'local_images_receipt_invalid')
+
+    def test_oversized_local_receipt_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, 'receipt.json')
+            path.write_bytes(b' ' * (local_images.MAX_RECEIPT_BYTES + 1))
+            path.chmod(0o600)
+            with self.assertRaises(local_images.LocalImageError) as raised:
+                local_images.load_receipt(path)
+            self.assertEqual(raised.exception.code, 'local_images_receipt_invalid')
+
+
+def _review_oci_archive(path, issue=None):
+    """A self-contained two-layer save; semantic mutations keep hashes valid."""
+    import hashlib
+    import io
+    import tarfile
+    def digest(data):
+        return 'sha256:' + hashlib.sha256(data).hexdigest()
+    layers = [b'first-layer', b'second-layer']
+    diff_ids = [digest(data) for data in layers]
+    config = json.dumps({'os':'linux', 'architecture':'amd64',
+                         'rootfs':{'type':'layers', 'diff_ids':diff_ids}}).encode()
+    cd = digest(config)
+    layer_paths = ['blobs/sha256/' + value[7:] for value in diff_ids]
+    node = {'schemaVersion':2, 'config':{'digest':cd, 'size':len(config)},
+            'layers':[{'digest':value, 'size':len(data)}
+                      for value,data in zip(diff_ids,layers)]}
+    if issue == 'layer-order': node['layers'].reverse()
+    if issue == 'layer-size': node['layers'][0]['size'] += 1
+    if issue == 'config-size': node['config']['size'] += 1
+    if issue == 'nested-index': node = {'manifests':[]}
+    manifest_data = json.dumps(node).encode()
+    md = digest(manifest_data)
+    descriptor = {'digest':md, 'size':len(manifest_data),
+                  'platform':{'os':'linux', 'architecture':'amd64'},
+                  'annotations':{'io.containerd.image.name':'docker.io/library/app:test'}}
+    if issue == 'platform': descriptor['platform']['architecture'] = 'arm64'
+    if issue == 'tag': descriptor['annotations']['io.containerd.image.name'] = 'foreign:test'
+    if issue == 'descriptor-size': descriptor['size'] += 1
+    index = {'manifests':[descriptor]}
+    if issue == 'duplicate-tag': index['manifests'].append(descriptor)
+    entries = {'manifest.json':json.dumps([{'Config':'blobs/sha256/'+cd[7:],
+                 'RepoTags':['app:test'], 'Layers':layer_paths}]).encode(),
+               'index.json':json.dumps(index).encode(), 'oci-layout':b'{"imageLayoutVersion":"1.0.0"}',
+               'blobs/sha256/'+cd[7:]:config, 'blobs/sha256/'+md[7:]:manifest_data}
+    entries.update(dict(zip(layer_paths,layers)))
+    with tarfile.open(path,'w') as archive:
+        for name,data in entries.items():
+            member = tarfile.TarInfo(name); member.size = len(data)
+            archive.addfile(member,io.BytesIO(data))
+        if issue in ('absolute','parent','symlink','hardlink','duplicate','device'):
+            name = {'absolute':'/foreign', 'parent':'../foreign',
+                    'duplicate':'manifest.json'}.get(issue,'foreign')
+            member = tarfile.TarInfo(name)
+            member.type = {'symlink':tarfile.SYMTYPE,'hardlink':tarfile.LNKTYPE,
+                           'device':tarfile.CHRTYPE}.get(issue,tarfile.REGTYPE)
+            member.linkname = layer_paths[0]
+            archive.addfile(member)
+    image = {'refs':['app:test'], 'image_id':cd, 'config_digest':cd,
+             'builder_image_id':md, 'manifest_digest':md,
+             'layers_digest':local_images.canonical_digest(diff_ids), 'platform':'linux/amd64'}
+    return {'image-1':image}, diff_ids
+
+
+class BundleReviewArchiveTests(unittest.TestCase):
+    def test_oci_index_resolves_identity_and_rejects_inconsistent_descriptors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for issue in (None,'nested-index','platform','tag','layer-order','layer-size',
+                          'config-size','duplicate-tag','descriptor-size'):
+                with self.subTest(issue=issue):
+                    path = Path(directory,'bundle.tar')
+                    images,_ = _review_oci_archive(path,issue)
+                    if issue is None:
+                        result = local_images.bundle_identities(path,images)
+                        self.assertEqual(result['image-1']['manifest_digest'],images['image-1']['manifest_digest'])
+                    else:
+                        with self.assertRaises(local_images.LocalImageError):
+                            local_images.bundle_identities(path,images)
+
+    def test_unsafe_members_refuse_without_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for issue in ('absolute','parent','symlink','hardlink','duplicate','device'):
+                with self.subTest(issue=issue):
+                    path = Path(directory,'bundle.tar')
+                    images,_ = _review_oci_archive(path,issue)
+                    with self.assertRaises(local_images.LocalImageError):
+                        local_images.bundle_identities(path,images)
+
+    def test_classic_repositories_archive_has_clear_refusal(self):
+        import hashlib
+        import io
+        import tarfile
+        config = json.dumps({'os':'linux','architecture':'amd64','rootfs':{'diff_ids':[]}}).encode()
+        cd = hashlib.sha256(config).hexdigest()
+        entries = {'manifest.json':json.dumps([{'Config':cd+'.json', 'RepoTags':['app:test'],
+                                              'Layers':[]}]).encode(),
+                   'repositories':json.dumps({'app':{'test':cd}}).encode(), cd+'.json':config}
+        images = {'image-1':{'refs':['app:test'],'config_digest':'sha256:'+cd,
+                            'layers_digest':local_images.canonical_digest([]),
+                            'manifest_digest':None,'platform':'linux/amd64'}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory,'classic.tar')
+            with tarfile.open(path,'w') as archive:
+                for name,data in entries.items():
+                    member = tarfile.TarInfo(name); member.size = len(data)
+                    archive.addfile(member,io.BytesIO(data))
+            with self.assertRaises(local_images.LocalImageError) as raised:
+                local_images.bundle_identities(path,images)
+            self.assertEqual(raised.exception.code,'local_images_v2_unsupported_builder')
+            self.assertIn('containerd',str(raised.exception))
+
+    def test_unsupported_builder_refuses_before_probe_build_or_output(self):
+        for version,status in (('24.0.9', [['driver-type','io.containerd.snapshotter.v1']]),
+                               ('29.0.0', [['Backing Filesystem','extfs']])):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory, \
+                 patch.object(local_images.subprocess,'run',side_effect=[
+                     SimpleNamespace(stdout=version),SimpleNamespace(stdout=json.dumps(status))]), \
+                 patch.object(local_images,'_probe_local') as probe, \
+                 patch.object(local_images,'_run_local') as build:
+                output = Path(directory,'output')
+                with self.assertRaises(local_images.LocalImageError) as raised:
+                    local_images.build_local_images(validated={},commit='a'*40,source_revision='a'*40,
+                        config_command='unused',build_command=lambda _: 'unused',compose_project='unused',
+                        source_dir=directory,runtime_dir=directory,output_dir=output,
+                        platform='linux/amd64',environment=synthetic_environment(),timeout=1,receipt_version='v2')
+                self.assertEqual(raised.exception.code,'local_images_v2_unsupported_builder')
+                probe.assert_not_called(); build.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_v2_build_resolves_portable_config_and_v1_restores_stale_cleanup(self):
+        import shutil
+        for version in ('v1','v2'):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                fixture = Path(directory,'fixture.tar')
+                images,layers = _review_oci_archive(fixture)
+                image = images['image-1']
+                output = Path(directory,'output'); output.mkdir()
+                stale = output/'image-99.tar'; stale.write_bytes(b'stale')
+                observation = {'schema':1,'config_error':None,'engine':'linux/amd64',
+                    'services':{'web':{'present':True,'image':'app:test','build':True,
+                        'pull_policy':None,'build_digest':_receipt()['services']['web']['build_digest']}}}
+                saves = []
+                def execute(command,**_kwargs):
+                    argv = shlex.split(command)
+                    if 'save' in argv:
+                        saves.append(argv)
+                        shutil.copyfile(fixture,argv[argv.index('-o')+1])
+                    return 0,''
+                with patch.object(local_images,'_require_v2_builder') as capability, \
+                     patch.object(local_images,'_probe_local',return_value=json.dumps(observation)), \
+                     patch.object(local_images,'_inspect_local',return_value={'Id':image['manifest_digest'],
+                         'Os':'linux','Architecture':'amd64','RootFS':{'Layers':layers}}), \
+                     patch.object(local_images,'_run_local',side_effect=execute), \
+                     patch.object(local_images,'_builder_identity',return_value=_receipt()['builder']):
+                    value = local_images.build_local_images(validated={'project':'app','environment':'development',
+                        'compose':{'service':'web'}},commit='a'*40,source_revision='a'*40,config_command='unused',
+                        build_command=lambda _: 'synthetic-build',compose_project='sandbox-host-app-development',
+                        source_dir=directory,runtime_dir=directory,output_dir=output,platform='linux/amd64',
+                        environment=synthetic_environment(),timeout=1,receipt_version=version)
+                self.assertEqual(len(saves),1)
+                self.assertEqual(value['artifacts']['image-1']['config_digest'],image['config_digest'])
+                self.assertEqual(value['artifacts']['image-1']['builder_image_id'],image['manifest_digest'])
+                self.assertEqual(stale.exists(),version=='v2')
+                if version=='v2':
+                    capability.assert_called_once()
+                    self.assertEqual(value['bundles']['bundle-1']['members'],['image-1'])
+                    self.assertNotIn('archive',value['artifacts']['image-1'])
+                else:
+                    capability.assert_not_called()
+                    self.assertEqual(value['schema'],local_images.RECEIPT_SCHEMA)
+                self.assertEqual(local_images.load_receipt(output/'receipt.json')[0],value)
+
+
+class BuildFingerprintReceiptModelTests(unittest.TestCase):
+    def test_recomputed_fingerprint_participates_in_receipt_model_identity_without_raw_inputs(self):
+        from sandbox.core import _hosting as hosting
+        def observe(dsn, token):
+            values = {"DSN": dsn, "TOKEN": token, "ORG": "synthetic-org", "PROJECT": "synthetic-project"}
+            validated = {"secrets": {"values": values, "required": {}, "generated": {}},
+                         "deploy": {"derived_environment": {"BUILD_FP": {"provider": "hmac_sha256_v1", "inputs": {
+                             "DSN": "value", "TOKEN": "presence", "ORG": "value", "PROJECT": "value"}}}}}
+            resolved = hosting.resolve_environment(validated, {})
+            config = {"services": {"web": {"image": "app:test", "build": {"context": ".", "args": {"BUILD_FP": resolved["BUILD_FP"]}}}}}
+            return local_images.observe_local_model(
+                config_command="printf %s " + shlex.quote(json.dumps(config)), services=["web"], roots={},
+                environment=synthetic_environment(resolved), symbolic_secrets={"DSN", "TOKEN"})
+        initial = observe("synthetic-browser-dsn-one", "synthetic-token-one")
+        changed = observe("synthetic-browser-dsn-two", "synthetic-token-one")
+        rotated = observe("synthetic-browser-dsn-one", "synthetic-token-two")
+        absent = observe("synthetic-browser-dsn-one", "")
+        self.assertIsNone(initial["config_error"])
+        digest = initial["services"]["web"]["build_digest"]
+        receipt = {"services": {"web": {"image": "app:test", "build_digest": digest}}}
+        self.assertEqual(local_images.compare_compose_model(receipt, initial), [])
+        self.assertEqual(local_images.compare_compose_model(receipt, rotated), [])
+        self.assertTrue(local_images.compare_compose_model(receipt, changed))
+        self.assertTrue(local_images.compare_compose_model(receipt, absent))
+        for raw in ["synthetic-browser-dsn-one", "synthetic-token-one", "synthetic-org", "synthetic-project"]:
+            self.assertNotIn(raw, json.dumps(initial))
+
+    def test_short_secret_substrings_do_not_refuse_or_normalize_fingerprint_args(self):
+        fingerprint = "0123456789abcdef" * 2
+        config = {"services": {"web": {"image": "app:test", "build": {
+            "context": ".", "args": {"BUILD_FP": fingerprint}}}}}
+        observations = []
+        for secret in ("0", "1a", "0123456", "synthetic-long-token"):
+            observation = local_images.observe_local_model(
+                config_command="printf %s " + shlex.quote(json.dumps(config)),
+                services=["web"], roots={}, environment=synthetic_environment({"TOKEN": secret}),
+                symbolic_secrets={"TOKEN"})
+            self.assertIsNone(observation["config_error"])
+            observations.append(observation["services"]["web"]["build_digest"])
+        self.assertEqual(len(set(observations)), 1)
+
+    def test_short_declared_secret_arguments_are_still_rejected(self):
+        for args in ({"TOKEN": "0"}, ["TOKEN=0"]):
+            config = {"services": {"web": {"image": "app:test", "build": {"context": ".", "args": args}}}}
+            observation = local_images.observe_local_model(
+                config_command="printf %s " + shlex.quote(json.dumps(config)),
+                services=["web"], roots={}, environment=synthetic_environment({"TOKEN": "0"}),
+                symbolic_secrets={"TOKEN"})
+            self.assertEqual(observation["config_error"], "secret_exposed")
+
+    def test_apply_recomputes_current_inputs_before_accepting_the_receipt_model(self):
+        from sandbox.core import _hosting as hosting
+        from sandbox.transports import remote_local_images
+        revision = "a" * 40
+        validated = {"project": "app", "environment": "development", "source_root": "/synthetic/source",
+                     "compose": {"build": False, "files": ["compose.yml"], "service": "web", "background_services": [], "init_services": []},
+                     "secrets": {"values": {"DSN": "synthetic-old-dsn"}, "required": {}, "generated": {}},
+                     "deploy": {"derived_environment": {"BUILD_FP": {"provider": "hmac_sha256_v1", "inputs": {"DSN": "value"}}}}}
+        original = hosting.resolve_environment(validated, {})["BUILD_FP"]
+        validated["secrets"]["values"]["DSN"] = "synthetic-new-dsn"
+        current = hosting.resolve_environment(validated, {})["BUILD_FP"]
+        captured = {}
+        def model(**kwargs):
+            captured.update(kwargs)
+            self.assertEqual(kwargs["environment"]["BUILD_FP"], current)
+            self.assertNotEqual(kwargs["environment"]["BUILD_FP"], original)
+            env_file = shlex.split(kwargs["config_command"])[3]
+            self.assertIn("BUILD_FP=" + current, Path(env_file).read_text())
+            return {"config_error": None, "services": {"web": {"present": True, "image": "app:test", "build_digest": "sha256:" + "b" * 64}}}
+        receipt = {"commit": revision, "source_revision": revision,
+                   "services": {"web": {"image": "app:test", "build_digest": "sha256:" + "c" * 64}}}
+        with patch.object(remote_local_images, "read_receipt", return_value={"local_receipt": receipt}), \
+             patch.object(local_images, "require_receipt_target"), \
+             patch.object(hosting, "compose_project_name", return_value="sandbox-host-app-development"), \
+             patch.object(local_images, "observe_local_model", side_effect=model):
+            with self.assertRaisesRegex(hosting.HostingError, "Compose model changed"):
+                hosting_cmd._verify_receipt_bound_local_images(
+                    validated, {}, "synthetic-remote", "sha256:" + "d" * 64, revision, revision,
+                    "synthetic-machine", {},
+                    source_dir="/synthetic/source", runtime_dir="/synthetic/runtime", runtime={})
+        self.assertTrue(captured)
 
 
 if __name__ == "__main__":

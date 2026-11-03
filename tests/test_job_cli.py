@@ -819,4 +819,3 @@ class JobRetentionCliAcceptanceTests(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(p.returncode, 0)
-

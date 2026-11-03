@@ -1127,6 +1127,12 @@ CPU-heavy hosted application images can be built on a faster Linux controller:
 ./sb host apply --project-dir /path/to/app --environment development --remote xcloud-london --local-images sha256:REMOTE_RECEIPT_DIGEST --confirm --json
 ```
 
+Add `--receipt-version v2` to `build-local` to export one shared raw image
+bundle. V1 remains the default. V2 output uses a separate `v2/` directory, so
+retained v1 receipts remain available for rollback. See
+[shared bundle transport](docs/remote-hosting.md#opt-in-shared-local-image-bundle-pack-9)
+for membership checks, timeout sizing, and transfer reporting.
+
 The first command creates artifacts, the second only stages and verifies them,
 and only `host apply` can claim deployment. The environment must declare
 `compose.build: false`; Sandbox never falls back to a remote build or pull.
@@ -1146,6 +1152,10 @@ Unexpected transfer exceptions return a nonzero JSON envelope with
 have completed; retrying the same local receipt freshly verifies and skips exact
 remote images rather than resuming archive bytes. Do not delete remote locks or
 receipts manually. See the [transfer contract](docs/remote-hosting.md).
+Remote-command refusals report their exit status and a bounded, redacted
+remote stderr diagnostic (never stdout). If v2 reconciliation reports
+`unsafe reservation ledger`, see the [legacy-ledger permission repair](docs/remote-hosting.md#local-image-remote-command-failures)
+before retrying; keep the strict ownership and writable-bit checks.
 
 Immutable multi-image activation prepares private candidate configuration without
 overwriting retained deployment inputs. See the [v2 activation contract](docs/immutable-image-plan-set-v2.md)
@@ -1321,3 +1331,90 @@ Hosted image conversion can use [component data recovery](docs/hosted-data-recov
 for encrypted PostgreSQL/storage checkpoints and isolated restore evidence.
 Immutable image preparation exposes public authority discovery and an explicit
 operator handoff; see [remote hosting](docs/remote-hosting.md).
+
+### Upgrading shared-bundle clients
+
+V2 requires Docker >=25 with the containerd image store on the builder. Classic
+and legacy stores use v1. V2 reserves 3x the full bundle under the engine lease,
+reconciles proven orphan reservations before admission, and retains reservations
+for uncertain imports until operator reconciliation. See the
+[reservation lifecycle and self-contained recovery commands](docs/remote-hosting.md#v2-reservation-lifecycle-and-quarantine-recovery).
+
+The current contract requires **protocol 17**. From the upgraded checkout,
+migrate each runtime **before bumping client pins**, including for v1-only
+verdict-gated commands:
+
+```sh
+./sb remote service migrate NAME --plan --json
+./sb remote service migrate NAME --confirm --json
+./sb remote service status NAME --json
+```
+
+Review the plan and explicitly authorize migration. Verify installed revision
+and compatibility, then confirm the old pinned client still reports compatible
+status before changing its pin. Protocol-13/14/15/16 runtimes cannot serve a
+protocol-17 client. New runtimes still serve older clients; strict revision pins
+require an exact revision match. Upgrading this checkout performs no migration.
+
+
+### Derived build-secret fingerprints
+
+A clean hosted deployment can declare a non-secret cache identity under
+`deploy.derived_environment`:
+
+```yaml
+deploy:
+  require_clean: true
+  derived_environment:
+    BUILD_SECRET_FINGERPRINT:
+      provider: hmac_sha256_v1
+      inputs:
+        BROWSER_DSN: value
+        UPLOAD_TOKEN: presence
+        UPLOAD_ORG: value
+        UPLOAD_PROJECT: value
+```
+
+`value` inputs may name `secrets.values`, `secrets.required`, or
+`secrets.generated` destinations. Prefer non-confidential values such as a
+browser DSN or an organization name. Validate and plan emit one warning listing
+required/generated destinations used in value mode: the fixed public HMAC key
+permits offline guessing of low-entropy inputs. The warning contains destination
+names only, never resolved values or source names. This warning does not reject
+semi-public required inputs such as Lenzora's NEXT_PUBLIC_SENTRY_DSN.
+
+`presence` accepts inputs from `secrets.values`, `secrets.required`, and
+`secrets.generated`. It encodes only whether the resolved string is nonempty;
+it never hashes token contents. Required and generated inputs must resolve to
+nonempty strings before the provider runs, so their presence bit is always
+`true`: an absent input fails resolution rather than changing the fingerprint.
+Use a `secrets.values` entry that can be empty when presence changes must
+invalidate the cache. Lenzora's required SENTRY_AUTH_TOKEN uses the constant-true
+case; rotating its value does not invalidate the cache. Unknown inputs, modes,
+options, secret-destination collisions and derived-input chains are rejected.
+
+Local image model observation rejects declared secret names as build arguments,
+regardless of value length. Its additional substring exposure/normalization probe
+uses only secret values of at least eight characters, to avoid false matches of
+short strings inside fingerprints, paths and other public build metadata. This
+heuristic cannot detect a short secret copied under an unrelated argument name;
+pass secrets through Compose build secret mounts, never build arguments.
+
+The provider uses HMAC-SHA256 with the fixed public versioned key
+`sandbox.build-secret-fingerprint.v1`. Its message is UTF-8 compact JSON of
+`[name, mode, value-or-boolean]` rows sorted by input name, with ASCII escaping.
+The first 32 lowercase hex characters become the result. This is a deterministic
+cache identity, not a secret MAC key or a confidentiality guarantee for
+low-entropy inputs. No resolved input is logged or returned by the provider.
+
+Sandbox resolves this value before Compose config observation and local build,
+using the same private environment for both. When used as a Compose build arg,
+the result contributes to the receipt's build digest. Apply-time model checking
+recomputes it from current inputs, so a changed value or presence requires a new
+receipt. Rotating a still-present token does not change the result. Runtime Env
+revision checks remain specific to `pushed_commit_sha`; build fingerprints do
+not require a running container environment variable. Plan output contains only
+the derived key, provider name and resolution timing, not input values or results.
+
+This provider changes the staged runtime revision. Upgrade through the supported
+runtime lifecycle only as part of an explicitly authorized pin/runtime rollout.

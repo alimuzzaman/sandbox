@@ -297,6 +297,8 @@ def _emit(data: dict, as_json: bool) -> None:
         print(json.dumps(data))
         return
     print(f"{data['project']} / {data['environment']}")
+    for warning in data.get("warnings", []):
+        print(f"  warning: {warning}")
     for route in data.get("routes", []):
         suffix = f" -> {route['target']}" if route.get("target") else ""
         print(f"  {route['mode']}: {route['hostname']}{suffix}")
@@ -455,8 +457,14 @@ def _cmd_host_image_build_local(args) -> None:
                     **validated["secrets"]["generated"]}.items():
                 if source in source_values:
                     child_env[destination] = source_values[source]
+            derived = validated.get("deploy", {}).get("derived_environment", {})
+            if derived:
+                resolved = hosting.resolve_environment(validated, source_values, source_revision)
+                child_env.update({key: resolved[key] for key in derived})
             output_dir = local_images.default_output_directory(
                 RUNTIME_DIR, validated, commit)
+            if getattr(args, "receipt_version", "v1") == "v2":
+                output_dir = output_dir / "v2"
             progress = None
             if not args.json:
                 def progress(message):
@@ -475,6 +483,7 @@ def _cmd_host_image_build_local(args) -> None:
                 source_dir=str(source_dir), runtime_dir=str(runtime_dir),
                 output_dir=output_dir, platform=local_images.DEFAULT_PLATFORM,
                 environment=child_env, timeout=timeout,
+                receipt_version=getattr(args, "receipt_version", "v1"),
                 source_root_relative=source_root_relative, progress=progress,
                 symbolic_secrets=validated["secrets"]["required"].keys()
                 | validated["secrets"]["generated"].keys())
@@ -537,7 +546,11 @@ def _cmd_host_image_push_local(args) -> None:
         payload = {"ok": True, "action": "push-local", "remote": args.remote,
                    "receipt_digest": result["receipt"]["receipt_digest"],
                    "remote_receipt_digest": result["remote_receipt_digest"],
-                   "loaded": result["loaded"], "skipped": result["skipped"]}
+                   "loaded": result["loaded"], "skipped": result["skipped"],
+                   "transferred_bundles": result.get("transferred_bundles", []),
+                   "transferred_bytes": result.get("transferred_bytes", 0)}
+        if result["receipt"]["schema"] == local_images.RECEIPT_SCHEMA_V2:
+            payload["reservation_cleanup_pending"] = result.get("reservation_cleanup_pending", False)
     except RemoteJobAdmissionError as exc:
         if args.json:
             print(json.dumps(exc.to_payload(remote=args.remote, operation="push-local"),
@@ -1814,7 +1827,8 @@ def _verify_remote_derived_environment(entry: dict, validated: dict,
                                        *, observation: dict | None = None) -> dict:
     """Fail closed when a running service did not receive the pushed revision."""
     derived = validated["deploy"].get("derived_environment", {})
-    if not derived:
+    # Fingerprints attest build inputs through the receipt/model, not container Env.
+    if not any(provider == "pushed_commit_sha" for provider in derived.values()):
         return {"state": "not_declared", "checks": []}
     observation = observation or _observe_host_runtime(
         validated, entry, source_dir, runtime_dir,
@@ -2237,7 +2251,8 @@ def _unavailable_host_observation() -> dict:
 
 def _host_observation_is_exact_ready(validated: dict, classified: dict,
                                      expected_revision: str) -> bool:
-    source_required = bool(validated["deploy"].get("derived_environment"))
+    source_required = any(provider == "pushed_commit_sha" for provider in
+                          validated["deploy"].get("derived_environment", {}).values())
     return (
         classified.get("complete") is True
         and classified["topology"]["state"] == "ready"
@@ -4185,6 +4200,10 @@ def _verify_receipt_bound_local_images(validated: dict, entry: dict,
                 **validated["secrets"]["generated"]}.items():
             if source in secret_values:
                 child_env[destination] = secret_values[source]
+        derived = validated.get("deploy", {}).get("derived_environment", {})
+        if derived:
+            resolved = hosting.resolve_environment(validated, secret_values, published_revision)
+            child_env.update({key: resolved[key] for key in derived})
         model = local_images.observe_local_model(
             config_command=shlex.join(
                 [*compose, "--profile", "*", "config", "--format", "json"]),
@@ -7078,6 +7097,8 @@ def cmd_host(cfg, args) -> None:
                 name = result.get("environment", "<unknown>")
                 if result.get("ok"):
                     print(f"  {name}: ok")
+                    for warning in result.get("warnings", []):
+                        print(f"    warning: {warning}")
                 else:
                     print(f"  {name}: invalid ({result.get('error', 'validation failed')})")
         if not all_ok:

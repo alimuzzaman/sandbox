@@ -509,7 +509,7 @@ metrics, declared artifacts, and retained CI rematerialization archives, then re
 `cleanup_state` in the registry. Repeated sweeps page deterministically through candidates
 ordered oldest finished first; sweeps can also resume explicitly via `--cursor <job_id>`.
 The envelope explicitly returns `"cursor"` (string or null), `"limit"` (integer), and `"truncated"` (boolean)
-to support deterministic cross-process continuation (control protocol 14).
+to support deterministic cross-process continuation (control protocol 18).
 If the host is below its configured free-disk reserve, use
 `./sb job-retention --storage-pressure --json`; only the oldest terminal jobs
 are reclaimed until pressure clears. Active jobs and retained failed workspaces

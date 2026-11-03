@@ -11,19 +11,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Retention sweep now excludes no-op retained jobs and completed retired CI
   rows from consuming candidate scan limits, supports cross-process keyset
   continuation via `--cursor` CLI and envelope `cursor`, `limit`, and `truncated`
-  fields (control protocol 14), safely handles malformed timestamps without
+  fields (control protocol 18), safely handles malformed timestamps without
   crashing, filters already-swept jobs without unexpired data while preserving
   eligible logs/artifacts/CI materialization retirement, and truthfully
   propagates terminal materialization retirement failures instead of
   swallowing them.
-- Local-image transfer now strictly decodes byte acknowledgements after remote
-  receipt publication instead of crashing without JSON. Malformed replies stay
-  publication-unknown; unexpected transfer exceptions emit the closed
-  `local_images_transfer_unknown` envelope without exposing exception text.
-  Protocol 13 and receipt shapes are unchanged; the source-derived runtime
-  revision changes, so exact-match consumers still require supported migration.
+- Remote diagnostics use stderr only, bound complete-line tails before decoding,
+  and redact bare OpenSSH hosts/ports, usernames and remote paths before display
+  truncation. No extra remote lookup or protocol change is introduced.
+- Local-image remote-command failures preserve the exit status and bounded,
+  redacted diagnostics instead of discarding the reconciliation error. Document
+  the permission-only repair for legacy 0664 reservation ledgers; strict ledger
+  validation and protocol 17 are unchanged.
+- V2 readiness reads stdout only; SSH stderr warnings are captured separately
+  in bounded diagnostics and cannot block a valid worker acknowledgement.
+  Garbage on stdout still refuses before upload. Protocol 17 is unchanged.
+- Local-image receipt publication decodes byte acknowledgements correctly;
+  malformed replies remain publication-unknown and unexpected exceptions return
+  a closed JSON error without exposing details.
+- Shared-bundle reservations now start under the engine lease after proven
+  orphans for that target are reconciled. A reservation-verified worker readiness
+  acknowledgement precedes upload; early failures release their reservation.
+  Persistent reservations remain for live workers and quarantined imports.
+- Release accepts same-owner non-writable 0644 ledgers from older clients,
+  tightens them to 0600, and waits boundedly for the ledger lock. Cleanup failures
+  preserve the original error or successful publication and report pending cleanup.
+- V2 builders require Docker >=25 and containerd. V1 archive cleanup is restored;
+  ordinary reservation expiry is unchanged. V2 reserves at least 3x the full bundle
+  with a default 1 GiB floor, scales load timeout, and fences uncertain imports.
+- Current control protocol is **18**. Migrate runtimes from the upgraded checkout
+  before bumping client pins: review `sb remote service migrate NAME --plan --json`,
+  authorize `sb remote service migrate NAME --confirm --json`, and verify with
+  `sb remote service status NAME --json`. Older runtimes cannot serve this client,
+  including v1-only verdict-gated commands. No remote migration is performed here.
+- Protocol history: 14 introduced v2 and recorded existing `cmd_retention` drift
+  (`commands`, `remedy`, `skipped`); 15 added quarantine and 16 added persistent
+  operation reservations. Their lifecycle corrections ship under 17.
 
 ### Added
+- Opt-in local-image v2 receipts (`--receipt-version v2`) bind one shared raw
+  save bundle, with closed image membership and version-aware apply readers.
+  V1 remains the default and rollback format. The receipt contract introduced
+  protocol 14; the current fixes above require 17. No installed runtime or
+  deployment is changed by this source work.
 - Hosted local images (spec 068). `sb host image build-local` builds an exact
   clean revision for `linux/amd64` with hosted Compose inputs and writes a
   bounded non-secret receipt; `host image push-local` confirmation-gates a
@@ -34,8 +64,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   remote-engine lock serializes load, verification and receipt-bound apply
   before delivery admission. Receipts retain a builder store ID separately from
   the portable archive configuration ID required on the destination, supporting
-  Docker 29 containerd-store builders without digest aliases. The control
-  protocol is now 13. Apply also verifies the actual remote Compose render;
+  Docker 29 containerd-store builders without digest aliases. The initial control
+  contract used protocol 13. Apply also verifies the actual remote Compose render;
   local rendering refuses Docker-client-dependent image interpolation. Transfer
   pins registration, gates readiness before writes, validates target path slugs,
   caps every step with the aggregate timeout, and fences surviving load workers

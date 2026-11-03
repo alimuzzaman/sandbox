@@ -2191,3 +2191,264 @@ before use (exact revision equality under `--strict-runtime`).
 active status, unknown status, or retained-without-result marker through the
 activation owner. It never re-enters activation. A frontend can recover a lost
 committed reply even after its original admission deadline expires.
+
+### Opt-in shared local-image bundle (pack 9)
+
+`sb host image build-local --receipt-version v2` saves all built image references
+in one raw `bundle-1.tar`. The default remains v1 (one archive per image).
+V2 retains per-image `artifacts` identities and service keys, and moves transport
+hash, byte size and exact sorted image membership into a closed `bundles` map.
+Local and remote schema namespaces end in `.v2`; canonical digests bind the full
+receipt. Portable config IDs remain the only accepted destination IDs.
+
+Push transfers the entire bundle once when any reference differs, then verifies
+all references before publication. All-present receivers upload zero bytes.
+`loaded`/`skipped` describe images at the initial locked observation; skipped
+images can still travel inside the bundle. `transferred_bundles` and
+`transferred_bytes` report transport separately. `--artifact-timeout` applies to
+the whole bundle; size the aggregate `--timeout` accordingly. Staging, import and unpacking
+reserve at least three times the bundle bytes, with a default 1 GiB storage floor.
+
+Older clients reject the v2 schema before transfer writes. Roll back by using
+the older client with a separately exported v1 receipt; there is no automatic
+fallback or conversion of persisted receipts. Do not overwrite retained v1
+output directories when selecting v2. No remote acceptance is implied by local
+proof. Protocol 14 introduced this contract; the reservation lifecycle below requires protocol 17.
+
+### Shared-bundle runtime upgrade and review fixes
+
+V2 export requires **Docker >=25 with the containerd image store** on the
+builder. Classic graphdriver stores and legacy saves must use v1. The builder
+check runs before builds or export writes; a classic `repositories` archive
+also receives an explicit unsupported-builder error. Archive member validation
+runs only on the client. It remains a separate read from the hash/stream pass
+and therefore relies on the controller owner's runtime-directory trust.
+
+V2 storage admission always runs. An unset or zero `storage_floor_gb` uses a
+1 GiB floor; a configured positive floor is retained. The reservation is at
+least **3 times the full bundle bytes**, including on partial receivers, for
+staging, import and unpacking. The load timeout is 1800 seconds plus one second
+per started MiB. Controller aggregate/per-artifact deadlines may expire first;
+the worker continues under its fence. V1 keeps its existing storage policy and
+1800-second load limit.
+
+Before v2 load starts, the worker persists `load-unverified` and changes
+`load-fence.lock` to mode 0400. Successful Docker completion restores mode 0600
+and removes the marker. A load timeout, CLI error or worker death leaves the
+engine quarantined: new controllers refuse the marker, and old controllers
+refuse the unsafe fence mode. The result is unknown, never permission to start
+another import. There is no automatic quarantine reset. An operator must first
+independently establish that the daemon is idle, for example through an approved
+Docker maintenance stop, before restoring the owner-only fence to mode 0600
+and removing `load-unverified`. Do not clear it merely because a CLI exited.
+
+Protocol 14 introduced the v2 receipt/transport shapes and also recorded existing
+`cmd_retention` shape drift: `commands`, `remedy`, and `skipped`. These retention
+keys were missing from the pinned protocol-13 manifest; pack 9 did not add that
+retention behavior. The first review fixes advanced the protocol to 15; the reservation lifecycle
+follow-up below requires **17**, as required by the shape gate. From the upgraded
+checkout, **migrate each runtime before changing client pins**, including for
+v1-only verdict-gated commands.
+A protocol-13/14/15/16 runtime cannot serve this protocol-17 client.
+No v1-only compatibility exception is added to the global verdict gate.
+
+From the upgraded Sandbox checkout, review and explicitly authorize the migration:
+
+```sh
+./sb remote service migrate NAME --plan --json
+./sb remote service migrate NAME --confirm --json
+./sb remote service status NAME --json
+```
+
+Check the installed revision and compatibility range in the status response
+before using verdict-gated commands. These are operator rollout instructions;
+this change performs no remote migration. Old clients remain within the runtime's
+served range, but their v1 archive behavior does not gain v2 support.
+
+In v2 results, `skipped` means initially verified at the locked observation.
+Those images still travel inside a transferred full bundle and may be re-imported;
+`transferred_bytes` and `transferred_bundles` expose the transport cost.
+
+A hard-killed stage worker can leave its private `.upload-*.tar` file behind.
+There is no automatic sweeper; inspect task-owned staging during operator
+reconciliation after proving the daemon idle.
+
+### V2 reservation lifecycle and quarantine recovery
+
+V2 holds the engine lease before reconciling reservations and admitting the full
+3x bundle budget. Reconciliation also acquires the worker fence and checks there
+is no quarantine marker. Only then are `kind=host-local-images` reservations for
+the exact target provably orphaned and automatically removed. Other targets and
+ordinary job reservations are preserved. A delayed worker must verify its token
+still exists before acknowledging readiness; a reaped token cannot import.
+
+The controller sends no archive bytes before the exact readiness acknowledgement.
+Readiness is read only from stdout. SSH stderr warnings are kept as bounded
+diagnostics; unexpected stdout still refuses before any archive bytes are sent.
+Local preflight failures, SSH failures without acknowledgement and early worker
+exits release the operation's reservation. An acknowledged worker killed during
+upload is reconciled when its fence is free and no marker exists, either during
+failure handling or before the next admission. Live workers and quarantine are
+never reaped. Cleanup failure cannot hide an original error or replace successful
+publication; successful v2 JSON reports `reservation_cleanup_pending` if necessary.
+
+V2 operation reservations use a numeric year-9999 expiry so older admission and
+reclaim readers retain them too. Confirmed Docker success durably releases the
+operation before clearing quarantine and acknowledging completion. A timeout or
+uncertain import retains both reservation and quarantine until reconciliation.
+Ordinary job/deploy reservations retain their 45-minute policy. Safe same-owner
+0644 ledgers written by old clients are accepted and tightened to 0600; group or
+other write access, links and foreign ownership refuse. Release waits up to ten
+seconds for the ledger lock. A tight all-present v2 host can still fail the full
+budget check; select a separately exported v1 receipt for that fallback.
+
+The current contract requires **protocol 17**. Migrate runtimes first using the
+plan/confirmed migration/status workflow above, then bump client pins. No remote
+migration is performed by this change.
+
+After independently proving daemon idleness, for example through an **approved
+Docker maintenance stop**, run this self-contained command **on the target as the
+Sandbox owner**. It uses Python's standard library only; no Sandbox checkout,
+package import or PYTHONPATH is required. Set the registered Sandbox home if it
+is different from `$HOME/sandbox`. The command takes both engine and worker locks,
+releases the marker's exact reservation, restores mode 0600 and removes the marker.
+It also handles legacy plain-text markers. It refuses while a worker holds the
+fence. Do not run it just because a CLI timed out.
+
+```sh
+SANDBOX_HOME="${SANDBOX_HOME:-$HOME/sandbox}" python3 - <<'PY'
+def release_storage_reservation(store: str, reservation_id: str | None, *,
+                                orphan_target: str | None = None, verify_only: bool = False,
+                                lock_timeout: float = 10) -> None:
+    """Atomically release only one owned operation reservation; usable in workers."""
+    import fcntl
+    import json
+    import os
+    import re
+    import stat
+    import tempfile
+    import time
+    from pathlib import Path
+
+    if reservation_id is None and orphan_target is None:
+        raise ValueError("operation or target required")
+    if reservation_id is not None and not re.fullmatch(r"[0-9a-f]{32}", reservation_id):
+        raise ValueError("invalid operation reservation")
+    root = Path(store)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError("unsafe reservation store")
+    lock = os.open(root / "reservations.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(lock)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe reservation lock")
+        deadline = time.monotonic() + lock_timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("reservation lock busy")
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        try:
+            fd = os.open(root / "reservations.json", os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if verify_only:
+                raise ValueError("operation reservation missing")
+            return
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o022 or info.st_nlink != 1 or info.st_size > 8 * 1024**2):
+                raise ValueError("unsafe reservation ledger")
+            # Older admissions rewrite this same-owner ledger as 0644.
+            os.fchmod(handle.fileno(), 0o600)
+            entries = json.loads(handle.read(8 * 1024**2 + 1))
+        if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+            raise ValueError("invalid reservation ledger")
+        if verify_only:
+            if not any(e.get("id") == reservation_id and e.get("kind") == "host-local-images" for e in entries):
+                raise ValueError("operation reservation missing")
+            return
+        retained = [e for e in entries if not (
+            e.get("kind") == "host-local-images" and e.get("target") == orphan_target
+            if orphan_target is not None else e.get("id") == reservation_id)]
+        if retained == entries:
+            return  # Idempotent after an acknowledgement was lost.
+        if reservation_id is not None and any(e.get("id") == reservation_id and e.get("kind") != "host-local-images" for e in entries):
+            raise ValueError("reservation ownership differs")
+        descriptor, temporary = tempfile.mkstemp(prefix=".reservation-release-", dir=root)
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                json.dump(retained, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, root / "reservations.json")
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    finally:
+        os.close(lock)
+
+import fcntl, json, os
+from pathlib import Path
+
+home = Path(os.environ["SANDBOX_HOME"])
+root = home / "runtime" / "host-local-images"
+marker = root / "load-unverified"
+fence = root / "load-fence.lock"
+with (root / "engine.lock").open("r+b") as engine, fence.open("rb") as worker:
+    fcntl.flock(engine, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fcntl.flock(worker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    raw = marker.read_bytes()
+    reservation_id = None if raw == b"load outcome unverified\n" else json.loads(raw)["reservation_id"]
+    if reservation_id is not None:
+        release_storage_reservation(str(home / "runtime" / "storage"), reservation_id)
+    os.fchmod(worker.fileno(), 0o600)
+    os.fsync(worker.fileno())
+    marker.unlink()
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+PY
+```
+
+Markers from genuine uncertain imports still require manual idle verification.
+Unmarked orphan reservations self-heal on the next v2 attempt under the lease,
+fence and marker checks. Never delete or reset the complete reservation ledger.
+A hard-killed worker can retain an owned `.upload-*.tar`; inspect and remove only
+that owned staging file after proving idleness. No automatic staging sweeper is added.
+
+### Local-image remote command failures
+
+`local_images_remote_failed` includes the nonzero SSH/remote exit status and a
+bounded, redacted stderr diagnostic. Stdout is never used as an error fallback.
+The helper bounds input to a complete-line tail within 16 KiB before decoding,
+then redacts SSH identities, ports and absolute remote paths before the final
+350-character display limit. It performs no extra remote lookup. Commands and
+stdin are not echoed. Read the final
+exception line before retrying; a failure during v2 reservation reconciliation
+happens before storage admission and bundle upload.
+
+For example, `ValueError: unsafe reservation ledger` can mean that a legacy
+controller wrote `runtime/storage/reservations.json` as 0664 under umask 0002.
+The v2 reconciler intentionally refuses group-writable ledgers. New admissions
+write mode 0600, and old non-writable 0644 ledgers are accepted and tightened.
+Do not weaken that validation, reset the ledger, or remove reservations.
+
+With the owner's approval and deployment holds claimed, verify that the storage
+directory is private (0700), the lock is private (0600), and both the directory
+and the single-link regular ledger belong to the remote operator. While holding
+`reservations.lock`, tighten only the legacy ledger mode to 0600; preserve its
+contents. This permission correction is reversible and does not clear live
+reservations. Retire the old writer from active use: running it again can recreate
+the group-writable file. Then retry the same immutable receipt.

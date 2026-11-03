@@ -65,9 +65,6 @@ not close the external or human gates listed below.
   hit 100% from about 21 `deploy-src/<branch>-workspace-<hash>` dirs (61 GB),
   and production lenzora Postgres went into a PANIC/restart loop on ENOSPC.
   Gaps to close:
-  - the reap plan labels retained terminal jobs `active_job`
-    (`sandbox/resources/remote.py` `retained_job`); report them separately as
-    `retained_terminal`, with the `job-cleanup <id> --remote --confirm` remedy;
   - no free-disk admission gate before a remote submission (the 063 readiness
     capacity row covers Docker subnets only); refuse below a host reserve that
     protects hosted targets;
@@ -261,12 +258,6 @@ not close the external or human gates listed below.
 
 ## P2 — protected recovery, hosting, and product gates
 
-- Control DNS fallback (`_control_urlopen`) tests the review asked for: a real-opener
-  POST keeping Host, Authorization and one Content-Length; HTTPS and HTTP redirects
-  refused with no second request; a mismatched or untrusted certificate failing before
-  any header is sent; `verify_remote` 400/405/406 vs 401 through the fallback; the DNS
-  reason visible from `remote_diagnostics` and `verify_remote`. Also give the
-  `sb doctor` MCP probe the same fallback.
 - Host destroy leaves explicitly named images (`image: xspeed-sandbox/wordpress:<env>`
   in the project's compose file): teardown only removes `<compose-name>-*` tags, while
   the probe counts every project-labelled image, so the target never reads "nothing to

@@ -605,10 +605,15 @@ class ResourceService:
                     kwargs["deep"] = True
                 if self._supports_keyword(self.adapter.observe, "directory_cache"):
                     kwargs["directory_cache"] = "cache_only"
-            snapshot = self.adapter.observe(**kwargs)
-            if expected_target is not None and snapshot.target != expected_target:
-                raise ResourceError("capacity target identity changed", "target_identity_changed")
-            return snapshot
+            try:
+                snapshot = self.adapter.observe(**kwargs)
+                if expected_target is not None and snapshot.target != expected_target:
+                    raise ResourceError("capacity target identity changed", "target_identity_changed")
+                return snapshot
+            except ResourceError:
+                raise
+            except Exception as exc:
+                raise ResourceError("capacity observation is unavailable", "capacity_scope_unavailable") from exc
 
         def capacity(snapshot):
             if stop_at_available_bytes is None:

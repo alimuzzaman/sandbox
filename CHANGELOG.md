@@ -8,14 +8,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
-- Retention sweep now excludes no-op retained jobs and completed retired CI
-  rows from consuming candidate scan limits, supports cross-process keyset
-  continuation via `--cursor` CLI and envelope `cursor`, `limit`, and `truncated`
-  fields (control protocol 18), safely handles malformed timestamps without
-  crashing, filters already-swept jobs without unexpired data while preserving
-  eligible logs/artifacts/CI materialization retirement, and truthfully
-  propagates terminal materialization retirement failures instead of
-  swallowing them.
+- Retention sweep no longer counts no-op candidates as cleaned jobs. Those rows
+  still consume the bounded scan budget; when `truncated` is true, callers must
+  pass the returned `cursor` via `--cursor` to continue across processes. The
+  envelope includes `cursor`, `limit`, and `truncated` fields (control protocol
+  20). Retention safely handles malformed timestamps without
+  crashing, reaches noncompleted terminal candidates with present `finished_at`
+  timestamps so unindexed physical output is reclaimed under age and pressure
+  sweeps, distinguishes completed cleanup from legitimate policy retention
+  (which remains `ok: true`), handles per-row retirement and cleanup failures
+  within sweeps while preserving fail-closed direct cleanup exceptions, and
+  truthfully reports failed workspace releases and candidate errors with
+  `ok: false` in both individual cleanup outcomes and the sweep result envelope.
 - Remote diagnostics use stderr only, bound complete-line tails before decoding,
   and redact bare OpenSSH hosts/ports, usernames and remote paths before display
   truncation. No extra remote lookup or protocol change is introduced.
@@ -39,14 +43,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - V2 builders require Docker >=25 and containerd. V1 archive cleanup is restored;
   ordinary reservation expiry is unchanged. V2 reserves at least 3x the full bundle
   with a default 1 GiB floor, scales load timeout, and fences uncertain imports.
-- Current control protocol is **18**. Migrate runtimes from the upgraded checkout
+- Current control protocol is **20**. Migrate runtimes from the upgraded checkout
   before bumping client pins: review `sb remote service migrate NAME --plan --json`,
   authorize `sb remote service migrate NAME --confirm --json`, and verify with
   `sb remote service status NAME --json`. Older runtimes cannot serve this client,
   including v1-only verdict-gated commands. No remote migration is performed here.
 - Protocol history: 14 introduced v2 and recorded existing `cmd_retention` drift
   (`commands`, `remedy`, `skipped`); 15 added quarantine and 16 added persistent
-  operation reservations. Their lifecycle corrections ship under 17.
+  operation reservations. Their lifecycle corrections ship under 17; 18 added retention sweep cursor continuation envelope fields; 20 adds read keys for cleanup state kind and the structured per-candidate outcomes of retention sweeps (19 was never released).
 
 ### Added
 - Opt-in local-image v2 receipts (`--receipt-version v2`) bind one shared raw

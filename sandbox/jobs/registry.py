@@ -959,16 +959,7 @@ class JobRepository:
             "lifecycle IN ('succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted')",
             "finished_at IS NOT NULL",
             "finished_at != ''",
-            "("
-            "cleanup_state IN ('not_requested', 'failed') "
-            "OR (cleanup_state = 'retained' AND ("
-            "EXISTS (SELECT 1 FROM output_streams WHERE output_streams.job_id = jobs.job_id AND output_streams.available = 1) "
-            "OR EXISTS (SELECT 1 FROM artifacts WHERE artifacts.job_id = jobs.job_id AND artifacts.status = 'available') "
-            "OR EXISTS (SELECT 1 FROM metrics_index WHERE metrics_index.job_id = jobs.job_id AND metrics_index.available = 1) "
-            "OR (kind = 'ci' AND workspace_authority_digest IS NOT NULL)"
-            "))"
-            "OR (kind = 'ci' AND workspace_authority_digest IS NOT NULL)"
-            ")",
+            "(cleanup_state != 'completed' OR (kind = 'ci' AND workspace_authority_digest IS NOT NULL))",
         ]
         if before_finished_at is not None:
             clauses.append("finished_at <= ?")

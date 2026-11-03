@@ -2450,16 +2450,26 @@ class WorkspaceService:
                     not isinstance(expected_size, int)):
                 raise WorkspaceIndexError(
                     "workspace_ownership_drift", "workspace artifact proof changed")
-            # An archive already gone (an earlier retirement could not record
-            # it) is recorded now. A missing retention root is not proof, so it
-            # falls through to verification and stays a fail-closed refusal.
+            # Absence alone proves nothing: an unmounted volume leaves an empty
+            # mountpoint. Record the attempt while the archive is present; only a
+            # recorded attempt lets a later absence count as retired. Any other
+            # observation falls through to verification and stays a refusal.
+            attempted = bool(record.metadata.get("ci_materialization_retiring", False))
+            exists = absent = False
             try:
                 artifact.lstat()
-                missing = False
-            except OSError as exc:
-                missing = isinstance(exc, FileNotFoundError)
-            missing = missing and artifact_root.is_dir()
+                exists = True
+            except FileNotFoundError:
+                absent = True
+            except OSError:
+                pass
+            missing = absent and attempted and artifact_root.is_dir()
             if not missing:
+                if exists and not attempted:
+                    repo.mark_lifecycle(
+                        workspace_id, record.lifecycle, status=record.status,
+                        metadata={"ci_materialization_retiring": True},
+                    )
                 _unlink_verified_artifact(
                     artifact, authority.get("artifact_digest"), expected_size)
             try:

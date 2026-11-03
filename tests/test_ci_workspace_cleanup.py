@@ -1492,26 +1492,80 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         self.assertTrue(self._materialization_retired(row))
         self.assertFalse(self.workspaces.has_retained_materialization(row))
 
-    def test_retirement_of_missing_archive_records_without_removing_anything(self):
-        checkout = self._checkout("retire-missing-archive")
+    def test_retirement_of_missing_archive_without_attempt_keeps_refusing(self):
+        """An empty mountpoint looks like this: absence alone never retires."""
+        from sandbox.workspaces.repository import WorkspaceIndexError
+
+        checkout = self._checkout("retire-missing-no-attempt")
         service = self._service(lambda _descriptor: None)
-        accepted = service.submit(self._submission(checkout, request_id="retire-missing-archive-req"))
+        accepted = service.submit(self._submission(checkout, request_id="retire-missing-no-attempt-req"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        row = self.job_repository.get(accepted["job_id"])
+        sibling = artifact.with_name("unrelated-sibling.tar.gz")
+        sibling.write_bytes(b"synthetic")
+        artifact.unlink()
+
+        for _ in range(2):  # a refused sweep must not arm the next one
+            with self.assertRaises(WorkspaceIndexError) as caught:
+                self.workspaces.retire_terminal_materialization(row)
+            self.assertEqual(caught.exception.code, "workspace_materialization_unavailable")
+        self.assertFalse(self._materialization_retired(row))
+        self.assertTrue(self.workspaces.has_retained_materialization(row))
+        self.assertEqual(sibling.read_bytes(), b"synthetic")
+
+    def test_retirement_recovers_when_removal_was_attempted_but_unproven(self):
+        from sandbox.workspaces.repository import WorkspaceIndexError
+
+        checkout = self._checkout("retire-attempted-unproven")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="retire-attempted-unproven-req"))
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
         service.get(accepted["job_id"])
         artifact = self._materialization_artifact(accepted)
         row = self.job_repository.get(accepted["job_id"])
 
-        sibling = artifact.with_name("unrelated-sibling.tar.gz")
-        sibling.write_bytes(b"synthetic")
-        artifact.unlink()
+        def removed_then_refused(target, _digest, _size):
+            target.unlink()
+            raise WorkspaceIndexError("cleanup_unproven", "synthetic")
 
-        with patch("sandbox.application.workspace_service._unlink_verified_artifact") as mock_unlink:
+        with patch("sandbox.application.workspace_service._unlink_verified_artifact",
+                   side_effect=removed_then_refused):
+            with self.assertRaises(WorkspaceIndexError):
+                self.workspaces.retire_terminal_materialization(row)
+        self.assertFalse(self._materialization_retired(row))
+
+        with patch("sandbox.application.workspace_service._unlink_verified_artifact") as unlink:
             self.assertFalse(self.workspaces.retire_terminal_materialization(row))
-            mock_unlink.assert_not_called()
-
+        unlink.assert_not_called()
         self.assertTrue(self._materialization_retired(row))
-        self.assertEqual(sibling.read_bytes(), b"synthetic")
+
+    def test_retirement_attempt_record_failure_removes_nothing(self):
+        checkout = self._checkout("retire-attempt-record-failure")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="retire-attempt-record-failure-req"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        row = self.job_repository.get(accepted["job_id"])
+        real = WorkspaceRepository.mark_lifecycle
+
+        def fail(repository, workspace_id, lifecycle, **kwargs):
+            if "ci_materialization_retiring" in (kwargs.get("metadata") or {}):
+                raise RuntimeError("synthetic registry failure")
+            return real(repository, workspace_id, lifecycle, **kwargs)
+
+        with patch.object(WorkspaceRepository, "mark_lifecycle", autospec=True, side_effect=fail), \
+             patch("sandbox.application.workspace_service._unlink_verified_artifact") as unlink:
+            with self.assertRaisesRegex(RuntimeError, "synthetic registry failure"):
+                self.workspaces.retire_terminal_materialization(row)
+        unlink.assert_not_called()
+        self.assertTrue(artifact.exists())
+        self.assertFalse(self._materialization_retired(row))
 
     def test_retirement_with_missing_retention_root_fails_closed(self):
         from sandbox.workspaces.repository import WorkspaceIndexError
@@ -1535,18 +1589,20 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
     def test_retirement_of_missing_archive_keeps_registry_failure_visible(self):
         checkout = self._checkout("retire-missing-registry-failure")
         service = self._service(lambda _descriptor: None)
-        accepted = service.submit(self._submission(checkout, request_id="retire-missing-reg-fail-req"))
+        accepted = service.submit(self._submission(checkout, request_id="retire-missing-registry-failure-req"))
         self.job_repository.transition(accepted["job_id"], "running")
         self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
         service.get(accepted["job_id"])
         artifact = self._materialization_artifact(accepted)
         row = self.job_repository.get(accepted["job_id"])
 
-        artifact.unlink()
+        with self._unlink_without_broker(), self._fail_retirement_record():
+            self.assertTrue(self.workspaces.retire_terminal_materialization(row))
         with self._fail_retirement_record():
             with self.assertRaisesRegex(RuntimeError, "synthetic registry failure"):
                 self.workspaces.retire_terminal_materialization(row)
 
+        self.assertFalse(artifact.exists())
         self.assertFalse(self._materialization_retired(row))
 
     def test_cleanup_recovers_after_retirement_record_failure(self):

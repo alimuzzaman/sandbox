@@ -1002,12 +1002,14 @@
    "WorkspaceService.retire_terminal_materialization:read[artifact_size_bytes]",
    "WorkspaceService.retire_terminal_materialization:read[ci_cleanup_authority]",
    "WorkspaceService.retire_terminal_materialization:read[ci_materialization_retired]",
+   "WorkspaceService.retire_terminal_materialization:read[ci_materialization_retiring]",
    "WorkspaceService.retire_terminal_materialization:read[digest]",
    "WorkspaceService.retire_terminal_materialization:read[project_identity]",
    "WorkspaceService.retire_terminal_materialization:read[workspace_authority_digest]",
    "WorkspaceService.retire_terminal_materialization:read[workspace_id]",
    "WorkspaceService.retire_terminal_materialization:read[workspace_label]",
-   "WorkspaceService.retire_terminal_materialization:repo.mark_lifecycle(metadata=)={ci_materialization_retired}",
+   "WorkspaceService.retire_terminal_materialization:repo.mark_lifecycle(metadata=)#2={ci_materialization_retired}",
+   "WorkspaceService.retire_terminal_materialization:repo.mark_lifecycle(metadata=)={ci_materialization_retiring}",
    "WorkspaceService.status:read[counts]",
    "WorkspaceService.status:read[index]",
    "WorkspaceService.status:read[index][complete]",
@@ -1130,6 +1132,7 @@
    "ci_cleanup_authority",
    "ci_cleanup_intent",
    "ci_materialization_retired",
+   "ci_materialization_retiring",
    "cleanup_id",
    "cleanup_policy",
    "cleanup_state",
@@ -4333,5 +4336,5 @@
    "stage"
   ]
  },
- "spoken": 20
+ "spoken": 21
 }

@@ -226,3 +226,31 @@ class StorageReviewTests(unittest.TestCase):
             self.assertEqual(receipt['data']['outcomes'][0]['status'], 'indeterminate')
             self.assertFalse(service.cleanup(plan['data']['plan_id'], confirm=True)['ok'])
             self.assertEqual(adapter.removed, ['cache'])
+
+    def test_remote_unknown_effect_consumes_plan_without_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            row = observation('cache', kind='build_cache', locator='a'*24)
+            mutations = []
+            def request(entry, command, *, input_data=None, timeout=0):
+                payload = json.loads(input_data)
+                if payload['action'] == 'remove':
+                    mutations.append(payload)
+                    return ProcessResult(('synthetic',), 0, 'invalid receipt', '')
+                return ProcessResult(('synthetic',), 0, json.dumps({
+                    'identity': 'host', 'capacity': {'total_bytes': 100, 'used_bytes': 80,
+                        'available_bytes': 20, 'reserved_bytes': 0},
+                    'resources': [row.internal_dict()],
+                    'category_outcomes': [{'category': 'docker_build_cache', 'status': 'complete'}],
+                }), '')
+            adapter = RemoteResourceAdapter('remote-a', remote_lookup=lambda name: {'provisioned': True},
+                                            service_request=request, clock=lambda: NOW)
+            service = self.service(adapter, temp)
+            plan = service.plan('cache')
+            receipt = service.cleanup(plan['data']['plan_id'], confirm=True)
+            self.assertEqual(receipt['status'], 'indeterminate')
+            self.assertFalse(receipt['ok'])
+            self.assertEqual(receipt['data']['outcomes'][0]['status'], 'indeterminate')
+            self.assertIsNone(receipt['data']['outcomes'][0]['observed_bytes'])
+            self.assertEqual(service.plan_store.load(plan['data']['plan_id']).state, 'indeterminate')
+            self.assertFalse(service.cleanup(plan['data']['plan_id'], confirm=True)['ok'])
+            self.assertEqual(len(mutations), 1)

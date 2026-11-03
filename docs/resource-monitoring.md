@@ -896,9 +896,8 @@ This includes a failed volume identity inspect immediately before removal.
 Missing or malformed final capacity, including observation decoder exceptions,
 makes the run `indeterminate` and retains and persists known item outcomes;
 missing removal receipts or removal exceptions produce an `indeterminate` item
-with unknown observed bytes and consume the plan as indeterminate, preventing replay;
- it cannot turn a removed-item receipt into successful
-completion without a final observation.
+with unknown observed bytes and consume the plan as indeterminate, preventing replay.
+Known removals cannot be reported as successful completion without a final observation.
 
 Normal deep scans retry incomplete directory caches; `--fast` stays cache-only.
 This is a fresh bounded walk, not checkpoint resume. For a larger walk use

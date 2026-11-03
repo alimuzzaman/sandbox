@@ -76,17 +76,18 @@ class StorageAuthorityLifecycleRepository:
             return self._read_state_locked()
 
     def _read_state_locked(self) -> Dict[str, Any]:
+        # Reading never writes. Unreadable state is refused, not reset: replacing it
+        # would erase recorded revocations and acceptance history.
         if not self.path.exists():
-            state = self._default_state()
-            self._write_state_locked(state)
-            return state
+            return self._default_state()
         try:
             with open(self.path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            state = self._default_state()
-            self._write_state_locked(state)
-            return state
+                state = json.load(f)
+        except (ValueError, OSError):
+            raise LifecycleError("lifecycle state is unreadable") from None
+        if not isinstance(state, dict):
+            raise LifecycleError("lifecycle state is unreadable")
+        return state
 
     def _write_state_locked(self, state: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -38,11 +38,12 @@ def _revocation_applies(item, remote_identity, promotion_id, binding) -> bool:
     """A revocation that cannot be read counts: it must not grant anything."""
     if not isinstance(item, dict) or not _text(item.get("remote_identity")):
         return True
+    if item["remote_identity"] != remote_identity:
+        return False
     selectors = [item.get("promotion_id"), item.get("authority_binding_id")]
     if not any(_text(value) for value in selectors):
         return True
-    return item["remote_identity"] == remote_identity and (
-        selectors[0] == promotion_id or selectors[1] == binding)
+    return selectors[0] == promotion_id or selectors[1] == binding
 
 
 def _authority_check(state, remote_identity, service_revision, source_revision, now):
@@ -175,15 +176,26 @@ class AuthorityLifecycleService:
                 "reason_code": "authority_unsupported",
             }
 
-        state = self.repository.load_state()
-        completed_acc, reason_code = _authority_check(
-            state, remote_identity, service_revision, source_revision, now_dt)
+        try:
+            state = self.repository.load_state()
+        except LifecycleError:
+            # Unreadable state proves nothing and is left in place for an operator.
+            completed_acc, reason_code = None, "authority_unavailable"
+        else:
+            # Taken after the read: the lock wait must not outlast a promotion's expiry.
+            completed_acc, reason_code = _authority_check(
+                state, remote_identity, service_revision, source_revision,
+                datetime.datetime.now(datetime.timezone.utc))
         if completed_acc is not None:
             support_tier = SupportTier.PROVEN
             adoptable = True
             acceptance_state = AcceptanceState.COMPLETE
         elif reason_code == "authority_revision_mismatch":
             support_tier = SupportTier.DRIFTED
+            adoptable = False
+            acceptance_state = AcceptanceState.FAILED
+        elif reason_code == "authority_unavailable":
+            support_tier = SupportTier.UNAVAILABLE
             adoptable = False
             acceptance_state = AcceptanceState.FAILED
         elif reason_code == "implemented_unproven":

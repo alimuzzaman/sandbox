@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -463,6 +464,47 @@ class TestOwnedStorageReview(unittest.TestCase):
                                                  "promotion_id": ["p"]}}}):
             with self.subTest(overrides=overrides):
                 self.assertIsNone(self._check(self._state(**overrides))[0])
+
+    def test_expiry_is_judged_after_the_state_read(self):
+        self._record_chain(expires_at=(datetime.datetime.now(datetime.timezone.utc)
+                                       + datetime.timedelta(milliseconds=30)).isoformat())
+        real = self.lifecycle_repo.load_state
+
+        def slow_read():
+            time.sleep(0.1)  # stands in for waiting on the state lock
+            return real()
+
+        with patch.object(self.lifecycle_repo, "load_state", side_effect=slow_read):
+            report = self._evaluate()
+        self.assertFalse(report["adoptable"])
+        self.assertEqual(report["reason_code"], "authority_expired")
+
+    def test_missing_state_is_not_created_by_evaluation(self):
+        self.assertFalse(self.lifecycle_path.exists())
+        report = self._evaluate()
+        self.assertEqual(report["support_tier"], "implemented_unproven")
+        self.assertFalse(self.lifecycle_path.exists())
+
+    def test_unreadable_state_is_refused_and_left_in_place(self):
+        for content in (b"{not json", b"[]", b"\xff"):
+            with self.subTest(content=content):
+                self.lifecycle_path.write_bytes(content)
+                report = self._evaluate()
+                self.assertEqual(report["support_tier"], "unavailable")
+                self.assertFalse(report["adoptable"])
+                self.assertEqual(report["reason_code"], "authority_unavailable")
+                self.assertEqual(set(report["checks"].values()), {"unknown"})
+                self.assertEqual(self.lifecycle_path.read_bytes(), content)
+
+    def test_writers_refuse_unreadable_state_instead_of_replacing_it(self):
+        self.lifecycle_path.write_bytes(b"{not json")
+        with self.assertRaises(LifecycleError):
+            self.lifecycle_repo.get_generation()
+        self.assertEqual(self.lifecycle_path.read_bytes(), b"{not json")
+
+    def test_selectorless_revocation_for_another_remote_does_not_apply(self):
+        revocation = {"remote_identity": "rem_other"}
+        self.assertEqual(self._check(self._state(revocations={"r": revocation}))[1], "proven")
 
     def test_checks_are_honest_in_each_tier(self):
         # 1. Unproven

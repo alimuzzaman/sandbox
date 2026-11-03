@@ -481,12 +481,18 @@ def _venv_paths_match(venv: Path) -> bool:
     return True
 
 
+def _install_chromium(py: Path) -> None:
+    # Progress goes to stderr: `sb visit` keeps stdout for its JSON report.
+    subprocess.check_call([str(py), "-m", "playwright", "install", "chromium"],
+                          stdout=sys.stderr)
+
+
 def ensure_tools_venv() -> Path:
     """Build the headless-browser venv on first use and return its python path.
 
     Lives under runtime/.venv-tools/ so it sits next to other auto-managed
-    state and is wiped by `./sb clean`. The Chromium binary that Playwright
-    downloads lands in the playwright cache under the venv.
+    state and is wiped by `./sb clean`. Chromium lands in Playwright's shared
+    cache outside the venv, so it can disappear while the venv stays intact.
     """
     py = TOOLS_VENV / "bin" / "python"
     req = TOOLS_DIR / "visit" / "requirements.txt"
@@ -501,6 +507,12 @@ def ensure_tools_venv() -> Path:
         shutil.rmtree(TOOLS_VENV, ignore_errors=True)
 
     if py.exists() and stamp.exists() and stamp.read_text().strip() == req.read_text().strip():
+        # The stamp proves the packages, not the browser. This install is a
+        # no-op when Chromium is present and repairs a cleared cache when not.
+        try:
+            _install_chromium(py)
+        except (OSError, subprocess.CalledProcessError):
+            die("could not install headless Chromium; check the network and retry")
         return py
 
     if not py.exists():
@@ -524,7 +536,7 @@ def ensure_tools_venv() -> Path:
     info("Downloading headless Chromium (one-time, ~150 MB)…")
     # Pin to chromium only — we don't need firefox/webkit and don't want
     # to wait for 3x the download on first run.
-    subprocess.check_call([str(py), "-m", "playwright", "install", "chromium"])
+    _install_chromium(py)
     stamp.write_text(req.read_text())
     ok("Tools venv ready.")
     return py

@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb visit` repairs a missing headless Chromium instead of failing before navigation
+  when the browser cache was cleared, and install progress no longer reaches stdout.
 - Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only
   `main` rule, `specs/README.md` indexes specs 066-069, and release guidance no longer
   requires the `app.py` helper namespace.

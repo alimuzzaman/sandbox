@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- The `sb web` dashboard polls one job at a time with one request in flight, so
+  a slow response no longer duplicates output. A failed or closed poll releases
+  the dashboard instead of freezing refreshes until reload, and polling never
+  resubmits a job.
 - `sb visit` repairs a missing headless Chromium instead of failing before navigation
   when the browser cache was cleared, and install progress no longer reaches stdout.
 - Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only

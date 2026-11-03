@@ -5,10 +5,18 @@ import { $ } from "../dom";
 import { store } from "../state";
 import { postAction, fetchJob } from "../api";
 import { toast } from "./toast";
+import { startPoll, type PollHandle } from "./poller";
 
 // main.ts injects refresh() to avoid a circular import.
 let refresh: () => Promise<void> = async () => {};
 export function setConsoleRefresh(fn: () => Promise<void>): void { refresh = fn; }
+
+// One poll owns the drawer at a time.
+let activePoll: PollHandle | null = null;
+function stopActivePoll(): void {
+  activePoll?.cancel();
+  activePoll = null;
+}
 
 export function consoleOpen(title: string): void {
   $("console").classList.remove("w-0");
@@ -20,6 +28,7 @@ export function consoleOpen(title: string): void {
 }
 
 export function consoleClose(): void {
+  stopActivePoll();
   $("console").classList.add("w-0");
   $("console").classList.remove("w-[26rem]");
   $("conInputRow").classList.add("hidden");
@@ -37,24 +46,39 @@ function consoleStatus(s: string, ok: boolean | null | undefined): void {
 }
 
 export function pollJob(id: string, instance: string | null, label?: string): void {
+  stopActivePoll();
   store.paused = true;
   consoleOpen(label || "Working…");
-  let offset = 0;
   let titled = !!label;
-  const t = setInterval(async () => {
-    const j = await fetchJob(id, offset);
-    if (!titled && j.status) { $("conTitle").textContent = j.status.replace(/ [✓✗]$/, ""); titled = true; }
-    if (j.chunk) { consoleWrite(j.chunk); offset = j.offset ?? offset; }
-    else if (typeof j.offset === "number") { offset = j.offset; }
-    if (j.done) {
-      clearInterval(t);
-      store.paused = false;
-      if (instance) delete store.busy[instance];
+  const release = (): void => {
+    store.paused = false;
+    if (instance) delete store.busy[instance];
+  };
+  activePoll = startPoll((offset) => fetchJob(id, offset), 800, {
+    onSnapshot(j) {
+      if (!titled && j.status) { $("conTitle").textContent = j.status.replace(/ [✓✗]$/, ""); titled = true; }
+      if (j.chunk) consoleWrite(j.chunk);
+    },
+    onDone(j) {
+      activePoll = null;
+      release();
       consoleStatus(j.status || "done", j.ok);
       toast(j.status || "done", j.ok ? "ok" : "err");
-      await refresh();
-    }
-  }, 800);
+      void refresh();
+    },
+    onLost() {
+      activePoll = null;
+      release();
+      const message = "Lost contact with this job; it may still be running";
+      consoleStatus(message, false);
+      toast(message, "err");
+      void refresh();
+    },
+    onCancel() {
+      release();
+      void refresh();
+    },
+  });
 }
 
 // ---- interactive terminal ----
@@ -90,17 +114,29 @@ async function runTerm(): Promise<void> {
   try { r = await postAction({ instance: termInstance, action: "term", cmd }); }
   catch (e) { consoleWrite("error: " + e + "\n"); termBusy = false; return; }
   if (!r.job_id) { consoleWrite((r.output || "failed") + "\n"); termBusy = false; return; }
-  let offset = 0;
-  const t = setInterval(async () => {
-    const j = await fetchJob(r.job_id!, offset);
-    if (j.chunk) { consoleWrite(j.chunk); offset = j.offset ?? offset; }
-    else if (typeof j.offset === "number") offset = j.offset;
-    if (j.done) {
-      clearInterval(t); termBusy = false; consoleWrite("\n");
-      $("conDot").className = "w-2 h-2 rounded-full bg-emerald-500";
+  stopActivePoll();
+  const finish = (color: string): void => {
+    activePoll = null;
+    termBusy = false;
+    $("conDot").className = "w-2 h-2 rounded-full " + color;
+  };
+  activePoll = startPoll((offset) => fetchJob(r.job_id!, offset), 500, {
+    onSnapshot(j) {
+      if (j.chunk) consoleWrite(j.chunk);
+    },
+    onDone() {
+      finish("bg-emerald-500");
+      consoleWrite("\n");
       input.focus();
-    }
-  }, 500);
+    },
+    onLost() {
+      finish("bg-red-500");
+      consoleWrite("\nLost contact with this command; it may still be running\n");
+    },
+    onCancel() {
+      termBusy = false;
+    },
+  });
 }
 
 function termKey(e: KeyboardEvent): void {

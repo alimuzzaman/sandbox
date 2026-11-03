@@ -1289,7 +1289,14 @@ class _NginxHostEdge:
         hostnames = list(runtime["certificate_hostnames"])
         route = self.route_name(name)
         if proxied:
-            return self.nginx.ensure_origin_certificate(self.entry, route, hostnames, client)
+            cert_path, key_path, certificate = self.nginx.ensure_origin_certificate(
+                self.entry, route, hostnames, client)
+            # A reused certificate reports no id; keep the recorded one so destroy can revoke it.
+            prior = state_entry.get("certificate") if isinstance(state_entry, dict) else None
+            if (certificate.get("id") is None and isinstance(prior, dict) and prior.get("id")
+                    and sorted(prior.get("hostnames") or []) == certificate.get("hostnames")):
+                certificate = {**certificate, "id": prior["id"]}
+            return cert_path, key_path, certificate
         if self.nginx.public_certificate_present(self.entry, route, hostnames):
             cert_path, key_path = self.nginx.public_paths(route)
             return cert_path, key_path, {"id": None, "hostnames": sorted(hostnames),
@@ -3601,6 +3608,42 @@ def _recovery_governance_authorized(validated: dict, remote_name: str) -> bool:
     return False
 
 
+_APPLIED_FIELDS = ("name", "type", "content", "proxied", "ttl", "comment")
+
+
+def _applied_record(record) -> dict:
+    """What this apply wrote, so destroy can tell whether the record is still ours.
+
+    An incomplete answer gives an empty snapshot, not a missing one: destroy leaves
+    that record alone, while a missing snapshot means a row saved before this check.
+    """
+    if not isinstance(record, dict):
+        return {}
+    if not all(isinstance(record.get(key), str) and record[key] for key in ("name", "type", "content")):
+        return {}
+    return {key: record.get(key) for key in _APPLIED_FIELDS}
+
+
+def _first_adoption_records(prior, changes: list[dict]) -> list[dict]:
+    """Records for host destroy: keep what the first apply found, per managed record.
+
+    `changes` holds what this run replaced, which rollback needs. Once a record is
+    ours, a later apply sees our own record as "previous", and destroy must not
+    restore that. A record whose id changed was recreated, so it starts over.
+    """
+    known = {
+        (item.get("zone_id"), item.get("created_id")): item
+        for item in (prior if isinstance(prior, list) else [])
+        if isinstance(item, dict) and item.get("zone_id") and item.get("created_id")
+        and "previous" in item
+    }
+    saved = []
+    for change in changes:
+        first = known.get((change["zone_id"], change["created_id"]))
+        saved.append(change if first is None else {**change, "previous": first["previous"]})
+    return saved
+
+
 def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                              _request: RecoveryRequest, operation: dict) -> dict:
     """Continue only the declared Caddy/Cloudflare edge for a proven runtime."""
@@ -3676,7 +3719,8 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             created = client.upsert_address(
                 zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous,
-                            "created_id": created.get("id")})
+                            "created_id": created.get("id"),
+                            "applied": _applied_record(created)})
         certificate = edge.after_dns(
             validated, port, secret_values, cert_path, certificate, caddy_name,
             log_path=apply_log)
@@ -3690,7 +3734,8 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
             kwargs["basic_auth_credentials"] = credentials
         _verify_edge(edge_intent["routes"], **kwargs)
         result["record"] = {
-            "certificate": certificate, "records": changes,
+            "certificate": certificate,
+            "records": _first_adoption_records(recorded.get("records"), changes),
             "caddy_name": caddy_name, "edge": {"state": "ready"},
         }
         if edge.mode != "caddy":
@@ -4681,14 +4726,16 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 cname_target = hosting.normalize_hostname(str(cname.get("content") or ""), wildcard=False)
                 if cname_target == target_host:
                     updated = client.update_record(zone["id"], cname, proxied=proxied)
-                    changes.append({"zone_id": zone["id"], "previous": cname, "created_id": updated.get("id")})
+                    changes.append({"zone_id": zone["id"], "previous": cname, "created_id": updated.get("id"),
+                                    "applied": _applied_record(updated)})
                     continue
                 raise RuntimeError(f"declared hostname {hostname} has a conflicting CNAME to {cname_target}")
             previous = next((record for record in all_records if record.get("type") == kind), None)
             if previous is None:
                 fresh_hostnames.add(hostname)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
-            changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
+            changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id"),
+                            "applied": _applied_record(created)})
         certificate = edge.after_dns(
             validated, runtime["loopback_port"], secret_values, cert_path, certificate,
             caddy_name, log_path=apply_log)
@@ -4763,7 +4810,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "loopback_port": runtime["loopback_port"],
             "compose_project": runtime["compose_project"],
             "certificate": certificate,
-            "records": changes,
+            "records": _first_adoption_records(state["hosts"][key].get("records"), changes),
             "commit": sha,
             "recorded_revision": sha,
             "caddy_name": caddy_name,

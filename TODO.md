@@ -261,11 +261,6 @@ not close the external or human gates listed below.
 
 ## P2 — protected recovery, hosting, and product gates
 
-- Host apply: keep first-adoption DNS provenance across re-applies (today the second
-  apply records Sandbox's own record as `previous`, so `host destroy` restores
-  instead of deleting it), and keep the Origin CA id when nginx reuses a certificate
-  (recorded as `id: null`, so destroy cannot revoke it). Found in the 2026-10-12
-  `host destroy` review.
 - Control DNS fallback (`_control_urlopen`) tests the review asked for: a real-opener
   POST keeping Host, Authorization and one Content-Length; HTTPS and HTTP redirects
   refused with no second request; a mismatched or untrusted certificate failing before

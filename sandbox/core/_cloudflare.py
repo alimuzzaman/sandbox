@@ -108,6 +108,18 @@ class Client:
             raise CloudflareError(f"no Cloudflare zone found for {hostname}", "zone_not_found")
         return rows[0]
 
+    def record(self, zone_id: str, record_id: str) -> dict | None:
+        """Read one record by id; None when it no longer exists."""
+        try:
+            result = self._request("GET", f"/zones/{zone_id}/dns_records/{record_id}").get("result")
+        except CloudflareError as exc:
+            if str(exc).startswith("Cloudflare request failed: HTTP 404"):
+                return None
+            raise
+        if not isinstance(result, dict):
+            raise CloudflareError("Cloudflare returned an invalid DNS record")
+        return result
+
     def records(self, zone_id: str, hostname: str) -> list[dict]:
         path = f"/zones/{zone_id}/dns_records?name={urllib.parse.quote(hostname)}"
         return list(self._request("GET", path).get("result") or [])

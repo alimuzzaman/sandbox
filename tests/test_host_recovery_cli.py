@@ -479,7 +479,7 @@ class HostRecoveryCliContractTests(unittest.TestCase):
         client = Mock()
         client.records.return_value = []
         client.current_ssl_mode.return_value = "strict"
-        client.upsert_address.return_value = {"id": "record-1"}
+        client.upsert_address.return_value = {"id": "record-1", "name": "example.test", "type": "A", "content": "192.0.2.1", "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting"}
         certificate_runtime = []
 
         def issue_certificate(_entry, _validated, runtime, state_entry,
@@ -514,6 +514,77 @@ class HostRecoveryCliContractTests(unittest.TestCase):
         verify.assert_called_once()
         self.assertEqual(certificate_runtime[0]["certificate_hostnames"],
                          ["example.test"])
+        self.assertEqual(result["record"]["records"][0]["applied"], {
+            "name": "example.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        })
+
+
+    def test_continue_host_edge_only_keeps_first_adoption_dns_provenance(self):
+        validated = {
+            "project": "project", "environment": "development",
+            "cloudflare": {"proxied": True}, "basic_auth": None,
+            "healthcheck": {"path": "/health"},
+            "routes": [{"hostname": "example.test", "mode": "proxy"}],
+        }
+        edge_intent = {
+            "records": [{"hostname": "example.test", "address": "192.0.2.1",
+                         "proxied": True, "mode": "proxy", "target": None}],
+            "routes": validated["routes"],
+            "certificate_hostnames": ["example.test"],
+            "proxied": True, "healthcheck_path": "/health",
+            "basic_auth": {"enabled": False, "username": None},
+        }
+        operation = {"digest": "sha256:" + "1" * 64, "evidence": {
+            "edge_intent": edge_intent,
+            "edge_intent_digest": canonical_digest(edge_intent),
+        }}
+        record = {
+            "loopback_port": 18000,
+            "hosting_operation": operation,
+            "records": [{"zone_id": "zone-1", "previous": None, "created_id": "record-1"}],
+        }
+        client = Mock()
+        client.records.return_value = [
+            {"id": "record-1", "type": "A", "name": "example.test", "content": "192.0.2.1"}
+        ]
+        client.current_ssl_mode.return_value = "strict"
+        client.upsert_address.return_value = {
+            "id": "record-1", "name": "example.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+
+        def issue_certificate(_entry, _validated, runtime, _state_entry,
+                              _client, _home):
+            return "/cert.pem", "/cert.key", {
+                "id": "cert-1", "hostnames": runtime["certificate_hostnames"]}
+
+        with patch.object(hosting_command, "_secret_status", return_value=({}, [])), \
+             patch.object(hosting_command.hosting, "load_host_state", return_value={
+                 "version": 1, "hosts": {"remote/project/development": record}}), \
+             patch.object(hosting_command.remote, "resolve_sandbox_home", return_value="/srv"), \
+             patch.object(hosting_command.cloudflare, "Client", return_value=client), \
+             patch.object(hosting_command, "_zone_for_hostname", return_value={
+                 "id": "zone-1", "name": "example.test"}), \
+             patch.object(hosting_command, "_read_remote_optional", return_value=None), \
+             patch.object(hosting_command, "_origin_certificate",
+                          side_effect=issue_certificate), \
+             patch.object(hosting_command.hosting, "caddyfile", return_value="edge"), \
+             patch.object(hosting_command, "_configure_host_caddy"), \
+             patch.object(hosting_command, "_verify_edge"), \
+             patch.object(hosting_command, "_ensure_host_source",
+                          side_effect=AssertionError("source path reached")), \
+             patch.object(hosting_command, "_run_compose",
+                          side_effect=AssertionError("runtime path reached")):
+            result = hosting_command._continue_host_edge_only(
+                validated, {}, "remote", Mock(), operation)
+        self.assertEqual(result["record"]["edge"], {"state": "ready"})
+        self.assertIsNone(result["record"]["records"][0]["previous"])
+        self.assertEqual(result["record"]["records"][0]["created_id"], "record-1")
+        self.assertEqual(result["record"]["records"][0]["applied"], {
+            "name": "example.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        })
 
 
 if __name__ == "__main__":

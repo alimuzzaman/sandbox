@@ -112,6 +112,26 @@ def _other_environments(state: dict, remote_name: str, project: str, environment
                   if key.startswith(prefix) and key != f"{prefix}{environment}")
 
 
+def _record_identities(item) -> set:
+    """The (zone, record id) pairs a saved DNS row can act on."""
+    if not isinstance(item, dict) or not item.get("zone_id"):
+        return set()
+    previous = item.get("previous")
+    ids = {item.get("created_id"), previous.get("id") if isinstance(previous, dict) else None}
+    return {(item["zone_id"], record_id) for record_id in ids if record_id}
+
+
+def _records_held_elsewhere(state: dict, key: str) -> set:
+    """Pairs another hosted target saved. Destroy must leave those alone."""
+    held = set()
+    for other_key, other in (state.get("hosts") or {}).items():
+        if other_key == key or not isinstance(other, dict):
+            continue
+        for item in other.get("records") or []:
+            held |= _record_identities(item)
+    return held
+
+
 def _fence_only(record) -> bool:
     """A placeholder an interrupted destroy left on a colliding name."""
     return isinstance(record, dict) and set(record) <= {"compose_project", "active_operation"} \
@@ -190,13 +210,17 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
                                "remote_probe_failed")
         probe = parse_probe(result.stdout)
     others = _other_environments(state, remote_name, project, environment)
+    held = _records_held_elsewhere(state, key)
     dns = []
     for item in (record or {}).get("records") or []:
         if isinstance(item, dict) and item.get("zone_id") and (
                 item.get("created_id") or item.get("previous")):
-            dns.append({"zone_id": item["zone_id"],
-                        "action": "restore_previous" if item.get("previous") else "delete",
-                        "record_id": (item.get("previous") or {}).get("id") or item.get("created_id")})
+            shared = bool(_record_identities(item) & held)
+            action = ("keep_shared" if shared else
+                      "restore_previous" if item.get("previous") else "delete")
+            dns.append({"zone_id": item["zone_id"], "action": action,
+                        "record_id": (item.get("previous") or {}).get("id") or item.get("created_id"),
+                        "verifiable": isinstance(item.get("applied"), dict)})
     certificate = (record or {}).get("certificate")
     origin_cert = certificate.get("id") if isinstance(certificate, dict) else None
     fences = [field for field in ("active_operation", "recovery_uncertainty")
@@ -279,10 +303,30 @@ def nginx_edge_name(name: str) -> str:
     return name.removeprefix("sandbox-")
 
 
+_COMPARED_FIELDS = ("name", "type", "content", "proxied", "ttl", "comment")
+
+
 def _remove_cloudflare(found: dict, client) -> list[dict]:
     results = []
     for item in found.get("_records") or []:
         zone_id = item["zone_id"]
+        applied = item.get("applied")
+        record_id = item.get("created_id")
+        if isinstance(applied, dict):
+            previous = item.get("previous")
+            # Restoring acts on previous.id, so it must be the record verified below.
+            mismatched = isinstance(previous, dict) and previous.get("id") != record_id
+            if (mismatched or not record_id
+                    or not all(applied.get(key) for key in ("name", "type", "content"))):
+                results.append({"zone_id": zone_id, "state": "kept_changed", "record_id": record_id})
+                continue
+            current = client.record(zone_id, record_id)
+            if current is None:
+                results.append({"zone_id": zone_id, "state": "already_absent", "record_id": record_id})
+                continue
+            if any(current.get(key) != applied.get(key) for key in _COMPARED_FIELDS):
+                results.append({"zone_id": zone_id, "state": "kept_changed", "record_id": record_id})
+                continue
         try:
             client.restore_record(zone_id, item.get("previous"), item.get("created_id"))
             results.append({"zone_id": zone_id, "state": "removed"})
@@ -321,8 +365,10 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             state = hosting.load_host_state()
         found = plan(state, entry, remote_name, project, environment)
         record = state.get("hosts", {}).get(key)
+        held = _records_held_elsewhere(state, key)
         found["_records"] = [item for item in (record or {}).get("records") or []
-                             if isinstance(item, dict) and item.get("zone_id")]
+                             if isinstance(item, dict) and item.get("zone_id")
+                             and not (_record_identities(item) & held)]
         if not found["found"]:
             return {"state": "absent", "target": key}
         if found["fences"] and not clear_fenced:
@@ -373,13 +419,20 @@ def render(result: dict, *, confirmed: bool) -> str:
     if r.get("source_kb"):
         lines.append(f"  deploy source {r['source_kb']} KB kept (shared by the project's "
                      "environments; remove it by hand once none is left)")
-    lines.append(f"  DNS records {len(result['dns_records'])}, origin certificate "
-                 f"{'yes' if result['origin_certificate'] else 'none recorded'}")
+    for row in result["dns_records"]:
+        note = "" if row.get("verifiable") else " (applied before verification; check it by hand)"
+        lines.append(f"  DNS {row['action']} {row['record_id']}{note}")
+    lines.append(f"  origin certificate {'yes' if result['origin_certificate'] else 'none recorded'}")
     lines.append(f"  local state entry {'yes' if result['state_entry'] else 'no'}")
     if result["other_environments"]:
         lines.append("  keeps deploy source for " + ", ".join(result["other_environments"]))
     if result["fences"]:
         lines.append("  fenced by " + ", ".join(result["fences"]) + " (needs --clear-fenced)")
+    for row in result.get("cloudflare") or []:
+        if row.get("state") == "kept_changed":
+            lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} changed since the last apply; left in place")
+        elif row.get("state") == "already_absent" and row.get("record_id"):
+            lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} was already gone")
     if not confirmed:
         lines.append("dry run; re-run with --confirm to remove")
     else:

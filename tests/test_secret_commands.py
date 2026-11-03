@@ -240,6 +240,30 @@ class SecretCommandTests(unittest.TestCase):
         self.assertIn("the command exited with status 11", stderr.getvalue())
         self.assertNotIn("secret use command failed", stderr.getvalue())
 
+    def test_run_timeout_is_nonzero_after_bounded_result(self):
+        args = self.parser().parse_args([
+            "run", "--source", "fixture", "--key", "API_TOKEN",
+            "--timeout-seconds", "1", "--", "synthetic-private-command",
+        ])
+        for exit_code in (None, 0):
+            service = SimpleNamespace(run_many=Mock(return_value={
+                "ok": True, "operation": "run",
+                "result": {"termination": "timed_out", "exit_code": exit_code,
+                           "output": "bounded child output\n"},
+            }))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with self.subTest(exit_code=exit_code), \
+                 patch.object(command, "_service", return_value=service), \
+                 redirect_stdout(stdout), redirect_stderr(stderr), \
+                 self.assertRaises(SystemExit) as raised:
+                command.cmd_secrets({}, args)
+            self.assertEqual(raised.exception.code, 124)
+            self.assertIn("termination=timed_out", stdout.getvalue())
+            self.assertIn("bounded child output", stdout.getvalue())
+            self.assertIn("child_timed_out", stderr.getvalue())
+            self.assertNotIn("synthetic-private-command", stderr.getvalue())
+            service.run_many.assert_called_once()
+
     def test_run_labels_selected_keys_apart_from_child_output(self):
         args = SimpleNamespace(
             action="run", source="fixture", key=None, secrets=["A_KEY=A", "B_KEY=B"],
@@ -531,6 +555,25 @@ class IsolatedProviderCommandTests(unittest.TestCase):
             self.assertNotIn(canary, combined)
         self.assertNotIn("Traceback", combined)
         return result
+
+    def test_ordinary_run_real_child_timeout_exits_124(self):
+        config_path = self.root / "sandbox.config.json"
+        config = json.loads(config_path.read_text())
+        config["secrets"]["sources"]["fixture"] = {
+            "path": ".env.fixture", "format": "dotenv",
+        }
+        config_path.write_text(json.dumps(config))
+        source = self.root / ".env.fixture"
+        source.write_text("API_TOKEN=SB_SYNTHETIC_PROVIDER_PRIVATE_841c\n")
+        source.chmod(0o600)
+        result = self.invoke(
+            "run", "--source", "fixture", "--key", "API_TOKEN",
+            "--timeout-seconds", "1", "--", sys.executable, "-c",
+            "import time; time.sleep(30)",
+        )
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("termination=timed_out exit_code=None", result.stdout)
+        self.assertIn("child_timed_out", result.stderr)
 
     def test_fixed_profile_uses_one_child_with_minimal_environment_and_redacted_json(self):
         result = self.invoke("use-profile", "--profile", "fixed", "--json")

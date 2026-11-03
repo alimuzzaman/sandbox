@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb secrets run` ordinary child timeouts now exit with status 124 after
+  printing the bounded result instead of returning 0. Operator session lifetime
+  expiry retains its separate contract.
 - Retention sweep no longer counts no-op candidates as cleaned jobs. Those rows
   still consume the bounded scan budget; when `truncated` is true, callers must
   pass the returned `cursor` via `--cursor` to continue across processes. The

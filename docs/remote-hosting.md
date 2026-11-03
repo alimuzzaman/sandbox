@@ -890,13 +890,11 @@ deadline has expired after a possible write, which returns
 `local_images_transfer_unknown`. Unexpected client exceptions return
 `local_images_transfer_unknown` in the nonzero `--json` envelope without exposing
 exception text. Either result may follow successful receipt publication.
-Preserve existing images, archives, and receipts; do not infer receipt
-absence or repeat the transfer to recover a missing acknowledgement. A caller-initiated
-retry of the same local receipt freshly observes and skips exact remote images,
-then publishes a receipt with the new verification timestamp; it does not resume a
-partial archive. Retained receipts and lock files are not cleanup targets. This
-controller correction is based on source revision `b6054fc5d097963da787d0d196b6155884b99f24`;
-it does not change the remote receipt schema or authorize a runtime update.
+Do not infer that the receipt is absent. The controller publishes once and never
+retries on its own. A caller-initiated retry of the same local receipt freshly
+observes and skips exact remote images, then publishes a receipt with the new
+verification timestamp; it does not resume a partial archive. Retained receipts
+and lock files are not cleanup targets.
 Environments declaring `hostingImages` use a separate signed
 machine authority and cannot use this workflow.
 

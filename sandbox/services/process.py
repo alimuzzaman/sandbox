@@ -288,6 +288,7 @@ class BoundedProcessRunner:
                 )
         process = subprocess.Popen(
             command, cwd=cwd, env=None if env is None else ExplicitEnvironment(env),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
             start_new_session=os.name == "posix", bufsize=0,
         )

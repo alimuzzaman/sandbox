@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `job-*` control commands with `--remote` no longer write local Compose files first, so they work on a full local disk. Remote SSH commands no longer read the caller's stdin, so a `while read` loop around them processes every line.
 - The `sb web` dashboard polls each job with one request in flight, so a slow response no longer
   duplicates output. A failed or stalled poll now ends and frees the dashboard instead of freezing
   refreshes until reload. Closing the drawer or starting another job no longer stops a job from

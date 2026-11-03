@@ -350,6 +350,21 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("invalid for ensure", result.stdout)
         self.assertIn("sb apply --instance NAME", result.stdout)
 
+    def test_secret_project_context_does_not_migrate_state(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        handler = mock.Mock()
+        with mock.patch.object(sys, "argv", ["sb", "secrets", "project-context", "--project-dir", "/tmp/project", "--json"]), \
+                mock.patch.object(cli, "COMMANDS", {"secrets": handler}), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(migrate, "maybe_auto_migrate") as auto_migrate:
+            cli.main()
+        handler.assert_called_once()
+        auto_migrate.assert_not_called()
+
     def test_project_routed_ensure_skips_compose_and_env_predispatch_writes(self):
         import sandbox.cli as cli
         import sandbox.commands.migrate as migrate

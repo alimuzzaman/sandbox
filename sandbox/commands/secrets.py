@@ -894,4 +894,6 @@ def _secrets_entrypoint(cfg, args) -> None:
 register_specs((CommandSpec(
     name="secrets", handler=_secrets_entrypoint, configure=configure_parser,
     owner=__name__, scope="global", destructive=False,
+    # A context check must not migrate state as a side effect of asking.
+    predispatch_policy=lambda args: getattr(args, "action", None) == "project-context",
 ),))

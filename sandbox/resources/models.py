@@ -24,7 +24,7 @@ PLAN_STATES = frozenset({
     "planned", "in_progress", "completed", "indeterminate", "expired",
 })
 RUN_STATES = frozenset({"completed", "partial", "indeterminate", "refused"})
-ITEM_STATES = frozenset({"removed", "skipped", "failed", "timed_out", "already_absent"})
+ITEM_STATES = frozenset({"removed", "skipped", "failed", "timed_out", "already_absent", "indeterminate"})
 NETWORK_LIFECYCLES = frozenset({"active", "idle", "orphaned", "indeterminate"})
 NETWORK_ALLOCATION_STATES = frozenset({"allocated", "available", "exhausted", "unknown"})
 NETWORK_OWNER_KINDS = frozenset({"workspace", "sandbox", "foreign", "unknown", "unmanaged"})

@@ -1607,7 +1607,11 @@ class LocalResourceAdapter:
 
     def _find_current(self, candidate: CleanupCandidate) -> ResourceObservation | None:
         from .service import CATEGORY_KINDS, RevalidationUnavailable
-        snapshot = self.observe(thorough=True, budget_seconds=30)
+        try:
+            snapshot = self.observe(thorough=True, budget_seconds=30)
+        except Exception as exc:
+            raise RevalidationUnavailable("cleanup revalidation evidence is unavailable",
+                                          "measurement_unavailable", retryable=True) from exc
         category = next((name for name, kinds in CATEGORY_KINDS.items()
                          if candidate.kind in kinds), None)
         if not category or not any(

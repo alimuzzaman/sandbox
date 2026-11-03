@@ -27,6 +27,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   within sweeps while preserving fail-closed direct cleanup exceptions, and
   truthfully reports failed workspace releases and candidate errors with
   `ok: false` in both individual cleanup outcomes and the sweep result envelope.
+  A CI archive removed before its retirement could be recorded no longer leaves
+  the job failing every later sweep; the next cleanup records it.
 - Remote diagnostics use stderr only, bound complete-line tails before decoding,
   and redact bare OpenSSH hosts/ports, usernames and remote paths before display
   truncation. No extra remote lookup or protocol change is introduced.

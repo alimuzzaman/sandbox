@@ -494,7 +494,11 @@ free-space reserve; it does not accumulate a new archive per
 attempt. The ownership projection reports its retained byte count, and explicit/age or
 pressure cleanup requests retirement of the exact digest-verified archive. Restore hashes,
 sizes, and extracts one open archive identity. Where identity-bound removal is unavailable,
-retirement fails closed without unlinking or marking the archive retired. A path
+retirement fails closed without unlinking or marking the archive retired. If an
+archive is removed but recording its retirement fails, the result still lists it
+and the job stays `retained`; the next cleanup records the retirement. An archive
+already missing from an existing retention directory is recorded as retired
+without removing anything; a missing retention directory still refuses. A path
 replacement fails closed and a failed restore removes staging without publishing a checkout.
 Generic jobs, reusable/index/legacy
 workspaces, `retain`, failed `on-success`, missing authority, unknown observations,

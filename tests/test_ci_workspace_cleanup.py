@@ -188,6 +188,31 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         record = self.workspace_repository.get(row["workspace_id"])
         return Path(record.metadata["ci_cleanup_authority"]["artifact_locator"])
 
+    def _materialization_retired(self, row):
+        record = self.workspace_repository.get(row["workspace_id"])
+        return record.metadata.get("ci_materialization_retired", False)
+
+    def _fail_retirement_record(self):
+        """Patch only the retirement's registry write; other writes stay real."""
+        real = WorkspaceRepository.mark_lifecycle
+
+        def fail(repository, workspace_id, lifecycle, **kwargs):
+            if "ci_materialization_retired" in (kwargs.get("metadata") or {}):
+                raise RuntimeError("synthetic registry failure")
+            return real(repository, workspace_id, lifecycle, **kwargs)
+
+        return patch.object(WorkspaceRepository, "mark_lifecycle",
+                            autospec=True, side_effect=fail)
+
+    def _unlink_without_broker(self):
+        """The Linux broker is not under test: remove the archive directly."""
+        def unlink(artifact, _digest, size):
+            artifact.unlink()
+            return size
+
+        return patch("sandbox.application.workspace_service._unlink_verified_artifact",
+                     side_effect=unlink)
+
     def _fail_checkout_removal(self, *, after_emptying=False):
         from sandbox.application import ci_cleanup_broker as broker
 
@@ -1445,6 +1470,103 @@ class DisposableCIWorkspaceCleanupTests(unittest.TestCase):
         row = self.job_repository.get(accepted["job_id"])
         record = self.workspace_repository.get(row["workspace_id"])
         self.assertFalse(record.metadata.get("ci_materialization_retired", False))
+
+    def test_retirement_record_failure_reports_removal_then_next_call_records_it(self):
+        checkout = self._checkout("retire-record-failure-recovery")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="retire-record-fail-first"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        row = self.job_repository.get(accepted["job_id"])
+
+        with self._unlink_without_broker(), self._fail_retirement_record():
+            self.assertTrue(self.workspaces.retire_terminal_materialization(row))
+
+        self.assertFalse(artifact.exists())
+        self.assertFalse(self._materialization_retired(row))
+        self.assertTrue(self.workspaces.has_retained_materialization(row))
+
+        self.assertFalse(self.workspaces.retire_terminal_materialization(row))
+        self.assertTrue(self._materialization_retired(row))
+        self.assertFalse(self.workspaces.has_retained_materialization(row))
+
+    def test_retirement_of_missing_archive_records_without_removing_anything(self):
+        checkout = self._checkout("retire-missing-archive")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="retire-missing-archive-req"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        row = self.job_repository.get(accepted["job_id"])
+
+        sibling = artifact.with_name("unrelated-sibling.tar.gz")
+        sibling.write_bytes(b"synthetic")
+        artifact.unlink()
+
+        with patch("sandbox.application.workspace_service._unlink_verified_artifact") as mock_unlink:
+            self.assertFalse(self.workspaces.retire_terminal_materialization(row))
+            mock_unlink.assert_not_called()
+
+        self.assertTrue(self._materialization_retired(row))
+        self.assertEqual(sibling.read_bytes(), b"synthetic")
+
+    def test_retirement_with_missing_retention_root_fails_closed(self):
+        from sandbox.workspaces.repository import WorkspaceIndexError
+
+        checkout = self._checkout("retire-missing-root")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="retire-missing-root-req"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        row = self.job_repository.get(accepted["job_id"])
+
+        shutil.rmtree(artifact.parent)
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            self.workspaces.retire_terminal_materialization(row)
+        self.assertEqual(caught.exception.code, "workspace_materialization_unavailable")
+
+        self.assertFalse(self._materialization_retired(row))
+
+    def test_retirement_of_missing_archive_keeps_registry_failure_visible(self):
+        checkout = self._checkout("retire-missing-registry-failure")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="retire-missing-reg-fail-req"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        row = self.job_repository.get(accepted["job_id"])
+
+        artifact.unlink()
+        with self._fail_retirement_record():
+            with self.assertRaisesRegex(RuntimeError, "synthetic registry failure"):
+                self.workspaces.retire_terminal_materialization(row)
+
+        self.assertFalse(self._materialization_retired(row))
+
+    def test_cleanup_recovers_after_retirement_record_failure(self):
+        checkout = self._checkout("cleanup-recovery-after-retire-failure")
+        service = self._service(lambda _descriptor: None)
+        accepted = service.submit(self._submission(checkout, request_id="cleanup-recover-retire-req"))
+        self.job_repository.transition(accepted["job_id"], "running")
+        self.job_repository.transition(accepted["job_id"], "succeeded", exit_code=0)
+        service.get(accepted["job_id"])
+        artifact = self._materialization_artifact(accepted)
+        row = self.job_repository.get(accepted["job_id"])
+
+        with self._unlink_without_broker(), self._fail_retirement_record():
+            first = service.cleanup(accepted["job_id"])
+        self.assertIn("workspace_materialization", first["removed"])
+        self.assertEqual(first["cleanup_state"], "retained")
+
+        second = service.cleanup(accepted["job_id"])
+        self.assertNotIn("workspace_materialization", second["removed"])
+        self.assertTrue(self._materialization_retired(row))
 
     def test_materialization_archive_is_bounded_inventoried_and_retained_without_safe_removal(self):
         checkout = self._checkout("archive-lifecycle")

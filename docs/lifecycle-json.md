@@ -50,8 +50,10 @@ malformed, multiple-document, and over-64-KiB stdout fail closed with
 `remote_empty_output`, `remote_invalid_output`, or
 `remote_output_too_large`; non-finite JSON constants are invalid too. Exit 255
 SSH failures report `remote_authentication_failed`, `remote_unreachable`, or
-`remote_connection_lost`: the first two mean the remote command did not run,
-and the third means completion is unknown. The SSH
+`remote_connection_lost`. These name the likely cause from SSH's message, which
+cannot prove when the failure happened and may come from the remote command itself,
+and deployment runs before it. Treat completion as unknown and inspect before
+retrying. The SSH
 client concurrently drains stdout and stderr into separate 64-KiB caps and
 terminates locally on overflow. Overflow and timeout report unknown completion
 instead of parsing a partial document. Raw tracebacks are omitted. Human output

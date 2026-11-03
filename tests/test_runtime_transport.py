@@ -1527,22 +1527,22 @@ class TestStatusJsonRedaction(unittest.TestCase):
             (
                 "Permission denied (publickey).",
                 "remote_authentication_failed",
-                "did not run",
+                "inspect",
             ),
             (
                 "ssh: Could not resolve hostname x: nodename nor servname provided",
                 "remote_unreachable",
-                "did not run",
+                "inspect",
             ),
             (
                 "ssh: connect to host x port 22: Connection refused",
                 "remote_unreachable",
-                "did not run",
+                "inspect",
             ),
             (
                 "ssh: connect to host x port 22: No route to host",
                 "remote_unreachable",
-                "did not run",
+                "inspect",
             ),
             (
                 "client_loop: send disconnect: Broken pipe",
@@ -1597,6 +1597,24 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(observed["error"]["code"], "remote_connection_lost")
         self.assertIn("completion is unknown", observed["error"]["message"])
         self.assertEqual(observed["exit_code"], 255)
+
+    def test_remote_ensure_never_claims_the_command_did_not_run(self):
+        # Stderr cannot prove when a failure happened: a remote command can print
+        # these words itself and exit 255, and deployment ran before it anyway.
+        for stderr in ("Permission denied (publickey).", "ssh: connect to host x port 22: Connection refused",
+                       "client_loop: send disconnect: Broken pipe"):
+            with self.subTest(stderr=stderr):
+                observed = self._run_remote_ensure_result(types.SimpleNamespace(
+                    returncode=255, stdout="", stderr=stderr, stdout_truncated=False,
+                    stderr_truncated=False, termination_reason="exited"))
+                self.assertNotIn("did not run", observed["error"]["message"])
+                self.assertIn("inspect", observed["error"]["message"])
+
+    def test_remote_ensure_overflow_with_ssh_status_stays_overflow(self):
+        observed = self._run_remote_ensure_result(types.SimpleNamespace(
+            returncode=255, stdout="x", stderr="Permission denied", stdout_truncated=True,
+            stderr_truncated=False, termination_reason="output_overflow"))
+        self.assertEqual(observed["error"]["code"], "remote_output_too_large")
 
     def test_remote_ensure_nonssh_empty_output_is_unchanged(self):
         result = types.SimpleNamespace(

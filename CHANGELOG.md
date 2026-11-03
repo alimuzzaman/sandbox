@@ -10,7 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 - `sb ensure --remote` reports SSH failures as `remote_authentication_failed`,
   `remote_unreachable` or `remote_connection_lost` instead of
-  `remote_empty_output`, so a caller can tell whether the remote command ran.
+  `remote_empty_output`, naming the likely cause. Completion stays unknown: inspect before retrying.
 - `job-*` control commands with `--remote` no longer write local Compose files first, so they run on a full
   local disk; `job-artifact-get --output-file` still needs local space for its file. Remote SSH commands no
   longer read the caller's stdin, so a `while read` loop around them processes every line.

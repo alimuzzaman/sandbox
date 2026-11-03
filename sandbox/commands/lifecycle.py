@@ -199,9 +199,9 @@ def _remote_ensure_failure(result) -> dict:
             ),
             "remote_timeout": "remote ensure timed out; completion is unknown",
             "remote_invalid_output": "remote ensure returned invalid JSON output",
-            "remote_authentication_failed": "SSH authentication failed; the remote command did not run",
-            "remote_unreachable": "the remote could not be reached; the remote command did not run",
-            "remote_connection_lost": "the SSH connection ended unexpectedly; completion is unknown",
+            "remote_authentication_failed": "SSH reported an authentication failure; inspect the remote before retrying",
+            "remote_unreachable": "SSH reported the remote as unreachable; inspect the remote before retrying",
+            "remote_connection_lost": "the SSH connection ended unexpectedly; completion is unknown, inspect before retrying",
         }
         if getattr(result, "returncode", None) == 255 and parse_code not in (
             "remote_output_too_large",

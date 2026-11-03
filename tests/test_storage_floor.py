@@ -199,7 +199,7 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(payload["storage"]["free_bytes"], 32 * GB)
         self.assertEqual(payload["target"]["remote"], "xcloud-london")
         self.assertNotIn("secret", json.dumps(payload))
-        self.assertIn("32.0 GB", payload["detail"])
+        self.assertIn("32.0 GiB", payload["detail"])
 
 class SafetyRegressionTest(RemoteProgramTest):
     def test_corrupt_reservations_refuse_without_overwrite(self):
@@ -572,3 +572,263 @@ class UnsafeReservationLedgerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ReadOnlyInspectionTests(unittest.TestCase):
+    def run_program(self, root):
+        import contextlib, io
+        request = {"target": str(root / "deploy-src" / "project"),
+                   "floor_bytes": 30 * GB, "default_estimate": 5 * GB,
+                   "minimum_estimate": 6 * GB, "inspect_only": True}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.object(sf, 'ssh_run', side_effect=AssertionError('no network')):
+            exec(sf._PROGRAM, {"REQUEST": request})
+        return json.loads(output.getvalue())
+
+    def test_empty_home_has_no_created_files(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            before = list(root.rglob('*'))
+            value = self.run_program(root)
+            self.assertEqual(value['status'], 'complete')
+            self.assertEqual(value['reserved_bytes'], 0)
+            self.assertEqual(value['estimate_bytes'], 6 * GB)
+            self.assertEqual(list(root.rglob('*')), before)
+
+    def test_public_readable_resource_directory_with_private_lock_is_supported(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            resources = root / 'runtime' / 'resources'
+            resources.mkdir(parents=True, mode=0o755)
+            resources.chmod(0o755)
+            (resources / 'reclaim-host.lock').touch(mode=0o600)
+            self.assertEqual(self.run_program(root)['status'], 'complete')
+            self.assertEqual(resources.stat().st_mode & 0o777, 0o755)
+
+    def test_expired_entries_are_not_pruned_or_rewritten(self):
+        import tempfile, time
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            store = root / 'runtime' / 'storage'
+            store.mkdir(parents=True, mode=0o700)
+            lock = store / 'reservations.lock'
+            lock.touch(mode=0o600)
+            ledger = store / 'reservations.json'
+            raw = json.dumps([{'expires_at': 1, 'estimate_bytes': 99 * GB},
+                              {'expires_at': time.time() + 3600, 'estimate_bytes': 2 * GB}])
+            ledger.write_text(raw)
+            ledger.chmod(0o600)
+            before = ledger.stat()
+            value = self.run_program(root)
+            self.assertEqual(value['reserved_bytes'], 2 * GB)
+            self.assertEqual(value['live_reservations'], 1)
+            self.assertEqual(ledger.read_text(), raw)
+            self.assertEqual(ledger.stat().st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(ledger.stat().st_mode, before.st_mode)
+
+    def test_busy_writer_is_not_contended_and_unsafe_evidence_is_not_repaired(self):
+        import tempfile, fcntl
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            store = root / 'runtime' / 'storage'
+            store.mkdir(parents=True, mode=0o700)
+            lock = store / 'reservations.lock'
+            lock.touch(mode=0o600)
+            with lock.open('r') as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(self.run_program(root)['status'], 'complete')
+            ledger = store / 'reservations.json'
+            ledger.write_text('[]')
+            ledger.chmod(0o664)
+            self.assertEqual(self.run_program(root)['status'], 'unavailable')
+            self.assertEqual(ledger.stat().st_mode & 0o777, 0o664)
+            ledger.unlink()
+            ledger.symlink_to(root / 'absent')
+            self.assertEqual(self.run_program(root)['status'], 'unavailable')
+
+    def test_report_units_margin_full_archive_and_provisional(self):
+        measured = {'status': 'complete', 'free_bytes': 40 * GB, 'reserved_bytes': 2 * GB,
+                    'live_reservations': 1, 'snapshot_at': 12345.0, 'estimate_bytes': 6 * GB, 'estimate_source': 'minimum'}
+        with mock.patch.object(sf, '_run_probe', return_value=measured) as run:
+            value = sf.remote_storage_floor_inspection({'storage_floor_gb': 30}, '/s/deploy-src/p', archive_bytes=2 * GB)
+        self.assertEqual(value['archive_bytes'], 2 * GB)
+        self.assertEqual(value['archive_gib'], 2)
+        self.assertEqual(value['margin_gib'], 2)
+        self.assertEqual(value['floor_gib'], 30)
+        self.assertFalse(value['provisional'])
+        self.assertFalse(value['reservation_created'])
+        request = run.call_args.args[1]
+        self.assertEqual(request['minimum_estimate'], 6 * GB)
+        self.assertTrue(request['inspect_only'])
+        self.assertNotIn('reservation_id', request)
+        with mock.patch.object(sf, '_run_probe', return_value=measured):
+            self.assertTrue(sf.remote_storage_floor_inspection({}, '/s/deploy-src/p')['provisional'])
+        with mock.patch.object(sf, '_run_probe', return_value=None):
+            unavailable = sf.remote_storage_floor_inspection({}, '/s/deploy-src/p')
+        self.assertFalse(unavailable['ok'])
+        self.assertIsNone(unavailable['margin_bytes'])
+        self.assertIn('GiB', sf.describe(value))
+
+class InspectionInvalidInputTests(unittest.TestCase):
+    def test_invalid_policy_or_archive_fails_closed_without_probe(self):
+        for remote, size, multiplier in [({'storage_floor_gb': False}, None, 3),
+                                         ({'storage_floor_gb': -1}, None, 3),
+                                         ({}, 'private-input', 3), ({}, 4, '3')]:
+            with mock.patch.object(sf, '_run_probe') as probe:
+                result = sf.remote_storage_floor_inspection(remote, '/s/deploy-src/p', archive_bytes=size, multiplier=multiplier)
+                self.assertFalse(result['ok'])
+                probe.assert_not_called()
+                self.assertNotIn('private-input', str(result))
+
+class LockFreeSnapshotReviewTests(unittest.TestCase):
+    def test_slow_dev_probe_never_blocks_concurrent_prod_admission(self):
+        import tempfile, threading, concurrent.futures, sys
+        from pathlib import Path
+        from tests.subprocess_support import run_test_process
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deploy = root / 'deploy-src'
+            deploy.mkdir()
+            scanning, proceed = threading.Event(), threading.Event()
+            def slow_history(*_args):
+                scanning.set()
+                if not proceed.wait(10):
+                    raise AssertionError('admission did not complete during inspection')
+                return None, GB, 'default'
+            request = {'default_estimate': GB, 'minimum_estimate': 0}
+            with mock.patch.object(sf, 'storage_estimate', side_effect=slow_history), \
+                 mock.patch.object(sf, 'storage_free_bytes', return_value=40 * GB), \
+                 mock.patch('fcntl.flock', side_effect=AssertionError('inspection must never flock')):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    inspection = executor.submit(sf.inspect_storage_floor, root, deploy, str(deploy / 'dev'), request, [str(root)])
+                    self.assertTrue(scanning.wait(5))
+                    admission = {'target': str(deploy / 'prod'), 'floor_bytes': 1,
+                                 'default_estimate': GB, 'minimum_estimate': 0,
+                                 'window_seconds': 3600}
+                    try:
+                        child = run_test_process([sys.executable, '-c', 'REQUEST = ' + repr(admission) + '\n' + sf._PROGRAM],
+                            env={'SANDBOX_HOME': str(root)}, capture_output=True, text=True, timeout=5)
+                        self.assertEqual(child.returncode, 0, child.stderr)
+                        value = json.loads(child.stdout)
+                        self.assertEqual(value['status'], 'complete')
+                        self.assertTrue(value['admitted'])
+                        self.assertFalse(inspection.done())
+                    finally:
+                        proceed.set()
+                    result = inspection.result(timeout=5)
+                    self.assertEqual(result['status'], 'complete')
+                    self.assertEqual(result['live_reservations'], 1)
+                    self.assertEqual(result['reserved_bytes'], GB)
+                    self.assertEqual(result['snapshot_kind'], 'point_in_time')
+
+    def test_first_writer_between_absent_snapshot_and_free_sample_fails_closed(self):
+        import tempfile, time
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deploy = root / 'deploy-src'
+            deploy.mkdir()
+            def first_admission(_roots):
+                resources = root / 'runtime' / 'resources'
+                resources.mkdir(parents=True, mode=0o700)
+                (resources / 'reclaim-host.lock').touch(mode=0o600)
+                store = root / 'runtime' / 'storage'
+                store.mkdir(mode=0o700)
+                (store / 'reservations.lock').touch(mode=0o600)
+                ledger = store / 'reservations.json'
+                ledger.write_text(json.dumps([{'expires_at': time.time() + 3600, 'estimate_bytes': 3 * GB}]))
+                ledger.chmod(0o600)
+                return 40 * GB
+            with mock.patch.object(sf, 'storage_free_bytes', side_effect=first_admission) as sample:
+                result = sf.inspect_storage_floor(root, deploy, str(deploy / 'dev'), {'default_estimate': GB}, [str(root)])
+            self.assertEqual(result['status'], 'unavailable')
+            self.assertEqual(result['reason'], 'storage_snapshot_changed')
+            sample.assert_called_once()
+
+    def test_atomic_ledger_replacement_during_free_sample_fails_closed(self):
+        import tempfile, time, os
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deploy = root / 'deploy-src'
+            deploy.mkdir()
+            store = root / 'runtime' / 'storage'
+            store.mkdir(parents=True, mode=0o700)
+            ledger = store / 'reservations.json'
+            ledger.write_text('[]')
+            ledger.chmod(0o600)
+            def replaced(_roots):
+                updated = store / 'new.json'
+                updated.write_text(json.dumps([{'expires_at': time.time() + 3600, 'estimate_bytes': GB}]))
+                updated.chmod(0o600)
+                os.replace(updated, ledger)
+                return 40 * GB
+            with mock.patch.object(sf, 'storage_free_bytes', side_effect=replaced):
+                result = sf.inspect_storage_floor(root, deploy, str(deploy / 'dev'), {'default_estimate': GB}, [str(root)])
+            self.assertEqual(result['status'], 'unavailable')
+
+    def test_history_precedes_the_single_point_in_time_free_sample(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deploy = root / 'deploy-src'
+            deploy.mkdir()
+            order = []
+            def history(*_args):
+                order.append('history')
+                return None, GB, 'default'
+            def sample(_roots):
+                order.append('sample')
+                return 40 * GB
+            with mock.patch.object(sf, 'storage_estimate', side_effect=history), \
+                 mock.patch.object(sf, 'storage_free_bytes', side_effect=sample) as free:
+                result = sf.inspect_storage_floor(root, deploy, str(deploy / 'dev'), {}, [str(root)])
+            self.assertEqual(order, ['history', 'sample'])
+            free.assert_called_once()
+            self.assertEqual(result['status'], 'complete')
+            self.assertEqual(result['reserved_bytes'], 0)
+            self.assertGreater(result['snapshot_at'], 0)
+
+class InspectionMetadataRoundThreeTests(unittest.TestCase):
+    def test_rejects_unvalidated_live_counts_and_snapshot_timestamps(self):
+        complete = {'status': 'complete', 'free_bytes': 40 * GB, 'reserved_bytes': 0,
+                    'estimate_bytes': GB, 'estimate_source': 'minimum', 'live_reservations': 0, 'snapshot_at': 12345.0}
+        cases = [('live_reservations', value) for value in (None, True, -1, 1.5, 'SB_SYNTHETIC_PRIVATE')]
+        cases += [('snapshot_at', value) for value in (None, True, -1, 0, float('nan'), float('inf'), 'SB_SYNTHETIC_PRIVATE', 10**400)]
+        for key, value in cases:
+            with self.subTest(key=key, kind=type(value).__name__), mock.patch.object(sf, '_run_probe', return_value={**complete, key: value}):
+                result = sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app')
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['reason'], 'measurement_unavailable')
+                self.assertIsNone(result['live_reservations'])
+                self.assertIsNone(result['snapshot_at'])
+                self.assertNotIn('SB_SYNTHETIC_PRIVATE', json.dumps(result))
+        with mock.patch.object(sf, '_run_probe', return_value=complete):
+            self.assertTrue(sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app')['ok'])
+
+    def test_inspection_uses_the_existing_push_minimum_without_changing_push(self):
+        from sandbox.hosting.local_images import MAX_RECEIPT_BYTES
+        complete = {'status': 'complete', 'free_bytes': 40 * GB, 'reserved_bytes': 0,
+                    'estimate_bytes': MAX_RECEIPT_BYTES, 'estimate_source': 'minimum', 'live_reservations': 0, 'snapshot_at': 12345.0}
+        with mock.patch.object(sf, '_run_probe', return_value=complete) as probe:
+            result = sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app', archive_bytes=1)
+        self.assertTrue(result['ok'])
+        self.assertEqual(probe.call_args.args[1]['minimum_estimate'], MAX_RECEIPT_BYTES)
+
+    def test_preserves_only_allowlisted_unavailable_reasons(self):
+        for reason, expected in [('storage_snapshot_changed', 'storage_snapshot_changed'),
+                                 ('SB_SYNTHETIC_PRIVATE', 'measurement_unavailable')]:
+            with mock.patch.object(sf, '_run_probe', return_value={'status': 'unavailable', 'reason': reason}):
+                result = sf.remote_storage_floor_inspection({'storage_floor_gb': 1}, '/s/deploy-src/app')
+            self.assertEqual(result['reason'], expected)
+            self.assertNotIn('SB_SYNTHETIC_PRIVATE', json.dumps(result))

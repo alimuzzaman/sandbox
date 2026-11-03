@@ -915,7 +915,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="for `remote network-range assign`: per-network subnet prefix (default 26)")
     remote_p.add_argument("--ipv4", default=None, help="public IPv4 address for hosted DNS records")
     remote_p.add_argument("--gb", "--storage-floor-gb", dest="storage_floor_gb", type=int, default=None,
-        help="set-storage-floor: free space (GB) remote test/job work must leave "
+        help="set-storage-floor: free space (GiB) remote test/job work must leave "
              "for hosted sites; 0 clears it (spec 066)")
     remote_p.add_argument("--ipv6", default=None, help="public IPv6 address for hosted DNS records")
     remote_p.add_argument("--yes", action="store_true",
@@ -1013,11 +1013,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, or heal hosted services that exhausted their restarts")
     host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local"],
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission"],
         help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
-    host_p.add_argument("--project", default=None, help="host heal: hosted project name")
+    host_p.add_argument("--project", default=None, help="host heal or image storage-admission: hosted project name")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
     host_p.add_argument("--all", action="store_true",
         help="with validate, check every declared environment")
@@ -1033,7 +1033,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--receipt-version", choices=["v1", "v2"], default="v1",
         help="build-local archive contract (v2: one shared bundle; default v1)")
     host_p.add_argument("--receipt", default=None, metavar="PATH",
-        help="local build receipt for `host image push-local`")
+        help="local build receipt for `host image push-local` or read-only `storage-admission`")
     host_p.add_argument("--local-images", default=None, metavar="DIGEST",
         help="immutable remote local-image receipt for `host apply`")
     host_p.add_argument("--timeout", type=int, default=None, metavar="SECONDS",

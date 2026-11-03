@@ -1094,3 +1094,37 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(self.events()[-1]["reason_code"], "child_exited")
         self.assertEqual({event["decision"] for event in self.events()
                           if event["phase"] == "outcome"}, {"succeeded"})
+
+class ProjectContextErrorTests(unittest.TestCase):
+    def test_project_denial_is_typed_redacted_and_has_no_original_chain(self):
+        from sandbox.application.context import ProjectRootNotAllowedError
+        from sandbox.secrets.service import _bounded_call
+        def denied():
+            raise ProjectRootNotAllowedError('/forbidden/SB_SYNTHETIC_PRIVATE')
+        result, error = _bounded_call(denied)
+        self.assertIsNone(result)
+        self.assertEqual(error.code, 'project_root_not_allowed')
+        self.assertIn('SANDBOX_PROJECT_ROOTS', error.remedy)
+        self.assertNotIn('/forbidden', str(error.as_dict()))
+        self.assertNotIn('SB_SYNTHETIC_PRIVATE', str(error.as_dict()))
+        self.assertIsNone(error.__context__)
+        self.assertIsNone(error.__cause__)
+        _, unknown = _bounded_call(lambda: (_ for _ in ()).throw(ValueError('SB_SYNTHETIC_PRIVATE')))
+        self.assertEqual(unknown.code, 'operation_failed')
+        self.assertNotIn('SB_SYNTHETIC_PRIVATE', str(unknown.as_dict()))
+
+    def test_allowed_and_denied_offload_contexts(self):
+        from sandbox.application.context import load_project_descriptor, ProjectRootNotAllowedError
+        import sandbox_core as sc
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(sc, '_allowed_roots', return_value=[root.parent]), \
+                 mock.patch.object(sc, 'load_project_config', return_value={'kind': 'compose'}) as load:
+                self.assertEqual(load_project_descriptor(root), {'kind': 'compose'})
+                load.assert_called_once_with(str(root.resolve()))
+            with mock.patch.object(sc, '_allowed_roots', return_value=[root / 'other']), \
+                 mock.patch.object(sc, 'load_project_config') as load:
+                with self.assertRaises(ProjectRootNotAllowedError) as caught:
+                    load_project_descriptor(root)
+                self.assertNotIn(str(root), str(caught.exception))
+                load.assert_not_called()

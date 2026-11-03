@@ -506,6 +506,40 @@ def _cmd_host_image_build_local(args) -> None:
     _emit(result, args.json)
 
 
+def _cmd_host_image_storage_admission(args) -> None:
+    from sandbox.hosting import local_images
+    from sandbox.transports import remote_local_images
+    if not args.remote or (not args.receipt and (not args.project or not args.environment)):
+        die("storage-admission requires --remote and either --receipt or --project with --environment")
+    if args.confirm:
+        die("storage-admission is read-only; --confirm is not accepted")
+    try:
+        storage = remote_local_images.inspect_storage(args.remote, receipt_path_value=args.receipt,
+                                                       project=args.project, environment=args.environment)
+        payload = {"ok": storage["ok"], "action": "storage-admission", "storage": storage}
+    except (local_images.LocalImageError, remote_local_images.RemoteLocalImageError):
+        payload = {"ok": False, "code": "storage_inspection_unavailable",
+                   "message": "storage admission evidence unavailable; no reservation created"}
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        storage = payload.get("storage", {})
+        verdict = "not required" if storage.get("floor_applied") is False else "passed" if payload["ok"] else "blocked"
+        reason = storage.get("reason") or payload.get("code") or "none"
+        print(f"Storage admission: {verdict}; reason: {reason}")
+        if payload.get("message"):
+            print(payload["message"])
+        if storage:
+            for key in ("free", "floor", "reserve", "reserved", "archive", "estimate", "margin"):
+                value, gib = storage.get(key + "_bytes"), storage.get(key + "_gib")
+                print(f"{key}: unknown" if value is None else f"{key}: {value} bytes ({gib} GiB)")
+            print(f"live reservations: {storage.get('live_reservations')}; provisional: {storage.get('provisional')}; advisory; no reservation created")
+            if storage.get("snapshot_at") is not None:
+                print(f"point-in-time snapshot: {storage['snapshot_at']}")
+    if not payload["ok"]:
+        raise SystemExit(1)
+
+
 def _cmd_host_image_push_local(args) -> None:
     from sandbox.delivery.context import registered_host_digest
     from sandbox.hosting import local_images
@@ -7018,11 +7052,16 @@ def cmd_host(cfg, args) -> None:
             (getattr(args, "revision", None), "build-local", "--revision"),
             (getattr(args, "receipt", None), "push-local", "--receipt"),
             (getattr(args, "artifact_timeout", None), "push-local", "--artifact-timeout")):
-        if value is not None and image_action != expected:
+        if value is not None and image_action != expected and not (label == "--receipt" and image_action == "storage-admission"):
             die(f"{label} is only available with `host image {expected}`")
     if getattr(args, "timeout", None) is not None \
             and image_action not in {"build-local", "push-local"}:
         die("--timeout is only available with `host image build-local` or `push-local`")
+    if image_action == "storage-admission":
+        if args.action != "image":
+            die("storage-admission is only available with `host image`")
+        _cmd_host_image_storage_admission(args)
+        return
     if image_action == "build-local":
         if args.action != "image":
             die("build-local is only available with `host image`")

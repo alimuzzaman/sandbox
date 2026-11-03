@@ -482,9 +482,12 @@ def _venv_paths_match(venv: Path) -> bool:
 
 
 def _install_chromium(py: Path) -> None:
-    # Progress goes to stderr: `sb visit` keeps stdout for its JSON report.
-    subprocess.check_call([str(py), "-m", "playwright", "install", "chromium"],
-                          stdout=sys.stderr)
+    # Progress goes to the process's stderr: `sb visit` keeps stdout for its JSON
+    # report. Fd 2 works even when sys.stderr was replaced by an object with no fd.
+    try:
+        subprocess.check_call([str(py), "-m", "playwright", "install", "chromium"], stdout=2)
+    except (OSError, subprocess.CalledProcessError):
+        die("could not install headless Chromium; check the network and retry")
 
 
 def ensure_tools_venv() -> Path:
@@ -509,10 +512,7 @@ def ensure_tools_venv() -> Path:
     if py.exists() and stamp.exists() and stamp.read_text().strip() == req.read_text().strip():
         # The stamp proves the packages, not the browser. This install is a
         # no-op when Chromium is present and repairs a cleared cache when not.
-        try:
-            _install_chromium(py)
-        except (OSError, subprocess.CalledProcessError):
-            die("could not install headless Chromium; check the network and retry")
+        _install_chromium(py)
         return py
 
     if not py.exists():

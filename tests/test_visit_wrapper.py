@@ -1,5 +1,4 @@
 import subprocess
-import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -55,7 +54,7 @@ class ToolsVenvBrowserTests(unittest.TestCase):
             with patch.object(_config.subprocess, "check_call") as check_call:
                 self.assertEqual(_config.ensure_tools_venv(), py)
         check_call.assert_called_once_with(
-            [str(py), "-m", "playwright", "install", "chromium"], stdout=sys.stderr)
+            [str(py), "-m", "playwright", "install", "chromium"], stdout=2)
 
     def test_browser_install_failure_is_a_clean_error(self):
         from sandbox.core import _config
@@ -70,6 +69,32 @@ class ToolsVenvBrowserTests(unittest.TestCase):
                  patch.object(_config, "die", side_effect=SystemExit(1)) as die:
                 with self.assertRaises(SystemExit):
                     _config.ensure_tools_venv()
+        die.assert_called_once()
+
+    def test_fresh_install_browser_failure_is_a_clean_error_and_leaves_no_stamp(self):
+        from sandbox.core import _config
+
+        with tempfile.TemporaryDirectory() as raw:
+            py, patches = self._venv(Path(raw))
+            stamp = py.parent.parent / ".installed"
+            stamp.unlink()
+            for active in patches:
+                active.start()
+                self.addCleanup(active.stop)
+
+            def install(command, **_kwargs):
+                if "playwright" in command:
+                    raise subprocess.CalledProcessError(1, "install")
+                return 0
+
+            with patch.object(_config.subprocess, "run",
+                              return_value=SimpleNamespace(returncode=0)), \
+                 patch.object(_config.subprocess, "check_call", side_effect=install), \
+                 patch.object(_config, "die", side_effect=SystemExit(1)) as die, \
+                 patch.object(_config, "info"):
+                with self.assertRaises(SystemExit):
+                    _config.ensure_tools_venv()
+            self.assertFalse(stamp.exists())
         die.assert_called_once()
 
 

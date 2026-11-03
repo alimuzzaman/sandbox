@@ -524,7 +524,7 @@ job ID cursor intentionally does not enforce policy options across calls; mainta
 no-op prefix. The envelope explicitly returns `"ok"`
 (truthfully reflecting whether all attempted candidate cleanups succeeded), `"cursor"`
 (string or null), `"limit"` (integer), and `"truncated"` (boolean) to support
-deterministic cross-process continuation (control protocol 21; includes additive read shape verification on cleanup state kind and sweep candidate outcomes).
+deterministic cross-process continuation (control protocol 22; includes additive read shape verification on cleanup state kind and sweep candidate outcomes).
 If the host is below its configured free-disk reserve, use
 `./sb job-retention --storage-pressure --json`; only the oldest terminal jobs
 are reclaimed until pressure clears. Active jobs and retained failed workspaces

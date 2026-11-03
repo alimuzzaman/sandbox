@@ -8,12 +8,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
-- `host destroy` reads each DNS record first and only touches one that still
-  matches what Sandbox last wrote, in every field and that no other hosted
-  target holds, and its dry run lists each DNS action. `host apply` keeps
-  first-adoption provenance across re-applies, so a record Sandbox created is
-  deleted rather than restored, and a reused nginx Origin CA certificate keeps
-  its ID.
+- `host destroy` reads a DNS record saved with a snapshot before acting, and only touches it if its name,
+  type, content, proxied status, TTL and comment still match what Sandbox last wrote and no other hosted target
+  holds it. Records saved earlier have no snapshot and are still acted on unread; the dry run lists every DNS
+  action and marks those. `host apply` keeps first-adoption provenance across re-applies, so a record Sandbox
+  created is deleted rather than restored, and a reused nginx Origin CA certificate keeps its ID.
 - `job-*` control commands with `--remote` no longer write local Compose files first, so they run on a full
   local disk; `job-artifact-get --output-file` still needs local space for its file. Remote SSH commands no
   longer read the caller's stdin, so a `while read` loop around them processes every line.

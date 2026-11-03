@@ -1297,16 +1297,21 @@ route loaded. Destroy waits up to
 `--lock-wait` seconds for the shared host state lock, like apply, and never holds
 that lock across an SSH call.
 
-Destroy undoes the first adoption, but only for a record that is still
-Sandbox's. It reads each record by ID first: one Sandbox created is deleted, and
-one it adopted is restored to what the first apply found. A record with any field
-changed since the last apply (including proxied status, TTL or comment) is left
-in place and reported with its ID and zone, and one held by another hosted target
-in local state is kept. Records saved before this check show `check it by hand`
-in the dry run, because they cannot be verified; their saved previous value may
-be Sandbox's own record. Limits: local state cannot see other uses of a record
-outside Sandbox, and another target applying onto the same record while destroy
-runs is not detected. A reused nginx Origin CA certificate keeps its recorded ID
+Destroy undoes the first adoption, but only for a record it can verify. For a record saved
+with a snapshot, it reads the record by ID first: one Sandbox created is deleted, and one it
+adopted is restored to what the first apply found. A change to its name, type, content, proxied
+status, TTL or comment since the last apply leaves the record in place, reported with its ID and
+zone; other provider fields are not compared. A record another hosted target holds in local state
+is kept, and so is one whose snapshot is incomplete or names a different record.
+
+Records saved before this check have no snapshot, so destroy still acts on them **without reading
+them first**, and can overwrite or delete a later change; their saved previous value may even be
+Sandbox's own record. The dry run marks these `check it by hand`: check them before confirming.
+
+Limits: nothing detects a concurrent writer. That covers another target applying onto the same
+record while destroy runs, a record changing between an apply's read and its write, and any
+change between destroy's read and its write. Local state also cannot see uses of a record outside
+Sandbox. A reused nginx Origin CA certificate keeps its recorded ID
 so destroy can revoke it.
 
 ### Disposable remote previews

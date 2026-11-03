@@ -444,6 +444,15 @@ class Execution(unittest.TestCase):
                 _client, results = self._destroy_row(row, {})
                 self.assertEqual(results[0]["state"], "kept_changed")
 
+    def test_dry_run_shows_untrusted_snapshots_as_kept(self):
+        for row in ({"zone_id": "z1", "created_id": "x", "applied": {}, "previous": None},
+                    {"zone_id": "z1", "created_id": "b", "previous": {"id": "a"},
+                     "applied": {"name": "a.test", "type": "A", "content": "192.0.2.1"}}):
+            with self.subTest(row=row):
+                found = destroy.plan({"hosts": {KEY: _record(records=[row])}}, ENTRY, "r1", "site",
+                                     "sandbox", probe=dict(EMPTY_PROBE))
+                self.assertEqual(found["dns_records"][0]["action"], "keep_unverifiable")
+
     def test_incomplete_applied_is_left_alone(self):
         client = FakeClient()
         record_called = []

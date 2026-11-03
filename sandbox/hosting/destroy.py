@@ -121,6 +121,18 @@ def _record_identities(item) -> set:
     return {(item["zone_id"], record_id) for record_id in ids if record_id}
 
 
+def _snapshot_untrusted(item: dict) -> bool:
+    """A saved snapshot destroy cannot act on: incomplete, or not about this record."""
+    applied = item.get("applied")
+    if not isinstance(applied, dict):
+        return False
+    previous = item.get("previous")
+    # Restoring acts on previous.id, so it must be the record verified before acting.
+    return (not item.get("created_id")
+            or (isinstance(previous, dict) and previous.get("id") != item.get("created_id"))
+            or not all(applied.get(key) for key in ("name", "type", "content")))
+
+
 def _records_held_elsewhere(state: dict, key: str) -> set:
     """Pairs another hosted target saved. Destroy must leave those alone."""
     held = set()
@@ -217,6 +229,7 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
                 item.get("created_id") or item.get("previous")):
             shared = bool(_record_identities(item) & held)
             action = ("keep_shared" if shared else
+                      "keep_unverifiable" if _snapshot_untrusted(item) else
                       "restore_previous" if item.get("previous") else "delete")
             dns.append({"zone_id": item["zone_id"], "action": action,
                         "record_id": (item.get("previous") or {}).get("id") or item.get("created_id"),
@@ -313,11 +326,7 @@ def _remove_cloudflare(found: dict, client) -> list[dict]:
         applied = item.get("applied")
         record_id = item.get("created_id")
         if isinstance(applied, dict):
-            previous = item.get("previous")
-            # Restoring acts on previous.id, so it must be the record verified below.
-            mismatched = isinstance(previous, dict) and previous.get("id") != record_id
-            if (mismatched or not record_id
-                    or not all(applied.get(key) for key in ("name", "type", "content"))):
+            if _snapshot_untrusted(item):
                 results.append({"zone_id": zone_id, "state": "kept_changed", "record_id": record_id})
                 continue
             current = client.record(zone_id, record_id)

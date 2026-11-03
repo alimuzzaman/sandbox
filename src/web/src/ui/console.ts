@@ -10,6 +10,10 @@ import { jobFlags, startPoll } from "./poller";
 // main.ts injects refresh() to avoid a circular import.
 let refresh: () => Promise<void> = async () => {};
 export function setConsoleRefresh(fn: () => Promise<void>): void { refresh = fn; }
+// refresh() does nothing while another job still pauses it, so a job that ends then
+// repaints directly; otherwise its busy spinner stays until the last job ends.
+let repaint: () => void = () => {};
+export function setConsoleRepaint(fn: () => void): void { repaint = fn; }
 
 // One owner writes to the drawer. A job that loses it keeps polling silently, so its
 // completion and flags still resolve.
@@ -57,12 +61,14 @@ export function pollJob(id: string, instance: string | null, label?: string): vo
     },
     onDone(j) {
       release();
+      repaint();
       if (drawerOwner === owner) consoleStatus(j.status || "done", j.ok);
       toast(j.status || "done", j.ok ? "ok" : "err");
       void refresh();
     },
     onLost() {
       release();
+      repaint();
       const message = "Lost contact with this job; it may still be running";
       if (drawerOwner === owner) consoleStatus(message, false);
       toast(message, "err");

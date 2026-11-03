@@ -13,11 +13,22 @@ export interface PollHandlers<T extends PollSnapshot> {
 }
 
 export const MAX_CONSECUTIVE_FAILURES = 5;
+export const REQUEST_TIMEOUT_MS = 30_000;
+
+// A request that never settles counts as a failure; a late answer is ignored.
+function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("request timed out")), timeoutMs);
+  });
+  return Promise.race([request, expired]).finally(() => clearTimeout(timer));
+}
 
 export function startPoll<T extends PollSnapshot>(
   fetchSnapshot: (offset: number) => Promise<T>,
   intervalMs: number,
   handlers: PollHandlers<T>,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): void {
   let offset = 0;
   let failures = 0;
@@ -25,7 +36,7 @@ export function startPoll<T extends PollSnapshot>(
   const tick = async (): Promise<void> => {
     let snapshot: T;
     try {
-      snapshot = await fetchSnapshot(offset);
+      snapshot = await withTimeout(fetchSnapshot(offset), timeoutMs);
       if (snapshot === null || typeof snapshot !== "object") throw new Error("invalid snapshot");
     } catch {
       failures += 1;

@@ -242,3 +242,36 @@ test("jobFlags release is idempotent", () => {
   second();
   assert.equal(store.paused, false);
 });
+
+test("a request that never settles counts as a failure and the poll still ends", async () => {
+  let calls = 0;
+  const rec = recorder();
+  startPoll(
+    () => { calls += 1; return new Promise<{ chunk?: string }>(() => {}); },
+    INTERVAL,
+    rec.handlers,
+    2,
+  );
+  await settle(120);
+  assert.deepEqual(rec.events, ["lost"]);
+  assert.equal(calls, MAX_CONSECUTIVE_FAILURES);
+});
+
+test("a late answer after a timeout is ignored", async () => {
+  const late = deferred<{ chunk?: string; done?: boolean }>();
+  let calls = 0;
+  const rec = recorder();
+  startPoll(
+    () => {
+      calls += 1;
+      return calls === 1 ? late.promise : Promise.resolve({ chunk: "second", done: true });
+    },
+    INTERVAL,
+    rec.handlers,
+    2,
+  );
+  await settle(40);
+  late.resolve({ chunk: "first", done: true });
+  await settle(10);
+  assert.deepEqual(rec.events, ["snapshot:second", "done"]);
+});

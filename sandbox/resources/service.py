@@ -540,6 +540,9 @@ class ResourceService:
                     })
             if selected is not None and {item.resource_id for item in candidates} != selected:
                 raise ResourceError("every selected resource must be present and eligible", "invalid_selection")
+            if selected is not None:
+                by_id = {item.resource_id: item for item in candidates}
+                candidates = [by_id[value] for value in resource_ids]
             plan = CleanupPlan.create(
                 scan.target, scope, candidates, exclusions,
                 scan_id=scan.scan_id, now=self.clock(),
@@ -609,17 +612,20 @@ class ResourceService:
 
         def capacity(snapshot):
             if stop_at_available_bytes is None:
-                return snapshot.capacity
-            if getattr(snapshot, "capacity_scope_id", None) == capacity_scope_id:
+                value = snapshot.capacity
+            elif getattr(snapshot, "capacity_scope_id", None) == capacity_scope_id:
                 value = snapshot.capacity
             else:
                 deep = getattr(snapshot, "deep_attribution", None)
                 value = next((row.to_dict() for row in (deep.filesystems if deep else ())
                               if row.filesystem_id == capacity_scope_id), None)
-            if (not isinstance(value, dict) or not isinstance(value.get("available_bytes"), int)
-                    or isinstance(value.get("available_bytes"), bool) or value["available_bytes"] < 0):
-                raise ResourceError("capacity scope evidence is unavailable", "capacity_scope_unavailable")
-            return {**value, "capacity_scope_id": capacity_scope_id}
+            if not isinstance(value, dict) or any(
+                type(value.get(key)) is not int or value[key] < 0
+                for key in ("used_bytes", "available_bytes")
+            ):
+                raise ResourceError("capacity observation is unavailable", "capacity_scope_unavailable")
+            return ({**value, "capacity_scope_id": capacity_scope_id}
+                    if stop_at_available_bytes is not None else dict(value))
 
         started = self.clock().astimezone(timezone.utc)
         try:

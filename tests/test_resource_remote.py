@@ -810,7 +810,7 @@ class TestRemoteProbeResilience(unittest.TestCase):
             }]), ""
         namespace["run"] = run
         self.assertEqual(namespace["remove"](), {
-            "status": "failed", "reason": "volume_identity_changed",
+            "status": "skipped", "reason": "volume_identity_changed",
         })
         self.assertEqual(calls, [("docker", "volume", "inspect", locator)])
 

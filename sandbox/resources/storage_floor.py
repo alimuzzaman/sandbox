@@ -83,7 +83,7 @@ class StorageFloorAdmissionError(RuntimeError):
 def describe(decision: dict) -> str:
     def gb(key):
         value = decision.get(key)
-        return "unknown" if value is None else f"{value / GB:.1f} GB"
+        return "unknown" if value is None else f"{value / GB:.1f} GiB"
     if decision.get("reason") == "measurement_unavailable":
         return ("remote job submission blocked by the remote storage floor: free "
                 f"space could not be measured (floor {gb('floor_bytes')})")
@@ -259,6 +259,34 @@ def remote_storage_floor_admission(remote: dict, target: str, *,
     return evaluate_storage_floor(payload, floor_gb=floor // GB)
 
 
+def remote_storage_floor_inspection(remote: dict, target: str, *, archive_bytes: int | None = None,
+                                    multiplier: int = 3, timeout: int = 60) -> dict:
+    """Advisory admission only. The later push must reserve and recheck."""
+    floor_value = remote.get("storage_floor_gb")
+    floor = 1 if floor_value is None or (type(floor_value) is int and floor_value == 0) else floor_value
+    valid = type(floor) is int and 0 < floor <= MAX_FLOOR_GB
+    valid = valid and (archive_bytes is None or _count(archive_bytes) is not None)
+    valid = valid and type(multiplier) is int and multiplier in (2, 3)
+    minimum = max(multiplier * (archive_bytes or 0), 2 * 1024**2) if valid else 0
+    archive_bytes = _count(archive_bytes)
+    request = {"target": target, "floor_bytes": floor * GB if valid else 0,
+               "default_estimate": DEFAULT_ESTIMATE_BYTES, "minimum_estimate": minimum,
+               "inspect_only": True}
+    payload = _run_probe(remote, request, timeout=timeout) if valid else None
+    decision = evaluate_storage_floor(payload, floor_gb=floor if valid else 0)
+    margin = (decision["free_bytes"] - decision["reserved_bytes"]
+              - decision["estimate_bytes"] - decision["floor_bytes"]
+              if decision["free_bytes"] is not None else None)
+    decision.update(reserve_bytes=DEFAULT_ESTIMATE_BYTES, archive_bytes=archive_bytes,
+                    margin_bytes=margin, provisional=archive_bytes is None,
+                    live_reservations=payload.get("live_reservations") if isinstance(payload, dict) else None,
+                    reservation_created=False, advisory=True)
+    for key in ("free", "floor", "reserve", "reserved", "archive", "estimate", "margin"):
+        value = decision.get(key + "_bytes")
+        decision[key + "_gib"] = value / GB if value is not None else None
+    return decision
+
+
 def remote_free_space(remote: dict, *, timeout: int = 30) -> dict:
     """Measure free space only (no estimate, no reservation) for heal."""
     request = {"target": None, "floor_bytes": None, "default_estimate": 0,
@@ -272,8 +300,110 @@ def remote_free_space(remote: dict, *, timeout: int = 30) -> dict:
             "free_bytes": free}
 
 
+def storage_estimate(deploy, target, request):
+    import subprocess, time
+    from pathlib import Path
+    history = None
+    if target:
+        slug = Path(target).name
+        try:
+            siblings = [p for p in deploy.iterdir()
+                        if p.is_dir() and not p.is_symlink()
+                        and (p.name == slug or p.name.startswith(slug + "-workspace-"))]
+        except OSError:
+            siblings = []
+        siblings.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        sizes = []
+        deadline = time.monotonic() + 20
+        for path in siblings[:3]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                out = subprocess.run(["du", "-sk", str(path)], capture_output=True,
+                                     text=True, timeout=remaining)
+                if out.returncode == 0:
+                    sizes.append(int(out.stdout.split()[0]) * 1024)
+            except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+                continue
+        if sizes:
+            history = max(sizes)
+    default_estimate = int(request.get("default_estimate") or 0)
+    minimum_estimate = int(request.get("minimum_estimate") or 0)
+    ordinary_estimate = history or default_estimate
+    estimate = max(ordinary_estimate, minimum_estimate)
+    estimate_source = ("minimum" if minimum_estimate > ordinary_estimate
+                       else "history" if history else "default")
+    return history, estimate, estimate_source
+
+
+def inspect_storage_floor(home, deploy, target, request, free):
+    """Read an advisory snapshot, without creating locks or pruning the ledger."""
+    import fcntl, json, math, os, stat, time
+    from pathlib import Path
+    descriptors = []
+    def checked(path, *, directory=False):
+        state = path.lstat()
+        if (not (stat.S_ISDIR(state.st_mode) if directory else stat.S_ISREG(state.st_mode))
+                or state.st_uid != os.geteuid() or state.st_mode & 0o022
+                or (not directory and state.st_nlink != 1)):
+            raise ValueError("unsafe storage evidence")
+        return state
+    try:
+        # No O_CREAT, chmod, mkdir, pruning, lease, or reconciliation in this path.
+        for lock_path in (home / "runtime" / "resources" / "reclaim-host.lock",
+                          home / "runtime" / "storage" / "reservations.lock"):
+            try:
+                checked(lock_path.parent, directory=True)
+                checked(lock_path)
+                descriptor = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                continue
+            descriptors.append(descriptor)
+            state = os.fstat(descriptor)
+            if (not stat.S_ISREG(state.st_mode) or state.st_uid != os.geteuid()
+                    or state.st_mode & 0o077 or state.st_nlink != 1):
+                raise ValueError("unsafe storage lock")
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        store = home / "runtime" / "storage"
+        entries = []
+        try:
+            if checked(store, directory=True).st_mode & 0o077:
+                raise ValueError("unsafe storage store")
+            ledger = store / "reservations.json"
+            checked(ledger)
+            descriptor = os.open(ledger, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as handle:
+                state = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(state.st_mode) or state.st_uid != os.geteuid()
+                        or state.st_mode & 0o022 or state.st_nlink != 1 or state.st_size > 8 * 1024**2):
+                    raise ValueError("unsafe storage ledger")
+                entries = json.loads(handle.read(8 * 1024**2 + 1))
+        except FileNotFoundError:
+            pass
+        if not isinstance(entries, list) or any(
+                not isinstance(e, dict) or type(e.get("expires_at")) not in (int, float)
+                or not math.isfinite(e["expires_at"]) or type(e.get("estimate_bytes")) is not int
+                or e["estimate_bytes"] < 0 for e in entries):
+            raise ValueError("invalid storage ledger")
+        live = [e for e in entries if e["expires_at"] > time.time()]
+        history, estimate, source = storage_estimate(deploy, target, request)
+        return {"status": "complete", "free_bytes": free,
+                "reserved_bytes": sum(e["estimate_bytes"] for e in live),
+                "live_reservations": len(live), "estimate_bytes": estimate,
+                "estimate_source": source, "history_bytes": history}
+    except BlockingIOError:
+        return {"status": "unavailable", "reason": "storage_lock_busy"}
+    except Exception:
+        return {"status": "unavailable", "reason": "storage_evidence_unavailable"}
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
 # Runs on the remote with ``REQUEST`` bound. Prints exactly one JSON line.
-_PROGRAM = RESERVATION_RELEASE_PROGRAM + r'''
+_PROGRAM = (RESERVATION_RELEASE_PROGRAM + "\n" + inspect.getsource(storage_estimate)
+            + "\n" + inspect.getsource(inspect_storage_floor)) + r'''
 import fcntl, json, math, os, stat, subprocess, time
 from pathlib import Path
 
@@ -308,6 +438,8 @@ def main():
         return emit({"status": "unavailable", "reason": "statvfs_failed"})
     if REQUEST.get("measure_only"):
         return emit({"status": "complete", "free_bytes": free})
+    if REQUEST.get("inspect_only"):
+        return emit(inspect_storage_floor(home, deploy, target, REQUEST, free))
     # Serialize admission with reclaim. The reservation protects the source
     # family after this guard is released, throughout staging/job registration.
     guard_path = home / "runtime" / "resources" / "reclaim-host.lock"
@@ -326,37 +458,7 @@ def main():
     GUARDS.append(guard)
     store = Path(REQUEST.get("reservations") or (home / "runtime" / "storage"))
     store.mkdir(parents=True, exist_ok=True, mode=0o700)
-    history = None
-    if target:
-        slug = Path(target).name
-        try:
-            siblings = [p for p in deploy.iterdir()
-                        if p.is_dir() and not p.is_symlink()
-                        and (p.name == slug or p.name.startswith(slug + "-workspace-"))]
-        except OSError:
-            siblings = []
-        siblings.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        sizes = []
-        deadline = time.monotonic() + 20
-        for path in siblings[:3]:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                out = subprocess.run(["du", "-sk", str(path)], capture_output=True,
-                                     text=True, timeout=remaining)
-                if out.returncode == 0:
-                    sizes.append(int(out.stdout.split()[0]) * 1024)
-            except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
-                continue
-        if sizes:
-            history = max(sizes)
-    default_estimate = int(REQUEST.get("default_estimate") or 0)
-    minimum_estimate = int(REQUEST.get("minimum_estimate") or 0)
-    ordinary_estimate = history or default_estimate
-    estimate = max(ordinary_estimate, minimum_estimate)
-    estimate_source = ("minimum" if minimum_estimate > ordinary_estimate
-                       else "history" if history else "default")
+    history, estimate, estimate_source = storage_estimate(deploy, target, REQUEST)
     lock = os.open(str(store / "reservations.lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

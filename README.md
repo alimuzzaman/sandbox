@@ -515,7 +515,7 @@ deletion manifest before each removal so "what happened to X" stays answerable:
 ./sb workspace release <name> --remote scaleway-sandbox    # done with it
 ./sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox
 ./sb workspace reap --remote scaleway-sandbox --dry-run
-# keep 30 GB free for hosted sites: remote test/job submissions that would
+# keep 30 GiB free for hosted sites: remote test/job submissions that would
 # cross it are refused before any upload (remote_storage_floor, spec 066)
 ./sb remote set-storage-floor scaleway-sandbox --gb 30
 # hosted services that exhausted their on-failure restarts (e.g. after a full
@@ -542,7 +542,7 @@ keeps source and retained cleanup state; workspace reap reports
 `finished_job_idle` candidate even if its stack still runs; a queued or running
 job, an unreadable job registry, a live source-family reservation, or an active lease keeps it.
 Admission and reclaim share the host reclaim guard; the largest of the three
-most recent repository footprints supplies the estimate, or a stated 5 GB default.
+most recent repository footprints supplies the estimate, or a stated 5 GiB default.
 `remote list`, `remote readiness`, and `resources status` show the configured floor. Hosted sites are
 untouchable, a partial delete is reported as a
 failure rather than success, and the default retention window is 7 days.
@@ -1418,3 +1418,31 @@ the derived key, provider name and resolution timing, not input values or result
 
 This provider changes the staged runtime revision. Upgrade through the supported
 runtime lifecycle only as part of an explicitly authorized pin/runtime rollout.
+
+### Read-only local-image storage admission
+
+`./sb host image storage-admission --remote NAME --project lenzora --environment development --json`
+reports provisional admission before a build. After building, use
+`./sb host image storage-admission --remote NAME --receipt /absolute/receipt.json --json`.
+The report includes free/floor/default reserve/live reserved/archive/estimate/margin
+in bytes and GiB, the live reservation count, and `reservation_created: false`.
+The reserve is the default estimate, not a second charge. V2 uses the full 3x
+bundle estimate; v1 conservatively counts all archives at 2x. The same bounded
+workspace-history estimate as admission is included. No Docker inventory or
+nominal image sizes are used to infer recoverable space.
+
+Inspection opens only existing locks and ledger files, ignores expired entries
+without pruning them, and fails closed on unsafe/unavailable evidence or busy
+locks. It creates no reservation, file, directory or lease. Results are advisory;
+the actual push must recheck and reserve. No cleanup runs automatically. This is
+a controller-side additive CLI capability; it does not change the runtime wire
+protocol or authorize a runtime update.
+
+Secret commands classify a denied project context as `project_root_not_allowed`
+with a fixed remedy: use an allowed checkout or add its approved parent to
+`SANDBOX_PROJECT_ROOTS`, then retry with the same `--project-dir`. Denied paths
+and secret values are omitted; unclassified failures remain generic.
+
+`./sb secrets project-context --project-dir /approved/prospective/checkout --json`
+checks the same canonical root policy without loading a descriptor or secrets.
+It supports a source checkout that has not been created yet and returns no paths.

@@ -905,3 +905,37 @@ class SSHReadinessWarningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StorageInspectionTests(unittest.TestCase):
+    def test_inspection_uses_full_v2_bundle_and_never_reserves_or_observes_docker(self):
+        from tests.test_hosting_local_images import SharedBundleReceiptTests
+        receipt = SharedBundleReceiptTests.receipt()
+        receipt['bundles']['bundle-1']['archive_bytes'] = 100_000_000
+        receipt = local_images.seal_receipt(receipt)
+        with patch.object(remote_local_images, '_entry', return_value={'storage_floor_gb': 30}), \
+             patch.object(remote_local_images._remote, 'resolve_sandbox_home', return_value='/srv/sandbox'), \
+             patch.object(local_images, 'load_receipt', return_value=(receipt, Path('/receipt'))), \
+             patch('sandbox.resources.storage_floor.remote_storage_floor_inspection', return_value={'ok': True}) as inspect, \
+             patch('sandbox.resources.storage_floor.remote_storage_floor_admission') as reserve, \
+             patch.object(remote_local_images, 'observe') as observe:
+            self.assertEqual(remote_local_images.inspect_storage('remote', receipt_path_value='/receipt'), {'ok': True})
+            self.assertEqual(inspect.call_args.kwargs['archive_bytes'], 100_000_000)
+            self.assertEqual(inspect.call_args.kwargs['multiplier'], 3)
+            reserve.assert_not_called()
+            observe.assert_not_called()
+
+    def test_mismatched_receipt_target_refuses_without_probe(self):
+        with patch.object(remote_local_images, '_entry', return_value={}), \
+             patch.object(local_images, 'load_receipt', return_value=(_receipt(), Path('/receipt'))), \
+             patch('sandbox.resources.storage_floor.remote_storage_floor_inspection') as probe:
+            with self.assertRaises(remote_local_images.RemoteLocalImageError):
+                remote_local_images.inspect_storage('remote', receipt_path_value='/receipt', project='foreign')
+            probe.assert_not_called()
+
+    def test_public_command_wiring_is_read_only_and_renders_report(self):
+        args = SimpleNamespace(action='image', image_action='storage-admission', remote='target',
+            project='lenzora', environment='development', json=True, receipt=None, confirm=False)
+        with patch.object(remote_local_images, 'inspect_storage', return_value={'ok': True, 'reservation_created': False}) as inspect, redirect_stdout(io.StringIO()) as out:
+            hosting_cmd.cmd_host({}, args)
+        self.assertFalse(json.loads(out.getvalue())['storage']['reservation_created'])
+        inspect.assert_called_once_with('target', receipt_path_value=None, project='lenzora', environment='development')

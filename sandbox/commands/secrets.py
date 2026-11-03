@@ -45,6 +45,9 @@ _DISPLAY_SOURCE_FIELDS = (
 def configure_parser(parser) -> None:
     parser.description = "Inspect, use, or update registered secrets with least disclosure"
     actions = parser.add_subparsers(dest="action", required=True)
+    context = actions.add_parser("project-context", help="check an existing or prospective project root without loading secrets")
+    context.add_argument("--project-dir", required=True)
+    context.add_argument("--json", action="store_true")
     source_info = actions.add_parser(
         "source-info", help="inspect registered file metadata without reading its contents",
     )
@@ -188,12 +191,12 @@ def configure_parser(parser) -> None:
 
 
 def _service(project_dir: str):
-    from sandbox.application.context import load_project_descriptor
+    from sandbox.secrets.service import load_secret_project_descriptor
     from sandbox.core._paths import BASE
     from sandbox.core._secrets import secret_file
     root = Path(project_dir).expanduser().resolve()
     return build_secret_service(
-        project_root=root, config=load_project_descriptor(root), personal_path=secret_file(),
+        project_root=root, config=load_secret_project_descriptor(root), personal_path=secret_file(),
         runtime_root=BASE / "runtime",
     )
 
@@ -772,6 +775,10 @@ def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None)
         _migrate(args)
         return 0
     try:
+        if args.action == "project-context":
+            from sandbox.secrets.service import validate_secret_project_context
+            _emit(validate_secret_project_context(args.project_dir), args.json)
+            return 0
         session_lifetime = _session_preflight(args) if args.action == "run" else None
         service = _service(args.project_dir)
         if args.action == "source-info":

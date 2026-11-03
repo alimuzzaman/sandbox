@@ -199,7 +199,7 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(payload["storage"]["free_bytes"], 32 * GB)
         self.assertEqual(payload["target"]["remote"], "xcloud-london")
         self.assertNotIn("secret", json.dumps(payload))
-        self.assertIn("32.0 GB", payload["detail"])
+        self.assertIn("32.0 GiB", payload["detail"])
 
 class SafetyRegressionTest(RemoteProgramTest):
     def test_corrupt_reservations_refuse_without_overwrite(self):
@@ -572,3 +572,119 @@ class UnsafeReservationLedgerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ReadOnlyInspectionTests(unittest.TestCase):
+    def run_program(self, root):
+        import contextlib, io
+        request = {"target": str(root / "deploy-src" / "project"),
+                   "floor_bytes": 30 * GB, "default_estimate": 5 * GB,
+                   "minimum_estimate": 6 * GB, "inspect_only": True}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.object(sf, 'ssh_run', side_effect=AssertionError('no network')):
+            exec(sf._PROGRAM, {"REQUEST": request})
+        return json.loads(output.getvalue())
+
+    def test_empty_home_has_no_created_files(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            before = list(root.rglob('*'))
+            value = self.run_program(root)
+            self.assertEqual(value['status'], 'complete')
+            self.assertEqual(value['reserved_bytes'], 0)
+            self.assertEqual(value['estimate_bytes'], 6 * GB)
+            self.assertEqual(list(root.rglob('*')), before)
+
+    def test_public_readable_resource_directory_with_private_lock_is_supported(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            resources = root / 'runtime' / 'resources'
+            resources.mkdir(parents=True, mode=0o755)
+            resources.chmod(0o755)
+            (resources / 'reclaim-host.lock').touch(mode=0o600)
+            self.assertEqual(self.run_program(root)['status'], 'complete')
+            self.assertEqual(resources.stat().st_mode & 0o777, 0o755)
+
+    def test_expired_entries_are_not_pruned_or_rewritten(self):
+        import tempfile, time
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            store = root / 'runtime' / 'storage'
+            store.mkdir(parents=True, mode=0o700)
+            lock = store / 'reservations.lock'
+            lock.touch(mode=0o600)
+            ledger = store / 'reservations.json'
+            raw = json.dumps([{'expires_at': 1, 'estimate_bytes': 99 * GB},
+                              {'expires_at': time.time() + 3600, 'estimate_bytes': 2 * GB}])
+            ledger.write_text(raw)
+            ledger.chmod(0o600)
+            before = ledger.stat()
+            value = self.run_program(root)
+            self.assertEqual(value['reserved_bytes'], 2 * GB)
+            self.assertEqual(value['live_reservations'], 1)
+            self.assertEqual(ledger.read_text(), raw)
+            self.assertEqual(ledger.stat().st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(ledger.stat().st_mode, before.st_mode)
+
+    def test_busy_or_unsafe_evidence_fails_closed_without_repair(self):
+        import tempfile, fcntl
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy-src').mkdir()
+            store = root / 'runtime' / 'storage'
+            store.mkdir(parents=True, mode=0o700)
+            lock = store / 'reservations.lock'
+            lock.touch(mode=0o600)
+            with lock.open('r') as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(self.run_program(root)['reason'], 'storage_lock_busy')
+            ledger = store / 'reservations.json'
+            ledger.write_text('[]')
+            ledger.chmod(0o664)
+            self.assertEqual(self.run_program(root)['status'], 'unavailable')
+            self.assertEqual(ledger.stat().st_mode & 0o777, 0o664)
+            ledger.unlink()
+            ledger.symlink_to(root / 'absent')
+            self.assertEqual(self.run_program(root)['status'], 'unavailable')
+
+    def test_report_units_margin_full_archive_and_provisional(self):
+        measured = {'status': 'complete', 'free_bytes': 40 * GB, 'reserved_bytes': 2 * GB,
+                    'live_reservations': 1, 'estimate_bytes': 6 * GB, 'estimate_source': 'minimum'}
+        with mock.patch.object(sf, '_run_probe', return_value=measured) as run:
+            value = sf.remote_storage_floor_inspection({'storage_floor_gb': 30}, '/s/deploy-src/p', archive_bytes=2 * GB)
+        self.assertEqual(value['archive_bytes'], 2 * GB)
+        self.assertEqual(value['archive_gib'], 2)
+        self.assertEqual(value['margin_gib'], 2)
+        self.assertEqual(value['floor_gib'], 30)
+        self.assertFalse(value['provisional'])
+        self.assertFalse(value['reservation_created'])
+        request = run.call_args.args[1]
+        self.assertEqual(request['minimum_estimate'], 6 * GB)
+        self.assertTrue(request['inspect_only'])
+        self.assertNotIn('reservation_id', request)
+        with mock.patch.object(sf, '_run_probe', return_value=measured):
+            self.assertTrue(sf.remote_storage_floor_inspection({}, '/s/deploy-src/p')['provisional'])
+        with mock.patch.object(sf, '_run_probe', return_value=None):
+            unavailable = sf.remote_storage_floor_inspection({}, '/s/deploy-src/p')
+        self.assertFalse(unavailable['ok'])
+        self.assertIsNone(unavailable['margin_bytes'])
+        self.assertIn('GiB', sf.describe(value))
+
+class InspectionInvalidInputTests(unittest.TestCase):
+    def test_invalid_policy_or_archive_fails_closed_without_probe(self):
+        for remote, size, multiplier in [({'storage_floor_gb': False}, None, 3),
+                                         ({'storage_floor_gb': -1}, None, 3),
+                                         ({}, 'private-input', 3), ({}, 4, '3')]:
+            with mock.patch.object(sf, '_run_probe') as probe:
+                result = sf.remote_storage_floor_inspection(remote, '/s/deploy-src/p', archive_bytes=size, multiplier=multiplier)
+                self.assertFalse(result['ok'])
+                probe.assert_not_called()
+                self.assertNotIn('private-input', str(result))

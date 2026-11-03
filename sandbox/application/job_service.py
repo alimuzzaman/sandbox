@@ -1287,56 +1287,69 @@ class JobService:
                 (not hasattr(self.workspace_registry, "has_retained_materialization") or
                  self.workspace_registry.has_retained_materialization(state))):
             retired_materialization = self.workspace_registry.retire_terminal_materialization(state)
-        if logs:
-            output = directory / "output"
-            if output.exists(): shutil.rmtree(output); removed.append("logs")
-        if artifacts:
-            artifact_dir = directory / "artifacts"
-            if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
-            if retired_materialization:
-                removed.append("workspace_materialization")
-            if (self.workspace_registry is not None and
-                    hasattr(self.workspace_registry, "release_terminal_job") and
-                    state.get("kind") == "ci" and
-                    state.get("cleanup_state") != "completed"):
-                try:
-                    rel_res = self.workspace_registry.release_terminal_job(state, self.repository)
-                    from sandbox.resources.ci_teardown import cleanup_completed
-                    if cleanup_completed(rel_res):
-                        removed.append("workspace_cleanup")
-                    elif not (isinstance(rel_res, dict) and rel_res.get("ok") is True):
+        cleanup_state = "retained"
+        try:
+            if logs:
+                output = directory / "output"
+                if output.exists(): shutil.rmtree(output); removed.append("logs")
+            if artifacts:
+                artifact_dir = directory / "artifacts"
+                if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
+                if retired_materialization:
+                    removed.append("workspace_materialization")
+                if (self.workspace_registry is not None and
+                        hasattr(self.workspace_registry, "release_terminal_job") and
+                        state.get("kind") == "ci" and
+                        state.get("cleanup_state") != "completed"):
+                    try:
+                        rel_res = self.workspace_registry.release_terminal_job(state, self.repository)
+                        from sandbox.resources.ci_teardown import cleanup_completed
+                        if cleanup_completed(rel_res):
+                            removed.append("workspace_cleanup")
+                        elif not (isinstance(rel_res, dict) and rel_res.get("ok") is True):
+                            workspace_cleanup_failed = True
+                        workspace_cleanup_pending = not cleanup_completed(rel_res)
+                    except Exception:
                         workspace_cleanup_failed = True
-                    workspace_cleanup_pending = not cleanup_completed(rel_res)
-                except Exception:
-                    workspace_cleanup_failed = True
-                    workspace_cleanup_pending = True
+                        workspace_cleanup_pending = True
 
-        if metrics:
-            metric_file = directory / "metrics.jsonl"
-            metric_dir = directory / "metrics"
-            metric_removed = False
-            if metric_file.exists():
-                metric_file.unlink()
-                metric_removed = True
-            if metric_dir.exists():
-                shutil.rmtree(metric_dir)
-                metric_removed = True
-            if metric_removed:
-                removed.append("metrics")
-        self.repository.mark_retained_metadata_unavailable(
-            job_id, logs=logs, artifacts=artifacts, metrics=metrics)
-        remaining = any((directory / name).exists() for name in ("output", "artifacts", "metrics", "metrics.jsonl"))
-        if (not remaining and self.workspace_registry is not None and
-                hasattr(self.workspace_registry, "has_retained_materialization")):
-            try:
+            if metrics:
+                metric_file = directory / "metrics.jsonl"
+                metric_dir = directory / "metrics"
+                metric_removed = False
+                if metric_file.exists():
+                    metric_file.unlink()
+                    metric_removed = True
+                if metric_dir.exists():
+                    shutil.rmtree(metric_dir)
+                    metric_removed = True
+                if metric_removed:
+                    removed.append("metrics")
+            self.repository.mark_retained_metadata_unavailable(
+                job_id, logs=logs, artifacts=artifacts, metrics=metrics)
+            remaining = any((directory / name).exists() for name in ("output", "artifacts", "metrics", "metrics.jsonl"))
+            if (not remaining and self.workspace_registry is not None and
+                    hasattr(self.workspace_registry, "has_retained_materialization")):
                 remaining = self.workspace_registry.has_retained_materialization(state)
+            cleanup_state = "retained" if remaining or workspace_cleanup_pending else "completed"
+            self.repository.set_cleanup_state(job_id, cleanup_state)
+        except Exception:
+            # A step failed after data may already be gone: keep the true
+            # removal record, mark it retained and report the failure.
+            workspace_cleanup_failed = True
+            cleanup_state = "retained"
+            if retired_materialization and "workspace_materialization" not in removed:
+                removed.append("workspace_materialization")
+            try:
+                self.repository.mark_retained_metadata_unavailable(
+                    job_id, logs="logs" in removed, artifacts="artifacts" in removed,
+                    metrics="metrics" in removed)
             except Exception:
-                # Files may already be gone, so report what was removed and
-                # treat the unobservable materialization as still retained.
-                remaining = True
-                workspace_cleanup_failed = True
-        cleanup_state = "retained" if remaining or workspace_cleanup_pending else "completed"
-        self.repository.set_cleanup_state(job_id, cleanup_state)
+                pass
+            try:
+                self.repository.set_cleanup_state(job_id, cleanup_state)
+            except Exception:
+                pass
         return {"ok": not workspace_cleanup_failed, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
 
     def retention_sweep(self, *, retention_days: int = 7, limit: int = 200,

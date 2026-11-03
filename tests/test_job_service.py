@@ -1536,6 +1536,54 @@ class JobServiceTests(unittest.TestCase):
 
             repository.close()
 
+    def test_retention_sweep_partial_removal_failure_keeps_true_removed_record(self):
+        """Logs removed, then artifact removal fails: the row lists what was removed."""
+        import shutil as shutil_module
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            now = datetime.now(timezone.utc)
+            job_ids = []
+            for index, days in enumerate((10, 8)):
+                row, _ = repository.accept(JobSubmission(
+                    "test", temp, "p", "local", f"partial-{index}",
+                    ("echo", "ok"), 60, SourceIdentity("source"),
+                    request_id=f"req-partial-{index}",
+                ))
+                jid = row["job_id"]
+                repository.transition(jid, "running")
+                repository.transition(jid, "succeeded", exit_code=0)
+                finished = (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+                repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (finished, jid))
+                job_dir = storage.job_dir(jid, create=True)
+                (job_dir / "output").mkdir(parents=True, exist_ok=True)
+                (job_dir / "output" / "log.txt").write_text("synthetic")
+                job_ids.append(jid)
+            failing, healthy = job_ids
+            artifacts = storage.job_dir(failing) / "artifacts"
+            artifacts.mkdir(parents=True, exist_ok=True)
+            (artifacts / "kept.txt").write_text("synthetic")
+            real_rmtree = shutil_module.rmtree
+
+            def rmtree(path, *args, **kwargs):
+                if Path(path) == artifacts:
+                    raise PermissionError("synthetic")
+                return real_rmtree(path, *args, **kwargs)
+
+            with patch("shutil.rmtree", side_effect=rmtree):
+                sweep = service.retention_sweep(retention_days=7)
+            self.assertFalse(sweep["ok"])
+            rows = {row["job_id"]: row for row in sweep["cleaned"]}
+            self.assertEqual(rows[failing], {"cleanup_state": "retained", "job_id": failing,
+                                             "ok": False, "removed": ["logs"]})
+            self.assertTrue(rows[healthy]["ok"])
+            self.assertEqual(rows[healthy]["removed"], ["logs"])
+            self.assertFalse((storage.job_dir(failing) / "output").exists())
+            self.assertTrue((artifacts / "kept.txt").exists())
+            self.assertEqual(repository.get(failing)["cleanup_state"], "retained")
+            repository.close()
+
     def test_ci_prior_log_removal_with_subsequent_release_failure_retains_truthful_removed_and_failure(self):
         """Physical logs removed before workspace release failure preserves truthful removed and ok:False."""
         for mode in ("raise", "failed"):

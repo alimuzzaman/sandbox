@@ -243,6 +243,9 @@ class FilesystemObservation:
     parent_mount_id: str | None = None
     capacity_scope_id: str | None = None
     mount_flags: tuple[str, ...] = ()
+    container_data_root: str | None = None
+    device: str | None = None
+    mount_point: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("filesystem_id", "display_name", "filesystem_type"):
@@ -297,6 +300,9 @@ class FilesystemObservation:
             "parent_mount_id": self.parent_mount_id,
             "capacity_scope_id": self.capacity_scope_id,
             "mount_flags": list(self.mount_flags),
+            "container_data_root": self.container_data_root,
+            "device": self.device,
+            "mount_point": self.mount_point,
         })
 
     @classmethod
@@ -321,6 +327,9 @@ class FilesystemObservation:
             parent_mount_id=value.get("parent_mount_id"),
             capacity_scope_id=value.get("capacity_scope_id"),
             mount_flags=tuple(value.get("mount_flags") or ()),
+            container_data_root=value.get("container_data_root"),
+            device=value.get("device"),
+            mount_point=value.get("mount_point"),
         )
 
 
@@ -1564,7 +1573,7 @@ class DeepAttributionCollector:
             created = 0
         age = max(now - created, 0)
         fresh = age <= _DIRECTORY_CACHE_TTL
-        if mode == "cache_only" or fresh:
+        if mode == "cache_only" or (fresh and entry.get("complete")):
             rows = [
                 [int(item[0]), str(item[1])]
                 for item in entry["rows"]
@@ -1674,7 +1683,8 @@ class DeepAttributionCollector:
         )
         if docker_info.returncode == 0:
             try:
-                docker_root = Path(json.loads(docker_info.stdout.strip()))
+                value = json.loads(docker_info.stdout.strip())
+                docker_root = Path(value) if isinstance(value, str) and Path(value).is_absolute() and value != "/" else None
             except (TypeError, ValueError, json.JSONDecodeError):
                 docker_root = None
         selected_reasons = select_filesystem_mounts(
@@ -2019,6 +2029,10 @@ class DeepAttributionCollector:
                 ),
                 selected=selected,
                 selection_reason=selection_reason,
+                container_data_root=(str(docker_root) if docker_root is not None
+                    and _mount_for_system(docker_root, rows, system_name=self.system()) == mount else None),
+                device=row.get("device"),
+                mount_point=mount,
                 status=status,
                 observed_allocated_bytes=observed,
                 hardlink_deduplication=hardlinks,

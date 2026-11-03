@@ -271,7 +271,7 @@ def directory_index(mount, argv, multiplier, timeout, keep_prefixes):
     if isinstance(entry, dict) and isinstance(entry.get("rows"), list):
         age = max(now - float(entry.get("created_at") or 0), 0)
         fresh = age <= DIRECTORY_CACHE_TTL
-        if fresh or DIRECTORY_CACHE_MODE == "cache_only":
+        if (fresh and entry.get("complete")) or DIRECTORY_CACHE_MODE == "cache_only":
             cached_rows = [
                 (int(item[0]), str(item[1]))
                 for item in entry["rows"]
@@ -420,7 +420,9 @@ def budget_outcome(category, status):
         outcome["reason"] = "probe_budget_exhausted"
         outcome["next_step"] = (
             "sb resources status" + target + " --deep --refresh --budget 1800"
-            " --detach --json builds the host index as a durable job; then"
+            " --detach --request-id " + datetime.now(timezone.utc).strftime("storage-refresh-%Y%m%dT%H%M%SZ")
+            + " --json builds the host index as a durable job; "
+            "keep that identity on replay, retain the accepted job_id, and read job-status/job-output; then"
             " sb resources status" + target + " --fast reads it"
         )
     return outcome
@@ -630,12 +632,12 @@ def docker_inventory():
         ("containers", ["docker", "ps", "-aq"], ["docker", "inspect", "--size"]),
         ("volumes", ["docker", "volume", "ls", "-q"], ["docker", "volume", "inspect"]),
         ("networks", ["docker", "network", "ls", "-q"], ["docker", "network", "inspect"]),
-        ("images", ["docker", "image", "ls", "-q"], ["docker", "image", "inspect"]),
+        ("images", ["docker", "image", "ls", "--all", "-q"], ["docker", "image", "inspect"]),
     )
     for key, list_argv, inspect_argv in commands:
         category = "docker_" + key
         code, out, _err = run(list_argv, 10)
-        identifiers = out.split()
+        identifiers = list(dict.fromkeys(out.split()))
         list_failed = code != 0
         if not identifiers:
             outcomes.append({
@@ -699,14 +701,52 @@ def docker_inventory():
     else:
         status = "timed_out" if code == 124 else "unavailable"
     outcomes.append({"category": "docker_build_cache", "status": status})
+    inventory["containers_complete"] = any(
+        row.get("category") == "docker_containers" and row.get("status") == "complete"
+        for row in outcomes)
     return inventory, outcomes
+
+def review_metadata(kind: str, record: dict, containers: list[dict], containers_complete: bool = False):
+    # Allow only review fields; exclude Env, commands, mounts and health output.
+    import re
+    sensitive = re.compile(r'(?i)(token|password|passphrase|authorization|cookie|credential|secret|key)')
+    def labels(values):
+        if not isinstance(values, dict):
+            return {}
+        return {str(key): '[redacted]' if sensitive.search(str(key)) else
+                re.sub(r'(?i)(?:[a-z]+://[^\s/@:]+:[^\s/@]+@|bearer\s+\S+|(?:token|password|secret|credential)\s*[=:]\s*\S+)', '[redacted]', str(value))
+                for key, value in values.items() if isinstance(value, (str, int, bool))}
+    identity = str(record.get('Id') or record.get('Name') or '')
+    result = {'engine_id': identity, 'references_complete': bool(containers_complete),
+              'created_at': record.get('Created') or record.get('CreatedAt'),
+              'labels': labels((record.get('Config') or {}).get('Labels')
+                               if kind in {'image', 'container'} else record.get('Labels'))}
+    if kind == 'image':
+        result.update(aliases=list(record.get('RepoTags') or ()), digests=list(record.get('RepoDigests') or ()),
+                      container_ids=sorted({str(row['Id']) for row in containers
+                                            if row.get('Image') == identity and row.get('Id')}))
+    elif kind == 'container':
+        state = record.get('State') or {}
+        result.update(image_id=record.get('Image'), restart_count=record.get('RestartCount'),
+                      health_status=(state.get('Health') or {}).get('Status'), state={key: state[key] for key in (
+            'Status', 'Running', 'Paused', 'Restarting', 'OOMKilled', 'Dead', 'ExitCode',
+            'StartedAt', 'FinishedAt') if key in state and isinstance(state[key], (str, bool, int))})
+    elif kind == 'volume':
+        result.update(driver=record.get('Driver'), options=labels(record.get('Options')),
+                      container_ids=sorted({str(row['Id']) for row in containers if row.get('Id')
+                          and any(mount.get('Type') == 'volume' and mount.get('Name') == identity
+                                  for mount in row.get('Mounts') or ())}))
+    result['labels_redacted'] = any(value == '[redacted]' or '[redacted]' in value
+                                    for key in ('labels', 'options') for value in result.get(key, {}).values())
+    return result
+
 
 def observation(kind, locator, display, owner_kind, owner_id, classification,
                 size_state, size_bytes, reclaimable, references=(), evidence=(),
                 errors=(), capacity_accounted=False, lifecycle=None,
                 active_references=(), allocation_state=None,
                 allocation_pool=None, cleanup_eligible=False,
-                last_observed=None, engine_identity=None):
+                last_observed=None, engine_identity=None, engine=None):
     value = {
         "resource_id": rid(kind, locator + ("\0" + engine_identity if engine_identity else "")),
         "kind": kind,
@@ -723,6 +763,8 @@ def observation(kind, locator, display, owner_kind, owner_id, classification,
         "evidence": list(evidence),
         "errors": list(errors),
     }
+    if engine is not None:
+        value["engine"] = engine
     if kind == "network":
         value.update({
             "lifecycle": lifecycle or "indeterminate",
@@ -1213,15 +1255,7 @@ def deep_attribution(capacity, managed_roots=()):
         }]
     host_mount = mount_for(Path("/"), rows) or rows[0]["mount_point"]
     sandbox_mount = mount_for(HOME, rows)
-    code, out, _err = run(
-        ["docker", "info", "--format", "{{json .DockerRootDir}}"], 4,
-    )
-    docker_root = None
-    if code == 0:
-        try:
-            docker_root = Path(json.loads(out.strip()))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
+    docker_root = docker_data_root()
     docker_mount = mount_for(docker_root, rows) if docker_root else None
     selected = {host_mount: "root"}
     if sandbox_mount and sandbox_mount not in selected:
@@ -1413,6 +1447,8 @@ def deep_attribution(capacity, managed_roots=()):
             "writable": bool(row.get("writable")),
             "selected": selected_mount,
             "selection_reason": selected.get(mount, "unrelated"),
+            "container_data_root": str(docker_root) if docker_root and mount == docker_mount else None,
+            "mount_point": mount,
             "status": state,
             "observed_allocated_bytes": observed,
             "hardlink_deduplication": hardlinks,
@@ -2004,17 +2040,40 @@ def host_capacity_resources(thorough):
         ))
     return resources, [budget_outcome("host_filesystem", status)]
 
+DOCKER_DATA_ROOT = None
+DOCKER_DATA_ROOT_PROBED = False
+
+def docker_data_root():
+    global DOCKER_DATA_ROOT, DOCKER_DATA_ROOT_PROBED
+    if not DOCKER_DATA_ROOT_PROBED:
+        DOCKER_DATA_ROOT_PROBED = True
+        code, output, _err = run(["docker", "info", "--format", "{{json .DockerRootDir}}"], 4)
+        if code == 0:
+            try:
+                value = json.loads(output.strip())
+                if isinstance(value, str) and Path(value).is_absolute() and value != "/":
+                    DOCKER_DATA_ROOT = Path(value)
+            except (TypeError, ValueError):
+                pass
+    return DOCKER_DATA_ROOT
+
+
 def docker_storage_resources(thorough):
     if not thorough:
         return [], [{"category": "docker_storage", "status": "not_measured"}]
     resources = []
     status = "complete"
-    roots = (
-        (Path("/var/lib/docker/overlay2"), "Docker overlay layers"),
-        (Path("/var/lib/docker/volumes"), "Docker volume storage"),
-        (Path("/var/lib/docker/buildkit"), "Docker BuildKit storage"),
-        (Path("/var/lib/docker/containers"), "Docker container logs"),
-        (Path("/var/lib/docker/image"), "Docker image metadata"),
+    docker_root = docker_data_root()
+    if docker_root is None:
+        status = "partial"
+    roots = tuple((docker_root / name, display) for name, display in (
+        ("overlay2", "Docker overlay layers"),
+        ("volumes", "Docker volume storage"),
+        ("buildkit", "Docker BuildKit storage"),
+        ("containers", "Docker container logs"),
+        ("image", "Docker image metadata"),
+    )) if docker_root is not None else ()
+    roots += (
         # containerd keeps its own content store; `docker system df` never
         # reports it, so a docker-only report silently loses that space.
         (Path("/var/lib/containerd"), "containerd content store"),
@@ -2069,7 +2128,10 @@ def docker_storage_resources(thorough):
             ("monitoring_only",), ("docker_storage_root",),
             (error,) if error else (),
         ))
-    return resources, [budget_outcome("docker_storage", status)]
+    outcome = budget_outcome("docker_storage", status)
+    if docker_root is None:
+        outcome["reason"] = "docker_data_root_unavailable"
+    return resources, [outcome]
 
 LEASE_DIR = RUNTIME / "resources" / "leases"
 DELETION_DIR = RUNTIME / "resources" / "deletions"
@@ -3043,10 +3105,9 @@ def scan():
         running = bool((container.get("State") or {}).get("Running"))
         labels = (container.get("Config") or {}).get("Labels") or {}
         project = owner(labels)
-        if not project:
-            continue
-        owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
-            workspace_projection, "compose_project", project,
+        owner_kind, owner_id, owner_evidence, owner_protected = (
+            workspace_owner(workspace_projection, "compose_project", project)
+            if project else ("unmanaged", None, ("ownership_unverified",), False)
         )
         oneoff = str(labels.get("com.docker.compose.oneoff") or "").lower() == "true"
         locator = str(container.get("Id") or container.get("Name") or "")
@@ -3069,6 +3130,9 @@ def scan():
         elif owner_protected or project in protected_projects:
             classification = "retained"
             references = ("instance_or_job_registry",)
+        elif not project:
+            classification = "unmanaged"
+            references = ()
         elif oneoff and lifecycle_complete:
             classification = "disposable_cache"
             references = ()
@@ -3089,6 +3153,7 @@ def scan():
                     "lifecycle_evidence_unavailable"
                 ),
             ),
+            engine=review_metadata("container", container, inventory["containers"], inventory.get("containers_complete", False)),
         ))
     for volume in inventory["volumes"]:
         name = volume.get("Name")
@@ -3172,6 +3237,7 @@ def scan():
             volume_evidence,
             (error,) if error else (),
             engine_identity=engine_identity,
+            engine=review_metadata("volume", volume, inventory["containers"], inventory.get("containers_complete", False)),
         ))
     for network in inventory["networks"]:
         network_id = network.get("Id")
@@ -3269,10 +3335,9 @@ def scan():
         if targeted and (target_kind != "image" or target_locator != locator):
             continue
         project = owner((image.get("Config") or {}).get("Labels"))
-        if not project:
-            continue
-        owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
-            workspace_projection, "compose_project", project,
+        owner_kind, owner_id, owner_evidence, owner_protected = (
+            workspace_owner(workspace_projection, "compose_project", project)
+            if project else ("unmanaged", None, ("ownership_unverified",), False)
         )
         used = locator in used_images
         raw_size = image.get("Size")
@@ -3285,8 +3350,8 @@ def scan():
             "active" if used or "workspace_active_reference" in owner_evidence else
             "retained" if owner_protected or project in protected_projects else
             "unverified" if owner_kind == "unknown" else
-            "disposable_cache" if lifecycle_complete else
-            "unverified"
+            "unmanaged" if not project else
+            "disposable_cache" if lifecycle_complete and inventory.get("containers_complete") else "unverified"
         )
         display = next(iter(image.get("RepoTags") or ()), locator)
         resources.append(observation(
@@ -3303,6 +3368,7 @@ def scan():
                 if owner_protected or project in protected_projects else ()
             ),
             owner_evidence,
+            engine=review_metadata("image", image, inventory["containers"], inventory.get("containers_complete", False)),
         ))
     for record in inventory["build_cache"]:
         locator = record.get("ID")
@@ -3473,14 +3539,14 @@ def scan():
                 state, measured_size, error = size(
                     path, (thorough or is_cache) and not FAST,
                 )
-                classification = "disposable_cache" if is_cache else "retained"
+                classification = "unverified" if is_cache else "retained"
                 if is_cache and state != "measured":
                     classification = "unverified"
                 item = observation(
                     "download_cache" if is_cache else "runtime", str(path), path.name,
                     "sandbox", "sandbox", classification, state, measured_size,
                     measured_size if classification == "disposable_cache" and measured_size is not None else 0,
-                    ("retention_policy",) if not is_cache else (),
+                    ("retention_policy",) if not is_cache else ("download_cache_idle_unverified",),
                     ("sandbox_runtime_root", "download_cache" if is_cache else "retention_unknown"),
                     (error,) if error else (),
                 )
@@ -3864,6 +3930,7 @@ def _observation(value: dict) -> ResourceObservation:
         allocation_pool=allocation.get("pool"),
         cleanup_eligible=bool(value.get("cleanup_eligible", False)),
         last_observed=value.get("last_observed"),
+        engine=value.get("engine"),
     )
 
 
@@ -4164,6 +4231,10 @@ class RemoteResourceAdapter:
         return {"ok": False, "reason": f"{action}_response_invalid"}
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:
+        from .service import CATEGORY_KINDS, RevalidationUnavailable
+        def unavailable():
+            return RevalidationUnavailable("cleanup revalidation evidence is unavailable",
+                                 "measurement_unavailable", retryable=True)
         entry = self._entry()
         response = self._request(entry, {
             "action": "observe",
@@ -4175,19 +4246,27 @@ class RemoteResourceAdapter:
             "target_locator": candidate.locator,
         }, 32)
         if response.returncode != 0:
-            return None
+            raise unavailable()
         try:
             payload = _salvage_payload(response.stdout) or {}
             identity = payload["identity"]
             target = StorageTarget("remote", self.remote_name, identity)
             if self._target is not None and self._target != target:
-                return None
+                raise unavailable()
             self._target = target
+            category = next((name for name, kinds in CATEGORY_KINDS.items()
+                             if candidate.kind in kinds), None)
+            outcomes = payload.get("category_outcomes") or ()
+            if not category or not any(
+                isinstance(row, dict) and row.get("category") == category
+                and row.get("status") == "complete" for row in outcomes
+            ):
+                raise unavailable()
             resources = tuple(
                 _observation(item) for item in payload.get("resources") or ()
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return None
+            raise unavailable()
         return next((
             item for item in resources
             if item.resource_id == candidate.resource_id

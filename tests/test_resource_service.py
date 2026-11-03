@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 import os
@@ -577,7 +578,7 @@ class TestResourceService(unittest.TestCase):
             references=("container:active",),
         )
         result = service.cleanup(plan_id, confirm=True)
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertEqual(result["data"]["outcomes"][0]["status"], "skipped")
         self.assertEqual(result["data"]["outcomes"][0]["reason"], "evidence_changed")
         self.assertEqual(adapter.removed, [])
@@ -601,9 +602,13 @@ class TestResourceService(unittest.TestCase):
 
     def test_owner_identity_is_stable_across_status_plan_and_apply(self):
         item = observation(
-            "workspace-container", kind="container", owner_kind="workspace",
-            owner_id="ws_unit", locator="container-id", size_bytes=500,
+            "workspace-image", kind="image", owner_kind="workspace",
+            owner_id="ws_unit", locator="image-id", size_bytes=500,
         )
+        item = replace(item, engine={
+            "engine_id": "image-id", "created_at": "2026-01-01", "aliases": ["dev:old"],
+            "labels": {}, "references_complete": True, "container_ids": [], "labels_redacted": False,
+        })
         adapter = FakeAdapter((item,))
         service = self.service(adapter)
 
@@ -618,7 +623,7 @@ class TestResourceService(unittest.TestCase):
 
         applied = service.cleanup(plan["data"]["plan_id"], confirm=True)
         self.assertTrue(applied["ok"])
-        self.assertEqual(adapter.removed, ["workspace-container"])
+        self.assertEqual(adapter.removed, ["workspace-image"])
 
     def test_remote_or_local_measurement_without_capacity_fails_safely(self):
         adapter = FakeAdapter()

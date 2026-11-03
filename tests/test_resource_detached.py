@@ -96,7 +96,7 @@ class DetachedResourceTests(unittest.TestCase):
         output = io.StringIO()
         with patch("sandbox.resources.context.resource_service", return_value=Service()), \
                 redirect_stdout(output):
-            self.assertEqual(detached.run_worker(args), 0)
+            self.assertEqual(detached.run_worker(args), 1)
 
         events = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([event["event"] for event in events], ["progress", "result"])

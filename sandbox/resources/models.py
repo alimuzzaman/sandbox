@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import re
 import secrets
 import threading
 from typing import Any, Iterable, Mapping
+
+from .engine_review import EngineReview
 
 
 TARGET_KINDS = frozenset({"local", "remote"})
@@ -480,8 +483,32 @@ class ResourceObservation:
     allocation_pool: str | None = None
     cleanup_eligible: bool = False
     last_observed: str | None = None
+    engine: EngineReview | None = None
 
     def __post_init__(self) -> None:
+        if self.engine is not None:
+            allowed = set(EngineReview.__annotations__)
+            if not isinstance(self.engine, dict) or set(self.engine) - allowed:
+                raise ValueError("engine review must contain only allowlisted metadata")
+            for key, value in self.engine.items():
+                if key in {"aliases", "digests", "container_ids"}:
+                    valid = isinstance(value, list) and all(isinstance(item, str) for item in value)
+                elif key in {"labels", "options"}:
+                    valid = isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str)
+                                                           for k, v in value.items())
+                elif key == "state":
+                    valid = isinstance(value, dict) and set(value) <= {
+                        "Status", "Running", "Paused", "Restarting", "OOMKilled", "Dead", "ExitCode",
+                        "StartedAt", "FinishedAt"} and all(isinstance(v, (str, int, bool)) for v in value.values())
+                elif key in {"references_complete", "labels_redacted"}:
+                    valid = type(value) is bool
+                elif key == "restart_count":
+                    valid = value is None or (type(value) is int and value >= 0)
+                else:
+                    valid = value is None or isinstance(value, str)
+                if not valid:
+                    raise ValueError("engine review field has an invalid type")
+            object.__setattr__(self, "engine", redact(json.loads(json.dumps(self.engine))))
         for name in ("resource_id", "kind", "locator", "display_name", "owner_kind"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
@@ -568,6 +595,8 @@ class ResourceObservation:
                 "cleanup_eligible": False,
                 "last_observed": self.last_observed,
             })
+        if self.engine is not None:
+            value["engine"] = self.engine
         return redact(value)
 
     def internal_dict(self) -> dict:
@@ -598,6 +627,8 @@ class CleanupCandidate:
             item.owner_id or "", *sorted(item.evidence), *sorted(item.references),
             item.lifecycle or "", repr(item.active_references),
             item.allocation_state or "", item.allocation_pool or "",
+            *([json.dumps(item.engine, sort_keys=True, separators=(",", ":"))]
+              if item.engine is not None else []),
         ))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -996,6 +1027,12 @@ class CleanupRun:
             "observed_reclaimed_bytes": self.observed_reclaimed_bytes,
             "capacity_before": self.capacity_before,
             "capacity_after": self.capacity_after,
+            "available_bytes_delta": (
+                self.capacity_after["available_bytes"] - self.capacity_before["available_bytes"]
+                if isinstance(self.capacity_before, dict) and isinstance(self.capacity_after, dict)
+                and isinstance(self.capacity_before.get("available_bytes"), int)
+                and isinstance(self.capacity_after.get("available_bytes"), int) else None
+            ),
             "drift": self.drift,
             "outcomes": [item.to_dict() for item in self.outcomes],
             "errors": list(self.errors),

@@ -285,4 +285,4 @@ def run_worker(args) -> int:
             ),
         )
     print(json.dumps(_event("result", payload=payload), sort_keys=True), flush=True)
-    return 0 if payload.get("ok") else 1
+    return 0 if payload.get("ok") and payload.get("status") == "complete" else 1

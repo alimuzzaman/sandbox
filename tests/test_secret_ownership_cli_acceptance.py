@@ -242,8 +242,15 @@ class SecretOwnershipCLIAcceptanceTests(unittest.TestCase):
         sources = copy.deepcopy(self.synthetic.sources)
         sources["synthetic-file"]["path"] = "proof.txt"
         self._write_raw_config(sources=sources)
-        with patch.dict(os.environ, {"SANDBOX_PROJECT_ROOTS": str(self.synthetic.root)}):
+        import sandbox.secrets.credentials.manifest as credentials
+        # Record instead of raising: the config block turns any exception into
+        # input_invalid, so a raising stub could not fail this test.
+        with patch.dict(os.environ, {"SANDBOX_PROJECT_ROOTS": str(self.synthetic.root)}), \
+             patch.object(credentials, "create_credential_store") as store, \
+             patch.object(socket, "create_connection") as connect:
             expect_error("input_invalid", lambda: build_ownership_context(self.synthetic.project))
+        store.assert_not_called()
+        connect.assert_not_called()
 
     def test_malformed_yaml_config_is_input_invalid(self):
         (self.synthetic.project / "sandbox.config.json").unlink(missing_ok=True)

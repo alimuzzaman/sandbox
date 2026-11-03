@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Explicit non-empty `SANDBOX_HOME` runs skip writing the legacy checkout-root
+  `.env` compatibility file, preventing isolated state runs from rewriting shared
+  checkout state while preserving existing output when `SANDBOX_HOME` is unset
+  or empty.
 - `sb secrets run` ordinary child timeouts now exit with status 124 after
   printing the bounded result instead of returning 0. Operator session lifetime
   expiry retains its separate contract.

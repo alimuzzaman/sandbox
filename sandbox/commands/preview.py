@@ -106,7 +106,11 @@ def _cmd_preview(cfg, args) -> None:
     action = args.action
     state = _load_state()
     if action == "list":
-        rows = sorted(state["previews"].values(), key=lambda row: row["expires_at"])
+        from sandbox.commands.lifecycle import _public_status_json
+        rows = sorted((row for row in state["previews"].values()
+                       if not args.remote or row.get("remote") == args.remote),
+                      key=lambda row: row["expires_at"])
+        rows = _public_status_json(rows)
         if args.json:
             print(json.dumps({"ok": True, "previews": rows}))
         else:

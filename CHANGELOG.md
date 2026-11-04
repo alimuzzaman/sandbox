@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb preview list` no longer prints login URLs or autologin tokens, and honours `--remote`.
 - The V2 reservation recovery snippet in `docs/remote-hosting.md` no longer fails on a host whose `python3` is older than 3.10.
 - The dashboard and wp-admin refuse a second action on a busy instance with `instance_busy` instead of
   queueing it silently, except read actions and creating an instance. wp-admin can no longer delete a

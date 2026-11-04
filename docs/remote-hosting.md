@@ -1350,6 +1350,8 @@ expiry record stored only under `$SANDBOX_HOME/runtime/remote-previews.json`.
 ./sb preview cleanup --remote myvps --confirm
 ```
 
+`preview list` never prints a login URL or token; `--remote` limits it to one remote.
+
 Creation is confirmation-gated because it deploys the selected checkout, creates
 one Cloudflare-proxied A record, configures a Caddy route, and starts a remote
 container. `destroy` removes only the recorded Caddy fragment, named Sandbox

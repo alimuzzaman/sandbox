@@ -1323,8 +1323,9 @@ operation has a 30-second timeout, which is not a total deadline), and other tar
 can refuse `operation_busy` meanwhile. A lock timeout or provider failure at this step keeps the fence and
 the state (a local read or write that times out promises less: dry-run first), and is reported as `state_lock_timeout`, `provider_timeout`, `state_timeout` or the provider's
 error; rerun with `--clear-fenced`. Earlier rows may already have been restored or deleted by then. A row with
-a snapshot is read first, so a rerun acts on it only if it still matches: one already acted on normally reads
-`already_absent` or `kept_changed`. A row saved before snapshots existed is acted on unread, so a rerun repeats
+a usable snapshot is read first, so a rerun acts on it only if it still matches: one already acted on normally reads
+`already_absent` or `kept_changed`. A row another target now holds, or whose snapshot is unusable, is left alone
+unread. A row saved before snapshots existed is acted on unread, so a rerun repeats
 its restore or delete over any later change.
 
 Limits: nothing detects a concurrent writer outside that lock. That covers another controller, which has

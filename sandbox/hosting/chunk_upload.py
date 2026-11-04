@@ -201,7 +201,7 @@ def chunk_runtime(status):
         if os.path.lexists(manifest_path):
             check=opened(manifest_path);os.close(check)
             try:valid=load_manifest(manifest_path)==manifest
-            except (ValueError,UnicodeError):pass
+            except (ValueError,UnicodeError,RecursionError):pass
         if not valid:
             temporary=plan+'/.manifest-'+os.urandom(16).hex()+'.tmp'
             fd=os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
@@ -392,7 +392,7 @@ def cleanup_chunk_plans(root, *, keep_receipt=None, keep_manifest=None, evict_ot
                             candidate=ctx.get('project')
                             if isinstance(candidate,str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',candidate):project=candidate
                             keep=keep or (keep_receipt is not None and ctx.get('receipt_digest')==keep_receipt)
-                    except (ValueError,UnicodeError,AttributeError,TypeError):pass
+                    except (ValueError,UnicodeError,AttributeError,TypeError,RecursionError):pass
             finally:os.close(fd)
         plans.append((not keep,newest,name,entries,size,project))
     retained=0;count=0;removed_projects=set()

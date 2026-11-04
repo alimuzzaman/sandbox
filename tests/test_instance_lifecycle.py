@@ -433,6 +433,7 @@ class TestApplyServerChangePolicy(unittest.TestCase):
 
 class TestEnsureServerChangePolicyRefusal(unittest.TestCase):
     def test_a_late_server_refusal_does_not_claim_nothing_changed(self):
+        import sandbox.core._instances as _instances
         cfg = {"instances": {"site": {"server": "litespeed"}}}
         pconf = {"server": "nginx", "server_declared": True}
         with mock.patch.object(_instances, "resolve_instances",

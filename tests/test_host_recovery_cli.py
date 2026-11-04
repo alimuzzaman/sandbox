@@ -123,6 +123,7 @@ class HostRecoveryCliContractTests(unittest.TestCase):
                 "routes": [{"hostname": "example.test", "mode": "proxy"}],
                 "cloudflare": {"proxied": False},
                 "healthcheck": {"path": "/health"}, "basic_auth": None,
+                "deploy": {}, "secrets": {"required": {}, "generated": {}},
             }
             with patch.object(hosting_command, "_cloudflare_drift",
                               return_value={"configured": False}) as drift:
@@ -167,6 +168,7 @@ class HostRecoveryCliContractTests(unittest.TestCase):
             root = Path(temporary)
             directory = root / "remote-registration"
             directory.mkdir(mode=0o755)
+            directory.chmod(0o755)
             with patch.object(hosting_command.remote, "RUNTIME_DIR", root), \
                  self.assertRaisesRegex(ValueError, "directory is unsafe"):
                 with hosting_command.remote.registered_remote_lock():

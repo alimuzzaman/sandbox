@@ -1206,6 +1206,51 @@ class Execution(unittest.TestCase):
         self.assertEqual(self.events[second_load_idx + 1], "write")
         self.assertEqual(self.events[second_load_idx + 2], "unlock")
 
+    def test_state_write_timeout_does_not_promise_the_fence_is_kept(self):
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        writes = []
+        real_write = RecoveryRepository._write
+
+        def counting_write(repo_self, state):
+            if len(writes) == 2:
+                raise TimeoutError("local state write timeout")
+            writes.append(state)
+            return real_write(repo_self, state)
+
+        client = FakeClient()
+        with mock.patch.object(RecoveryRepository, "_write", counting_write):
+            with self.assertRaises(destroy.DestroyError) as caught:
+                self._run(_record(), [self.PROBE, "", "removed\n"], client)
+
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(caught.exception.code, "state_timeout")
+        self.assertIn("check it with a dry run", str(caught.exception))
+        self.assertNotIn("state and fence kept", str(caught.exception))
+
+    def test_keeps_a_newly_shared_record_but_still_revokes_this_targets_certificate(self):
+        client = FakeClient()
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "x", "previous": None,
+        }])
+
+        def teardown_reply(repo):
+            st = self._last_state()
+            st.setdefault("hosts", {})["r1/other/sandbox"] = {
+                "records": [{"zone_id": "z1", "created_id": "x", "previous": None}],
+                "certificate": {"id": "cert2", "hostnames": ["other.example"]},
+            }
+            repo._write(st)
+            return "removed\n"
+
+        result, _, _ = self._run(record, [self.PROBE, "", teardown_reply], client)
+        self.assertEqual(result["state"], "destroyed")
+        cloud = result["cloudflare"]
+        self.assertIn({"zone_id": "z1", "state": "kept_shared", "record_id": "x"}, cloud)
+        self.assertIn(("cert", "cert1"), client.calls)
+        self.assertNotIn(("cert", "cert2"), client.calls)
+        dns_calls = [call for call in client.calls if call[0] == "dns"]
+        self.assertEqual(dns_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

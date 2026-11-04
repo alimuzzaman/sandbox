@@ -189,3 +189,30 @@ with patch('sandbox.transports.chunk_connections._remote.ssh_command_args',retur
                 active+=delta;peak=max(peak,active)
                 if row['target']=='fake-host':own+=delta;own_peak=max(own_peak,own)
             self.assertEqual(peak,3);self.assertEqual(own_peak,1);self.assertEqual(active,0)
+
+    def test_ambiguous_background_start_with_socket_never_reauthenticates(self):
+        import subprocess
+        pool=self.pool(1)
+        def ambiguous(argv):
+            Path(argv[argv.index('-S')+1]).touch()
+            raise subprocess.TimeoutExpired('ssh',20)
+        with patch.object(pool,'operation',side_effect=ambiguous) as operation,patch('sandbox.transports.chunk_connections.subprocess.run'):
+            with self.assertRaises(ConnectionFailure) as caught:
+                with pool:self.fail('ambiguous startup reused')
+        self.assertEqual(operation.call_count,1)
+        self.assertEqual(caught.exception.cause,'master_state_unknown')
+
+    def test_real_ssh_mux_fallback_opens_zero_connections_even_with_eight_clients(self):
+        import shutil,socket,subprocess
+        from tests.subprocess_support import synthetic_environment
+        ssh=shutil.which('ssh',path='/usr/bin:/bin')
+        if ssh is None:self.skipTest('Local OpenSSH client unavailable')
+        with tempfile.TemporaryDirectory() as directory,socket.socket() as listener:
+            listener.bind(('127.0.0.1',0));listener.listen(16);listener.settimeout(.05)
+            with patch('sandbox.transports.chunk_connections._remote.ssh_command_args',return_value=[ssh,'-F','/dev/null','-oIdentityAgent=none','-oConnectTimeout=1','-p',str(listener.getsockname()[1]),'127.0.0.1','']):
+                pool=UploadConnections({},8,lambda:10,lambda:False)
+            def client(index):
+                argv=pool.argv(str(Path(directory)/str(index)),command='true')
+                return subprocess.run(argv,capture_output=True,env=synthetic_environment({'HOME':directory}),timeout=3).returncode
+            with ThreadPoolExecutor(max_workers=8) as executor:self.assertEqual(list(executor.map(client,range(8))),[255]*8)
+            with self.assertRaises(socket.timeout):listener.accept()

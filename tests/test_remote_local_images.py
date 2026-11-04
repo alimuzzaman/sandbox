@@ -1657,7 +1657,9 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
     def test_parallel_load_quarantines_and_marks_fence_0400_before_docker(self):
         audit=self.f.home/'load-guard-proof'
         (self.f.bin/'docker').write_text('#!'+sys.executable+'\nimport pathlib,stat,sys\nroot=pathlib.Path('+repr(str(self.f.root))+')\nassert (root/"load-unverified").exists()\nassert stat.S_IMODE((root/"load-fence.lock").stat().st_mode)==0o400\npathlib.Path('+repr(str(audit))+').write_text("guarded")\nraise SystemExit(1)\n')
-        with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'transfer_unknown'):self.upload(8)
+        with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'chunk_load_unknown') as caught:self.upload(8)
+        self.assertEqual(caught.exception.failure['phase'],'docker_load')
+        self.assertEqual(caught.exception.failure['values']['docker_exit'],1)
         self.assertEqual(audit.read_text(),'guarded')
         self.assertTrue((self.f.root/'load-unverified').exists())
         self.assertEqual((self.f.root/'load-fence.lock').stat().st_mode&0o777,0o400)
@@ -1703,8 +1705,11 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
         script='import json,sys;sys.stdin.buffer.readline();print(json.dumps({"schema":1,"state":"ready"}),flush=True);sys.stdin.buffer.read()'
         args=[sys.executable,'-c',script]
         with self.ports():
-            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'chunk_protocol_unsupported'):
+            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'chunk_protocol_unsupported') as caught:
                 with chunks.Session(args,manifest,8,3,None):self.fail('old peer accepted')
+            self.assertEqual(caught.exception.failure['values']['cause'],'handshake_incompatible')
+            self.assertEqual(caught.exception.failure['values']['expected_control_protocol'],25)
+            self.assertEqual(caught.exception.failure['effects']['load'],'unknown')
         self.assertFalse(self.f.loaded.exists())
 
     def test_stale_chunks_are_cleaned_only_without_active_worker_or_quarantine(self):
@@ -1813,18 +1818,29 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
                     self.assertIsNone(worker_failure({**frame,'values':{'secret':'private-canary'}}))
 
     def test_idle_cache_is_reclaimed_before_unrelated_prod_admission(self):
-        manifest,plan=self.seed([0,2])
-        # Fresh DEV chunks are not TTL eligible, but must not steal PROD floor.
-        receipt={'schema':local_images.RECEIPT_SCHEMA_V1,'project':'prod-other-project'}
+        from sandbox.resources import storage_floor as sf
+        _manifest,plan=self.seed([0,2])
+        receipt={'schema':local_images.RECEIPT_SCHEMA,'project':'prod-other-project'}
+        target=self.f.home/'deploy-src'/receipt['project'];target.mkdir(parents=True)
         ledger=self.f.home/'runtime/storage/reservations.json'
-        entries=json.loads(ledger.read_text());entries[0]['target']='/different/dev/project'
+        entries=json.loads(ledger.read_text());entries[0]['target']=str(self.f.home/'deploy-src'/'app')
         entries.append({'id':'ordinary-job','kind':'job','target':'prod','estimate_bytes':1,'expires_at':9999999999})
         ledger.write_text(json.dumps(entries));ledger.chmod(0o600)
-        with self.ports():
-            with remote_local_images.target_image_lease('local','app','production',self.f.context['receipt_digest'],entry={}):
-                self.assertTrue(remote_local_images._reconcile_reservations({},receipt))
-                self.assertFalse(plan.exists())
-                self.assertEqual([item['id'] for item in json.loads(ledger.read_text())],['ordinary-job'])
+        def measured(_entry,command,**_kwargs):
+            argv=shlex.split(command)
+            prefix='import os\nfrom pathlib import Path\nfrom types import SimpleNamespace\nbase=Path('+repr(str(self.f.root/'chunks'))+')\ncached=sum(p.stat().st_size for p in base.glob("*/*") if p.is_file())\nos.statvfs=lambda _:SimpleNamespace(f_bavail='+str(6*sf.GB+65536)+'-cached,f_frsize=1)\n'
+            return run_test_process([sys.executable,'-c',prefix+argv[2],*argv[3:]],capture_output=True,text=True,timeout=5,env=self.f.child_env)
+        with patch.object(sf,'ssh_run',side_effect=measured):
+            before=sf.remote_storage_floor_admission({'storage_floor_gb':1},str(target),minimum_estimate_bytes=5*sf.GB)
+            self.assertFalse(before['ok'])
+            with self.ports():
+                with remote_local_images.target_image_lease('local','app','production',self.f.context['receipt_digest'],entry={}):
+                    self.assertTrue(remote_local_images._reconcile_reservations({},receipt))
+                    self.assertFalse(plan.exists())
+                    self.assertEqual([item['id'] for item in json.loads(ledger.read_text())],['ordinary-job'])
+                    after=sf.remote_storage_floor_admission({'storage_floor_gb':1},str(target),minimum_estimate_bytes=5*sf.GB)
+                    self.assertTrue(after['ok'])
+                    self.assertGreaterEqual(after['free_bytes']-after['reserved_bytes']-after['estimate_bytes'],after['floor_bytes'])
         self.assertFalse(self.f.loaded.exists())
 
     def test_idle_retention_cap_and_active_or_quarantine_exclusion(self):
@@ -1849,7 +1865,8 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
             with (plan/('1-'+'a'*64+'.part')).open('wb') as partial:partial.truncate(2*1024**3+1)
             (plan/('1-'+'a'*64+'.part')).chmod(0o600)
             cleanup_chunk_plans(str(self.f.root/'chunks'),keep_manifest=plan.name)
-            self.assertFalse(plan.exists())
+            self.assertTrue(plan.exists())
+            self.assertLessEqual(sum(item.stat().st_size for item in plan.iterdir()),2*1024**3)
 
     def test_command_renders_same_failure_contract_in_text_and_json(self):
         error=remote_local_images.RemoteLocalImageError('local_images_chunk_no_space',failure={
@@ -1897,3 +1914,21 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
         self.assertEqual(json.loads((self.f.home/'runtime/storage/reservations.json').read_text()),[])
         self.assertFalse((self.f.root/'load-unverified').exists())
         self.assertEqual((self.f.root/'load-fence.lock').stat().st_mode&0o777,0o600)
+
+
+    def test_distinct_successful_dev_receipts_leave_no_chunks_for_prod(self):
+        for digit in ('a','b','c'):
+            self.f.context['receipt_digest']='sha256:'+digit*64
+            self.f.token=digit*32;self.f.reservation()
+            self.upload(1)
+            self.assertEqual(list((self.f.root/'chunks').iterdir()),[])
+            self.assertEqual(json.loads((self.f.home/'runtime/storage/reservations.json').read_text()),[])
+
+    def test_missing_coordinator_executable_is_a_known_pretransfer_failure(self):
+        from sandbox.transports import chunk_local_images as chunks
+        with patch.object(chunks,'CHUNK_BYTES',65536):manifest=chunks.manifest_for(self.f.archive,self.f.context)
+        with self.assertRaises(remote_local_images.RemoteLocalImageError) as caught:
+            with chunks.Session(['/definitely-absent-ssh'],manifest,1,3,None):self.fail('missing executable admitted')
+        self.assertEqual(caught.exception.code,'local_images_coordinator_start_failed')
+        self.assertEqual(caught.exception.failure['effects']['load'],'not_started')
+        self.assertEqual(caught.exception.failure['values']['errno'],2)

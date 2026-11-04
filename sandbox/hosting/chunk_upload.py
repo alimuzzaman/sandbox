@@ -308,15 +308,21 @@ def chunk_runtime(status):
         status.update(phase='docker_load',values={})
         status['effects'].update(load='may_have_run',quarantine=True)
         docker=subprocess.Popen(['docker','image','load'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,pass_fds=(fence,))
-        for item in manifest['chunks']:
-            fd=opened(leaf(plan,item,'.chunk'))
-            try:
-                while True:
-                    raw=os.read(fd,1048576)
-                    if not raw:break
-                    docker.stdin.write(raw)
-            finally:os.close(fd)
-        docker.stdin.close()
+        try:
+            for item in manifest['chunks']:
+                fd=opened(leaf(plan,item,'.chunk'))
+                try:
+                    while True:
+                        raw=os.read(fd,1048576)
+                        if not raw:break
+                        docker.stdin.write(raw)
+                finally:os.close(fd)
+            docker.stdin.close()
+        except BrokenPipeError:
+            try:docker.stdin.close()
+            except BrokenPipeError:pass
+            status['values']={'docker_exit':docker.wait(timeout=timeout)}
+            raise ValueError('chunk_load_unknown') from None
         status['values']={'docker_exit':docker.wait(timeout=timeout)}
         if status['values']['docker_exit']!=0:raise ValueError('chunk_load_unknown')
         status['effects']['load']='completed'
@@ -350,12 +356,13 @@ def cleanup_chunk_plans(root, *, keep_receipt=None, keep_manifest=None, evict_ot
     four plans; idle retention is at most 2 GiB. Before unrelated admission all
     foreign idle plans are removed, regardless of TTL. Never called unfenced.
     """
+    import hashlib
     import json
     import os
     import re
     import stat
     import time
-    if not os.path.lexists(root):return
+    if not os.path.lexists(root):return set()
     def directory(name):
         info=os.lstat(name)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:raise ValueError('unsafe_chunk_cache',{'expected_mode':448,'actual_mode':stat.S_IMODE(info.st_mode),'expected_uid':os.geteuid(),'actual_uid':info.st_uid})
@@ -373,27 +380,46 @@ def cleanup_chunk_plans(root, *, keep_receipt=None, keep_manifest=None, evict_ot
             info=os.lstat(plan+'/'+entry)
             if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1:raise ValueError('unsafe_chunk_cache',{'expected_mode':384,'actual_mode':stat.S_IMODE(info.st_mode),'expected_uid':os.geteuid(),'actual_uid':info.st_uid,'links':info.st_nlink})
             newest=max(newest,info.st_mtime);size+=info.st_size
-        keep=name==keep_manifest
-        if keep_receipt is not None and 'manifest.json' in entries:
+        keep=name==keep_manifest;project=None
+        if 'manifest.json' in entries:
             fd=os.open(plan+'/manifest.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
             try:
                 info=os.fstat(fd)
                 if info.st_size<=2097152:
-                    try:keep=keep or json.loads(os.read(fd,2097153)).get('context',{}).get('receipt_digest')==keep_receipt
-                    except (ValueError,UnicodeError,AttributeError):pass
+                    try:
+                        meta=json.loads(os.read(fd,2097153));ctx=meta.get('context',{})
+                        if hashlib.sha256(json.dumps(meta,sort_keys=True,separators=(',',':')).encode()).hexdigest()==name:
+                            candidate=ctx.get('project')
+                            if isinstance(candidate,str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',candidate):project=candidate
+                            keep=keep or (keep_receipt is not None and ctx.get('receipt_digest')==keep_receipt)
+                    except (ValueError,UnicodeError,AttributeError,TypeError):pass
             finally:os.close(fd)
-        plans.append((not keep,newest,name,entries,size))
-    retained=0;count=0
-    for foreign,newest,name,entries,size in sorted(plans):
-        remove=(name==finish_manifest or newest<time.time()-86400 or
-                (evict_other and foreign) or retained+size>2*1024**3 or count>=4)
+        plans.append((not keep,newest,name,entries,size,project))
+    retained=0;count=0;removed_projects=set()
+    for foreign,newest,name,entries,size,project in sorted(plans):
+        metadata=os.lstat(root+'/'+name+'/manifest.json').st_size if 'manifest.json' in entries else 0
+        remove=(retained+metadata>2*1024**3 or name==finish_manifest or newest<time.time()-86400 or
+                (evict_other and foreign) or count>=4)
         if remove:
             for entry in entries:os.unlink(root+'/'+name+'/'+entry)
             os.rmdir(root+'/'+name)
-        else:retained+=size;count+=1
+            if project is not None:removed_projects.add(project)
+        else:
+            # Retain independent verified chunks up to the idle cap, rather
+            # than throwing away every chunk of a large interrupted bundle.
+            used=0
+            for entry in sorted(entries,key=lambda item:(item!='manifest.json',not item.endswith('.chunk'),item)):
+                current=os.lstat(root+'/'+name+'/'+entry).st_size
+                if entry!='manifest.json' and retained+used+current>2*1024**3:os.unlink(root+'/'+name+'/'+entry)
+                else:used+=current
+            retained+=used;count+=1
+            fd=os.open(root+'/'+name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(fd)
+            finally:os.close(fd)
     fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     try:os.fsync(fd)
     finally:os.close(fd)
+    return removed_projects
 
 
 CLEANUP_PROGRAM=inspect.getsource(cleanup_chunk_plans)

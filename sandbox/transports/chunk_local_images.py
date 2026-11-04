@@ -47,6 +47,9 @@ class Session:
         self.finalizing=False;self.process=None;self.timer=None;self.pending=b'';self.deadline=time.monotonic()+timeout
     def channel_failure(self,cause):
         return RemoteLocalImageError('local_images_coordinator_channel_lost',failure={'phase':'finalize' if self.finalizing else 'coordinator_setup','values':{'cause':cause,'exit_code':self.process.poll() if self.process else None},'effects':{'cache':'unknown','load':'unknown' if self.finalizing else 'not_started','reservation':'unknown'}})
+    def protocol_failure(self,cause,actual=None):
+        from sandbox.remote_runtime.protocol import CONTROL_PROTOCOL_SPOKEN
+        return RemoteLocalImageError('local_images_chunk_protocol_unsupported',failure={'phase':'coordinator_setup','values':{'cause':cause,'expected_schema':1,'expected_state':'chunk-session','expected_control_protocol':CONTROL_PROTOCOL_SPOKEN,'actual_schema':actual.get('schema') if isinstance(actual,dict) and type(actual.get('schema')) is int else None},'effects':{'cache':'unknown','load':'unknown','reservation':'unknown'}})
     def read(self):
         assert self.process is not None
         with selectors.DefaultSelector() as selector:
@@ -58,16 +61,18 @@ class Session:
                 data=os.read(self.process.stdout.fileno(),65536)
                 if not data:raise self.channel_failure('coordinator_channel_closed')
                 self.pending+=data
-                if len(self.pending)>1048576:raise RemoteLocalImageError('local_images_chunk_protocol_unsupported')
+                if len(self.pending)>1048576:raise self.protocol_failure('oversized_frame')
         raw,self.pending=self.pending.split(b'\n',1)
         try:value=local_images._json_loads_closed(raw)
-        except (ValueError,UnicodeError):raise RemoteLocalImageError('local_images_chunk_protocol_unsupported') from None
+        except (ValueError,UnicodeError):raise self.protocol_failure('invalid_json_frame') from None
         detail=worker_failure(value)
         if detail:raise RemoteLocalImageError('local_images_'+value['code'],failure=detail)
         return value
     def __enter__(self):
         try:
-            self.process=subprocess.Popen(self.argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+            try:self.process=subprocess.Popen(self.argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+            except OSError as error:
+                raise RemoteLocalImageError('local_images_coordinator_start_failed',failure={'phase':'coordinator_setup','values':{'errno':error.errno},'effects':{'cache':'unchanged','load':'not_started','reservation':'unknown'}}) from None
             self.timer=threading.Timer(self.timeout,self.process.kill);self.timer.start()
             self.process.stdin.write(json.dumps(self.manifest,sort_keys=True,separators=(',',':')).encode()+b'\n');self.process.stdin.flush()
             value=self.read();mid=local_images.canonical_digest(self.manifest)[7:]
@@ -77,7 +82,7 @@ class Session:
                     or type(value['streams']) is not int or value['streams']!=self.streams
                     or not isinstance(value['inventory'],list) or any(type(i) is not int or not 0<=i<len(self.manifest['chunks']) for i in value['inventory'])
                     or len(set(value['inventory']))!=len(value['inventory'])):
-                raise RemoteLocalImageError('local_images_chunk_protocol_unsupported','Worker refused chunk protocol or capacity; no archive bytes sent. Inspect limits, then retry same receipt with --upload-streams 1; no legacy fallback.')
+                raise self.protocol_failure('handshake_incompatible',value)
             self.ready=value;return self
         except BaseException:
             try:self.stop()
@@ -104,7 +109,7 @@ class Session:
         except (BrokenPipeError,OSError):raise self.channel_failure('coordinator_write_failed') from None
         value=self.read()
         expected={'schema':1,'state':'loaded','bytes':self.manifest['context']['archive_bytes']}
-        if value!=expected:raise RemoteLocalImageError('local_images_transfer_unknown','Chunk finalization unverified; inspect quarantine and same receipt before retry; no automatic retry.')
+        if value!=expected:raise self.channel_failure('load_ack_unverified')
         return value
 
 

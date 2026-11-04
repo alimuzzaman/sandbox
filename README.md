@@ -930,7 +930,13 @@ and wp-admin actions in one `sb web` process run one at a time; a job that has t
 says so in its console, and a console command that never exits holds up the rest until
 that `sb web` process restarts.
 
-Mutations launched from the web dashboard or its wp-admin snapshot bridge claim that instance while their job runs. A second mutation on the same instance is refused immediately (HTTP 409 from the bridge, or an error toast from the dashboard) instead of queuing behind it, so two restores or a snapshot and a server switch cannot race. Read actions (logs, status, doctor) continue to stream concurrently.
+A second action on a busy instance is refused rather than queued, except `logs`, `status`,
+`doctor`, `introspect` and creating an instance, which wait their turn; waiting jobs run in no
+guaranteed order. Locks and refusals are per `sb web` process: `sb up` starts a bridge process on 8765
+and a later `sb web` binds 8766 as a second process, so a dashboard on 8766 and wp-admin on 8765 do not
+serialise or refuse each other. CLI and MCP do not claim either. An instance created before this
+change keeps its old wp-admin snapshot page, where a refused delete shows no message, until it is
+recreated.
 
 You can view and drive instances with:
 

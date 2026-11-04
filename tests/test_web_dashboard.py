@@ -620,27 +620,31 @@ class InstanceClaims(JobCaptureIsolation):
         import sandbox.core._dash as dashboard
 
         # Job path
-        with patch.object(threading.Thread, "start", side_effect=RuntimeError("spawn fail")):
-            with self.assertRaises(RuntimeError):
-                _start_job("job-fail", lambda: True, instance="one")
-        self.assertNotIn("one", _web_claims)
-        self.assertEqual(len(_web_claims), 0)
-        job = list(_web_jobs.values())[-1]
-        self.assertTrue(job["done"])
-        self.assertFalse(job["ok"])
-        self.assertEqual(job["status"], "job-fail ✗")
+        for exc in (RuntimeError("spawn fail"), KeyboardInterrupt("interrupt")):
+            with self.subTest(job_exc=type(exc).__name__):
+                with patch.object(threading.Thread, "start", side_effect=exc):
+                    with self.assertRaises(type(exc)):
+                        _start_job("job-fail", lambda: True, instance="one")
+                self.assertNotIn("one", _web_claims)
+                self.assertEqual(len(_web_claims), 0)
+                job = list(_web_jobs.values())[-1]
+                self.assertTrue(job["done"])
+                self.assertFalse(job["ok"])
+                self.assertEqual(job["status"], "job-fail ✗")
 
         # Sweep path
-        with patch.object(dashboard, "load_config", return_value={}):
-            with patch.object(threading.Thread, "start", side_effect=RuntimeError("spawn fail")):
-                with self.assertRaises(RuntimeError):
-                    _web_do_action({"action": "start-all"})
-        self.assertNotIn("*", _web_claims)
-        self.assertEqual(len(_web_claims), 0)
-        sweep_job = list(_web_jobs.values())[-1]
-        self.assertTrue(sweep_job["done"])
-        self.assertFalse(sweep_job["ok"])
-        self.assertEqual(sweep_job["status"], "start-all ✗")
+        for exc in (RuntimeError("spawn fail"), KeyboardInterrupt("interrupt")):
+            with self.subTest(sweep_exc=type(exc).__name__):
+                with patch.object(dashboard, "load_config", return_value={}):
+                    with patch.object(threading.Thread, "start", side_effect=exc):
+                        with self.assertRaises(type(exc)):
+                            _web_do_action({"action": "start-all"})
+                self.assertNotIn("*", _web_claims)
+                self.assertEqual(len(_web_claims), 0)
+                sweep_job = list(_web_jobs.values())[-1]
+                self.assertTrue(sweep_job["done"])
+                self.assertFalse(sweep_job["ok"])
+                self.assertEqual(sweep_job["status"], "start-all ✗")
 
     def test_sweep_that_cannot_load_config_ends(self):
         import sandbox.core._dash as dashboard

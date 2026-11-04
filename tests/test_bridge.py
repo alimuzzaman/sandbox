@@ -255,7 +255,7 @@ class TestBridgeHandle(unittest.TestCase):
 
     def test_busy_instance_refuses_with_409(self):
         from sandbox.core._dash import _start_job as real_start_job
-        _web_claims["demo"] = "holder-action"
+        _web_claims["inst"] = "holder-action"
         self._mksnap("keep")
         cases = [
             ("snapshot", "POST", "/snapshot", {"name": "snap1"}, "sandbox.commands.data.cmd_snapshot"),
@@ -270,17 +270,17 @@ class TestBridgeHandle(unittest.TestCase):
                     self.assertEqual(code, 409)
                     self.assertFalse(payload["ok"])
                     self.assertEqual(payload["error"], "instance_busy")
-                    self.assertIn("demo is busy: holder-action", payload["reason"])
+                    self.assertIn("inst is busy: holder-action", payload["reason"])
                     cmd_mock.assert_not_called()
 
     def test_delete_snapshot_refuses_while_the_instance_is_busy(self):
         d = self._mksnap("snap-busy")
-        _web_claims["demo"] = "some-holder"
+        _web_claims["inst"] = "some-holder"
         code, payload = self.call("DELETE", "/snapshot/snap-busy")
         self.assertEqual(code, 409)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "instance_busy")
-        self.assertIn("demo is busy: some-holder", payload["reason"])
+        self.assertIn("inst is busy: some-holder", payload["reason"])
         self.assertTrue(d.exists(), "snapshot dir was deleted while instance was busy!")
 
     def test_delete_snapshot_releases_its_claim(self):
@@ -288,19 +288,19 @@ class TestBridgeHandle(unittest.TestCase):
         self._mksnap("snap-ok")
         code, payload = self.call("DELETE", "/snapshot/snap-ok")
         self.assertEqual(code, 200)
-        self.assertNotIn("demo", _web_claims)
+        self.assertNotIn("inst", _web_claims)
 
         # on 404
         code, payload = self.call("DELETE", "/snapshot/ghost-none")
         self.assertEqual(code, 404)
-        self.assertNotIn("demo", _web_claims)
+        self.assertNotIn("inst", _web_claims)
 
         # when _sh.rmtree raises OSError
         self._mksnap("snap-err")
         with mock.patch("shutil.rmtree", side_effect=OSError("disk error")):
             with self.assertRaises(OSError):
                 self.call("DELETE", "/snapshot/snap-err")
-        self.assertNotIn("demo", _web_claims)
+        self.assertNotIn("inst", _web_claims)
 
     def test_bridge_jobs_pass_their_instance(self):
         captured = []
@@ -319,9 +319,9 @@ class TestBridgeHandle(unittest.TestCase):
             self.call("POST", "/reset", {"confirm": True})
 
         self.assertEqual(len(captured), 3)
-        self.assertEqual(captured[0][2], "demo")
-        self.assertEqual(captured[1][2], "demo")
-        self.assertEqual(captured[2][2], "demo")
+        self.assertEqual(captured[0][2], "inst")
+        self.assertEqual(captured[1][2], "inst")
+        self.assertEqual(captured[2][2], "inst")
 
 
 class TestRegistryOverlay(unittest.TestCase):

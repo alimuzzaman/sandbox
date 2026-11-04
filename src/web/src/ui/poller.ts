@@ -15,8 +15,11 @@ export interface PollHandlers<T extends PollSnapshot> {
 export const MAX_CONSECUTIVE_FAILURES = 5;
 export const REQUEST_TIMEOUT_MS = 30_000;
 
+// Inline actions answer only when they finish, and `start` can take minutes.
+export const ACTION_REQUEST_TIMEOUT_MS = 15 * 60_000;
+
 // A request that never settles counts as a failure; a late answer is ignored.
-function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
+export function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const expired = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => reject(new Error("request timed out")), timeoutMs);

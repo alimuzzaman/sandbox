@@ -319,7 +319,9 @@ _web_claims: dict[str, str] = {}
 
 def _take_claim_locked(instance: str, label: str) -> None:
     """Take a claim or raise _InstanceBusy. The caller holds _web_jobs_lock."""
-    holder = _web_claims.get(instance) or _web_claims.get("*")
+    holder = _web_claims.get(instance)
+    if holder is None:
+        holder = _web_claims.get("*")
     if holder is None and instance == "*" and _web_claims:
         holder = next(iter(_web_claims.values()))
     if holder is not None:
@@ -388,7 +390,7 @@ def _start_job(label: str, fn, instance: str | None = None) -> str:
 
     try:
         threading.Thread(target=worker, daemon=True).start()
-    except Exception:
+    except BaseException:
         with _web_jobs_lock:
             if instance is not None:
                 _web_claims.pop(instance, None)
@@ -565,6 +567,9 @@ def _web_do_action(payload: dict) -> dict:
 
 
 def _web_dispatch(payload: dict) -> dict:
+    """Dispatch a UI action to the matching cmd_*. Fast actions return output
+    inline; create/delete (and the all-* sweeps) return a job_id and run in a
+    background thread."""
     from sandbox.commands.lifecycle import cmd_up, cmd_down, cmd_status, cmd_update, cmd_doctor
     from sandbox.commands.instances_cmd import cmd_focus, cmd_instance, cmd_ensure
     from sandbox.commands.debug import cmd_introspect, cmd_xdebug
@@ -573,9 +578,6 @@ def _web_dispatch(payload: dict) -> dict:
     )
     from sandbox.commands.wp import cmd_seed, cmd_wp
     from sandbox.commands.net import cmd_server
-    """Dispatch a UI action to the matching cmd_*. Fast actions return output
-    inline; create/delete (and the all-* sweeps) return a job_id and run in a
-    background thread."""
     action = payload.get("action")
     name = (payload.get("instance") or "").strip()
     valid_fast = {"start", "stop", "restart", "focus", "unfocus"}
@@ -644,7 +646,7 @@ def _web_dispatch(payload: dict) -> dict:
 
         try:
             threading.Thread(target=sweep, daemon=True).start()
-        except Exception:
+        except BaseException:
             with _web_jobs_lock:
                 _web_claims.pop("*", None)
                 job.update(done=True, ok=False, status=f"{action} ✗")

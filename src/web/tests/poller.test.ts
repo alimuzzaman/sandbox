@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { jobFlags, startPoll, MAX_CONSECUTIVE_FAILURES, busyHolder } from "../src/ui/poller.ts";
+import { jobFlags, startPoll, MAX_CONSECUTIVE_FAILURES, busyHolder, withTimeout } from "../src/ui/poller.ts";
 
 const INTERVAL = 1;
 const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -283,4 +283,18 @@ test("busyHolder identifies busy instance or sweep", () => {
   assert.equal(busyHolder({ "*": "start-all" }, "one"), "start-all");
   assert.equal(busyHolder({ one: "snapshot" }, "*"), "snapshot");
   assert.equal(busyHolder({}, "*"), null);
+});
+
+test("withTimeout rejects after its bound with a never-settling promise", async () => {
+  const neverSettling = new Promise<string>(() => {});
+  await assert.rejects(
+    () => withTimeout(neverSettling, 10),
+    { message: "request timed out" }
+  );
+});
+
+test("withTimeout passes through a value that arrives first", async () => {
+  const quick = new Promise<string>((resolve) => setTimeout(() => resolve("ok"), 5));
+  const res = await withTimeout(quick, 50);
+  assert.equal(res, "ok");
 });

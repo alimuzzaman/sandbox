@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `sb apply` and `sb ensure` refuse a declared web server change with `apply_server_change_refused` before changing anything, and no longer revert a prior `sb server` when the config declares none. Use `sb server`, which does not yet verify or roll back.
 - `sb snapshot list` refuses instead of saving a snapshot named `list`, and points to `sb snapshots`.
 - `sb wp plugin install`, `theme install` and `media import` keep a local file's extension when staging it for the container, so WP-CLI recognises a local `.zip` or image.
 - WordPress bootstrap readiness accepts the older `wp-includes/class-requests.php` layout on cores below 6.2, so a PHP 7.4 image no longer times out at 30 seconds on a site that is ready.

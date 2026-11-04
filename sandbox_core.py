@@ -672,6 +672,7 @@ def _load_project_config_legacy(project_dir, label: str | None = None,
         data = _merge_layers(user_doc, data)
         source = f"user+{source}"
     merged = _deep_merge(DEFAULTS, data)
+    merged["server_declared"] = "server" in data
     _normalize_wp_cron(data, merged)
     merged["root"] = str(root)
     merged["source"] = source

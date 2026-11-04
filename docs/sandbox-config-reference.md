@@ -462,6 +462,9 @@ file path.
 
   // Web stack. apache/nginx/litespeed are docker (only the compose web tier
   // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
+  // Declaring a change to server on an existing instance is refused by `apply`
+  // and `ensure` (apply_server_change_refused); omitting it preserves the live
+  // server rather than reverting to nginx. Use `sb server <name> <server>`.
   "server": "nginx",    // nginx (default) | apache | litespeed | herd
 
   // Scoped local hostname policy. Omission defaults new identity to .test;
@@ -1159,6 +1162,11 @@ database failure returns `instance_install_state_unavailable` with
 `mutated:false`, before port, Compose, registry, or project-wiring writes. A
 changed `wpVersion` on an installed site remains apply-only; `ensure` only
 warns about drift.
+
+`sb apply` (and `sb ensure`) refuses a declared change to `server` on an
+existing instance before modifying state (`apply_server_change_refused`); switch
+servers in place with `sb server <name> <server>`. Omitting `server` preserves
+the running web server rather than reverting to the default.
 
 1. Rewrites the `instances.<name>` block in `sandbox.local.yml` from the
    current project config (constants, multisite flag, version pins, extra

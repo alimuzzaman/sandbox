@@ -252,5 +252,182 @@ class TestActivationCoordinator(unittest.TestCase):
         self.assertTrue(all(item.ok for item in results))
 
 
+class TestApplyServerChangePolicy(unittest.TestCase):
+    def test_apply_refuses_declared_server_change_with_no_compose_and_no_state_write(self):
+        import contextlib
+        import sandbox_core as sc
+        from sandbox.core import _instances
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "nginx",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "nginx", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with mock.patch.object(sc, "load_project_config", return_value=pconf), \
+             mock.patch.object(sc, "registry_get", return_value=existing), \
+             mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()), \
+             mock.patch.object(_instances, "compose") as mock_compose, \
+             mock.patch.object(_instances, "_write_local_yaml") as mock_write_local:
+            with self.assertRaises(sc.ConfigError) as ctx:
+                _instances.apply_config(cfg, project_dir="/tmp/fake-project")
+
+            err = ctx.exception
+            self.assertEqual(getattr(err, "code", None), "apply_server_change_refused")
+            msg = str(err)
+            self.assertIn("apply_server_change_refused", msg)
+            self.assertIn("nginx", msg)
+            self.assertIn("litespeed", msg)
+            self.assertIn("No state was changed", msg)
+            self.assertIn("sb server demo litespeed", msg)
+            self.assertIn("on the host that runs this instance", msg.lower())
+            self.assertIn("that command does not verify the result or roll back; check the site after", msg)
+            mock_compose.assert_not_called()
+            mock_write_local.assert_not_called()
+
+    def test_apply_undeclared_server_keeps_litespeed_block_without_false_refusal(self):
+        import contextlib
+        from sandbox.core import _instances
+        import sandbox_core as sc
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "nginx",  # default in pconf
+            "server_declared": False,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "litespeed",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "litespeed", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with mock.patch.object(sc, "load_project_config", return_value=pconf), \
+             mock.patch.object(sc, "registry_get", return_value=existing), \
+             mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()), \
+             mock.patch.object(_instances, "_assert_apply_runtime_dependencies"), \
+             mock.patch.object(_instances, "prepare_php_extension_runtime", return_value=None), \
+             mock.patch.object(_instances, "_write_local_yaml") as mock_write_local, \
+             mock.patch.object(_instances, "load_config", return_value=cfg), \
+             mock.patch.object(_instances, "write_compose_files"), \
+             mock.patch.object(_instances, "compose", return_value=mock.MagicMock(returncode=0)), \
+             mock.patch.object(_instances, "_wait_reachable", return_value=True), \
+             mock.patch.object(_instances, "_wire_project_plugins"), \
+             mock.patch.object(_instances, "_wire_project_themes"), \
+             mock.patch.object(_instances, "_reconcile_wp_core", return_value={"ok": True}), \
+             mock.patch.object(_instances, "site_url", return_value="http://localhost:8088"), \
+             mock.patch.object(sc, "registry_put", return_value=existing):
+            _instances.apply_config(cfg, project_dir="/tmp/fake-project")
+            saved_local = mock_write_local.call_args[0][0]
+            self.assertEqual(saved_local["instances"]["demo"]["server"], "litespeed")
+
+    def test_apply_matching_declared_server_passes_without_refusal(self):
+        import contextlib
+        from sandbox.core import _instances
+        import sandbox_core as sc
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "nginx",
+            "server_declared": True,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "nginx",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "nginx", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with mock.patch.object(sc, "load_project_config", return_value=pconf), \
+             mock.patch.object(sc, "registry_get", return_value=existing), \
+             mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()), \
+             mock.patch.object(_instances, "_assert_apply_runtime_dependencies"), \
+             mock.patch.object(_instances, "prepare_php_extension_runtime", return_value=None), \
+             mock.patch.object(_instances, "_write_local_yaml") as mock_write_local, \
+             mock.patch.object(_instances, "load_config", return_value=cfg), \
+             mock.patch.object(_instances, "write_compose_files"), \
+             mock.patch.object(_instances, "compose", return_value=mock.MagicMock(returncode=0)), \
+             mock.patch.object(_instances, "_wait_reachable", return_value=True), \
+             mock.patch.object(_instances, "_wire_project_plugins"), \
+             mock.patch.object(_instances, "_wire_project_themes"), \
+             mock.patch.object(_instances, "_reconcile_wp_core", return_value={"ok": True}), \
+             mock.patch.object(_instances, "site_url", return_value="http://localhost:8088"), \
+             mock.patch.object(sc, "registry_put", return_value=existing):
+            _instances.apply_config(cfg, project_dir="/tmp/fake-project")
+            saved_local = mock_write_local.call_args[0][0]
+            self.assertEqual(saved_local["instances"]["demo"]["server"], "nginx")
+
+    def test_apply_herd_crossing_message_does_not_suggest_delete_and_ensure(self):
+        import contextlib
+        import sandbox_core as sc
+        from sandbox.core import _instances
+        from sandbox.commands import net
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "herd",
+            "server_declared": True,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "nginx",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "nginx", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with mock.patch.object(sc, "load_project_config", return_value=pconf), \
+             mock.patch.object(sc, "registry_get", return_value=existing), \
+             mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()):
+            with self.assertRaises(sc.ConfigError) as ctx:
+                _instances.apply_config(cfg, project_dir="/tmp/fake-project")
+            msg = str(ctx.exception)
+            self.assertIn("re-provision", msg)
+            self.assertIn("deletes the DB and files and needs its own plan", msg)
+            self.assertNotIn("delete", msg.lower().replace("deletes the db", ""))
+
+        # Also verify net.cmd_server herd crossing
+        args = mock.MagicMock()
+        args.name = "demo"
+        args.server_type = "herd"
+        with mock.patch.object(net, "resolve_instances", return_value={"demo": {"server": "nginx"}}), \
+             mock.patch.object(net, "die", side_effect=SystemExit(1)) as mock_die:
+            with self.assertRaises(SystemExit):
+                net.cmd_server(cfg, args)
+            die_msg = mock_die.call_args[0][0]
+            self.assertIn("re-provision", die_msg)
+            self.assertIn("deletes the DB and files and needs its own plan", die_msg)
+            self.assertNotIn("delete", die_msg.lower().replace("deletes the db", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

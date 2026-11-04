@@ -1350,7 +1350,8 @@ def _download_wordpress_core(instance: str, args: list[str], server: str) -> Non
                     "exec", "-T", "wp", "sh", "-c",
                     f"test -f {docroot}/wp-includes/version.php && "
                     f"{{ test -f {docroot}/wp-includes/Requests/src/Requests.php "
-                    f"|| test -f {docroot}/wp-includes/Requests/Requests.php; }}",
+                    f"|| test -f {docroot}/wp-includes/Requests/Requests.php "
+                    f"|| test -f {docroot}/wp-includes/class-requests.php; }}",
                     instance=instance, check=False, capture=True, timeout=5,
                 )
                 if getattr(seeded, "returncode", 1) == 0:

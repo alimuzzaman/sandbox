@@ -3,6 +3,8 @@ from pathlib import Path
 import contextlib
 import io
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -42,7 +44,8 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 "exec", "-T", "wp", "sh", "-c",
                 "test -f /var/www/html/wp-includes/version.php && "
                 "{ test -f /var/www/html/wp-includes/Requests/src/Requests.php "
-                "|| test -f /var/www/html/wp-includes/Requests/Requests.php; }",
+                "|| test -f /var/www/html/wp-includes/Requests/Requests.php "
+                "|| test -f /var/www/html/wp-includes/class-requests.php; }",
                 instance="preview-demo", check=False, capture=True, timeout=5,
             ),
             call(
@@ -96,6 +99,50 @@ class TestWordPressCoreDownload(unittest.TestCase):
         wpcli.assert_called_once_with(
             args, instance="preview-demo", check=True
         )
+
+    @patch("sandbox.commands.lifecycle.wpcli")
+    @patch("sandbox.commands.lifecycle.compose")
+    def test_bootstrap_readiness_accepts_each_bundled_requests_layout(
+            self, compose, wpcli):
+        compose.return_value = SimpleNamespace(returncode=0)
+        lifecycle._download_wordpress_core("preview-demo", ["core", "download"], "apache")
+        cmd_template = compose.call_args_list[0].args[5]
+
+        layouts = [
+            "wp-includes/Requests/src/Requests.php",
+            "wp-includes/Requests/Requests.php",
+            "wp-includes/class-requests.php",
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            temp_docroot = Path(td)
+            cmd = cmd_template.replace("/var/www/html", str(temp_docroot))
+
+            for layout in layouts:
+                with self.subTest(layout=layout):
+                    # Each of the three passes with version.php
+                    shutil.rmtree(temp_docroot)
+                    temp_docroot.mkdir()
+                    vfile = temp_docroot / "wp-includes" / "version.php"
+                    vfile.parent.mkdir(parents=True, exist_ok=True)
+                    vfile.touch()
+                    lfile = temp_docroot / layout
+                    lfile.parent.mkdir(parents=True, exist_ok=True)
+                    lfile.touch()
+
+                    res = subprocess.run(["sh", "-c", cmd], capture_output=True)
+                    self.assertEqual(res.returncode, 0, f"Expected {layout} + version.php to pass")
+
+                    # Nothing passes without version.php
+                    vfile.unlink()
+                    res = subprocess.run(["sh", "-c", cmd], capture_output=True)
+                    self.assertNotEqual(res.returncode, 0, f"Expected {layout} without version.php to fail")
+
+                    # version.php alone fails
+                    lfile.unlink()
+                    vfile.touch()
+                    res = subprocess.run(["sh", "-c", cmd], capture_output=True)
+                    self.assertNotEqual(res.returncode, 0, "Expected version.php alone to fail")
 
     def test_litespeed_install_downloads_core_then_generates_config(self):
         args = SimpleNamespace(resolved_instance="preview-demo")
@@ -585,6 +632,7 @@ class TestDoctorJson(unittest.TestCase):
         with patch.object(lifecycle, "resolve_instances", return_value={"fixture": inst_cfg}), \
                 patch.object(lifecycle, "_web_services", return_value=["wp"]), \
                 patch.object(lifecycle, "_compose_up"), \
+                patch.object(lifecycle, "prepare_php_extension_runtime"), \
                 patch.object(lifecycle, "wp_is_installed", return_value=False), \
                 patch.object(lifecycle, "wp_dir", return_value=Path("/tmp/nonexistent-wp-dir")), \
                 patch.object(lifecycle, "php_extension_status", return_value={"drift": {"state": "drift", "issues": []}}):

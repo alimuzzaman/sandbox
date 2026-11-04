@@ -936,8 +936,9 @@ guaranteed order. Locks and refusals are per `sb web` process: `sb up` starts a 
 and a later `sb web` binds 8766 as a second process, so a dashboard on 8766 and wp-admin on 8765 do not
 serialise or refuse each other. CLI and MCP do not claim either. An instance created before this
 change keeps its old wp-admin snapshot page, where a refused delete shows no message, until it is
-recreated. A dashboard action with no answer after 15 minutes is reported as possibly still
-running, and its later result is not shown in that tab.
+recreated. An action that marks its instance busy, such as start, stop or a server switch, is
+reported as possibly still running after 15 minutes with no answer, and its later result is not
+shown in that tab.
 
 You can view and drive instances with:
 

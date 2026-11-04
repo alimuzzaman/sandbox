@@ -58,6 +58,8 @@ def cmd_snapshot(cfg, args) -> None:
     if not name:
         die(f"could not derive a snapshot name from '{args.name}' — use "
             "letters, numbers, spaces or hyphens")
+    if name == "list":
+        die("'list' is not a snapshot name; `./sb snapshots` lists them. Pick another name to save one.")
     if name == _BASELINE_DIR:
         die(f"'{name}' is reserved for the install baseline — use `./sb reset --rebaseline`")
     if name != (args.name or "").strip():

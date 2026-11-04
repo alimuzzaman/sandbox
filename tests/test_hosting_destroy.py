@@ -10,8 +10,9 @@ from tests.subprocess_support import run_test_process
 
 ENTRY = {"name": "r1", "host": "h", "user": "u", "front_door": "nginx"}
 KEY = "r1/site/sandbox"
-EMPTY_PROBE = {"containers": 0, "volumes": 0, "networks": 0, "images": 0, "runtime_kb": 0,
-               "source_kb": 0, "route": 0, "certs": 0}
+EMPTY_PROBE = {"containers": 0, "volumes": 0, "networks": 0, "images": 0,
+               "retained_images": 0, "retained_untagged": 0, "retained_refs": [],
+               "runtime_kb": 0, "source_kb": 0, "route": 0, "certs": 0}
 
 
 def _record(**extra):
@@ -30,10 +31,32 @@ class TargetParsing(unittest.TestCase):
     def test_incomplete_probe_refuses(self):
         with self.assertRaises(destroy.DestroyError):
             destroy.parse_probe("containers=0\nvolumes=0")
-        parsed = destroy.parse_probe("containers=2\nvolumes=1\nnetworks=0\nimages=1\nruntime_kb=\n"
-                                     "source_kb=10\nroute=1\ncerts=0\n")
+        parsed = destroy.parse_probe("containers=2\nvolumes=1\nnetworks=0\nimages=1\n"
+                                     "retained_images=0\nretained_untagged=0\n"
+                                     "runtime_kb=\nsource_kb=10\nroute=1\ncerts=0\n")
         self.assertEqual(parsed["containers"], 2)
         self.assertEqual(parsed["runtime_kb"], 0)
+
+    def test_probe_requires_the_retained_counts(self):
+        text = ("containers=2\nvolumes=1\nnetworks=0\nimages=1\n"
+                "retained_untagged=0\nruntime_kb=\nsource_kb=10\nroute=1\ncerts=0\n")
+        with self.assertRaises(destroy.DestroyError) as caught:
+            destroy.parse_probe(text)
+        self.assertEqual(caught.exception.code, "remote_probe_failed")
+
+    def test_probe_collects_retained_references(self):
+        lines = [
+            "containers=0", "volumes=0", "networks=0", "images=0",
+            "retained_images=25", "retained_untagged=2",
+            "runtime_kb=0", "source_kb=0", "route=0", "certs=0",
+        ]
+        for n in range(25):
+            lines.append(f"retained_image=r{n}:1")
+        parsed = destroy.parse_probe("\n".join(lines) + "\n")
+        self.assertEqual(parsed["retained_images"], 25)
+        self.assertEqual(parsed["retained_untagged"], 2)
+        self.assertEqual(len(parsed["retained_refs"]), 20)
+        self.assertEqual(parsed["retained_refs"], [f"r{n}:1" for n in range(20)])
 
 
 @mock.patch.object(destroy.remote, "resolve_sandbox_home", lambda entry: "/home/u/sandbox")
@@ -118,6 +141,34 @@ class Planning(unittest.TestCase):
                              "r1", "site", "sandbox", probe=dict(EMPTY_PROBE))
         self.assertEqual(found["fences"], ["active_operation"])
 
+    def test_retained_images_alone_are_nothing_to_remove(self):
+        probe = {**EMPTY_PROBE, "retained_images": 2, "retained_untagged": 1,
+                 "retained_refs": ["a/b:1", "c/d:2"]}
+        found = destroy.plan({"hosts": {}}, ENTRY, "r1", "site", "sandbox", probe=probe)
+        self.assertFalse(found["found"])
+        rendered = destroy.render(found, confirmed=False)
+        self.assertEqual(
+            rendered,
+            "r1/site/sandbox: nothing to remove; kept 2 labelled images not proven ours: a/b:1, c/d:2, 1 untagged",
+        )
+
+    def test_more_retained_images_than_listed(self):
+        refs = [f"img/{i}:1" for i in range(20)]
+        probe = {**EMPTY_PROBE, "retained_images": 22, "retained_untagged": 0, "retained_refs": refs}
+        found = destroy.plan({"hosts": {}}, ENTRY, "r1", "site", "sandbox", probe=probe)
+        rendered = destroy.render(found, confirmed=False)
+        self.assertIn("(+2 more)", rendered)
+
+    def test_dry_run_prints_kept_before_the_dry_run_line(self):
+        probe = {**EMPTY_PROBE, "containers": 1, "retained_images": 1,
+                 "retained_refs": ["shared/base:1"]}
+        found = destroy.plan({"hosts": {KEY: _record()}}, ENTRY, "r1", "site", "sandbox", probe=probe)
+        rendered = destroy.render(found, confirmed=False)
+        lines = rendered.splitlines()
+        kept_idx = next(i for i, line in enumerate(lines) if "kept 1 labelled images not proven ours" in line)
+        dry_idx = next(i for i, line in enumerate(lines) if "dry run; re-run with --confirm to remove" in line)
+        self.assertLess(kept_idx, dry_idx)
+
 
 class FakeClient:
     def __init__(self, missing=()):
@@ -171,7 +222,7 @@ class Execution(unittest.TestCase):
                                      client_factory=lambda: client, **kwargs)
         return result, commands, load()
 
-    PROBE = "containers=1\nvolumes=2\nnetworks=1\nimages=1\nruntime_kb=24\nsource_kb=9\nroute=0\ncerts=0\n"
+    PROBE = "containers=1\nvolumes=2\nnetworks=1\nimages=1\nretained_images=0\nretained_untagged=0\nruntime_kb=24\nsource_kb=9\nroute=0\ncerts=0\n"
 
     def test_removes_remote_then_cloudflare_then_state(self):
         client = FakeClient()
@@ -288,6 +339,77 @@ class Execution(unittest.TestCase):
             self.assertEqual(result.returncode, 7, result.stderr)
             removed = log.read_text().split()
         self.assertEqual(removed, ["rmi", "sandbox-host-site-sandbox-web:latest"])
+
+    def test_probe_and_teardown_agree_on_owned_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "rmi.log"
+            fake = root / "bin" / "docker"
+            fake.parent.mkdir()
+            fake.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  images) printf '%s\\n' sandbox-host-site-sandbox-web:latest shared/base:1 '<none>:<none>' ;;\n"
+                "  rmi) echo \"$@\" >> \"$LOG\" ;;\n"
+                "  ps|volume|network) ;;\n"
+                "esac\n")
+            fake.chmod(0o755)
+            sudo_shim = root / "bin" / "sudo"
+            sudo_shim.write_text("#!/bin/sh\nexec \"$@\"\n")
+            sudo_shim.chmod(0o755)
+
+            paths = destroy._paths(directory, "site", "sandbox")
+            command = destroy._probe_command(
+                "sandbox-host-site-sandbox", paths, "/nonexistent/route", ["/nonexistent/cert"])
+            result = run_test_process(
+                ["bash", "-c", command],
+                env={"LOG": str(log), "PATH": f"{fake.parent}:/usr/bin:/bin"},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            parsed = destroy.parse_probe(result.stdout)
+            self.assertEqual(parsed["images"], 1)
+            self.assertEqual(parsed["retained_images"], 1)
+            self.assertEqual(parsed["retained_untagged"], 1)
+            self.assertEqual(parsed["retained_refs"], ["shared/base:1"])
+
+            teardown_cmd = destroy._remote_teardown_command(
+                "sandbox-host-site-sandbox", paths)
+            run_test_process(
+                ["bash", "-c", teardown_cmd],
+                env={"LOG": str(log), "PATH": f"{fake.parent}:/usr/bin:/bin"},
+                capture_output=True, text=True)
+            removed = log.read_text().split()
+            self.assertEqual(removed, ["rmi", "sandbox-host-site-sandbox-web:latest"])
+
+    def test_retained_reference_with_unsafe_characters_is_counted_not_listed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "rmi.log"
+            fake = root / "bin" / "docker"
+            fake.parent.mkdir()
+            fake.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  images) printf '%s\\n' 'evil$(x):1' ;;\n"
+                "  rmi) echo \"$@\" >> \"$LOG\" ;;\n"
+                "  ps|volume|network) ;;\n"
+                "esac\n")
+            fake.chmod(0o755)
+            sudo_shim = root / "bin" / "sudo"
+            sudo_shim.write_text("#!/bin/sh\nexec \"$@\"\n")
+            sudo_shim.chmod(0o755)
+
+            paths = destroy._paths(directory, "site", "sandbox")
+            command = destroy._probe_command(
+                "sandbox-host-site-sandbox", paths, "/nonexistent/route", ["/nonexistent/cert"])
+            result = run_test_process(
+                ["bash", "-c", command],
+                env={"LOG": str(log), "PATH": f"{fake.parent}:/usr/bin:/bin"},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            parsed = destroy.parse_probe(result.stdout)
+            self.assertEqual(parsed["retained_images"], 1)
+            self.assertEqual(parsed["retained_refs"], [])
 
     def test_fenced_target_refuses_before_any_effect(self):
         client = FakeClient()
@@ -602,6 +724,61 @@ class Execution(unittest.TestCase):
                                  [self.PROBE, "", "removed\n"], client,
                                  clear_fenced=True)
         self.assertEqual(result["state"], "destroyed")
+
+    def test_confirmed_destroy_prints_kept_after_removed(self):
+        probe = ("containers=1\nvolumes=0\nnetworks=0\nimages=1\n"
+                 "retained_images=1\nretained_untagged=0\nruntime_kb=0\nsource_kb=0\nroute=0\ncerts=0\n"
+                 "retained_image=shared/base:1\n")
+        client = FakeClient()
+        result, _, _ = self._run(_record(), [probe, "", "removed\n"], client)
+        self.assertEqual(result["state"], "destroyed")
+        rendered = destroy.render(result, confirmed=True)
+        lines = rendered.splitlines()
+        removed_idx = next(i for i, line in enumerate(lines) if line == "removed")
+        kept_idx = next(i for i, line in enumerate(lines) if "kept 1 labelled images not proven ours" in line)
+        self.assertLess(removed_idx, kept_idx)
+
+    def test_absent_target_reports_retained_images(self):
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        repository = RecoveryRepository(root / "hosts.json", root / "locks")
+        repository._write({"version": 1, "hosts": {"r1/keep/sandbox": {"x": 1}}})
+        real_load = destroy.hosting.load_host_state
+        load = lambda: real_load(root / "hosts.json")
+
+        probe_output = (
+            "containers=0\nvolumes=0\nnetworks=0\nimages=0\n"
+            "retained_images=2\nretained_untagged=1\n"
+            "runtime_kb=0\nsource_kb=0\nroute=0\ncerts=0\n"
+            "retained_image=shared/base:1\nretained_image=shared/db:1\n"
+        )
+        commands = []
+
+        def ssh(entry, command, timeout=30):
+            commands.append(command)
+            return subprocess.CompletedProcess([], 0, probe_output, "")
+
+        client = FakeClient()
+        with mock.patch.object(destroy.remote, "ssh_run", ssh), \
+                mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository",
+                           lambda: repository), \
+                mock.patch.object(destroy.hosting, "load_host_state", load):
+            result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+
+        self.assertEqual(result["state"], "absent")
+        self.assertEqual(result["remote"]["retained_images"], 2)
+        self.assertEqual(result["remote"]["retained_untagged"], 1)
+        self.assertEqual(result["remote"]["retained_refs"], ["shared/base:1", "shared/db:1"])
+        rendered = destroy.render(result, confirmed=False)
+        self.assertEqual(
+            rendered,
+            "r1/site/sandbox: nothing to remove; kept 2 labelled images not proven ours: shared/base:1, shared/db:1, 1 untagged",
+        )
+        self.assertEqual(len(commands), 1)
+        self.assertIn("docker ps", commands[0])
+        self.assertEqual(client.calls, [])
 
 
 if __name__ == "__main__":

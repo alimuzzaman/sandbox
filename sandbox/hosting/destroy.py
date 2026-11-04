@@ -25,7 +25,8 @@ import sandbox.core._remote as remote
 from sandbox.hosting.state_partition.layout import target_unreadable
 
 from sandbox.hosting.names import TARGET_PART_RE as _PART_RE
-_PROBE_KEYS = ("containers", "volumes", "networks", "images", "runtime_kb", "source_kb", "route", "certs")
+_PROBE_KEYS = ("containers", "volumes", "networks", "images", "retained_images", "retained_untagged",
+               "runtime_kb", "source_kb", "route", "certs")
 
 
 def _already_gone(exc: Exception) -> bool:
@@ -71,7 +72,15 @@ def _route_file(name: str, front_door: str) -> str:
     return f"/etc/caddy/conf.d/{name}.caddy"
 
 
+def _image_tag_filter(name: str) -> tuple[str, str]:
+    """(list every tag with this project's label, regex for the tags this target owns)."""
+    label = shlex.quote(f"label=com.docker.compose.project={name}")
+    tags = f"docker images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' --filter {label}"
+    return tags, shlex.quote(f"^{re.escape(name)}-[^:]*:")
+
+
 def _probe_command(name: str, paths: dict, route: str, certs: list[str]) -> str:
+    tags, own = _image_tag_filter(name)
     label = shlex.quote(f"label=com.docker.compose.project={name}")
     cert_test = " -o ".join(f"-d {shlex.quote(path)}" for path in certs)
     # A failed Docker listing must fail the probe, never read as zero.
@@ -80,11 +89,15 @@ def _probe_command(name: str, paths: dict, route: str, certs: list[str]) -> str:
         f"c=$(docker ps -aq --filter {label}) || exit 3; "
         f"v=$(docker volume ls -q --filter {label}) || exit 3; "
         f"n=$(docker network ls -q --filter {label}) || exit 3; "
-        f"i=$(docker images -q --filter {label}) || exit 3; "
+        f"t=$({tags}) || exit 3; "
         "echo networks=$(printf '%s' \"$n\" | grep -c .); "
         "echo containers=$(printf '%s' \"$c\" | grep -c .); "
         "echo volumes=$(printf '%s' \"$v\" | grep -c .); "
-        "echo images=$(printf '%s' \"$i\" | sort -u | grep -c .); "
+        f"echo images=$(printf '%s\\n' \"$t\" | sort -u | grep -E {own} | grep -c .); "
+        f"echo retained_images=$(printf '%s\\n' \"$t\" | sort -u | grep -Ev {own} | grep -Fxv '<none>:<none>' | grep -c .); "
+        "echo retained_untagged=$(printf '%s\\n' \"$t\" | grep -Fxc '<none>:<none>'); "
+        f"printf '%s\\n' \"$t\" | sort -u | grep -Ev {own} | grep -Fxv '<none>:<none>' "
+        "| grep -E '^[A-Za-z0-9._/:@-]+$' | head -20 | sed 's/^/retained_image=/'; "
         f"echo runtime_kb=$(du -sk {shlex.quote(paths['runtime'])} 2>/dev/null | cut -f1); "
         f"echo source_kb=$(du -sk {shlex.quote(paths['source'])} 2>/dev/null | cut -f1); "
         f"if $SUDO test -f {shlex.quote(route)}; then echo route=1; else echo route=0; fi; "
@@ -94,15 +107,19 @@ def _probe_command(name: str, paths: dict, route: str, certs: list[str]) -> str:
 
 def parse_probe(text: str) -> dict:
     found = {}
+    refs = []
     for line in (text or "").splitlines():
         key, _, value = line.strip().partition("=")
-        if key in _PROBE_KEYS:
+        if key == "retained_image":
+            refs.append(value.strip())
+        elif key in _PROBE_KEYS:
             value = value.strip()
             found[key] = int(value) if value.isdigit() else 0
     missing = [key for key in _PROBE_KEYS if key not in found]
     if missing:
         raise DestroyError("remote probe was incomplete: missing " + ", ".join(missing),
                            "remote_probe_failed")
+    found["retained_refs"] = refs[:20]
     return found
 
 
@@ -266,10 +283,9 @@ def _remote_teardown_command(name: str, paths: dict) -> str:
     remove an explicitly named volume belonging to something else.
     """
     label = shlex.quote(f"label=com.docker.compose.project={name}")
-    own = shlex.quote(f"^{re.escape(name)}-[^:]*:")
+    tags, own = _image_tag_filter(name)
     removals = [paths["runtime"]]
     quoted = " ".join(shlex.quote(path) for path in removals)
-    tags = f"docker images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' --filter {label}"
     return (
         "set -u; docker info >/dev/null 2>&1 || exit 3; "
         f"docker ps -aq --filter {label} | xargs -r docker rm -f >/dev/null || exit 4; "
@@ -355,6 +371,13 @@ def _remove_cloudflare(found: dict, client) -> list[dict]:
     return results
 
 
+_RETAINED_KEYS = ("retained_images", "retained_untagged", "retained_refs")
+
+
+def _retained(remote: dict) -> dict:
+    return {key: remote[key] for key in _RETAINED_KEYS if key in remote}
+
+
 def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             clear_fenced: bool = False, client_factory=None,
             lock_wait: float = 600) -> dict:
@@ -379,7 +402,7 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
                              if isinstance(item, dict) and item.get("zone_id")
                              and not (_record_identities(item) & held)]
         if not found["found"]:
-            return {"state": "absent", "target": key}
+            return {"state": "absent", "target": key, "remote": _retained(found["remote"])}
         if found["fences"] and not clear_fenced:
             raise DestroyError(
                 "target is fenced by " + ", ".join(found["fences"]) +
@@ -416,9 +439,25 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
     return {"state": "destroyed", **found, "cloudflare": cloud}
 
 
+def _kept_text(remote: dict) -> str:
+    """What destroy leaves on the engine: images it cannot show are this target's."""
+    named = int(remote.get("retained_images") or 0)
+    untagged = int(remote.get("retained_untagged") or 0)
+    if not named and not untagged:
+        return ""
+    refs = list(remote.get("retained_refs") or [])
+    text = f"kept {named} labelled images not proven ours"
+    if refs:
+        text += ": " + ", ".join(refs)
+    if named > len(refs):
+        text += f" (+{named - len(refs)} more)"
+    return text + f", {untagged} untagged"
+
+
 def render(result: dict, *, confirmed: bool) -> str:
     if result.get("state") == "absent" or not result.get("found", True):
-        return f"{result['target']}: nothing to remove"
+        kept = _kept_text(result.get("remote") or {})
+        return f"{result['target']}: nothing to remove" + (f"; {kept}" if kept else "")
     r = result["remote"]
     lines = [f"{result['target']} ({result['compose_project']}, {result['front_door']} front door)"]
     lines.append(f"  containers {r['containers']}, volumes {r['volumes']}, images {r['images']}")
@@ -444,10 +483,15 @@ def render(result: dict, *, confirmed: bool) -> str:
             lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} could not be verified; left in place")
         elif row.get("state") == "already_absent" and row.get("record_id"):
             lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} was already gone")
+    kept = _kept_text(r)
     if not confirmed:
+        if kept:
+            lines.append(f"  {kept}")
         lines.append("dry run; re-run with --confirm to remove")
     else:
         lines.append("removed")
+        if kept:
+            lines.append(f"  {kept}")
     return "\n".join(lines)
 
 

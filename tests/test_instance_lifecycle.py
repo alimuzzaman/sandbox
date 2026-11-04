@@ -444,11 +444,20 @@ class TestEnsureServerChangePolicyRefusal(unittest.TestCase):
                             {"server": spelled, "server_declared": True}, {"status": "stopped"}),
                         "nginx")
 
+    def test_a_non_string_server_is_refused_cleanly(self):
+        import sandbox.core._instances as _instances
+        with mock.patch.object(_instances, "resolve_instances",
+                               return_value={"site": {"server": "nginx"}}):
+            with self.assertRaises(SystemExit):
+                _instances._resolve_reconcile_server(
+                    {"instances": {}}, "site",
+                    {"server": ["bad"], "server_declared": True}, {"status": "stopped"})
+
     def test_a_user_global_server_is_not_a_project_declaration(self):
         import tempfile
         from pathlib import Path
         import sandbox_core as sc
-        with tempfile.TemporaryDirectory() as directory, \
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory, \
                 mock.patch.object(sc, "_load_user_global", return_value={"server": "litespeed"}):
             root = Path(directory)
             (root / "sandbox.config.json").write_text("{}")

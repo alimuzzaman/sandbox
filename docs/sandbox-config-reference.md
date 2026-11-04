@@ -1167,7 +1167,8 @@ warns about drift.
 the project declares it (`apply_server_change_refused`). The check runs before any change;
 `sb server` takes no project lock, so if one lands during a run, a later refusal says earlier
 steps may have changed local state. A `server` in the user-global config is a default for new
-instances, not a declaration. Switch servers in place with `sb server <name> <server>`, or set
+instances, not a declaration, though `init --force` writes the effective server into the project
+file, which then is one. Switch servers in place with `sb server <name> <server>`, or set
 the project's `server` to what the instance runs. Omitting `server` preserves the running web
 server rather than reverting to the default.
 

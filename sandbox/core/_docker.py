@@ -18,7 +18,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 def _valid_server(server: str) -> str:
-    s = (server or "nginx").strip().lower()
+    s = str(server or "nginx").strip().lower()
     if s not in SERVERS:
         die(f"unknown server '{server}'. Choose from: {', '.join(SERVERS)}.")
     return s

@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 import sandbox.commands.lifecycle as lifecycle  # noqa: E402
 import sandbox.core._instances as instances  # noqa: E402
 from sandbox.runtimes.base import OperationResult  # noqa: E402
+from tests.subprocess_support import run_test_process  # noqa: E402
 
 
 def _run_install_capture_stdout(args):
@@ -45,7 +46,8 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 "test -f /var/www/html/wp-includes/version.php && "
                 "{ test -f /var/www/html/wp-includes/Requests/src/Requests.php "
                 "|| test -f /var/www/html/wp-includes/Requests/Requests.php "
-                "|| test -f /var/www/html/wp-includes/class-requests.php; }",
+                "|| { test -f /var/www/html/wp-includes/class-requests.php "
+                "&& grep -Eq \"^[$]wp_version = '([0-5]\\.|6\\.[01][.'-])\" /var/www/html/wp-includes/version.php; }; }",
                 instance="preview-demo", check=False, capture=True, timeout=5,
             ),
             call(
@@ -108,41 +110,50 @@ class TestWordPressCoreDownload(unittest.TestCase):
         lifecycle._download_wordpress_core("preview-demo", ["core", "download"], "apache")
         cmd_template = compose.call_args_list[0].args[5]
 
-        layouts = [
-            "wp-includes/Requests/src/Requests.php",
-            "wp-includes/Requests/Requests.php",
-            "wp-includes/class-requests.php",
+        cases = [
+            ("wp-includes/Requests/src/Requests.php", "6.4.3", True),
+            ("wp-includes/Requests/Requests.php", "5.9", True),
+            ("wp-includes/class-requests.php", "5.9.10", True),
+            ("wp-includes/class-requests.php", "6.1.1", True),
+            ("wp-includes/class-requests.php", "6.1-RC1", True),
+            ("wp-includes/class-requests.php", "4.9", True),
+            ("wp-includes/class-requests.php", "6.2", False),
+            ("wp-includes/class-requests.php", "6.4.3", False),
+            ("wp-includes/class-requests.php", "6.10.1", False),
+            ("wp-includes/class-requests.php", "10.0", False),
+            ("wp-includes/class-requests.php", "", False),
+            ("wp-includes/class-requests.php", None, False),
         ]
 
         with tempfile.TemporaryDirectory() as td:
             temp_docroot = Path(td)
             cmd = cmd_template.replace("/var/www/html", str(temp_docroot))
 
-            for layout in layouts:
-                with self.subTest(layout=layout):
-                    # Each of the three passes with version.php
+            for layout, ver, should_pass in cases:
+                with self.subTest(layout=layout, version=ver, should_pass=should_pass):
                     shutil.rmtree(temp_docroot)
                     temp_docroot.mkdir()
-                    vfile = temp_docroot / "wp-includes" / "version.php"
-                    vfile.parent.mkdir(parents=True, exist_ok=True)
-                    vfile.touch()
                     lfile = temp_docroot / layout
                     lfile.parent.mkdir(parents=True, exist_ok=True)
                     lfile.touch()
 
-                    res = subprocess.run(["sh", "-c", cmd], capture_output=True)
-                    self.assertEqual(res.returncode, 0, f"Expected {layout} + version.php to pass")
+                    vfile = temp_docroot / "wp-includes" / "version.php"
+                    vfile.parent.mkdir(parents=True, exist_ok=True)
+                    if ver is not None:
+                        if ver == "":
+                            vfile.touch()
+                        else:
+                            vfile.write_text(f"<?php\n$wp_version = '{ver}';\n")
 
-                    # Nothing passes without version.php
-                    vfile.unlink()
-                    res = subprocess.run(["sh", "-c", cmd], capture_output=True)
-                    self.assertNotEqual(res.returncode, 0, f"Expected {layout} without version.php to fail")
-
-                    # version.php alone fails
-                    lfile.unlink()
-                    vfile.touch()
-                    res = subprocess.run(["sh", "-c", cmd], capture_output=True)
-                    self.assertNotEqual(res.returncode, 0, "Expected version.php alone to fail")
+                    res = run_test_process(
+                        ["sh", "-c", cmd],
+                        env={"PATH": "/usr/bin:/bin"},
+                        capture_output=True,
+                    )
+                    if should_pass:
+                        self.assertEqual(res.returncode, 0, f"Expected {layout} with version {ver} to pass")
+                    else:
+                        self.assertNotEqual(res.returncode, 0, f"Expected {layout} with version {ver} to fail")
 
     def test_litespeed_install_downloads_core_then_generates_config(self):
         args = SimpleNamespace(resolved_instance="preview-demo")

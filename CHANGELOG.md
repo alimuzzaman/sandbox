@@ -8,7 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
-- WordPress bootstrap readiness accepts the older `wp-includes/class-requests.php` layout, so a PHP 7.4 image no longer times out at 30 seconds on a site that is ready.
+- WordPress bootstrap readiness accepts the older `wp-includes/class-requests.php` layout on cores below 6.2, so a PHP 7.4 image no longer times out at 30 seconds on a site that is ready.
 - `sb preview list` no longer prints login URLs or autologin tokens, and honours `--remote`.
 - The V2 reservation recovery snippet in `docs/remote-hosting.md` no longer fails on a host whose `python3` is older than 3.10.
 - The dashboard and wp-admin refuse a second action on a busy instance with `instance_busy` instead of

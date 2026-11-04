@@ -243,9 +243,9 @@ def _stage_host_package_paths(
             cache.mkdir(parents=True, exist_ok=True)
             suffix = source.suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,16}", source.suffix) else ""
             temporary = cache / f".sandbox-host-package-{os.getpid()}-{len(staged)}{suffix}"
+            staged.append(temporary)  # before the copy, so a partial one is cleaned up too
             shutil.copyfile(source, temporary)
             temporary.chmod(0o644)
-            staged.append(temporary)
             rewritten[index] = f"/sandbox-dl-cache/{temporary.name}"
         except (OSError, ValueError) as exc:
             for path in staged:

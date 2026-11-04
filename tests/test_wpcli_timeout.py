@@ -184,6 +184,32 @@ class TestWpCliTimeout(unittest.TestCase):
                     forwarded = wpcli.call_args.args[0]
                     self.assertRegex(forwarded[2], r"^/sandbox-dl-cache/\.sandbox-host-package-\d+-\d+$")
 
+    def test_a_partial_copy_is_cleaned_up(self):
+        import sandbox.commands.wp as command
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "test-plugin.zip"
+            source.write_bytes(b"zip-payload")
+            runtime = Path(directory) / "runtime"
+            args = SimpleNamespace(
+                resolved_instance="fixture",
+                passthrough=["plugin", "install", str(source)],
+                run_async=False,
+            )
+
+            def partial_copy(_source, destination):
+                Path(destination).write_bytes(b"zip")
+                raise OSError("disk full")
+
+            with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(command, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(command, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(command.shutil, "copyfile", side_effect=partial_copy), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()), \
+                    self.assertRaises(SystemExit):
+                command.cmd_wp({}, args)
+            self.assertEqual(
+                list((runtime / "dl-cache" / "wp-http").glob(".sandbox-host-pack*")), [])
+
     def test_staged_files_with_extensions_are_cleaned_up(self):
         import sandbox.commands.wp as command
         with tempfile.TemporaryDirectory() as directory:

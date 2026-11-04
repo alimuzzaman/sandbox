@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Dashboard and wp-admin snapshot jobs no longer mix output when one starts while another runs, and no longer leave the process's stdout pointing at a finished job. Bridge jobs now wait their turn like every other dashboard action, and a waiting job's console says so.
 - `sb ensure --remote` reports SSH failures as `remote_authentication_failed`,
   `remote_unreachable` or `remote_connection_lost` instead of
   `remote_empty_output`, naming the likely cause. Completion stays unknown: inspect before retrying.

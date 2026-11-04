@@ -305,17 +305,25 @@ class _JobStream:
 
 
 def _start_job(label: str, fn) -> str:
-    """Run `fn(stream)` in a background thread, streaming its output into a new
-    job. `fn` returns True/False for ok. Returns the job_id immediately so the
-    page can poll /api/job/<id>?offset=N for live output."""
-    _web_job_seq[0] += 1
-    job_id = str(_web_job_seq[0])
+    """Run `fn()` in a background thread, streaming its output into a new job.
+    `fn` returns True/False for ok. Returns the job_id immediately so the page
+    can poll /api/job/<id>?offset=N for live output.
+
+    The worker holds `_web_lock` across the whole redirect. Redirection swaps the
+    process-global sys.stdout, so two jobs must never hold it at once. `fn` must not
+    take `_web_lock` itself: the lock is not reentrant."""
     job = {"status": label, "output": "", "done": False, "ok": None}
-    _web_jobs[job_id] = job
+    with _web_jobs_lock:
+        _web_job_seq[0] += 1
+        job_id = str(_web_job_seq[0])
+        _web_jobs[job_id] = job
     stream = _JobStream(job)
 
     def worker():
         ok_flag = True
+        if not _web_lock.acquire(blocking=False):
+            stream.write("waiting for another dashboard action to finish\n")
+            _web_lock.acquire()
         try:
             with redirect_stdout(stream), redirect_stderr(stream):
                 _WEB_STREAM[0] = True       # stream real subprocess output → console
@@ -328,6 +336,8 @@ def _start_job(label: str, fn) -> str:
         except Exception as e:
             ok_flag = False
             stream.write(f"\nerror: {e}\n")
+        finally:
+            _web_lock.release()
         with _web_jobs_lock:
             job["done"] = True
             job["ok"] = ok_flag
@@ -542,10 +552,11 @@ def _web_do_action(payload: dict) -> dict:
     # Sweep actions over every instance — backgrounded (booting all stacks is
     # slow). The page polls the job and refreshes when done.
     if action in ("start-all", "stop-all"):
-        _web_job_seq[0] += 1
-        job_id = str(_web_job_seq[0])
-        _web_jobs[job_id] = {"status": f"{action}…", "output": "",
-                             "done": False, "ok": None}
+        with _web_jobs_lock:
+            _web_job_seq[0] += 1
+            job_id = str(_web_job_seq[0])
+            _web_jobs[job_id] = {"status": f"{action}…", "output": "",
+                                 "done": False, "ok": None}
 
         def sweep():
             with _web_lock:
@@ -681,11 +692,7 @@ def _web_do_action(payload: dict) -> dict:
 
         label = f"{action}" + (f" {name}" if action != "wp"
                                else f" {name}: {payload.get('args','')}")
-        # Serialize against other mutating actions via the lock inside the job.
-        def locked():
-            with _web_lock:
-                return run_op()
-        return {"ok": True, "job_id": _start_job(label, locked)}
+        return {"ok": True, "job_id": _start_job(label, run_op)}
 
     # Switch an instance's web server in place. Backgrounded + streamed because
     # it recreates the web tier and may pull the OpenLiteSpeed image (slow).
@@ -699,9 +706,8 @@ def _web_do_action(payload: dict) -> dict:
         label = f"server {name} → {target}"
 
         def do_server():
-            with _web_lock:
-                cmd_server(load_config(), _types.SimpleNamespace(
-                    name=name, server_type=target, resolved_instance=name))
+            cmd_server(load_config(), _types.SimpleNamespace(
+                name=name, server_type=target, resolved_instance=name))
         return {"ok": True, "job_id": _start_job(label, do_server)}
 
     if action == "create":
@@ -726,12 +732,11 @@ def _web_do_action(payload: dict) -> dict:
                     "label must start with a letter/number and use only a-z, 0-9, _ or -"}
 
         def do_create():
-            with _web_lock:
-                cmd_ensure(load_config(), _types.SimpleNamespace(
-                    project_dir=str(project_dir), label=label or None,
-                    create=True, local=True, json=False,
-                    reveal_login=False, workspace=None,
-                ))
+            cmd_ensure(load_config(), _types.SimpleNamespace(
+                project_dir=str(project_dir), label=label or None,
+                create=True, local=True, json=False,
+                reveal_login=False, workspace=None,
+            ))
 
         return {"ok": True, "job_id": _start_job(
             f"Creating {label or 'default'} instance", do_create)}
@@ -742,9 +747,8 @@ def _web_do_action(payload: dict) -> dict:
                     "output": "delete requires confirm == instance name"}
 
         def do_inst():
-            with _web_lock:
-                cmd_instance(load_config(), _types.SimpleNamespace(
-                    action="delete", name=name, yes=True, resolved_instance=name))
+            cmd_instance(load_config(), _types.SimpleNamespace(
+                action="delete", name=name, yes=True, resolved_instance=name))
         return {"ok": True, "job_id": _start_job(f"Deleting {name}", do_inst)}
 
     return {"ok": False, "output": f"unknown action '{action}'"}

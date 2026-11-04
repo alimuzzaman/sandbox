@@ -187,9 +187,13 @@ class AuthorityLifecycleService:
                 state, remote_identity, service_revision, source_revision,
                 datetime.datetime.now(datetime.timezone.utc))
         if completed_acc is not None:
-            support_tier = SupportTier.PROVEN
-            adoptable = True
+            # The chain is complete, but support also needs an accepted decision from the protected
+            # lifecycle (capability-evidence-v1.md:69-80), and no such writer exists. It replaces this
+            # arm with a verified lineage check; only that may report proven or human_review pass.
+            support_tier = SupportTier.IMPLEMENTED_UNPROVEN
+            adoptable = False
             acceptance_state = AcceptanceState.COMPLETE
+            reason_code = "implemented_unproven"
         elif reason_code == "authority_revision_mismatch":
             support_tier = SupportTier.DRIFTED
             adoptable = False
@@ -207,9 +211,8 @@ class AuthorityLifecycleService:
             adoptable = False
             acceptance_state = AcceptanceState.FAILED
 
-        # Nothing here observes these primitives, so only a proven chain may vouch for them.
-        check_state = "pass" if support_tier == SupportTier.PROVEN else "unknown"
-        checks = {name: check_state for name in (
+        # Nothing here observes these primitives.
+        checks = {name: "unknown" for name in (
             "dedicated_identity", "private_root", "caller_non_mutation", "canonical_peer_auth",
             "controller_process_identity", "mount_controller_identity",
             "descriptor_only_mount_channel", "no_arbitrary_path_protocol",
@@ -242,8 +245,8 @@ class AuthorityLifecycleService:
             "expires_at": expires_at,
             "checks": checks,
             "storage_authority": {
-                "owner_identity_digest": "sha256:owner",
-                "root_identity_digest": "sha256:root",
+                "owner_identity_digest": None,
+                "root_identity_digest": None,
             },
             "resolver_authority": {
                 "included": False,

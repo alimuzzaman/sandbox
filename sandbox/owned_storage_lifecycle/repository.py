@@ -38,6 +38,16 @@ class LifecycleConflictError(LifecycleError):
     """Raised when replaying a request ID with conflicting content."""
 
 
+def _nonempty_text(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _revocation_names_a_scope(revocation: CapabilityRevocation) -> bool:
+    """Refuse a row the read side could only treat as blocking every remote or every promotion."""
+    return _nonempty_text(revocation.remote_identity) and (
+        _nonempty_text(revocation.promotion_id) or _nonempty_text(revocation.authority_binding_id))
+
+
 class StorageAuthorityLifecycleRepository:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -261,6 +271,8 @@ class StorageAuthorityLifecycleRepository:
             return CapabilityAcceptance(**data)
 
     def record_revocation(self, revocation: CapabilityRevocation, expected_generation: int) -> int:
+        if not _revocation_names_a_scope(revocation):
+            raise LifecycleError("a revocation must name a remote and a promotion or binding")
         with self._lock():
             state = self._read_state_locked()
             current_gen = state.get("generation", 0)

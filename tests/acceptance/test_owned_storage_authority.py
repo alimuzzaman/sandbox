@@ -120,16 +120,19 @@ class TestOwnedStorageAuthorityAcceptance(unittest.TestCase):
         )
         self.lifecycle_service.record_acceptance(remote, acceptance)
 
-        cap_proven = self.lifecycle_service.evaluate_capability(
+        cap_held = self.lifecycle_service.evaluate_capability(
             remote_identity=remote,
             platform_mode="ubuntu-24.04-systemd-255-private-root-v1",
             service_revision="sha256:srv_1",
             source_revision="sha256:src_1",
         )
-        self.assertEqual(cap_proven["support_tier"], SupportTier.PROVEN.value)
-        self.assertTrue(cap_proven["adoptable"])
+        self.assertEqual(cap_held["support_tier"], "implemented_unproven")
+        self.assertFalse(cap_held["adoptable"])
+        self.assertEqual(cap_held["acceptance_state"], "complete")
+        self.assertEqual(cap_held["reason_code"], "implemented_unproven")
+        self.assertEqual(cap_held["promotion_id"], "prom-001")
 
-        # Set future policy and adoption binding now that platform is proven
+        # Set future policy and adoption binding directly: this is fixture authority and not reviewed qualification
         self.storage_repo.save_policy(
             AuthorityPolicy(
                 policy_id="pol-001",
@@ -351,7 +354,7 @@ class TestOwnedStorageAuthorityAcceptance(unittest.TestCase):
             self.app_service.get_status(remote_identity=remote, project_identity=project),
             preview,
             reclaim,
-            cap_proven,
+            cap_held,
         ]
         for proj in projections:
             scrubbed = redact_storage_projection(proj)

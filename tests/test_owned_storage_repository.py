@@ -22,6 +22,7 @@ from sandbox.owned_storage_lifecycle.models import (
 from sandbox.owned_storage_lifecycle.repository import (
     LifecycleCASError,
     LifecycleConflictError,
+    LifecycleError,
     StorageAuthorityLifecycleRepository,
 )
 from sandbox.owned_storage.models import (
@@ -186,6 +187,77 @@ class TestStorageAuthorityLifecycleRepository(unittest.TestCase):
         )
         with self.assertRaises(LifecycleCASError):
             self.repo.record_revocation(rev2, expected_generation=0)
+
+    def test_record_revocation_refuses_a_row_with_no_scope(self):
+        base_kwargs = dict(
+            revocation_id="rev_no_scope",
+            remote_identity="rem_1",
+            project_identity="proj_1",
+            promotion_id="prom_1",
+            authority_binding_id="bind_1",
+            reviewer_identity_digest="sha256:rev",
+            request_id="req_r_1",
+            request_digest="sha256:digest_r1",
+            lifecycle_generation=0,
+            reason_code="synthetic",
+            revoked_at="2026-09-04T00:00:00Z",
+        )
+        cases = [
+            ("empty_remote", {"remote_identity": ""}),
+            ("whitespace_remote", {"remote_identity": "   "}),
+            ("none_remote", {"remote_identity": None}),
+            ("both_selectors_empty", {"promotion_id": "", "authority_binding_id": ""}),
+            ("both_selectors_whitespace", {"promotion_id": "   ", "authority_binding_id": "   "}),
+            ("both_selectors_none", {"promotion_id": None, "authority_binding_id": None}),
+        ]
+        for name, overrides in cases:
+            with self.subTest(case=name):
+                kwargs = {**base_kwargs, **overrides}
+                rev = CapabilityRevocation(**kwargs)
+                gen_before = self.repo.get_generation()
+                with self.assertRaises(LifecycleError):
+                    self.repo.record_revocation(rev, expected_generation=gen_before)
+                self.assertEqual(self.repo.get_generation(), gen_before)
+                state = self.repo.load_state()
+                self.assertNotIn("rev_no_scope", state.get("revocations", {}))
+
+    def test_record_revocation_accepts_one_selector(self):
+        base_kwargs = dict(
+            remote_identity="rem_1",
+            project_identity="proj_1",
+            reviewer_identity_digest="sha256:rev",
+            reason_code="synthetic",
+            revoked_at="2026-09-04T00:00:00Z",
+        )
+        # 1. only promotion_id set succeeds
+        rev_prom = CapabilityRevocation(
+            revocation_id="rev_prom_only",
+            promotion_id="prom_1",
+            authority_binding_id=None,
+            request_id="req_prom_only",
+            request_digest="sha256:prom_only",
+            lifecycle_generation=0,
+            **base_kwargs,
+        )
+        gen = self.repo.record_revocation(rev_prom, expected_generation=0)
+        self.assertEqual(gen, 1)
+        state = self.repo.load_state()
+        self.assertIn("rev_prom_only", state["revocations"])
+
+        # 2. only authority_binding_id set succeeds
+        rev_bind = CapabilityRevocation(
+            revocation_id="rev_bind_only",
+            promotion_id=None,
+            authority_binding_id="bind_1",
+            request_id="req_bind_only",
+            request_digest="sha256:bind_only",
+            lifecycle_generation=1,
+            **base_kwargs,
+        )
+        gen2 = self.repo.record_revocation(rev_bind, expected_generation=1)
+        self.assertEqual(gen2, 2)
+        state2 = self.repo.load_state()
+        self.assertIn("rev_bind_only", state2["revocations"])
 
 
 class TestStorageAuthorityRepository(unittest.TestCase):

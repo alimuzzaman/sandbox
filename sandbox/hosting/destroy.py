@@ -436,10 +436,14 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
         client = None
         if found["_records"] or found["origin_certificate"]:
             client = (client_factory or cloudflare.Client)()
-        lock_taken = False
+        kept = "state and fence kept, re-run with --clear-fenced"
+        # A write that timed out may have saved part of the state, so promise nothing there.
+        local_step = ("reading or saving local state timed out",
+                      "check it with a dry run, then re-run with --clear-fenced", "state_timeout")
+        step = ("another operation held the state lock", kept, "state_lock_timeout")
         try:
             with repository.state_lock(timeout_seconds=lock_wait):
-                lock_taken = True
+                step = local_step
                 # Read again: another target can apply onto one of these records during the
                 # teardown. Apply holds this lock across its provider writes and its save, so
                 # under it that target has either saved its row or has not started.
@@ -450,16 +454,15 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
                 found["_records"] = [item for item in found["_records"]
                                      if not (_record_identities(item) & held)]
                 if client is not None:
+                    step = ("a Cloudflare request timed out", kept, "provider_timeout")
                     cloud += _remove_cloudflare(found, client)
+                    step = local_step
                 for owned_key in namesakes(remote_name, project, environment):
                     state.get("hosts", {}).pop(owned_key, None)
                 repository._write(state)
         except TimeoutError:
-            cause, code = (("a Cloudflare request timed out", "provider_timeout") if lock_taken
-                           else ("another operation held the state lock", "state_lock_timeout"))
-            raise DestroyError(
-                f"remote teardown finished, but {cause}; state and fence kept, "
-                "re-run with --clear-fenced", code) from None
+            cause, advice, code = step
+            raise DestroyError(f"remote teardown finished, but {cause}; {advice}", code) from None
     found.pop("_records", None)
     return {"state": "destroyed", **found, "cloudflare": cloud}
 

@@ -1027,6 +1027,24 @@ class Execution(unittest.TestCase):
                 self.assertNotIn(KEY, end_state["hosts"])
                 self.assertIn("r1/keep/sandbox", end_state["hosts"])
 
+    def test_a_local_timeout_is_not_blamed_on_cloudflare(self):
+        real = destroy._records_held_elsewhere
+        calls = []
+
+        def held(state, key):
+            calls.append(key)
+            # plan and the first read in execute are 1 and 2; 3 is under the final lock.
+            if len(calls) == 3:
+                raise TimeoutError("local")
+            return real(state, key)
+
+        client = FakeClient()
+        with mock.patch.object(destroy, "_records_held_elsewhere", held), \
+                self.assertRaises(destroy.DestroyError) as caught:
+            self._run(_record(), [self.PROBE, "", "removed\n"], client)
+        self.assertEqual(caught.exception.code, "state_timeout")
+        self.assertEqual(client.calls, [])
+
     def test_provider_read_timeout_is_not_called_a_busy_lock(self):
         applied = {
             "name": "a.test", "type": "A", "content": "192.0.2.1",

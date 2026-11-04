@@ -119,7 +119,8 @@ sequence: `step1-fresh`, `step2-content-imported`, `step3-after-license`.
 
 ## Restore safety
 
-`restore` overwrites the live DB and uploads dir. Before running it, pass
+`restore` replaces the live DB; uploads in the snapshot are extracted over
+existing uploads and files added since are kept. Before running it, pass
 `--yes` in non-interactive contexts or answer the interactive prompt with an
 explicit `y`/`yes`; the default answer is cancellation. A DB-only snapshot
 does not contain `uploads.tgz`, so restoring one leaves existing uploads alone.

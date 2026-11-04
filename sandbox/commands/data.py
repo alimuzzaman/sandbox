@@ -263,10 +263,11 @@ def _confirmation_requested(args) -> bool:
     return bool(getattr(args, "yes", False) or getattr(args, "confirm", False))
 
 
-def _confirm_destructive_action(inst: str, target: str, args, *, action: str) -> bool:
-    """Require an explicit acknowledgement before dropping and importing DB data.
+def _confirm_destructive_action(inst: str, target: str, args, action: str = "reset",
+                                uploads_sentence: str = "") -> bool:
+    """Prompt for destructive actions unless --yes / confirm is provided.
 
-    A non-interactive caller must provide an explicit confirmation flag.  A
+    The web dashboard sets confirm=True; CLI uses args.yes. A non-interactive
     terminal caller gets the same default-deny prompt used by reset; cancelling
     or closing the prompt returns before any DB command is dispatched.
     """
@@ -274,9 +275,10 @@ def _confirm_destructive_action(inst: str, target: str, args, *, action: str) ->
         return True
     if not bool(getattr(sys.stdin, "isatty", lambda: False)()):
         die(f"{action} requires --yes when stdin is not interactive")
+    sentence = f" {uploads_sentence}" if uploads_sentence else ""
     try:
         answer = input(
-            f"This drops the current DB for '{inst}' and restores the {target}. "
+            f"This drops the current DB for '{inst}' and restores the {target}.{sentence} "
             "Continue? [y/N] "
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -304,8 +306,13 @@ def cmd_restore(cfg, args) -> None:
                 None)
     if name is None:
         die(f"no snapshot '{args.name}' under {snap_root}")
+    uploads_sentence = (
+        "Uploads in the snapshot are extracted over existing uploads and files "
+        "added since are kept. A DB-only snapshot leaves uploads unchanged."
+    )
     if not _confirm_destructive_action(inst, f"snapshot '{name}'", args,
-                                       action="restore"):
+                                       action="restore",
+                                       uploads_sentence=uploads_sentence):
         return
     _restore_snapshot(inst, snap_root, name)
     ok(f"Restored snapshot '{name}'.")

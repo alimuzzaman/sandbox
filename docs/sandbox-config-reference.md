@@ -1231,10 +1231,12 @@ Without it the official `wordpress` image's `sendmail` is absent, so
 `./sb snapshot <name>` exports the DB (`wp db export --add-drop-table`) and
 tars uploads. Add `--db-only` to omit uploads; when forcing a DB-only overwrite,
 any old uploads archive is removed. `./sb restore <name>` runs **`wp db reset --yes` before the
-import**, so restore is a true point-in-time replacement: tables created
+import**, so DB restore is a true point-in-time replacement: tables created
 *after* the snapshot (e.g. multisite sub-site `wp_2_*` tables from an FSI run)
 are dropped, not merged. `--add-drop-table` alone only drops tables present in
-the dump, so without the pre-reset those newer tables would survive.
+the dump, so without the pre-reset those newer tables would survive. Uploads in
+the snapshot are extracted over existing uploads and files added since are
+kept (merge stays the default).
 
 Each newly provisioned Docker instance captures a protected DB-only `@install`
 baseline and a full `install-baseline` snapshot after final setup or plugin/theme

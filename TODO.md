@@ -282,6 +282,10 @@ not close the external or human gates listed below.
   `evaluate_capability`; `human_review` reads `pass` only from that. A decision row alone proves
   nothing. The reviewer also decides recovery for a revocation with no readable remote, which
   today blocks every remote, through the protected revoke (a superseding record, not deletion).
+  Spec 052 text to reconcile with it: `data-model.md` still has review, promotion and capability
+  projection committing "only through the shared target transaction owner", against FR-058's
+  decoupling; and `tasks.md` T040-T042 read done though no review or revoke command or protected
+  writer exists.
 - [ ] **Spec 060 coordination: tests the 2026-10-11 merge-gate review asked
   for.** No known defect behind them; they pin behaviour shipped in `0239e1e`
   (protocol 8) in `tests/test_hosting_coordination_program.py`:

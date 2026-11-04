@@ -12,7 +12,7 @@ Filesystem locators and kernel identity fields exist only inside the private
 repository and Linux adapter. Existing sync, job, workspace, and resource
 records remain authoritative for their current application domains.
 
-All lifecycle-owned models below are durably persisted in a dedicated,
+All lifecycle-owned models below, except an `AuthorityCapability` evaluation, are durably persisted in a dedicated,
 crash-safe `StorageAuthorityLifecycleRepository` located under the service runtime
 boundary (e.g. `runtime/storage_authority/lifecycle.json`). It uses owner-only
 permissions (`0600`), advisory locking (`fcntl.flock`), atomic replacement via
@@ -24,10 +24,9 @@ It is completely decoupled from OCI hosting (`hosts.json` / `RecoveryRepository`
 One lifecycle-owned observation for an exact remote platform and operating mode.
 
 Evaluation is a read-only projection computed from one snapshot of the lifecycle
-state; it never writes. Only the review, finalize and revoke transitions write
-stored capability state, and mutation admission re-evaluates. No consumer reads a
-saved evaluation. A saved evaluation also raced revocation and proved nothing fresh,
-so it is not the durable record the paragraph above describes.
+state and the revisions the caller observed; it never writes. Only the review, finalize
+and revoke transitions write stored capability state, and mutation admission
+re-evaluates. No consumer reads a saved evaluation, and saving one raced revocation.
 
 Until the protected lifecycle writer exists, no evaluation reports `proven` or
 `adoptable=true`. See the support matrix in

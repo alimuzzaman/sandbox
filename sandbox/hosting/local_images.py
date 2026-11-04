@@ -1242,7 +1242,8 @@ def _builder_identity(environment: dict, engine: str | None) -> dict:
 # ------------------------------------------------------------------
 
 def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress=None,
-                   label: str = "", cancelled=None, ready_frame=None, on_started=None) -> dict:
+                   label: str = "", cancelled=None, ready_frame=None, on_started=None,
+                   resume_frame: dict | None = None) -> dict:
     """Stream one archive into a remote command's stdin with a hard deadline.
 
     The archive is hashed while it is sent; the caller compares the digest with
@@ -1252,6 +1253,8 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
     total = archive.stat().st_size
     digest = hashlib.sha256()
     sent = 0
+    offset = 0
+    protocol_error = False
     started = time.monotonic()
     timed_out = {"value": False}
     cancelled_state = {"value": False}
@@ -1259,7 +1262,7 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
         # V2 stdout is a strict protocol channel. SSH warnings belong only in
         # diagnostics, even when emitted before worker readiness.
         process = subprocess.Popen(ssh_argv, stdin=subprocess.PIPE, stdout=output,
-                                   stderr=diagnostics if ready_frame is not None else subprocess.STDOUT)
+                                   stderr=diagnostics if ready_frame is not None or resume_frame is not None else subprocess.STDOUT)
 
         def kill():
             timed_out["value"] = True
@@ -1270,29 +1273,80 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
         try:
             assert process.stdin is not None
             next_report = 0
-            acknowledged = ready_frame is None
-            if ready_frame is not None:
+            acknowledged = ready_frame is None and resume_frame is None
+            read_position = 0
+
+            def worker_frame():
+                nonlocal read_position
                 while process.poll() is None and not timed_out["value"]:
-                    prefix = os.pread(output.fileno(), 4097, 0)
-                    if b"\n" in prefix or len(prefix) > 4096:
+                    raw = os.pread(output.fileno(), 4097, read_position)
+                    if b"\n" in raw or len(raw) > 4096:
+                        line, _, _rest = raw.partition(b"\n")
+                        read_position += len(line) + 1
                         try:
-                            frame = _json_loads_closed(prefix.split(b"\n", 1)[0])
+                            return _json_loads_closed(line)
                         except (ValueError, UnicodeError):
-                            break
-                        if frame == ready_frame:
-                            if on_started is not None:
-                                on_started()
-                            acknowledged = True
-                        break
+                            return None
                     if cancelled is not None and cancelled():
                         cancelled_state["value"] = True
-                        break
+                        return None
                     threading.Event().wait(0.01)
-                if not acknowledged:
-                    broken = True
-                    if process.poll() is None:
-                        process.kill()
+                return None
+
+            if resume_frame is not None:
+                offer = worker_frame()
+                keys = set(resume_frame) | {"offset", "prefix_sha256"}
+                if (not isinstance(offer, dict) or set(offer) != keys
+                        or any(offer.get(k) != v for k, v in resume_frame.items())
+                        or type(offer.get("offset")) is not int or not 0 <= offer["offset"] <= total
+                        or not isinstance(offer.get("prefix_sha256"), str)
+                        or _DIGEST_RE.fullmatch(offer["prefix_sha256"]) is None):
+                    protocol_error = offer is not None
+                else:
+                    if on_started is not None:
+                        on_started()
+                    offset = offer["offset"]
+                    with open(archive, "rb") as prefix:
+                        remaining = offset
+                        while remaining and not timed_out["value"]:
+                            if cancelled is not None and cancelled():
+                                cancelled_state["value"] = True
+                                break
+                            chunk = prefix.read(min(1 << 20, remaining))
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                            remaining -= len(chunk)
+                    if remaining or timed_out["value"] or cancelled_state["value"]:
+                        broken = True
+                    else:
+                        matches = "sha256:" + digest.hexdigest() == offer["prefix_sha256"]
+                        confirmation = {"schema": 2, "action": "resume", "offset": offset,
+                                        "prefix_sha256": offer["prefix_sha256"]} if matches else {"schema": 2, "action": "restart"}
+                        if not matches:
+                            offset = 0
+                            digest = hashlib.sha256()
+                        try:
+                            process.stdin.write((json.dumps(confirmation, separators=(",", ":")) + "\n").encode())
+                            process.stdin.flush()
+                            frame = worker_frame()
+                            acknowledged = frame == {"schema": 2, "state": "ready", "reservation_id": resume_frame["reservation_id"],
+                                "upload_id": resume_frame["upload_id"], "offset": offset}
+                        except (BrokenPipeError, OSError):
+                            broken = True
+                        if acknowledged and progress is not None:
+                            progress(f"Verified retained prefix {offset} bytes; sending {total - offset} remaining bytes")
+            elif ready_frame is not None:
+                if worker_frame() == ready_frame:
+                    if on_started is not None:
+                        on_started()
+                    acknowledged = True
+            if not acknowledged:
+                broken = True
+                if process.poll() is None:
+                    process.kill()
             with open(archive, "rb") as handle:
+                handle.seek(offset)
                 while acknowledged:
                     if cancelled is not None and cancelled():
                         cancelled_state["value"] = True
@@ -1310,8 +1364,8 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
                     sent += len(chunk)
                     if progress is not None and (sent >= next_report or sent == total):
                         elapsed = max(time.monotonic() - started, 0.001)
-                        progress(f"{label}{sent // 1048576}/{total // 1048576} MiB "
-                                 f"({sent * 100 // max(total, 1)}%, "
+                        progress(f"{label}{(offset + sent) // 1048576}/{total // 1048576} MiB "
+                                 f"({(offset + sent) * 100 // max(total, 1)}%, "
                                  f"{sent / 1048576 / elapsed:.1f} MiB/s)")
                         next_report = sent + max(total // 20, 64 << 20)
             try:
@@ -1333,8 +1387,10 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
     result = {"returncode": returncode, "timed_out": timed_out["value"],
             "cancelled": cancelled_state["value"], "broken_pipe": broken,
             "sent_bytes": sent, "total_bytes": total,
-            "sha256": "sha256:" + digest.hexdigest() if sent == total else None,
+            "sha256": "sha256:" + digest.hexdigest() if offset + sent == total else None,
             "seconds": round(time.monotonic() - started, 1), "output_tail": tail}
-    if ready_frame is not None:
+    if ready_frame is not None or resume_frame is not None:
         result["stderr_tail"] = stderr_tail
+    if resume_frame is not None:
+        result.update(resumed_bytes=offset, resume_protocol_error=protocol_error)
     return result

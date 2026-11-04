@@ -953,16 +953,23 @@ class SSHReadinessWarningTests(unittest.TestCase):
         for garbage in (False,True):
             with self.subTest(garbage=garbage),tempfile.TemporaryDirectory() as directory, \
                  helper.controller(directory) as (_,_,release,_,_,publish):
-                frame={'schema':1,'state':'ready','reservation_id':'a'*32}
                 warnings='x'*5000+'\nWarning: Permanently added host\nWARNING: connection is not using a post-quantum key exchange algorithm\nAuthorized users only\n'
-                script='import sys,json\nsys.stderr.write('+repr(warnings)+');sys.stderr.flush()\n'
-                if garbage:script+="print('garbage on stdout',flush=True)\n"
-                script+='print('+repr(json.dumps(frame))+",flush=True)\ndata=sys.stdin.buffer.read()\nprint(json.dumps({'schema':1,'state':'loaded','bytes':len(data)}),flush=True)\n"
-                results=[];real_stream=local_images.stream_archive
-                def stream(*args,**kwargs):
-                    value=real_stream(*args,**kwargs);results.append(value);return value
+                results=[];real_stream=local_images.stream_archive;real_spawn=subprocess.Popen
+                def spawn(*args,**kwargs):
+                    kwargs['env']=synthetic_environment({'PATH':'/nonexistent'})
+                    return real_spawn(*args,**kwargs)
+                def stream(_argv,*args,**kwargs):
+                    import hashlib
+                    frame={**kwargs['resume_frame'],'offset':0,'prefix_sha256':'sha256:'+hashlib.sha256(b'').hexdigest()}
+                    script='import sys,json\nsys.stderr.write('+repr(warnings)+');sys.stderr.flush()\n'
+                    if garbage:script+="print('garbage on stdout',flush=True)\n"
+                    script+='print('+repr(json.dumps(frame))+",flush=True)\nack=json.loads(sys.stdin.buffer.readline())\n"
+                    ready={'schema':2,'state':'ready','reservation_id':frame['reservation_id'],'upload_id':frame['upload_id'],'offset':0}
+                    script+='print('+repr(json.dumps(ready))+",flush=True)\ndata=sys.stdin.buffer.read()\nprint(json.dumps({'schema':1,'state':'loaded','bytes':len(data)}),flush=True)\n"
+                    value=real_stream([sys.executable,'-c',script],*args,**kwargs);results.append(value);return value
                 with patch.object(remote_local_images,'observe',side_effect=[missing,missing,matching]), \
-                     patch.object(remote_local_images._remote,'ssh_command_args',return_value=[sys.executable,'-c',script]), \
+                     patch.object(remote_local_images._remote,'ssh_command_args',return_value=['synthetic']), \
+                     patch.object(local_images.subprocess,'Popen',side_effect=spawn), \
                      patch.object(local_images,'stream_archive',side_effect=stream):
                     if garbage:
                         with self.assertRaises(remote_local_images.RemoteLocalImageError):helper.push()
@@ -1146,3 +1153,303 @@ class StorageInspectionRoundThreeTests(unittest.TestCase):
                     hosting_cmd.cmd_host({}, self.args(False))
                 self.assertIn('Storage admission: blocked; reason: ' + reason, out.getvalue())
                 self.assertNotIn('None bytes', out.getvalue())
+
+class ResumableStreamTests(unittest.TestCase):
+    def test_verified_prefix_is_not_sent_again(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory, 'bundle.tar')
+            archive.write_bytes(b'prefix-suffix')
+            prefix = 'sha256:' + hashlib.sha256(b'prefix-').hexdigest()
+            base = {'schema': 2, 'state': 'resume', 'reservation_id': 'a'*32,
+                    'upload_id': 'b'*64, 'size': 13}
+            worker = """
+import json,sys
+base=json.loads(sys.argv[1]);prefix=sys.argv[2]
+print(json.dumps(dict(base,offset=7,prefix_sha256=prefix)),flush=True)
+ack=json.loads(sys.stdin.buffer.readline())
+assert ack=={'schema':2,'action':'resume','offset':7,'prefix_sha256':prefix},ack
+print(json.dumps({'schema':2,'state':'ready','reservation_id':base['reservation_id'],'upload_id':base['upload_id'],'offset':7}),flush=True)
+raw=sys.stdin.buffer.read()
+assert raw==b'suffix',raw
+print(json.dumps({'schema':1,'state':'loaded','bytes':13}))
+"""
+            real_spawn = subprocess.Popen
+            def spawn(*args, **kwargs):
+                kwargs['env'] = synthetic_environment()
+                return real_spawn(*args, **kwargs)
+            with patch.object(local_images.subprocess, 'Popen', side_effect=spawn):
+                result = local_images.stream_archive([sys.executable, '-c', worker, json.dumps(base), prefix], archive,
+                    timeout=3, resume_frame=base)
+            self.assertEqual(result['returncode'], 0, result['output_tail'])
+            self.assertEqual(result['sent_bytes'], 6)
+            self.assertEqual(result['resumed_bytes'], 7)
+            self.assertEqual(result['sha256'], 'sha256:' + hashlib.sha256(archive.read_bytes()).hexdigest())
+
+class ResumableWorkerTests(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name)
+        self.root = self.home / 'runtime/host-local-images'
+        self.root.mkdir(parents=True, mode=0o700)
+        self.archive = self.home / 'bundle-1.tar'
+        self.archive.write_bytes(b'abcdefgh' * (1024 * 1024))
+        self.archive.chmod(0o600)
+        self.want = 'sha256:' + hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        self.context = {'schema': 1, 'project': 'app', 'environment': 'development',
+                        'machine_identity': 'a'*24, 'registered_host_digest': 'sha256:'+'b'*64,
+                        'receipt_digest': 'sha256:'+'c'*64, 'bundle_digest': self.want,
+                        'archive_bytes': self.archive.stat().st_size}
+        self.token = 'd'*32
+        self.bin = self.home / 'bin'; self.bin.mkdir()
+        self.loaded = self.home / 'loaded'
+        (self.bin / 'docker').write_text('#!'+sys.executable+'\nimport pathlib,sys\npathlib.Path('+repr(str(self.loaded))+').write_text(str(pathlib.Path(sys.argv[-1]).stat().st_size))\n')
+        (self.bin / 'docker').chmod(0o700)
+        self.child_env = {'PATH': str(self.bin)+':/usr/bin:/bin', 'TMPDIR': str(self.home), 'PYTHONDONTWRITEBYTECODE': '1'}
+        self.reservation()
+
+    def reservation(self):
+        store = self.home / 'runtime/storage'; store.mkdir(mode=0o700, exist_ok=True)
+        ledger = store / 'reservations.json'
+        ledger.write_text(json.dumps([{'id':self.token,'kind':'host-local-images','target':str(self.home/'deploy-src/app')}]))
+        ledger.chmod(0o600)
+
+    def command(self):
+        return [sys.executable, '-c', remote_local_images._RESUMABLE_STAGE_PROGRAM,
+                str(self.root/'uploads'), json.dumps(self.context), self.token, '5']
+
+    def start(self):
+        child = subprocess.Popen(self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, env=synthetic_environment(self.child_env))
+        self.addCleanup(self.stop, child)
+        return child
+
+    @staticmethod
+    def stop(child):
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+
+    @staticmethod
+    def offer(child):
+        import selectors
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            if not selector.select(3):
+                raise AssertionError('no bounded offer from local worker')
+        return json.loads(child.stdout.readline())
+
+    def partial(self, content=b'abcdefgh'):
+        child = self.start(); offer = self.offer(child)
+        child.stdin.write((json.dumps({'schema':2,'action':'resume','offset':0,'prefix_sha256':offer['prefix_sha256']})+'\n').encode())
+        child.stdin.flush(); self.assertEqual(self.offer(child)['state'], 'ready')
+        child.stdin.write(content);child.stdin.close();child.stdin=None
+        output, error = child.communicate(timeout=5)
+        self.assertEqual(child.returncode, 32, error)
+        paths = list((self.root/'uploads').glob('.resume-*.tar'))
+        self.assertEqual(len(paths),1)
+        self.assertEqual(paths[0].read_bytes(), content)
+        self.assertFalse(self.loaded.exists())
+        self.reservation()
+        return paths[0]
+
+    def transfer(self):
+        real_spawn = subprocess.Popen
+        def spawn(*args, **kwargs):
+            kwargs['env'] = synthetic_environment(self.child_env)
+            return real_spawn(*args, **kwargs)
+        artifact = {'archive':self.archive.name,'archive_sha256':self.want,
+                    'archive_bytes':self.archive.stat().st_size,'members':['image-1']}
+        with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value=str(self.home)), \
+             patch.object(remote_local_images._remote,'ssh_command_args',return_value=self.command()), \
+             patch.object(local_images.subprocess,'Popen',side_effect=spawn):
+            return remote_local_images.load_archive('local',self.archive,artifact,timeout=10,entry={},
+                reservation_id=self.token,resume_context=self.context)
+
+    def test_connection_drop_keeps_prefix_and_rerun_sends_only_suffix(self):
+        self.partial()
+        frame = self.transfer()
+        self.assertEqual(frame['resumed_bytes'],8)
+        self.assertEqual(self.loaded.read_text(),str(self.archive.stat().st_size))
+        self.assertEqual(list((self.root/'uploads').glob('.resume-*')),[])
+
+    def test_corrupted_prefix_is_discarded_before_suffix_can_be_sent(self):
+        path = self.partial();path.write_bytes(b'corrupt!')
+        self.assertEqual(self.transfer()['resumed_bytes'],0)
+        self.assertTrue(self.loaded.exists())
+
+    def test_two_controllers_cannot_append_concurrently(self):
+        first = self.start(); self.offer(first)
+        second = self.start(); out, error = second.communicate(timeout=3)
+        self.assertEqual(second.returncode,75,error)
+        self.assertEqual(out,b'')
+        self.assertFalse(self.loaded.exists())
+
+    def test_killed_controller_leaves_reusable_bytes_and_releases_fences(self):
+        import signal,time,fcntl
+        harness = """
+import json,os,signal,sys
+from pathlib import Path
+from unittest.mock import patch
+from sandbox.transports import remote_local_images as transport
+ctx=json.loads(sys.argv[3]);home=Path(sys.argv[1]);archive=Path(sys.argv[2])
+artifact={'archive':archive.name,'archive_sha256':ctx['bundle_digest'],'archive_bytes':ctx['archive_bytes'],'members':['image-1']}
+def command(entry, command, **kwargs):
+ import shlex
+ argv=shlex.split(command);argv[0]=sys.executable;return argv
+def kill_after_chunk(message):
+ if 'MiB (' in message: os.kill(os.getpid(),signal.SIGKILL)
+with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home)),patch.object(transport._remote,'ssh_command_args',side_effect=command):
+ with transport.target_image_lease('local','app','development',ctx['receipt_digest'],entry={}) as lease:
+  transport.load_archive('local',archive,artifact,timeout=10,entry={},reservation_id=sys.argv[4],resume_context=ctx,progress=kill_after_chunk,cancelled=lease.lost)
+"""
+        result=run_test_process([sys.executable,'-c',harness,str(self.home),str(self.archive),json.dumps(self.context),self.token],env=self.child_env,capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,-signal.SIGKILL,result.stderr)
+        deadline=time.monotonic()+5
+        while True:
+            with open(self.root/'load-fence.lock','rb') as handle:
+                try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:
+                    if time.monotonic()>=deadline:raise AssertionError('worker survived EOF')
+                    time.sleep(.01);continue
+                break
+        paths=list((self.root/'uploads').glob('.resume-*.tar'))
+        self.assertEqual(len(paths),1)
+        saved=paths[0].stat().st_size
+        self.assertGreater(saved,0);self.assertLess(saved,self.archive.stat().st_size)
+        self.reservation()
+        self.assertEqual(self.transfer()['resumed_bytes'],saved)
+        self.assertTrue(self.loaded.exists())
+
+    def test_busy_worker_does_not_release_another_controllers_reservation(self):
+        first=self.start();self.offer(first)
+        second=self.start();second.communicate(timeout=3)
+        self.assertEqual(second.returncode,75)
+        ledger=json.loads((self.home/'runtime/storage/reservations.json').read_text())
+        self.assertEqual([row['id'] for row in ledger],[self.token])
+        engine=run_test_process([sys.executable,'-c',remote_local_images._ENGINE_LOCK_PROGRAM,str(self.root)],input=b'',capture_output=True,timeout=3)
+        self.assertEqual(engine.returncode,75,engine.stderr)
+        self.assertEqual(json.loads(engine.stdout),{'schema':1,'acquired':False})
+
+    def test_matching_full_partial_loads_without_resending_bytes(self):
+        self.partial(self.archive.read_bytes()[:-1])
+        paths=list((self.root/'uploads').glob('.resume-*.tar'))
+        paths[0].write_bytes(self.archive.read_bytes())
+        self.assertEqual(self.transfer()['resumed_bytes'],self.archive.stat().st_size)
+        self.assertTrue(self.loaded.exists())
+
+    def test_new_receipt_discards_same_scope_old_bundle_partial(self):
+        old=self.partial()
+        self.context['receipt_digest']='sha256:'+'e'*64
+        self.assertEqual(self.transfer()['resumed_bytes'],0)
+        self.assertFalse(old.exists())
+
+    def test_same_receipt_cannot_reuse_partial_from_another_machine(self):
+        old=self.partial()
+        self.context['machine_identity']='e'*24
+        self.assertEqual(self.transfer()['resumed_bytes'],0)
+        self.assertTrue(old.exists())  # Foreign identity is not silently deleted.
+
+    def test_missing_reservation_sends_no_offer_and_loads_nothing(self):
+        (self.home/'runtime/storage/reservations.json').write_text('[]')
+        child=self.start();output,_=child.communicate(timeout=3)
+        self.assertNotEqual(child.returncode,0)
+        self.assertEqual(output,b'');self.assertFalse(self.loaded.exists())
+
+    def test_symlink_and_hardlink_partial_are_not_followed_or_removed(self):
+        import os
+        for kind in ('symlink','hardlink'):
+            with self.subTest(kind=kind):
+                path=self.partial();path.unlink()
+                victim=self.home/'victim';victim.write_bytes(b'untouched');victim.chmod(0o600)
+                if kind=='symlink':path.symlink_to(victim)
+                else:os.link(victim,path)
+                child=self.start();child.communicate(timeout=3)
+                self.assertNotEqual(child.returncode,0)
+                self.assertEqual(victim.read_bytes(),b'untouched')
+                self.assertTrue(path.exists());path.unlink();victim.unlink()
+                self.reservation()
+
+    def test_stale_partial_is_reaped_under_fence_before_reservation_admission(self):
+        import os,time
+        path=self.partial()
+        for item in (self.root/'uploads').iterdir():os.utime(item,(time.time()-90000,)*2)
+        program=remote_local_images._RECONCILE_PROGRAM
+        result=run_test_process([sys.executable,'-c',program,str(self.root),str(self.home/'deploy-src/app')],capture_output=True,text=True,timeout=3)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout),{'safe':True})
+        self.assertFalse(path.exists())
+        self.reservation()
+        self.assertEqual(self.transfer()['resumed_bytes'],0)
+
+    def test_quarantine_blocks_gc_and_preserves_load_evidence(self):
+        import os,time
+        path=self.partial()
+        for item in (self.root/'uploads').iterdir():os.utime(item,(time.time()-90000,)*2)
+        (self.root/'load-unverified').write_text('{}')
+        result=run_test_process([sys.executable,'-c',remote_local_images._RECONCILE_PROGRAM,str(self.root),str(self.home/'deploy-src/app')],capture_output=True,text=True,timeout=3)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout),{'safe':False})
+        self.assertTrue(path.exists())
+
+    def test_failed_load_retains_full_archive_reservation_and_quarantine(self):
+        (self.bin/'docker').write_text('#!'+sys.executable+'\nraise SystemExit(1)\n')
+        with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'local_images_transfer_unknown'):
+            self.transfer()
+        self.assertTrue((self.root/'load-unverified').exists())
+        self.assertEqual((self.root/'load-fence.lock').stat().st_mode&0o777,0o400)
+        self.assertEqual(len(list((self.root/'uploads').glob('.resume-*.tar'))),1)
+        self.assertEqual(len(json.loads((self.home/'runtime/storage/reservations.json').read_text())),1)
+
+    def test_old_worker_handshake_refuses_clearly_without_sending_archive(self):
+        legacy="import json,sys;print(json.dumps({'schema':1,'state':'ready','reservation_id':sys.argv[1]}),flush=True);assert not sys.stdin.buffer.read()"
+        real_spawn=subprocess.Popen
+        def spawn(*args,**kwargs):
+            kwargs['env']=synthetic_environment(self.child_env);return real_spawn(*args,**kwargs)
+        artifact={'archive':self.archive.name,'archive_sha256':self.want,'archive_bytes':self.archive.stat().st_size,'members':['image-1']}
+        with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value=str(self.home)), \
+             patch.object(remote_local_images._remote,'ssh_command_args',return_value=[sys.executable,'-c',legacy,self.token]), \
+             patch.object(local_images.subprocess,'Popen',side_effect=spawn):
+            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'local_images_resume_protocol_unsupported'):
+                remote_local_images.load_archive('local',self.archive,artifact,timeout=3,entry={},reservation_id=self.token,resume_context=self.context)
+
+    def test_old_runtime_identity_failure_is_a_clear_pretransfer_refusal(self):
+        from sandbox.resources.host_memory.remote import RemoteProtocolError
+        args=SimpleNamespace(confirm=True,remote='target',receipt='/synthetic/receipt.json',timeout=60,artifact_timeout=30,json=True)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(hosting_cmd.remote,'registered_remote_lock'))
+            stack.enter_context(patch.object(hosting_cmd.remote,'registration_lock_name',return_value='fixture'))
+            stack.enter_context(patch.object(remote_local_images,'_entry',return_value={'mcp_service':{'runtime_revision':'a'*24}}))
+            stack.enter_context(patch('sandbox.readiness.gate.require_ready'))
+            stack.enter_context(patch.object(hosting_cmd.remote,'resolve_sandbox_home',return_value='/synthetic'))
+            stack.enter_context(patch.object(hosting_cmd.remote,'_remote_mcp_runtime_revision',return_value='b'*24))
+            stack.enter_context(patch.object(hosting_cmd,'_authenticated_machine_identity',side_effect=RemoteProtocolError('remote_runtime_revision_mismatch','secret-canary')))
+            push=stack.enter_context(patch.object(remote_local_images,'push_receipt'))
+            output=io.StringIO()
+            with redirect_stdout(output),self.assertRaises(SystemExit):hosting_cmd._cmd_host_image_push_local(args)
+            value=json.loads(output.getvalue())
+            self.assertEqual(value['code'],'remote_runtime_revision_mismatch')
+            for value_part in ['a'*24,'b'*24,'live unknown','before archive transfer','remote service status target --json','owner approval']:
+                self.assertIn(value_part,value['message'])
+            self.assertNotIn('secret-canary',output.getvalue());push.assert_not_called()
+
+    def test_cache_capacity_refuses_before_creating_an_extra_pair(self):
+        uploads=self.root/'uploads';uploads.mkdir(mode=0o700)
+        for index in range(127):
+            path=uploads/('unrecognized-'+str(index));path.touch(mode=0o600)
+        with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'local_images_partial_cache_full'):
+            self.transfer()
+        self.assertEqual(len(list(uploads.iterdir())),127)
+        self.assertFalse(self.loaded.exists())
+
+    def test_corrupt_metadata_never_authorizes_append_and_retry_recreates_pair(self):
+        self.partial()
+        meta=next((self.root/'uploads').glob('.resume-*.json'))
+        meta.write_text('{"bad":true}')
+        with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'local_images_partial_metadata_invalid'):
+            self.transfer()
+        self.assertFalse(self.loaded.exists())
+        self.reservation()
+        self.assertEqual(self.transfer()['resumed_bytes'],0)

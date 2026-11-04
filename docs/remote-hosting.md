@@ -2305,9 +2305,34 @@ In v2 results, `skipped` means initially verified at the locked observation.
 Those images still travel inside a transferred full bundle and may be re-imported;
 `transferred_bytes` and `transferred_bundles` expose the transport cost.
 
-A hard-killed stage worker can leave its private `.upload-*.tar` file behind.
-There is no automatic sweeper; inspect task-owned staging during operator
-reconciliation after proving the daemon idle.
+Legacy workers can leave private `.upload-*.tar` files after a hard kill;
+these legacy names still require operator reconciliation. Protocol23 v2 pushes
+instead retain digest-bound `.resume-*` pairs. Retry the same sealed receipt:
+the worker rehashes its actual prefix, the controller independently verifies it,
+and only the suffix is sent. A corrupt prefix resets; changed receipt/bundle or
+target identity never authorizes append. Full size/hash/fsync still precede load.
+
+The engine lease and worker fence cover negotiation and upload. Proven orphan
+reservations are reconciled, then the existing full3x reservation is recreated;
+retained bytes receive no storage credit and can conservatively require up to
+one extra bundle of headroom. Under the worker fence, inactive partials older
+than24h are reaped before admission. During negotiation, superseded same-target
+pairs are removed. Cache count/bytes are bounded; unsafe files, active workers
+and quarantine refuse cleanup. Load uncertainty retains full bytes and quarantine.
+No automatic quarantine reset or storage-floor bypass exists.
+
+This resumes bytes after a controller/app restart or connection loss; it does
+not detach the controller or automatically attach an apply job. The existing
+`transferred_bytes` reports logical full-bundle bytes; human progress names the
+verified retained prefix and remaining wire bytes. An old/incorrect upload
+handshake gives `local_images_resume_protocol_unsupported` before archive bytes,
+with no invisible fallback. Legacy v1 keeps its existing path.
+
+The current checkout speaks protocol23 and has a new runtime fingerprint.
+Runtime adoption and client re-pins require separate owner approval; this change
+installs nothing. A pre-transfer identity revision refusal is retained as
+`remote_runtime_revision_mismatch` with safe registered/controller values, live
+unknown through that error, and a status command instead of `transfer_unknown`.
 
 ### V2 reservation lifecycle and quarantine recovery
 
@@ -2338,7 +2363,7 @@ other write access, links and foreign ownership refuse. Release waits up to ten
 seconds for the ledger lock. A tight all-present v2 host can still fail the full
 budget check; select a separately exported v1 receipt for that fallback.
 
-The current contract requires **protocol 17**. Migrate runtimes first using the
+The reservation lifecycle was introduced in protocol17; this checkout requires **protocol23**. Migrate runtimes first using the
 plan/confirmed migration/status workflow above, then bump client pins. No remote
 migration is performed by this change.
 

@@ -376,8 +376,6 @@ def cmd_wp(cfg, args) -> None:
     if not pt:
         die("usage: ./sb wp <wp-cli args>")
     _reject_redundant_wp_token(pt)
-    if is_eval_file_stdin(pt) and _stdin_is_char_device_or_closed():
-        die("eval-file - requires a piped script; stdin is a character device or closed. Pass a script path instead.")
     allow_missing = bool(getattr(args, "allow_missing", False))
     plugin_partial = _plugin_deactivate_request(pt)
     if allow_missing and not (_is_option_get_probe(pt) or plugin_partial):
@@ -411,6 +409,8 @@ def cmd_wp(cfg, args) -> None:
     if managed_native_instance_selected(args.resolved_instance) is not None:
         if requires_stdin(pt):
             die("managed-native wp does not support stdin; pass the value as an argument, or for eval-file, a path")
+    if is_eval_file_stdin(pt) and _stdin_is_char_device_or_closed():
+        die("eval-file - requires a piped script; stdin is a character device or closed. Pass a script path instead.")
     pt = _absolutize_project_requires(pt, getattr(args, "project_dir", None))
     pt, staged_packages = _stage_host_package_paths(
         pt, args.resolved_instance, getattr(args, "project_dir", None),

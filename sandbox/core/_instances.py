@@ -955,10 +955,10 @@ def _resolve_reconcile_server(cfg: dict, name: str, pconf: dict,
     """Resolve the desired web server for apply/ensure, refusing declared server changes."""
     sc = _core()
     block = (resolve_instances(cfg).get(name) or {}) if cfg else {}
-    current = block.get("server") or (existing.get("server") if existing else None) or "nginx"
+    current = block.get("server") or (existing.get("server") if existing else None)
     declared = pconf.get("server") if pconf.get("server_declared") else None
     desired = declared or current or "nginx"
-    if declared is not None and declared != current:
+    if declared is not None and current and declared != current:
         if "herd" in (current, desired):
             msg = (
                 f"apply_server_change_refused: cannot change web server from '{current}' "
@@ -970,8 +970,9 @@ def _resolve_reconcile_server(cfg: dict, name: str, pconf: dict,
             msg = (
                 f"apply_server_change_refused: cannot change web server from '{current}' "
                 f"to '{desired}' for instance '{name}'. No state was changed. "
-                f"Run `sb server {name} {desired}` on the host that runs this instance to switch servers; "
-                "that command does not verify the result or roll back; check the site after."
+                f"Run `sb server {name} {desired}` on the host that runs this instance to switch servers "
+                f"(it does not verify the result or roll back; check the site after), "
+                f"or set the project's `server` to '{current}' if that is what you want."
             )
         err = sc.ConfigError(msg)
         err.code = "apply_server_change_refused"
@@ -1596,6 +1597,8 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
     ready_install_state = None
     with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
+        if existing and existing.get("instance") and existing.get("status") != "pending":
+            _resolve_reconcile_server(cfg, existing["instance"], pconf, existing)
         if creation_context is not None:
             from sandbox.server_config.creation_requests import (
                 validate_resolved_context, reserve_creation_request, scope_key,

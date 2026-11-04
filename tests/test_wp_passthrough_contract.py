@@ -199,31 +199,30 @@ class TestWpAsyncAndManagedNativeRefusal(unittest.TestCase):
 
     @patch("sandbox.commands.wp.preflight_instance_capability", return_value=None)
     def test_async_refuses_command_requiring_stdin_before_launch(self, _preflight):
-        err = io.StringIO()
-        with patch("sandbox.commands.jobs.launch_job") as launch_mock, \
-             contextlib.redirect_stderr(err), \
-             self.assertRaises(SystemExit) as raised:
-            wp.cmd_wp({}, self._args())
+        for cmd in (["--", "db", "query"], ["--", "eval-file", "-"]):
+            for char_dev in (True, False):
+                with self.subTest(cmd=cmd, char_dev=char_dev):
+                    err = io.StringIO()
+                    with patch("sandbox.commands.wp._stdin_is_char_device_or_closed", return_value=char_dev),                          patch("sandbox.commands.jobs.launch_job") as launch_mock,                          contextlib.redirect_stderr(err),                          self.assertRaises(SystemExit) as raised:
+                        wp.cmd_wp({}, self._args(passthrough=cmd))
 
-        self.assertEqual(raised.exception.code, 1)
-        self.assertIn("async wp does not support stdin", err.getvalue())
-        launch_mock.assert_not_called()
+                    self.assertEqual(raised.exception.code, 1)
+                    self.assertIn("async wp does not support stdin", err.getvalue())
+                    launch_mock.assert_not_called()
 
     @patch("sandbox.commands.wp.preflight_instance_capability", return_value=None)
     @patch("sandbox.commands.wp.managed_native_instance_selected", return_value=("/project", "default"))
     def test_managed_native_refuses_command_requiring_stdin_before_wpcli(self, _mn, _preflight):
-        err = io.StringIO()
-        args = self._args(run_async=False, passthrough=["--", "eval-file", "-"])
-        with patch("os.fstat", return_value=MagicMock(st_mode=stat.S_IFIFO)), \
-             patch.object(wp, "wpcli") as wpcli, \
-             contextlib.redirect_stderr(err), \
-             self.assertRaises(SystemExit) as raised:
-            wp.cmd_wp({}, args)
+        for char_dev in (True, False):
+            with self.subTest(char_dev=char_dev):
+                err = io.StringIO()
+                args = self._args(run_async=False, passthrough=["--", "eval-file", "-"])
+                with patch("sandbox.commands.wp._stdin_is_char_device_or_closed", return_value=char_dev),                      patch.object(wp, "wpcli") as wpcli,                      contextlib.redirect_stderr(err),                      self.assertRaises(SystemExit) as raised:
+                    wp.cmd_wp({}, args)
 
-        self.assertEqual(raised.exception.code, 1)
-        self.assertIn("managed-native wp does not support stdin", err.getvalue())
-        wpcli.assert_not_called()
-
+                self.assertEqual(raised.exception.code, 1)
+                self.assertIn("managed-native wp does not support stdin", err.getvalue())
+                wpcli.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

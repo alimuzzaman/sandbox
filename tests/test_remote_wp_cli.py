@@ -559,13 +559,15 @@ class TestRemoteWpCliCommand(unittest.TestCase):
     def test_cmd_wp_remote_refuses_commands_requiring_stdin_before_dispatch(
         self, core, _preflight, get_remote, remote_wp_cli,
     ):
-        err = StringIO()
-        with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
-            command.cmd_wp({}, self._args(passthrough=["--", "eval-file", "-"]))
-        self.assertEqual(raised.exception.code, 1)
-        self.assertIn("remote wp does not support stdin", err.getvalue())
-        self.assertIn("pass the value as an argument, or for eval-file, a path", err.getvalue())
-        remote_wp_cli.assert_not_called()
+        for char_dev in (True, False):
+            with self.subTest(char_dev=char_dev):
+                err = StringIO()
+                with patch("sandbox.commands.wp._stdin_is_char_device_or_closed", return_value=char_dev),                      redirect_stderr(err), self.assertRaises(SystemExit) as raised:
+                    command.cmd_wp({}, self._args(passthrough=["--", "eval-file", "-"]))
+                self.assertEqual(raised.exception.code, 1)
+                self.assertIn("remote wp does not support stdin", err.getvalue())
+                self.assertIn("pass the value as an argument, or for eval-file, a path", err.getvalue())
+                remote_wp_cli.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -293,7 +293,8 @@ class TestApplyServerChangePolicy(unittest.TestCase):
             self.assertIn("No state was changed", msg)
             self.assertIn("sb server demo litespeed", msg)
             self.assertIn("on the host that runs this instance", msg.lower())
-            self.assertIn("that command does not verify the result or roll back; check the site after", msg)
+            self.assertIn("(it does not verify the result or roll back; check the site after)", msg)
+            self.assertIn("or set the project's `server` to 'nginx' if that is what you want.", msg)
             mock_compose.assert_not_called()
             mock_write_local.assert_not_called()
 
@@ -428,6 +429,281 @@ class TestApplyServerChangePolicy(unittest.TestCase):
             self.assertIn("deletes the DB and files and needs its own plan", die_msg)
             self.assertNotIn("delete", die_msg.lower().replace("deletes the db", ""))
 
+
+
+class TestEnsureServerChangePolicyRefusal(unittest.TestCase):
+    def test_ensure_refuses_a_declared_change_before_any_effect(self):
+        import contextlib
+        import sandbox_core as sc
+        from sandbox.core import _instances
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "nginx", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        for status in ("ready", "stopped", "error"):
+            with self.subTest(status=status):
+                existing = {
+                    "instance": "demo",
+                    "label": "default",
+                    "status": status,
+                    "wordpress_port": 8088,
+                    "db_port": 3307,
+                    "mailpit_port": 8025,
+                    "server": "nginx",
+                }
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(sc, "load_project_config", return_value=pconf))
+                    stack.enter_context(mock.patch.object(sc, "registry_get", return_value=existing))
+                    stack.enter_context(mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+                    mock_put = stack.enter_context(mock.patch.object(sc, "registry_put"))
+                    mock_start_stopped = stack.enter_context(mock.patch.object(_instances, "_start_stopped_instance"))
+                    mock_resolve_ports = stack.enter_context(mock.patch.object(_instances, "_resolve_port_conflicts"))
+                    mock_attest = stack.enter_context(mock.patch.object(_instances, "attest_source_mounts"))
+                    mock_compose = stack.enter_context(mock.patch.object(_instances, "compose"))
+                    mock_reserve = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.reserve_creation_request"))
+                    mock_pending = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.pending_receipts"))
+                    mock_replay = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.replay_creation_result"))
+                    mock_validate = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.validate_resolved_context"))
+
+                    with self.assertRaises(sc.ConfigError) as ctx:
+                        _instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+
+                    self.assertEqual(getattr(ctx.exception, "code", None), "apply_server_change_refused")
+                    mock_put.assert_not_called()
+                    mock_start_stopped.assert_not_called()
+                    mock_resolve_ports.assert_not_called()
+                    mock_attest.assert_not_called()
+                    mock_compose.assert_not_called()
+                    mock_reserve.assert_not_called()
+                    mock_pending.assert_not_called()
+                    mock_replay.assert_not_called()
+                    mock_validate.assert_not_called()
+
+    def test_ensure_with_a_creation_request_refuses_before_writing_a_receipt(self):
+        import contextlib
+        import sandbox_core as sc
+        from sandbox.core import _instances
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "nginx", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "status": "ready",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "nginx",
+            "instance_incarnation_id": "inc-123",
+        }
+        creation_ctx = {
+            "operation_id": "op-456",
+            "intent_digest": "sha256:abc",
+            "label": "default",
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(mock.patch.object(sc, "registry_get", return_value=existing))
+            stack.enter_context(mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            mock_put = stack.enter_context(mock.patch.object(sc, "registry_put"))
+            mock_start_stopped = stack.enter_context(mock.patch.object(_instances, "_start_stopped_instance"))
+            mock_resolve_ports = stack.enter_context(mock.patch.object(_instances, "_resolve_port_conflicts"))
+            mock_attest = stack.enter_context(mock.patch.object(_instances, "attest_source_mounts"))
+            mock_compose = stack.enter_context(mock.patch.object(_instances, "compose"))
+            mock_reserve = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.reserve_creation_request"))
+            mock_pending = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.pending_receipts"))
+            mock_replay = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.replay_creation_result"))
+            mock_validate = stack.enter_context(mock.patch("sandbox.server_config.creation_requests.validate_resolved_context"))
+
+            with self.assertRaises(sc.ConfigError) as ctx:
+                _instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default", creation_context=creation_ctx)
+
+            self.assertEqual(getattr(ctx.exception, "code", None), "apply_server_change_refused")
+            mock_put.assert_not_called()
+            mock_start_stopped.assert_not_called()
+            mock_resolve_ports.assert_not_called()
+            mock_attest.assert_not_called()
+            mock_compose.assert_not_called()
+            mock_reserve.assert_not_called()
+            mock_pending.assert_not_called()
+            mock_replay.assert_not_called()
+            mock_validate.assert_not_called()
+
+    def test_ensure_pending_row_is_not_refused(self):
+        import contextlib
+        import sandbox_core as sc
+        from sandbox.core import _instances
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "status": "pending",
+            "server": "nginx",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "litespeed", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(mock.patch.object(sc, "registry_get", return_value=existing))
+            stack.enter_context(mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(mock.patch.object(_instances, "_docker_preflight"))
+            stack.enter_context(mock.patch.object(_instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(_instances, "_proxy_sudoers_installed", return_value=False))
+            stack.enter_context(mock.patch.object(_instances, "_secure_at_create", return_value=False))
+            stack.enter_context(mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=lambda c, **kw: c))
+            mock_build = stack.enter_context(mock.patch.object(_instances, "_build_instance_block", return_value={"server": "litespeed"}))
+            stack.enter_context(mock.patch.object(_instances, "prepare_php_extension_runtime", return_value=None))
+            stack.enter_context(mock.patch.object(_instances, "_write_local_yaml"))
+            stack.enter_context(mock.patch.object(_instances, "load_config", return_value=cfg))
+            stack.enter_context(mock.patch.object(_instances, "write_compose_files"))
+            stack.enter_context(mock.patch("sandbox.commands.lifecycle.cmd_up"))
+            stack.enter_context(mock.patch("sandbox.commands.lifecycle.cmd_install"))
+            stack.enter_context(mock.patch.object(_instances, "_instance_web_services_running", return_value=(True, "")))
+            stack.enter_context(mock.patch.object(_instances, "_auto_heal_wp_url"))
+            stack.enter_context(mock.patch.object(_instances, "_wait_http", return_value=True))
+            stack.enter_context(mock.patch.object(_instances, "_wait_reachable", return_value=True))
+            stack.enter_context(mock.patch.object(_instances, "_wire_project_plugins"))
+            stack.enter_context(mock.patch.object(_instances, "_wire_project_themes"))
+            stack.enter_context(mock.patch.object(_instances, "site_url", return_value="http://localhost:8088"))
+            stack.enter_context(mock.patch.object(_instances, "_refresh_registered_url", return_value=existing))
+            stack.enter_context(mock.patch("sandbox.commands.data.capture_install_snapshots"))
+            mock_put = stack.enter_context(mock.patch.object(sc, "registry_put", return_value=existing))
+
+            res = _instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+            self.assertIsNotNone(res)
+            self.assertEqual(mock_build.call_args[0][5], "litespeed")
+
+    def test_ensure_new_project_is_not_refused(self):
+        import contextlib
+        import sandbox_core as sc
+        from sandbox.core import _instances
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        cfg = {"instances": {}}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(mock.patch.object(sc, "registry_get", return_value=None))
+            stack.enter_context(mock.patch.object(sc, "registry_list_for_root", return_value=[]))
+            stack.enter_context(mock.patch.object(sc, "registry_all", return_value={}))
+            stack.enter_context(mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(mock.patch.object(_instances, "_derive_instance_name", return_value="fake-project"))
+            stack.enter_context(mock.patch.object(_instances, "_docker_preflight"))
+            stack.enter_context(mock.patch.object(_instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(_instances, "_proxy_sudoers_installed", return_value=False))
+            stack.enter_context(mock.patch.object(_instances, "_secure_at_create", return_value=False))
+            mock_build = stack.enter_context(mock.patch.object(_instances, "_build_instance_block", return_value={"server": "litespeed"}))
+            stack.enter_context(mock.patch.object(_instances, "prepare_php_extension_runtime", return_value=None))
+            stack.enter_context(mock.patch.object(_instances, "_write_local_yaml"))
+            stack.enter_context(mock.patch.object(_instances, "load_config", return_value={"instances": {"fake-project": {"server": "litespeed"}}}))
+            stack.enter_context(mock.patch.object(_instances, "write_compose_files"))
+            stack.enter_context(mock.patch("sandbox.commands.lifecycle.cmd_up"))
+            stack.enter_context(mock.patch("sandbox.commands.lifecycle.cmd_install"))
+            stack.enter_context(mock.patch.object(_instances, "_instance_web_services_running", return_value=(True, "")))
+            stack.enter_context(mock.patch.object(_instances, "_auto_heal_wp_url"))
+            stack.enter_context(mock.patch.object(_instances, "_wait_http", return_value=True))
+            stack.enter_context(mock.patch.object(_instances, "_wait_reachable", return_value=True))
+            stack.enter_context(mock.patch.object(_instances, "_wire_project_plugins"))
+            stack.enter_context(mock.patch.object(_instances, "_wire_project_themes"))
+            stack.enter_context(mock.patch.object(_instances, "site_url", return_value="http://localhost:8088"))
+            stack.enter_context(mock.patch.object(_instances, "_refresh_registered_url", return_value={"instance": "fake-project"}))
+            stack.enter_context(mock.patch("sandbox.commands.data.capture_install_snapshots"))
+            mock_put = stack.enter_context(mock.patch.object(sc, "registry_put", return_value={"instance": "fake-project"}))
+
+            res = _instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+            self.assertIsNotNone(res)
+            self.assertEqual(mock_build.call_args[0][5], "litespeed")
+
+    def test_ensure_ready_with_no_declaration_is_unchanged(self):
+        import contextlib
+        import sandbox_core as sc
+        from sandbox.core import _instances
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "nginx",  # default in pconf
+            "server_declared": False,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "status": "ready",
+            "server": "litespeed",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "url": "http://localhost:8088",
+            "login_url": "",
+            "admin_url": "http://localhost:8088/wp-admin/",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "litespeed", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(mock.patch.object(sc, "registry_get", return_value=existing))
+            stack.enter_context(mock.patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(mock.patch.object(_instances, "_docker_preflight"))
+            stack.enter_context(mock.patch.object(_instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(_instances, "attest_source_mounts", return_value={"ok": True}))
+            stack.enter_context(mock.patch.object(_instances, "_instance_reachable", return_value=True))
+            stack.enter_context(mock.patch.object(_instances, "_wp_core_install_state", return_value="installed"))
+            stack.enter_context(mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=lambda c, **kw: c))
+            stack.enter_context(mock.patch.object(_instances, "_warn_version_drift"))
+            stack.enter_context(mock.patch.object(_instances, "_proxy_sudoers_installed", return_value=False))
+            stack.enter_context(mock.patch.object(_instances, "site_url", return_value="http://localhost:8088"))
+            stack.enter_context(mock.patch.object(_instances, "_auto_heal_wp_url"))
+            stack.enter_context(mock.patch.object(_instances, "_wait_reachable", return_value=True))
+            stack.enter_context(mock.patch.object(_instances, "_refresh_registered_url", return_value=existing))
+
+            res = _instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+            self.assertEqual(res["instance"], "demo")
+            self.assertEqual(res["server"], "litespeed")
+
+    def test_record_with_no_established_server_accepts_a_declaration(self):
+        from sandbox.core import _instances
+
+        cfg = {"instances": {}}
+        existing = {
+            "instance": "unrecorded-instance",
+            "label": "default",
+            "status": "stopped",
+        }
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        server = _instances._resolve_reconcile_server(cfg, "unrecorded-instance", pconf, existing)
+        self.assertEqual(server, "litespeed")
 
 if __name__ == "__main__":
     unittest.main()

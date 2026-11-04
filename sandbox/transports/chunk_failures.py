@@ -40,7 +40,10 @@ def public_failure(error, *, receipt, remote, streams):
     # Diagnostics are executable inspection commands, never speculative chmod,
     # reservation deletion, Docker replay, or a quarantine bypass.
     cause=code.removeprefix('local_images_')
-    if cause in ('chunk_no_space','partial_cache_full','chunk_permission_denied','unsafe_chunk_entry','unsafe_chunk_cache') or cause.startswith('reservation_'):
+    if cause in ('coordinator_start_failed','ssh_setup_failed'):
+        command=shlex.join(['ssh','-V'])
+        description='Inspect the local OpenSSH client and the reported setup cause. Prepare the approved client or wait for shared authentication headroom; setup has a finite retry bound and chunks are never retried automatically.'
+    elif cause in ('chunk_no_space','partial_cache_full','chunk_permission_denied','unsafe_chunk_entry','unsafe_chunk_cache') or cause.startswith('reservation_'):
         command=storage
         description='Inspect the reported storage bytes/modes and ledger. An owner must repair the named storage or integrity cause; retry cannot repair permissions. Never delete an active reservation.'
     elif cause in ('chunk_hash_mismatch','bundle_hash_mismatch','chunk_manifest_invalid'):

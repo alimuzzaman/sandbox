@@ -141,7 +141,7 @@ def _run_probe(remote: dict, request: dict, *, timeout: int) -> dict | None:
 
 
 def release_storage_reservation(store: str, reservation_id: "str | None", *,
-                                orphan_target: "str | None" = None, verify_only: bool = False, orphan_engine: bool = False,
+                                orphan_target: "str | None" = None, verify_only: bool = False,
                                 lock_timeout: float = 10) -> None:
     """Atomically release only one owned operation reservation; usable in workers."""
     import fcntl
@@ -153,9 +153,7 @@ def release_storage_reservation(store: str, reservation_id: "str | None", *,
     import time
     from pathlib import Path
 
-    if type(orphan_engine) is not bool or (orphan_engine and (reservation_id is not None or orphan_target is not None or verify_only)):
-        raise ValueError("invalid orphan engine release")
-    if reservation_id is None and orphan_target is None and not orphan_engine:
+    if reservation_id is None and orphan_target is None:
         raise ValueError("operation or target required")
     if reservation_id is not None and not re.fullmatch(r"[0-9a-f]{32}", reservation_id):
         raise ValueError("invalid operation reservation")
@@ -197,11 +195,7 @@ def release_storage_reservation(store: str, reservation_id: "str | None", *,
             if not any(e.get("id") == reservation_id and e.get("kind") == "host-local-images" for e in entries):
                 raise ValueError("operation reservation missing")
             return
-        # orphan_engine is allowed only after the host-global engine lease and
-        # exclusive worker fence prove that every image uploader is idle and no
-        # uncertain load exists. Durable job reservations are never image pins.
         retained = [e for e in entries if not (
-            e.get("kind") == "host-local-images" if orphan_engine else
             e.get("kind") == "host-local-images" and e.get("target") == orphan_target
             if orphan_target is not None else e.get("id") == reservation_id)]
         if retained == entries:

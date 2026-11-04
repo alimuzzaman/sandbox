@@ -503,9 +503,13 @@ try:
  except BlockingIOError: done(False);sys.exit(0)
  if os.path.lexists(root+'/load-unverified'): done(False);sys.exit(0)
  cleanup_partials(root+'/uploads')
- cleanup_chunk_plans(root+'/chunks',keep_receipt=keep,evict_other=True)
+ removed=cleanup_chunk_plans(root+'/chunks',keep_receipt=keep,evict_other=True)
  store=os.path.dirname(root)+'/storage'
- if os.path.exists(store): release_storage_reservation(store,None,orphan_engine=True)
+ if os.path.exists(store):
+  # Foreign pins are released only for fully reclaimed canonical plans. A
+  # peer reservation without an attributable cache remains untouched.
+  targets={target}|{os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(root)),'deploy-src',project)) for project in removed}
+  for item in sorted(targets):release_storage_reservation(store,None,orphan_target=item)
  done(True)
 finally: os.close(fd)
 """

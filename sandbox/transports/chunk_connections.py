@@ -5,6 +5,7 @@ ControlPersist bounds orphan lifetime to 60 idle seconds after controller death.
 """
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import tempfile
@@ -65,6 +66,11 @@ class UploadConnections:
                         status, cause = self.operation(self.argv(path, '-M', '-N', '-f'))
                     except subprocess.TimeoutExpired:
                         status, cause = 255, 'connection_timeout'
+                    except OSError:
+                        raise ConnectionFailure('ssh_client_unavailable',attempt+1) from None
+                    if status != 0 and os.path.lexists(path):
+                        self.paths.append(path)
+                        raise ConnectionFailure('master_state_unknown',attempt+1)
                     if status == 0:
                         self.paths.append(path)
                         checked, cause = self.operation(self.argv(path, '-O', 'check'))

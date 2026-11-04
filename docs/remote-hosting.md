@@ -593,8 +593,11 @@ still pending.
 Host apply keeps bounded diagnostics at the SSH boundary. If a remote command times
 out, the CLI reports the timeout and a redacted tail of any partial output instead of
 discarding the captured stream; the remote command is not replayed automatically
-because its final state is unknown. During the 60-second loopback health window,
-Sandbox also emits a progress line every ten seconds with the last safe probe result.
+because its final state is unknown. During the loopback health window (default 60
+seconds, configurable via `healthcheck.deadline_seconds`), Sandbox verifies health
+without streaming progress. A deadline above the job's stall limit (300 seconds by
+default) can show `suspected_stalled` until the probe ends; no progress streaming is
+added here.
 Use the host logs command for the declared runtime, background, and initializer
 services after a deployment:
 
@@ -928,7 +931,10 @@ For a deliberate cold or large build, set `compose.build_timeout_seconds` to a b
 value from 60 through 7200 (default `900`). The value applies to the Compose `up` and
 explicit `init_services` build operations; the final no-build restart and health probes
 retain their own shorter limits. This keeps long builds observable and bounded instead
-of silently using a fixed 15-minute cutoff.
+of silently using a fixed 15-minute cutoff. Optional `healthcheck.deadline_seconds`
+(60-600, default 60) bounds only the healthcheck phase; because the suggested 900 s
+durable job covers the whole apply including build and later phases, a slow build plus
+a long deadline needs a larger job timeout.
 
 Build context size. `host apply` ships the Git commit plus a capped overlay of
 untracked, not-ignored files (4096 files / 64 MiB; over the cap the apply refuses), so

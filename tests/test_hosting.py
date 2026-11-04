@@ -1913,6 +1913,87 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(ssh_run.call_count, 1)
         self.assertEqual(receipt["phases"][0]["state"], "pending")
 
+    def test_healthcheck_deadline_seconds_validation_and_intent_digest(self):
+        with self._write(_manifest()) as directory:
+            base_validated = hosting.validate_manifest(directory)
+            self.assertNotIn("deadline_seconds", base_validated["healthcheck"])
+            base_intent_digest = hosting_cmd._nonsecret_host_intent(base_validated)
+
+            manifest_path = Path(directory) / "sandbox.hosting.yml"
+            original_text = manifest_path.read_text()
+
+            # Configured valid deadline propagates and changes intent digest
+            manifest_path.write_text(original_text.replace(
+                "statuses: [200, 399]", "statuses: [200, 399]\n      deadline_seconds: 150"
+            ))
+            configured_validated = hosting.validate_manifest(directory)
+            self.assertEqual(configured_validated["healthcheck"]["deadline_seconds"], 150)
+            self.assertNotEqual(hosting_cmd._nonsecret_host_intent(configured_validated), base_intent_digest)
+
+            # Revert: intent digest of a manifest without the field is unchanged
+            manifest_path.write_text(original_text)
+            reverted_validated = hosting.validate_manifest(directory)
+            self.assertEqual(hosting_cmd._nonsecret_host_intent(reverted_validated), base_intent_digest)
+
+            # Refuse 59, 601, string, True
+            for bad_val in (59, 601, "120", True):
+                val_repr = "true" if bad_val is True else (f'"{bad_val}"' if isinstance(bad_val, str) else str(bad_val))
+                manifest_path.write_text(original_text.replace(
+                    "statuses: [200, 399]", f"statuses: [200, 399]\n      deadline_seconds: {val_repr}"
+                ))
+                with self.subTest(bad_val=bad_val):
+                    with self.assertRaisesRegex(
+                        hosting.HostingError,
+                        "healthcheck.deadline_seconds must be an integer between 60 and 600",
+                    ):
+                        hosting.validate_manifest(directory)
+
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_remote_health_default_deadline_and_timeout(self, ssh_run):
+        ssh_run.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            "schema_version": 1, "complete": True, "status": 200, "phases": [],
+        }), stderr="")
+        runtime = {
+            "loopback_port": 18001,
+            "healthcheck": {"path": "/api/health", "statuses": [200]},
+        }
+        hosting_cmd._verify_remote_health({}, runtime)
+        self.assertEqual(ssh_run.call_count, 1)
+        self.assertEqual(ssh_run.call_args.kwargs.get("timeout"), 65)
+        cmd_args = shlex.split(ssh_run.call_args.args[1])
+        payload = json.loads(base64.b64decode(cmd_args[-1]).decode())
+        self.assertEqual(payload["deadline"], 60)
+
+        # On failure, failure message mentions 60 seconds
+        ssh_run.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            "schema_version": 1, "complete": False, "status": None, "phases": [],
+        }), stderr="")
+        with self.assertRaisesRegex(RuntimeError, "within 60 seconds"):
+            hosting_cmd._verify_remote_health({}, runtime)
+
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_remote_health_configured_deadline_and_timeout(self, ssh_run):
+        ssh_run.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            "schema_version": 1, "complete": True, "status": 200, "phases": [],
+        }), stderr="")
+        runtime = {
+            "loopback_port": 18001,
+            "healthcheck": {"path": "/api/health", "statuses": [200], "deadline_seconds": 150},
+        }
+        hosting_cmd._verify_remote_health({}, runtime)
+        self.assertEqual(ssh_run.call_count, 1)
+        self.assertEqual(ssh_run.call_args.kwargs.get("timeout"), 155)
+        cmd_args = shlex.split(ssh_run.call_args.args[1])
+        payload = json.loads(base64.b64decode(cmd_args[-1]).decode())
+        self.assertEqual(payload["deadline"], 150)
+
+        # On failure, failure message mentions 150 seconds
+        ssh_run.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            "schema_version": 1, "complete": False, "status": None, "phases": [],
+        }), stderr="")
+        with self.assertRaisesRegex(RuntimeError, "within 150 seconds"):
+            hosting_cmd._verify_remote_health({}, runtime)
+
     @patch("sandbox.commands.hosting.remote.ssh_run")
     def test_remote_failure_reports_the_cause_not_the_build_progress(self, ssh_run):
         # Compose writes build progress to stderr, so the cause is at the tail.

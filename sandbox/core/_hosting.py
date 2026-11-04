@@ -587,6 +587,16 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
         raise HostingError("healthcheck.path must start with /")
     if not isinstance(healthcheck.get("statuses"), list) or not healthcheck["statuses"]:
         raise HostingError("healthcheck.statuses must be a non-empty list")
+    if "deadline_seconds" in healthcheck:
+        deadline_seconds = healthcheck["deadline_seconds"]
+        if (
+            isinstance(deadline_seconds, bool)
+            or not isinstance(deadline_seconds, int)
+            or not 60 <= deadline_seconds <= 600
+        ):
+            raise HostingError(
+                "healthcheck.deadline_seconds must be an integer between 60 and 600"
+            )
     host = env.get("host") or {}
     primary = normalize_hostname(str(host.get("primary") or ""), wildcard=False)
     aliases = host.get("aliases") or []

@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `healthcheck.deadline_seconds` (60-600, default 60) sets how long `sb host apply` waits for the health path.
+
 ### Fixed
 - `sb wp` keeps piped stdin for the WP-CLI command instead of losing it to an internal probe. On a remote, with `--async` and under managed-native, commands that need stdin are refused up front, so `option update KEY` no longer risks writing an empty value.
 - `sb apply` and `sb ensure` refuse a declared web server change with `apply_server_change_refused` before changing anything, and no longer revert a prior `sb server` when the config declares none. Use `sb server`, which does not yet verify or roll back.

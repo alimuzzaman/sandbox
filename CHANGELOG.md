@@ -8,7 +8,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
-- Web dashboard and wp-admin snapshot bridge: refuse overlapping mutations on the same instance with an immediate refusal (HTTP 409 from the bridge; an info toast from the dashboard) rather than queuing behind an in-flight mutation; read-only actions (logs, status, doctor) continue to stream concurrently.
+- The dashboard and wp-admin refuse a second action on a busy instance with `instance_busy` instead of
+  queueing it silently, except read actions and creating an instance. wp-admin can no longer delete a
+  snapshot while a restore is reading it, which used to restore the database and silently skip uploads.
+  Refusals are per `sb web` process. A sweep whose configuration cannot load now ends as failed instead of
+  running forever.
 - `host destroy` re-reads local state and makes its Cloudflare calls and state removal under the state lock, after the remote teardown. On one controller, a target that applies onto a record during teardown keeps it, reported as `kept_shared`.
 - Recording a storage authority revocation refuses a row that names no remote, or neither a promotion nor a binding. Reading one that already exists still blocks authority.
 - Dashboard and wp-admin snapshot jobs no longer mix output when one starts while another runs, and no longer leave the process's stdout pointing at a finished job. Bridge jobs now wait their turn like every other dashboard action, and a waiting job's console says so.

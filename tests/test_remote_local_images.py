@@ -326,7 +326,7 @@ class RemoteLocalImageTests(unittest.TestCase):
                  returncode=0, stdout=json.dumps(document))):
             self.assertEqual(remote_local_images.read_receipt("target", digest), document)
 
-    def test_storage_floor_refusal_precedes_coordination_and_remote_write(self):
+    def test_storage_floor_refusal_follows_fenced_cache_reclaim_before_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self._write_receipt(directory)
             entry = {"provisioned": True, "storage_floor_gb": 30}
@@ -336,7 +336,8 @@ class RemoteLocalImageTests(unittest.TestCase):
                  patch.object(remote_local_images, "_entry", return_value=entry), \
                  patch.object(remote_local_images, "_storage_admission",
                               side_effect=refusal) as admission, \
-                 patch.object(remote_local_images, "_TransferLease") as lease:
+                 patch.object(remote_local_images, "_TransferLease") as lease, \
+                 patch.object(remote_local_images,"_reconcile_reservations",return_value=True) as reclaim:
                 with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,
                                             "remote_storage_floor"):
                     remote_local_images.push_receipt(
@@ -345,7 +346,8 @@ class RemoteLocalImageTests(unittest.TestCase):
             admission.assert_called_once_with(
                 entry, _receipt(), self._matching_observation(),
                 timeout=ANY, before_write=ANY)
-            lease.assert_not_called()
+            lease.assert_called_once()
+            reclaim.assert_called_once()
 
     def test_transfer_lock_is_held_by_registered_ssh_process_until_exit(self):
         process = MagicMock()
@@ -493,6 +495,7 @@ with tempfile.TemporaryDirectory() as sandbox_root:
                                    ("target_image_lease", acquire), ("_checked", daemon),
                                    ("load_archive", upload), ("publish", publish)):
                 stack.enter_context(patch.object(remote_local_images, name, side_effect=function))
+            stack.enter_context(patch.object(remote_local_images,"_reconcile_reservations",return_value=True))
             lookup = stack.enter_context(patch.object(remote_local_images, "_entry", return_value=entry))
             stack.enter_context(patch.object(remote_local_images.time, "monotonic", side_effect=lambda: clock[0]))
             def load_receipt(_path):
@@ -512,7 +515,7 @@ with tempfile.TemporaryDirectory() as sandbox_root:
         lookup.assert_called_once_with("target")
         self.assertEqual(result["loaded"], ["image-1"])
         self.assertEqual([name for name, _budget in calls], [
-            "initial_observe", "admission", "lease", "reobserve", "daemon_before",
+            "initial_observe", "lease", "admission", "reobserve", "daemon_before",
             "load", "post_load_observe", "daemon_after", "publish"])
 
     def test_transfer_with_explicit_entry_never_resolves_registration(self):
@@ -527,7 +530,7 @@ with tempfile.TemporaryDirectory() as sandbox_root:
         with self._push_steps(elapsed=elapsed) as (calls, _lookup, _entry):
             self._push()
         self.assertEqual(calls, [
-            ("initial_observe", 60), ("admission", 58), ("lease", 30),
+            ("initial_observe", 60), ("lease", 30), ("admission", 54),
             ("reobserve", 51), ("daemon_before", 30), ("load", 30),
             ("post_load_observe", 30), ("daemon_after", 28), ("publish", 25)])
 
@@ -535,7 +538,7 @@ with tempfile.TemporaryDirectory() as sandbox_root:
         for name in ("initial_observe", "admission", "lease", "reobserve",
                      "daemon_before", "load", "post_load_observe", "daemon_after", "publish"):
             with self.subTest(step=name), self._push_steps(elapsed={name: 61}) as (calls, _, _entry):
-                expected = "transfer_timeout" if name in ("initial_observe", "admission") else "transfer_unknown"
+                expected = "transfer_timeout" if name == "initial_observe" else "transfer_unknown"
                 with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError, expected):
                     self._push()
                 self.assertEqual(calls[-1][0], name)
@@ -1455,6 +1458,16 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
         self.reservation()
         self.assertEqual(self.transfer()['resumed_bytes'],0)
 
+class LocalChunkConnections:
+    """Local process adapter; network-pool behavior is tested independently."""
+    def __init__(self,entry,streams,remaining,cancelled):pass
+    def __enter__(self):return self
+    def __exit__(self,*args):return False
+    @contextmanager
+    def channel(self,command):
+        argv=shlex.split(command);argv[0]=sys.executable;yield argv
+
+
 class ChunkUploadTests(unittest.TestCase):
     def setUp(self):
         import hashlib
@@ -1477,7 +1490,8 @@ class ChunkUploadTests(unittest.TestCase):
             parsed=shlex.split(command);parsed[0]=sys.executable;return parsed
         with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value=str(self.f.home)), \
              patch.object(remote_local_images._remote,'ssh_command_args',side_effect=argv), \
-             patch.object(local_images.subprocess,'Popen',side_effect=spawn):yield
+             patch.object(local_images.subprocess,'Popen',side_effect=spawn), \
+             patch('sandbox.transports.chunk_local_images.UploadConnections',LocalChunkConnections):yield
 
     def upload(self,streams=8):
         from sandbox.transports import chunk_local_images
@@ -1516,7 +1530,7 @@ class ChunkUploadTests(unittest.TestCase):
         self.f.reservation();result=self.upload(8)
         self.assertEqual(result['resumed_bytes'],65540)
         self.assertEqual(result['uploaded_bytes'],3*65536)
-        self.assertEqual(len(list(plan.glob('*.chunk'))),5)
+        self.assertFalse(plan.exists())
         self.assertTrue(self.f.loaded.exists())
 
     @contextmanager
@@ -1584,13 +1598,14 @@ import json,os,shlex,signal,sys
 from pathlib import Path
 from unittest.mock import patch
 from sandbox.transports import remote_local_images as transport,chunk_local_images as chunks
+from tests.test_remote_local_images import LocalChunkConnections
 home=Path(sys.argv[1]);archive=Path(sys.argv[2]);ctx=json.loads(sys.argv[3]);chunks.CHUNK_BYTES=65536
 artifact={'archive':archive.name,'archive_bytes':ctx['archive_bytes'],'archive_sha256':ctx['bundle_digest'],'members':['image-1']}
 def command(entry,value,**kwargs):
  argv=shlex.split(value);argv[0]=sys.executable;return argv
 def progress(line):
  if 'chunks 1/' in line:os.kill(os.getpid(),signal.SIGKILL)
-with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home)),patch.object(transport._remote,'ssh_command_args',side_effect=command):
+with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home)),patch.object(transport._remote,'ssh_command_args',side_effect=command),patch.object(chunks,'UploadConnections',LocalChunkConnections):
  with transport.target_image_lease('local','app','development',ctx['receipt_digest'],entry={}) as lease:
   transport.load_archive('local',archive,artifact,timeout=15,entry={},reservation_id=sys.argv[4],resume_context=ctx,upload_streams=8,progress=progress,cancelled=lease.lost)
 '''
@@ -1607,8 +1622,9 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
         saved=list((self.f.root/'chunks').glob('*/*.chunk'));self.assertGreater(len(saved),0)
         self.assertFalse(self.f.loaded.exists())
         self.f.token='e'*32;self.f.reservation()
+        saved_bytes=sum(path.stat().st_size for path in saved)
         follow=self.upload(8)
-        self.assertEqual(follow['resumed_bytes'],sum(path.stat().st_size for path in saved))
+        self.assertEqual(follow['resumed_bytes'],saved_bytes)
         self.assertEqual(follow['uploaded_bytes']+follow['resumed_bytes'],self.f.archive.stat().st_size)
 
     def test_one_stream_failure_stops_scheduling_without_retry_storm(self):
@@ -1678,7 +1694,7 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
             with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
                 with chunks.Session(args,manifest,8,10,None) as session:
                     self.assertEqual(session.ready['inventory'],list(range(5)))
-                    with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'transfer_unknown'):session.finalize()
+                    with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'bundle_hash_mismatch'):session.finalize()
         self.assertFalse(self.f.loaded.exists());self.assertFalse((self.f.root/'load-unverified').exists())
 
     def test_old_handshake_is_refused_without_any_data_connections(self):
@@ -1741,3 +1757,143 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
                 path.unlink();victim.unlink()
                 item=json.loads((plan/'manifest.json').read_text())['chunks'][0]
                 path.write_bytes(self.f.archive.read_bytes()[:item['bytes']]);path.chmod(0o600)
+
+
+    def test_invalid_manifest_is_rebuilt_immediately_and_good_chunks_reused(self):
+        manifest,plan=self.seed([0,2])
+        (plan/'manifest.json').write_bytes(b'{"schema":')
+        self.f.reservation();result=self.upload(1)
+        self.assertEqual(result['resumed_bytes'],2*65536)
+        self.assertFalse(plan.exists())
+
+    def test_manifest_write_crash_is_atomic_and_rerun_has_no_ttl_wait(self):
+        import signal
+        from sandbox.transports import chunk_local_images as chunks
+        manifest,plan=self.seed([0]);(plan/'manifest.json').unlink()
+        # Kill the actual worker inside the first write to its private temp.
+        program=chunks.PROGRAM.replace('\n chunk_runtime(status)\n', """
+ import os,signal
+ original_write=os.write
+ def crash(fd,data):
+  if '/.manifest-' in os.readlink('/proc/self/fd/'+str(fd)):
+   original_write(fd,bytes(data[:5]));os.kill(os.getpid(),signal.SIGKILL)
+  return original_write(fd,data)
+ os.write=crash
+ chunk_runtime(status)
+""")
+        result=run_test_process([sys.executable,'-c',program,'coordinate',str(self.f.root),self.f.token,'10','1'],input=(json.dumps(manifest)+'\n').encode(),capture_output=True,timeout=15)
+        self.assertEqual(result.returncode,-signal.SIGKILL,result.stderr)
+        self.assertFalse((plan/'manifest.json').exists())
+        self.assertEqual(len(list(plan.glob('.manifest-*.tmp'))),1)
+        self.f.token='e'*32;self.f.reservation()
+        follow=self.upload(1)
+        self.assertEqual(follow['resumed_bytes'],65536)
+        self.assertFalse(plan.exists())
+
+    def test_worker_failure_retains_cause_values_and_contract_in_text_json(self):
+        from sandbox.transports.chunk_failures import worker_failure,public_failure,render_failure
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
+                with self.session(1) as (chunks,manifest,session):
+                    child=self.put(chunks,manifest,session,0)
+                    self.assertEqual(ResumableWorkerTests.offer(child)['state'],'chunk-ready')
+                    output,_=child.communicate(b'corrupted-private-canary',timeout=3)
+                    frame=json.loads(output);detail=worker_failure(frame)
+                    self.assertEqual(frame['code'],'chunk_hash_mismatch')
+                    self.assertEqual(detail['values']['expected_bytes'],65536)
+                    self.assertEqual(detail['values']['actual_bytes'],len(b'corrupted-private-canary'))
+                    self.assertEqual(detail['effects']['load'],'not_started')
+                    error=remote_local_images.RemoteLocalImageError('local_images_'+frame['code'],failure=detail)
+                    payload=public_failure(error,receipt="/receipt's path ;$.json",remote='dev',streams=8)
+                    text=render_failure(payload)
+                    for label in ('What failed:','Why:','State:','Fix:','Resume:','Bypass:'):self.assertIn(label,text)
+                    self.assertNotEqual(payload['fix']['command'],payload['resume'])
+                    self.assertNotIn('private-canary',json.dumps(payload))
+                    self.assertEqual(shlex.split(payload['resume'])[-6:],['--receipt',"/receipt's path ;$.json",'--upload-streams','8','--confirm','--json'])
+                    self.assertIsNone(worker_failure({**frame,'values':{'secret':'private-canary'}}))
+
+    def test_idle_cache_is_reclaimed_before_unrelated_prod_admission(self):
+        manifest,plan=self.seed([0,2])
+        # Fresh DEV chunks are not TTL eligible, but must not steal PROD floor.
+        receipt={'schema':local_images.RECEIPT_SCHEMA_V1,'project':'prod-other-project'}
+        ledger=self.f.home/'runtime/storage/reservations.json'
+        entries=json.loads(ledger.read_text());entries[0]['target']='/different/dev/project'
+        entries.append({'id':'ordinary-job','kind':'job','target':'prod','estimate_bytes':1,'expires_at':9999999999})
+        ledger.write_text(json.dumps(entries));ledger.chmod(0o600)
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','production',self.f.context['receipt_digest'],entry={}):
+                self.assertTrue(remote_local_images._reconcile_reservations({},receipt))
+                self.assertFalse(plan.exists())
+                self.assertEqual([item['id'] for item in json.loads(ledger.read_text())],['ordinary-job'])
+        self.assertFalse(self.f.loaded.exists())
+
+    def test_idle_retention_cap_and_active_or_quarantine_exclusion(self):
+        from sandbox.hosting.chunk_upload import cleanup_chunk_plans
+        import fcntl
+        manifest,plan=self.seed([0])
+        # Sparse logical size exercises the cap without allocating GiB.
+        chunk=next(plan.glob('*.chunk'))
+        with chunk.open('r+b') as handle:handle.truncate(2*1024**3+1)
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
+                with self.session(1) as (_chunks,_manifest,_session):
+                    # Coordinator repairs corrupt chunk before offering session.
+                    (self.f.root/'load-unverified').write_text('uncertain');(self.f.root/'load-unverified').chmod(0o600)
+                    self.assertFalse(remote_local_images._reconcile_reservations({}, {'project':'app'}))
+                    self.assertTrue(plan.exists())
+                    (self.f.root/'load-unverified').unlink()
+                    self.assertFalse(remote_local_images._reconcile_reservations({}, {'project':'app'}))
+        with (self.f.root/'load-fence.lock').open('rb') as handle:
+            fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            # Recreate oversize idle partial, which must be removed without TTL.
+            with (plan/('1-'+'a'*64+'.part')).open('wb') as partial:partial.truncate(2*1024**3+1)
+            (plan/('1-'+'a'*64+'.part')).chmod(0o600)
+            cleanup_chunk_plans(str(self.f.root/'chunks'),keep_manifest=plan.name)
+            self.assertFalse(plan.exists())
+
+    def test_command_renders_same_failure_contract_in_text_and_json(self):
+        error=remote_local_images.RemoteLocalImageError('local_images_chunk_no_space',failure={
+            'phase':'chunk_receive','values':{'errno':28,'index':2,'expected_bytes':65536},
+            'effects':{'cache':'partial_may_exist','load':'not_started','reservation':'unknown'}})
+        for json_mode in (True,False):
+            args=SimpleNamespace(confirm=True,remote='target',receipt="/synthetic/receipt's ;$.json",timeout=60,artifact_timeout=30,json=json_mode,upload_streams=8)
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(hosting_cmd.remote,'registered_remote_lock'))
+                stack.enter_context(patch.object(hosting_cmd.remote,'registration_lock_name',return_value='fixture'))
+                stack.enter_context(patch.object(remote_local_images,'_entry',return_value={}))
+                stack.enter_context(patch('sandbox.readiness.gate.require_ready'))
+                stack.enter_context(patch.object(hosting_cmd.remote,'resolve_sandbox_home',return_value='/synthetic'))
+                stack.enter_context(patch.object(hosting_cmd,'_authenticated_machine_identity',return_value='fixture'))
+                stack.enter_context(patch('sandbox.delivery.context.registered_host_digest',return_value='sha256:'+'a'*64))
+                stack.enter_context(patch.object(remote_local_images,'push_receipt',side_effect=error))
+                output=io.StringIO();diagnostic=io.StringIO()
+                with redirect_stdout(output),redirect_stderr(diagnostic),self.assertRaises(SystemExit):hosting_cmd._cmd_host_image_push_local(args)
+                if json_mode:
+                    payload=json.loads(output.getvalue())
+                    self.assertEqual(payload['code'],error.code)
+                    self.assertEqual(payload['why']['errno'],28)
+                    self.assertEqual(payload['state']['load'],'not_started')
+                    self.assertIsNone(payload['bypass']['flag'])
+                    self.assertNotEqual(payload['fix']['command'],payload['resume'])
+                    self.assertEqual(shlex.split(payload['resume'])[-6:],['--receipt',args.receipt,'--upload-streams','8','--confirm','--json'])
+                else:
+                    for marker in ('What failed:','Why:','State:','Fix:','Resume:','Bypass:'):self.assertIn(marker,diagnostic.getvalue())
+
+    def test_lost_load_ack_keeps_completed_load_safe_and_cache_removed(self):
+        self.seed(list(range(5)))
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
+                with self.session(1) as (_chunks,_manifest,session):
+                    read=session.read
+                    def lost():
+                        reply=read()
+                        self.assertEqual(reply['state'],'loaded')
+                        raise session.channel_failure('load_ack_lost')
+                    with patch.object(session,'read',side_effect=lost):
+                        with self.assertRaises(remote_local_images.RemoteLocalImageError) as caught:session.finalize()
+                    self.assertEqual(caught.exception.failure['effects']['load'],'unknown')
+        self.assertTrue(self.f.loaded.exists())
+        self.assertEqual(list((self.f.root/'chunks').iterdir()),[])
+        self.assertEqual(json.loads((self.f.home/'runtime/storage/reservations.json').read_text()),[])
+        self.assertFalse((self.f.root/'load-unverified').exists())
+        self.assertEqual((self.f.root/'load-fence.lock').stat().st_mode&0o777,0o600)

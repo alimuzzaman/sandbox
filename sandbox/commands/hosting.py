@@ -614,6 +614,13 @@ def _cmd_host_image_push_local(args) -> None:
             raise SystemExit(1)
         die(str(exc))
     except (local_images.LocalImageError, remote_local_images.RemoteLocalImageError) as exc:
+        if isinstance(exc, remote_local_images.RemoteLocalImageError) and exc.failure is not None:
+            from sandbox.transports.chunk_failures import public_failure, render_failure
+            payload = public_failure(exc, receipt=args.receipt, remote=args.remote, streams=upload_streams)
+            if args.json:
+                print(json.dumps(payload, sort_keys=True))
+                raise SystemExit(1)
+            die(render_failure(payload))
         payload = {"ok": False, "code": exc.code,
                    "message": remote.redact_text(str(exc).split(": ", 1)[-1])[:500]}
         if args.json:

@@ -2306,7 +2306,7 @@ Those images still travel inside a transferred full bundle and may be re-importe
 `transferred_bytes` and `transferred_bundles` expose the transport cost.
 
 Legacy workers can leave private `.upload-*.tar` files after a hard kill;
-those names still require operator reconciliation. Protocol24 v2 pushes use
+those names still require operator reconciliation. Protocol25 v2 pushes use
 independent 8 MiB chunks instead of a single contiguous prefix. Re-run the same
 sealed-receipt push: verified chunks can be present in any order, corrupt chunks
 are invalidated individually and only missing chunks are sent. The full bundle
@@ -2315,7 +2315,8 @@ is written. See [chunk resume and connection costs](../README.md#resuming-an-int
 
 `--upload-streams N` (1–8) defaults to8 for v2; explicit 1 is the serial fallback.
 The pool is bounded, stops scheduling on failure and performs no automatic
-connection/chunk retries. Progress gives stream count, chunks done and aggregate
+chunk retries. SSH authentication is serial and paced, with at most three
+transient setup attempts (1 s, 2 s backoff); established masters are reused. Progress gives stream count, chunks done and aggregate
 decimalMB/s; JSON upload statistics distinguish retained and uploaded bytes.
 The logical `transferred_bytes` compatibility field remains full-bundle bytes.
 No implicit switch to a legacy upload or registry mode occurs.
@@ -2327,8 +2328,11 @@ release reservations or unlock that description. Duplicate chunk writers refuse
 under per-chunk locks; finalization waits for every receiver to settle. The
 outer target-engine lease, storage reservation, mode 0400 fence and durable
 quarantine remain. Unknown loads require operator reconciliation, never a force
-retry. Stale >24h plans are reaped under the exclusive fence only with no load
-quarantine or active worker. The full 3x budget remains conservative on retries.
+retry. Successful load removes its chunks. Idle failed retention is at most
+2 GiB/four plans; unrelated chunks and orphan image reservations are reclaimed
+before any later v1/v2 storage admission, under the exclusive fence with no
+quarantine or active worker. Stale >24h plans also expire there. The full 3x
+budget remains conservative on retries.
 
 The fixed workers use Linux Unix sockets and SCM_RIGHTS; an unavailable or old
 chunk handshake refuses rather than bypassing the fence. At eight data streams,
@@ -2521,3 +2525,38 @@ and the single-link regular ledger belong to the remote operator. While holding
 contents. This permission correction is reversible and does not clear live
 reservations. Retire the old writer from active use: running it again can recreate
 the group-writable file. Then retry the same immutable receipt.
+
+### Resumable upload safety and failures (pending runtime migration)
+
+V2 uploads keep the default eight streams (one is the serial fallback), but
+authenticate upload-owned SSH masters serially, at least 250 ms apart. Each
+master carries many sequential chunk channels. Channel fallback to a fresh TCP
+connection is disabled; transient setup refusals get at most three attempts with
+1 s and 2 s backoff. Authentication denial is never retried. At most **one**
+connection from this upload can be unauthenticated at once; two already
+authenticated lease/coordinator connections plus eight masters give ten
+established connections. Other controllers still share the host's limits.
+The masters exit on normal completion, or after 60 idle seconds following a
+controller crash. No payload retry is automatic.
+
+Successful Docker loads remove their chunks before releasing the reservation.
+Idle failed caches retain at most 2 GiB across four plans; a crash may leave a
+larger, fully reserved active bundle until fenced reconciliation. Every v1/v2
+push reclaims unrelated idle chunks under the engine lease and exclusive worker
+fence **before** storage admission. Active receivers and quarantined/uncertain
+loads cannot be reclaimed; their safe refusal takes priority over deployment.
+The floor and full 3x admission estimate remain unchanged.
+
+Manifests are private temporary files, fsynced and atomically renamed; an invalid
+manifest can be rebuilt from the incoming digest-bound manifest immediately.
+Worker refusals carry a stable cause, phase, safe actual values and known effects
+through text and JSON, plus an inspection/repair instruction, an exact same-receipt
+resume command and no bypass for shared-host integrity. An uncertain load never
+claims nothing changed. Inspect quarantine before replay.
+
+Each established SSH connection costs server sshd processes, encryption and
+kernel buffers plus a Python receiver when active; no per-connection memory
+budget is claimed. Saved read-only host evidence reports MaxStartups 10:30:100,
+MaxSessions 10 per TCP connection, LoginGraceTime 120 s and MaxAuthTries 6.
+The serial authentication budget stays below ten; unrelated logins can still
+reach the shared threshold. No host configuration was changed.

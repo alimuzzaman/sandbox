@@ -123,13 +123,13 @@ def _cmd_preview(cfg, args) -> None:
     if action == "list":
         rows = sorted((row for row in state["previews"].values()
                        if not args.remote or row.get("remote") == args.remote),
-                      key=lambda row: row["expires_at"])
+                      key=lambda row: str(row.get("expires_at") or ""))
         rows = [_public_row(row) for row in rows]
         if args.json:
             print(json.dumps({"ok": True, "previews": rows}))
         else:
             for row in rows:
-                print(f"{row['id']}  {row.get('url', '')}  expires {row['expires_at']}")
+                print(f"{row['id']}  {row.get('url', '')}  expires {row.get('expires_at', 'unknown')}")
         return
     if action in {"destroy", "cleanup"} and not args.confirm:
         die("remote preview deletion requires --confirm")

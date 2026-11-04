@@ -4824,6 +4824,31 @@ class TestPreviewList(unittest.TestCase):
                 self.assertIn(b"login_url", after)
                 self.assertIn(b"SYNTHETIC", after)
 
+    def test_preview_list_survives_a_row_with_no_expiry(self):
+        state = self._synthetic_state()
+        del state["previews"]["p1"]["expires_at"]
+        state["previews"]["p2"]["expires_at"] = 7
+        for as_json in (True, False):
+            with self.subTest(json=as_json), tempfile.TemporaryDirectory() as td:
+                state_file = Path(td) / "remote-previews.json"
+                state_file.write_text(json.dumps(state))
+                with patch.object(preview, "_STATE_PATH", state_file):
+                    buf = io.StringIO()
+                    args = types.SimpleNamespace(action="list", remote=None, json=as_json)
+                    with redirect_stdout(buf):
+                        preview.cmd_preview(None, args)
+                    out = buf.getvalue()
+                    if as_json:
+                        payload = json.loads(out)
+                        self.assertTrue(payload["ok"])
+                        self.assertEqual(len(payload["previews"]), 2)
+                        ids = [r["id"] for r in payload["previews"]]
+                        self.assertIn("p1", ids)
+                        self.assertIn("p2", ids)
+                    else:
+                        self.assertIn("p1", out)
+                        self.assertIn("p2", out)
+
 
 class TestPersonalSecretFile(unittest.TestCase):
     def test_reads_quoted_export_and_environment_wins(self):

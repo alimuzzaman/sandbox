@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+import re
 from types import SimpleNamespace
 import subprocess
 import tempfile
@@ -113,6 +114,144 @@ class TestWpCliTimeout(unittest.TestCase):
         self.assertTrue(forwarded[2].startswith("/sandbox-dl-cache/.sandbox-host-package-"))
         self.assertEqual(forwarded[3], "--activate")
         self.assertFalse(any(runtime.rglob("*")))
+
+    def test_staged_file_keeps_its_extension(self):
+        import sandbox.commands.wp as command
+        for filename, suffix, content in (
+            ("foo.zip", ".zip", b"zip-content"),
+            ("a.JPG", ".JPG", b"jpg-content"),
+            ("script.php", ".php", b"php-content"),
+        ):
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as directory:
+                    source = Path(directory) / filename
+                    source.write_bytes(content)
+                    runtime = Path(directory) / "runtime"
+                    args = SimpleNamespace(
+                        resolved_instance="fixture",
+                        passthrough=["plugin", "install", str(source)],
+                        run_async=False,
+                    )
+                    captured = {}
+                    def fake_wpcli(argv, **kwargs):
+                        captured["argv"] = argv
+                        staged_files = list((runtime / "dl-cache" / "wp-http").glob(".sandbox-host-package-*"))
+                        captured["staged_count"] = len(staged_files)
+                        if staged_files:
+                            captured["staged_bytes"] = staged_files[0].read_bytes()
+                            captured["staged_name"] = staged_files[0].name
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+                    with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                            mock.patch.object(command, "_is_herd_instance", return_value=False), \
+                            mock.patch.object(command, "RUNTIME_DIR", runtime), \
+                            mock.patch.object(command, "wpcli", side_effect=fake_wpcli), \
+                            redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                        command.cmd_wp({}, args)
+
+                    forwarded = captured["argv"]
+                    self.assertTrue(forwarded[2].endswith(suffix))
+                    self.assertEqual(captured["staged_count"], 1)
+                    self.assertTrue(captured["staged_name"].endswith(suffix))
+                    self.assertEqual(captured["staged_bytes"], content)
+
+    def test_staged_file_drops_an_unsafe_extension(self):
+        import sandbox.commands.wp as command
+        cases = (
+            ("foo.z p", "foo.z p"),
+            ("foo.$(x)", "foo.$(x)"),
+            ("long_ext", "foo." + "a" * 17),
+            ("noext", "noext"),
+        )
+        for label, filename in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    source = Path(directory) / filename
+                    source.write_bytes(b"content")
+                    runtime = Path(directory) / "runtime"
+                    args = SimpleNamespace(
+                        resolved_instance="fixture",
+                        passthrough=["plugin", "install", str(source)],
+                        run_async=False,
+                    )
+                    result = SimpleNamespace(returncode=0, stdout="", stderr="")
+                    with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                            mock.patch.object(command, "_is_herd_instance", return_value=False), \
+                            mock.patch.object(command, "RUNTIME_DIR", runtime), \
+                            mock.patch.object(command, "wpcli", return_value=result) as wpcli, \
+                            redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                        command.cmd_wp({}, args)
+                    forwarded = wpcli.call_args.args[0]
+                    self.assertRegex(forwarded[2], r"^/sandbox-dl-cache/\.sandbox-host-package-\d+-\d+$")
+
+    def test_a_partial_copy_is_cleaned_up(self):
+        import sandbox.commands.wp as command
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "test-plugin.zip"
+            source.write_bytes(b"zip-payload")
+            runtime = Path(directory) / "runtime"
+            args = SimpleNamespace(
+                resolved_instance="fixture",
+                passthrough=["plugin", "install", str(source)],
+                run_async=False,
+            )
+
+            def partial_copy(_source, destination):
+                Path(destination).write_bytes(b"zip")
+                raise OSError("disk full")
+
+            with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(command, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(command, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(command.shutil, "copyfile", side_effect=partial_copy), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()), \
+                    self.assertRaises(SystemExit):
+                command.cmd_wp({}, args)
+            self.assertEqual(
+                list((runtime / "dl-cache" / "wp-http").glob(".sandbox-host-pack*")), [])
+
+    def test_staged_files_with_extensions_are_cleaned_up(self):
+        import sandbox.commands.wp as command
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "test-plugin.zip"
+            source.write_bytes(b"zip-payload")
+            runtime = Path(directory) / "runtime"
+            args = SimpleNamespace(
+                resolved_instance="fixture",
+                passthrough=["plugin", "install", str(source)],
+                run_async=False,
+            )
+            # Success case
+            fake_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(command, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(command, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(command, "wpcli", return_value=fake_result), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                command.cmd_wp({}, args)
+            leftover = list((runtime / "dl-cache" / "wp-http").glob(".sandbox-host-pack*"))
+            self.assertEqual(leftover, [])
+
+            # Command failure case
+            with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(command, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(command, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(command, "wpcli", side_effect=RuntimeError("wpcli crash")), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()), \
+                    self.assertRaises(RuntimeError):
+                command.cmd_wp({}, args)
+            leftover = list((runtime / "dl-cache" / "wp-http").glob(".sandbox-host-pack*"))
+            self.assertEqual(leftover, [])
+
+            # Staging failure case
+            with mock.patch.object(command.shutil, "copyfile", side_effect=OSError("disk error")), \
+                    mock.patch.object(command, "RUNTIME_DIR", runtime), \
+                    mock.patch.object(command, "_is_herd_instance", return_value=False), \
+                    redirect_stderr(StringIO()), \
+                    self.assertRaises(SystemExit):
+                command._stage_host_package_paths(["plugin", "install", str(source)], "fixture", directory)
+            leftover = list((runtime / "dl-cache" / "wp-http").glob(".sandbox-host-pack*"))
+            self.assertEqual(leftover, [])
 
     def test_cmd_wp_stages_absolute_host_media_and_eval_files(self):
         import sandbox.commands.wp as command

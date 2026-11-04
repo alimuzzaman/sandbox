@@ -7,9 +7,10 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from io import StringIO
 from types import SimpleNamespace
 from unittest import mock
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 
 
 class TestSnapshotDatabaseObservation(unittest.TestCase):
@@ -611,6 +612,53 @@ class TestBaselineProtection(unittest.TestCase):
                 restore.assert_not_called()
                 self.assertIn("baseline", str(die.call_args).lower() +
                               str(die.call_args_list).lower())
+
+    def test_snapshot_refuses_the_name_list(self):
+        from sandbox.commands import data
+
+        for name in ("list", "List", " list "):
+            with self.subTest(name=name), \
+                    mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "_capture_snapshot") as capture, \
+                    redirect_stderr(StringIO()) as stderr:
+                args = SimpleNamespace(resolved_instance="inst", name=name,
+                                       force=True, db_only=True)
+                with self.assertRaises(SystemExit):
+                    data.cmd_snapshot({}, args)
+                capture.assert_not_called()
+                self.assertIn("./sb snapshots", stderr.getvalue())
+
+    def test_snapshot_accepts_a_name_containing_list(self):
+        from sandbox.commands import data
+
+        for name in ("wishlist", "list-2"):
+            with self.subTest(name=name), \
+                    tempfile.TemporaryDirectory() as temp:
+                snap_root = Path(temp)
+                args = SimpleNamespace(resolved_instance="inst", name=name, force=False, db_only=False)
+                with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                        mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                        mock.patch.object(data, "snapshots_dir", return_value=snap_root), \
+                        mock.patch.object(data, "_capture_snapshot") as capture, \
+                        redirect_stdout(StringIO()):
+                    data.cmd_snapshot({}, args)
+                capture.assert_called_once_with("inst", snap_root, name, db_only=False)
+
+    def test_restore_still_accepts_an_existing_snapshot_named_list(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            snap_root = Path(temp)
+            (snap_root / "list").mkdir()
+            args = SimpleNamespace(resolved_instance="inst", name="list", yes=True)
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "snapshots_dir", return_value=snap_root), \
+                    mock.patch.object(data, "_restore_snapshot") as restore, \
+                    redirect_stdout(StringIO()):
+                data.cmd_restore({}, args)
+            restore.assert_called_once_with("inst", snap_root, "list")
 
 
 class TestDashboardResetDispatch(unittest.TestCase):

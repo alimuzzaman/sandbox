@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -92,13 +93,15 @@ class TestOwnedStorageReview(unittest.TestCase):
         self.assertFalse(report["resolver_authority"]["included"])
         self.assertFalse(report["resolver_authority"]["qualified"])
 
-    def test_tier_transition_to_proven_upon_acceptance(self):
+    def test_complete_chain_is_held_unproven_until_review(self):
         self._evaluate()
         self._record_chain()
         report = self._evaluate()
-        self.assertEqual(report["support_tier"], "proven")
-        self.assertTrue(report["adoptable"])
+        self.assertEqual(report["support_tier"], "implemented_unproven")
+        self.assertFalse(report["adoptable"])
         self.assertEqual(report["acceptance_state"], "complete")
+        self.assertEqual(report["reason_code"], "implemented_unproven")
+        self.assertEqual(report["promotion_id"], "prom_1")
 
     def test_drift_detection_on_revision_mismatch(self):
         self._record_chain()
@@ -130,8 +133,11 @@ class TestOwnedStorageReview(unittest.TestCase):
         self.assertIsNone(report["evidence_id"])
 
         report_other = self._evaluate(remote="rem_other")
-        self.assertEqual(report_other["support_tier"], "proven")
-        self.assertTrue(report_other["adoptable"])
+        self.assertEqual(report_other["support_tier"], "implemented_unproven")
+        self.assertFalse(report_other["adoptable"])
+        self.assertEqual(report_other["acceptance_state"], "complete")
+        self.assertEqual(report_other["reason_code"], "implemented_unproven")
+        self.assertEqual(report_other["promotion_id"], "prom_1")
 
     def test_acceptance_without_a_promotion_proves_nothing(self):
         acceptance = CapabilityAcceptance(
@@ -217,10 +223,13 @@ class TestOwnedStorageReview(unittest.TestCase):
         )
         self.lifecycle_repo.record_revocation(rev, self.lifecycle_repo.get_generation())
         report = self._evaluate()
-        self.assertEqual(report["support_tier"], "proven")
-        self.assertTrue(report["adoptable"])
+        self.assertEqual(report["support_tier"], "implemented_unproven")
+        self.assertFalse(report["adoptable"])
+        self.assertEqual(report["acceptance_state"], "complete")
+        self.assertEqual(report["reason_code"], "implemented_unproven")
+        self.assertEqual(report["promotion_id"], "prom_1")
 
-    def test_valid_promotion_proves_when_another_promotion_is_revoked(self):
+    def test_valid_promotion_holds_when_another_promotion_is_revoked(self):
         self._record_chain(suffix="1", binding="bind_1")
         self._record_chain(suffix="2", binding="bind_2")
         rev = CapabilityRevocation(
@@ -238,8 +247,11 @@ class TestOwnedStorageReview(unittest.TestCase):
         )
         self.lifecycle_repo.record_revocation(rev, self.lifecycle_repo.get_generation())
         report = self._evaluate()
-        self.assertEqual(report["support_tier"], "proven")
-        self.assertTrue(report["adoptable"])
+        self.assertEqual(report["support_tier"], "implemented_unproven")
+        self.assertFalse(report["adoptable"])
+        self.assertEqual(report["acceptance_state"], "complete")
+        self.assertEqual(report["reason_code"], "implemented_unproven")
+        self.assertEqual(report["promotion_id"], "prom_2")
 
     def test_binding_mismatch_or_unsupported_promotion_refuses_adoption(self):
         cases = [
@@ -278,7 +290,7 @@ class TestOwnedStorageReview(unittest.TestCase):
         for check_val in report["checks"].values():
             self.assertEqual(check_val, "unknown")
 
-    def test_revision_returning_to_the_bound_value_proves_again(self):
+    def test_revision_returning_to_the_bound_value_holds_again(self):
         self._record_chain()
         report_drifted = self._evaluate(service="sha256:other")
         self.assertEqual(report_drifted["support_tier"], "drifted")
@@ -288,9 +300,12 @@ class TestOwnedStorageReview(unittest.TestCase):
             source_revision=self.SOURCE,
         )
         self.assertFalse(report_unobserved["adoptable"])
-        report_proven = self._evaluate()
-        self.assertEqual(report_proven["support_tier"], "proven")
-        self.assertTrue(report_proven["adoptable"])
+        report_held = self._evaluate()
+        self.assertEqual(report_held["support_tier"], "implemented_unproven")
+        self.assertFalse(report_held["adoptable"])
+        self.assertEqual(report_held["acceptance_state"], "complete")
+        self.assertEqual(report_held["reason_code"], "implemented_unproven")
+        self.assertEqual(report_held["promotion_id"], "prom_1")
 
     def test_malformed_chain_values_never_prove(self):
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -533,15 +548,16 @@ class TestOwnedStorageReview(unittest.TestCase):
         for name, val in report_unproven["checks"].items():
             self.assertEqual(val, "unknown", f"unproven check {name} should be unknown")
 
-        # 2. Proven
+        # 2. Held complete chain
         self._record_chain()
-        report_proven = self._evaluate()
-        self.assertEqual(report_proven["support_tier"], "proven")
-        for name, val in report_proven["checks"].items():
-            if name == "human_review":
-                self.assertEqual(val, "unknown", "human_review should always be unknown")
-            else:
-                self.assertEqual(val, "pass", f"proven check {name} should be pass")
+        report_held = self._evaluate()
+        self.assertEqual(report_held["support_tier"], "implemented_unproven")
+        self.assertFalse(report_held["adoptable"])
+        self.assertEqual(report_held["acceptance_state"], "complete")
+        self.assertEqual(report_held["reason_code"], "implemented_unproven")
+        self.assertEqual(report_held["promotion_id"], "prom_1")
+        for name, val in report_held["checks"].items():
+            self.assertEqual(val, "unknown", f"held check {name} should be unknown")
 
         # 3. Drifted
         report_drifted = self._evaluate(service="sha256:srv_drifted")
@@ -561,6 +577,66 @@ class TestOwnedStorageReview(unittest.TestCase):
         self.assertEqual(report["support_tier"], "unsupported")
         self.assertFalse(report["adoptable"])
         self.assertEqual(report["reason_code"], "authority_unsupported")
+
+    def test_no_chain_is_not_mistaken_for_a_held_one(self):
+        report = self._evaluate()
+        self.assertEqual(report["support_tier"], "implemented_unproven")
+        self.assertFalse(report["adoptable"])
+        self.assertEqual(report["acceptance_state"], "pending_ordinary")
+        self.assertEqual(report["reason_code"], "implemented_unproven")
+        self.assertIsNone(report["promotion_id"])
+
+    def test_revoked_chain_is_not_reported_as_held(self):
+        self._record_chain()
+        rev = CapabilityRevocation(
+            revocation_id="rev_1",
+            remote_identity=self.remote_id,
+            project_identity=self.project_id,
+            promotion_id="prom_1",
+            authority_binding_id="bind_1",
+            reviewer_identity_digest="sha256:r",
+            request_id="req_r_1",
+            request_digest="sha256:r1",
+            lifecycle_generation=1,
+            reason_code="synthetic",
+            revoked_at=self._future(0),
+        )
+        self.lifecycle_repo.record_revocation(rev, self.lifecycle_repo.get_generation())
+        report = self._evaluate()
+        self.assertEqual(report["support_tier"], "implemented_unproven")
+        self.assertFalse(report["adoptable"])
+        self.assertEqual(report["reason_code"], "authority_revoked")
+        self.assertEqual(report["acceptance_state"], "failed")
+        self.assertIsNone(report["promotion_id"])
+
+    def test_complete_chain_is_never_adoptable_without_a_verified_review(self):
+        """A future writer's verifier must authenticate the reviewer and not trust an unverified review row."""
+        self._record_chain()
+        raw = json.loads(self.lifecycle_path.read_text())
+        raw.setdefault("review_decisions", {})["dec"] = {
+            "review_decision_id": "dec",
+            "decision": "accepted",
+            "evidence_candidate_id": "cand",
+            "expires_at": self._future(),
+        }
+        self.lifecycle_path.write_text(json.dumps(raw))
+        report = self._evaluate()
+        self.assertEqual(report["support_tier"], "implemented_unproven")
+        self.assertFalse(report["adoptable"])
+        self.assertEqual(report["acceptance_state"], "complete")
+        self.assertEqual(report["reason_code"], "implemented_unproven")
+        self.assertEqual(report["promotion_id"], "prom_1")
+        self.assertEqual(report["checks"]["human_review"], "unknown")
+
+    def test_unobserved_identity_digests_are_null(self):
+        report_no_chain = self._evaluate()
+        self.assertIsNone(report_no_chain["storage_authority"]["owner_identity_digest"])
+        self.assertIsNone(report_no_chain["storage_authority"]["root_identity_digest"])
+
+        self._record_chain()
+        report_with_chain = self._evaluate()
+        self.assertIsNone(report_with_chain["storage_authority"]["owner_identity_digest"])
+        self.assertIsNone(report_with_chain["storage_authority"]["root_identity_digest"])
 
 
 if __name__ == "__main__":

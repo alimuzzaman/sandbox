@@ -23,12 +23,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   duplicates output. A failed or stalled poll now ends and frees the dashboard instead of freezing
   refreshes until reload. Closing the drawer or starting another job no longer stops a job from
   reporting its end, and polling never resubmits a job.
-- Storage authority capability evaluation only reports `proven` through a complete acceptance whose
-  promotion names the requested remote, the same binding and both observed revisions, and is unexpired
-  and unrevoked. Malformed values and unreadable revocations never prove anything. Evaluation no longer writes
-  lifecycle state, and unreadable state is refused and left in place instead of being reset, which used to
-  erase recorded revocations; the capability check then fails with `authority_unavailable`. On a supported platform, checks report `unknown` unless the chain proves
-  them, and `human_review` reports `unknown`.
+- Storage authority capability evaluation never reports `proven` or adoptable until a protected
+  writer provides a verified human review. A complete chain, one whose promotion names the requested
+  remote, the same binding and both observed revisions and is unexpired and unrevoked, reads
+  `implemented_unproven` with `acceptance_state: complete`. Every named check reads `unknown`, except
+  parity `fail` on drift, and the unobserved identity digests are null. Malformed values and unreadable revocations
+  never count as a chain. Evaluation no longer writes lifecycle state, and unreadable state is refused and left
+  in place instead of being reset, which used to erase recorded revocations; the capability check then
+  fails with `authority_unavailable`.
 - `sb visit` repairs a missing headless Chromium instead of failing before navigation
   when the browser cache was cleared, and install progress no longer reaches stdout.
 - Repository guidance no longer contradicts itself: `CLAUDE.md` matches the read-only

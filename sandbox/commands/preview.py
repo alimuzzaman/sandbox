@@ -8,7 +8,6 @@ import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from sandbox.core import die, ok
 import sandbox.core as core
@@ -104,16 +103,17 @@ def _destroy(entry: dict, state: dict, preview_id: str) -> None:
 
 
 # What `preview list` may print. A field added to a saved row stays private until named here.
-_PUBLIC_ROW_FIELDS = ("id", "remote", "project_root", "instance", "domain", "url",
+_PUBLIC_ROW_FIELDS = ("id", "remote", "project_root", "instance", "domain",
                       "zone_id", "dns_record_id", "expires_at")
 
 
 def _public_row(row: dict) -> dict:
     public = {key: row[key] for key in _PUBLIC_ROW_FIELDS if key in row}
-    if isinstance(public.get("url"), str):
-        parts = urlsplit(public["url"])
-        public["url"] = parts._replace(netloc=parts.netloc.rpartition("@")[2],
-                                       query="", fragment="").geturl()
+    # A preview's address is always https://<domain> (see create). Rebuilding it means whatever
+    # the saved url holds, a path, a query or a malformed value, is neither printed nor parsed.
+    domain = row.get("domain")
+    if isinstance(domain, str) and domain:
+        public["url"] = f"https://{domain}"
     return public
 
 
@@ -129,7 +129,7 @@ def _cmd_preview(cfg, args) -> None:
             print(json.dumps({"ok": True, "previews": rows}))
         else:
             for row in rows:
-                print(f"{row['id']}  {row['url']}  expires {row['expires_at']}")
+                print(f"{row['id']}  {row.get('url', '')}  expires {row['expires_at']}")
         return
     if action in {"destroy", "cleanup"} and not args.confirm:
         die("remote preview deletion requires --confirm")

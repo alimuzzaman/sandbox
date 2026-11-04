@@ -1278,7 +1278,14 @@ could be writing it, so destroy never removes it; delete
 `<home>/deploy-src/hosts/<project>` by hand once no environment of the project is
 left. Containers, volumes and networks are selected by the Compose project label,
 never through `docker compose down`, so a Compose file elsewhere on the host cannot
-widen what is removed. Destroy refuses while the state file of the target, or of
+widen what is removed. Images are owned only when they carry the project label and a
+`<compose-name>-` tag. Other labelled images, including one named by `image:` in the
+Compose file, may be shared with a sibling target that sets `compose.build: false`, so
+destroy keeps them, lists them as `kept ... not proven ours`, and still reads
+`nothing to remove` when nothing else is left. Remove one by hand with a non-forced
+`docker rmi` once nothing needs it. Count fields in `--json`: `images` is owned tags;
+`retained_images`, `retained_untagged` and `retained_refs` (at most 20 references with
+safe characters) are what stays. Destroy refuses while the state file of the target, or of
 any target sharing its Compose name, cannot be read.
 
 Any failed step keeps the state entry, so the command can be re-run; Cloudflare

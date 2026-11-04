@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Recording a storage authority revocation refuses a row that names no remote, or neither a promotion nor a binding. Reading one that already exists still blocks authority.
 - `sb ensure --remote` reports SSH failures as `remote_authentication_failed`,
   `remote_unreachable` or `remote_connection_lost` instead of
   `remote_empty_output`, naming the likely cause. Completion stays unknown: inspect before retrying.

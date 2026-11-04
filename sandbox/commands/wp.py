@@ -23,7 +23,7 @@ from sandbox.application.context import (
     preflight_project_capability,
 )
 import sandbox.core._remote as _remote
-from sandbox.wp_argv import staging_command
+from sandbox.wp_argv import is_eval_file_stdin, requires_stdin, staging_command
 
 
 def _timeout_stream(value) -> str:
@@ -289,8 +289,22 @@ def _remote_project_slug(project_root: Path) -> str:
     return _remote.deploy_target_slug(project_root)
 
 
+def _stdin_is_char_device_or_closed(fd: int = 0) -> bool:
+    """True when stdin (fd 0) is a character device (such as a terminal) or closed."""
+    try:
+        if sys.stdin is not None and getattr(sys.stdin, "closed", False):
+            return True
+        st = os.fstat(fd)
+        import stat
+        return stat.S_ISCHR(st.st_mode)
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
 def _cmd_remote_wp(cfg, args, pt: list[str], *, allow_missing: bool) -> None:
     """Run WP-CLI through the authenticated co-located remote controller."""
+    if requires_stdin(pt):
+        die("remote wp does not support stdin; pass the value as an argument, or for eval-file, a path")
     if getattr(args, "run_async", False):
         die("remote wp does not support --async; use a finite --timeout and inspect state before retrying")
     if getattr(args, "instance", None):
@@ -362,6 +376,8 @@ def cmd_wp(cfg, args) -> None:
     if not pt:
         die("usage: ./sb wp <wp-cli args>")
     _reject_redundant_wp_token(pt)
+    if is_eval_file_stdin(pt) and _stdin_is_char_device_or_closed():
+        die("eval-file - requires a piped script; stdin is a character device or closed. Pass a script path instead.")
     allow_missing = bool(getattr(args, "allow_missing", False))
     plugin_partial = _plugin_deactivate_request(pt)
     if allow_missing and not (_is_option_get_probe(pt) or plugin_partial):
@@ -379,6 +395,8 @@ def cmd_wp(cfg, args) -> None:
         return
     # `./sb wp --async <args>` runs the command as a background job (spec 004).
     if getattr(args, "run_async", False):
+        if requires_stdin(pt):
+            die("async wp does not support stdin; pass the value as an argument, or for eval-file, a path")
         if managed_native_instance_selected(args.resolved_instance) is not None:
             die("managed-native async wp requires an adapter-native durable "
                 "transport; host/legacy job fallback is disabled")
@@ -390,6 +408,9 @@ def cmd_wp(cfg, args) -> None:
         print(f"  follow: ./sb job {jid} --follow", file=sys.stderr)
         print(f"  kill:   ./sb job {jid} --kill", file=sys.stderr)
         return
+    if managed_native_instance_selected(args.resolved_instance) is not None:
+        if requires_stdin(pt):
+            die("managed-native wp does not support stdin; pass the value as an argument, or for eval-file, a path")
     pt = _absolutize_project_requires(pt, getattr(args, "project_dir", None))
     pt, staged_packages = _stage_host_package_paths(
         pt, args.resolved_instance, getattr(args, "project_dir", None),

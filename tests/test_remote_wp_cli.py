@@ -185,6 +185,21 @@ class TestRemoteWpCliTransport(unittest.TestCase):
         )
         self.assertEqual((result["status"], result["exit_code"]), ("unknown", 125))
 
+    @patch("sandbox.core._remote._remote_control_request")
+    @patch("sandbox.core._remote._remote_mcp_runtime_revision", return_value="a" * 24)
+    def test_refuses_commands_requiring_stdin_before_control_request(self, _revision, request):
+        remote = {"mcp_service": {"ownership_marker": "b" * 24}}
+        for argv in (["eval-file", "-"], ["--path=/x", "eval-file", "-"], ["db", "query"]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(_remote.RemoteWpRefusalError) as raised:
+                    _remote.remote_wp_cli(
+                        remote, project_slug="project", label="default",
+                        argv=argv, timeout=5,
+                    )
+                self.assertEqual(raised.exception.code, "stdin_unsupported")
+                self.assertIn("pass the value as an argument, or for eval-file, a path", str(raised.exception))
+                request.assert_not_called()
+
 
 class TestRemoteWpCliCommand(unittest.TestCase):
     def _args(self, **overrides):
@@ -536,6 +551,21 @@ class TestRemoteWpCliCommand(unittest.TestCase):
                 self.assertRaises(SystemExit) as raised:
             command.cmd_wp({}, self._args())
         self.assertNotEqual(raised.exception.code, 0)
+
+    @patch("sandbox.commands.wp._remote.remote_wp_cli")
+    @patch("sandbox.commands.wp._remote.get_remote")
+    @patch("sandbox.commands.wp.preflight_project_capability", return_value=None)
+    @patch("sandbox.commands.wp._core")
+    def test_cmd_wp_remote_refuses_commands_requiring_stdin_before_dispatch(
+        self, core, _preflight, get_remote, remote_wp_cli,
+    ):
+        err = StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as raised:
+            command.cmd_wp({}, self._args(passthrough=["--", "eval-file", "-"]))
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("remote wp does not support stdin", err.getvalue())
+        self.assertIn("pass the value as an argument, or for eval-file, a path", err.getvalue())
+        remote_wp_cli.assert_not_called()
 
 
 if __name__ == "__main__":

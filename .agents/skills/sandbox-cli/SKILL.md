@@ -802,7 +802,11 @@ command runs. Bounded termination on timeout or output overflow is limited to
 the owned process group and returns a nonzero unknown result; inspect state
 before any manual retry.
 Remote `plugin install`, `theme install`, `media import`, and `eval-file` are
-refused because their local forms can stage host-file operands.
+refused because their local forms can stage host-file operands. Commands that
+require stdin (such as `eval-file -`, `db query` without a positional SQL query,
+`option add|update` with fewer than 2 operands, or `meta add|update` with fewer
+than 3 operands) are refused on remotes, with `--async`, and under
+managed-native; pass values as explicit arguments or script paths.
 
 Synchronous `sb wp` waits up to 60 seconds by default. Pass an integer from 1
 through 3600 with `--timeout` before the `--` delimiter to change that bound:

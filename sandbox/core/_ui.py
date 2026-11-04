@@ -67,8 +67,8 @@ def _display_command(cmd: list[str]) -> str:
 
 
 def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
-    if capture and (kw.get("stdin") is not None or kw.get("stdout") is not None):
-        raise ValueError("capture cannot be combined with explicit stdin/stdout")
+    if capture and kw.get("stdout") is not None:
+        raise ValueError("capture cannot be combined with explicit stdout")
     if not capture:
         print(f"  $ {_display_command(cmd)}")
 

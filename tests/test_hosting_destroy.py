@@ -108,6 +108,16 @@ class Planning(unittest.TestCase):
             destroy.plan(state, ENTRY, "r1", "site", "blue-sandbox", probe=dict(EMPTY_PROBE))
         self.assertEqual(caught.exception.code, "target_ambiguous")
 
+        for variation in (
+            {"compose_project": "sandbox-host-site-blue-sandbox", "active_operation": {"action": "apply"}},
+            {"compose_project": "sandbox-host-site-blue-sandbox", "active_operation": {"action": "destroy"}, "records": []},
+        ):
+            with self.subTest(variation=variation):
+                st = {"hosts": {"r1/site-blue/sandbox": dict(variation)}}
+                with self.assertRaises(destroy.DestroyError) as caught:
+                    destroy.plan(st, ENTRY, "r1", "site", "blue-sandbox", probe=dict(EMPTY_PROBE))
+                self.assertEqual(caught.exception.code, "target_ambiguous")
+
     def test_a_failed_docker_listing_fails_the_probe(self):
         command = destroy._probe_command("sandbox-host-site-sandbox",
                                          destroy._paths("/h", "site", "sandbox"), "/r", ["/c"])
@@ -1016,6 +1026,77 @@ class Execution(unittest.TestCase):
                 self.assertNotIn(KEY, end_state["hosts"])
                 self.assertIn("r1/keep/sandbox", end_state["hosts"])
 
+    def test_interrupted_destroy_fences_the_real_namesake_pair(self):
+        from sandbox.commands import hosting as cmd_hosting
+        from sandbox.hosting.recovery.repository import _ActivationHostStatePort
+
+        record = _record(compose_project="sandbox-host-site-blue-sandbox")
+        client = FakeClient()
+        with self.assertRaises(destroy.DestroyError):
+            self._run(record, [self.PROBE, "", (124, "")], client,
+                      project="site-blue", environment="sandbox")
+
+        state = self._last_state()
+        port = _ActivationHostStatePort(self.repository)
+
+        for key in ("r1/site-blue/sandbox", "r1/site/blue-sandbox"):
+            self.assertIn(key, state["hosts"])
+            self.assertEqual(state["hosts"][key]["active_operation"]["action"], "destroy")
+            with self.assertRaises(cmd_hosting.HostingError):
+                cmd_hosting._assert_no_active_host_operation(state, key)
+            with port.atomic_host_state_transaction(key):
+                with self.assertRaisesRegex(ValueError, "operation_busy"):
+                    port.read_activation_nested(key)
+
+        with port.atomic_host_state_transaction("r1/keep/sandbox"):
+            port.read_activation_nested("r1/keep/sandbox")
+
+    def test_retry_with_clear_fenced_removes_the_real_namesake_pair(self):
+        fence = {"compose_project": "sandbox-host-site-blue-sandbox",
+                 "active_operation": {"action": "destroy", "started_at": 1}}
+        record = dict(fence)
+        extra = {"r1/site/blue-sandbox": dict(fence)}
+        result, _, state = self._run(
+            record, [self.PROBE, "", "removed\n"], FakeClient(),
+            extra_hosts=extra, project="site-blue", environment="sandbox",
+            clear_fenced=True)
+        self.assertEqual(result["state"], "destroyed")
+        for key in ("r1/site-blue/sandbox", "r1/site/blue-sandbox"):
+            self.assertNotIn(key, state["hosts"])
+        self.assertIn("r1/keep/sandbox", state["hosts"])
+
+    def test_fence_write_reloads_state_under_the_lock(self):
+        record_retired = _record(retired_at=123)
+        record_cleared = _record()
+        self.assertNotIn("retired_at", record_cleared)
+
+        loads = [
+            {"version": 1, "hosts": {KEY: record_retired, "r1/keep/sandbox": {"x": 1}}},
+            {"version": 1, "hosts": {KEY: record_cleared, "r1/keep/sandbox": {"x": 1}}},
+        ]
+
+        def fake_load():
+            self.events.append("load")
+            if loads:
+                return loads.pop(0)
+            return self._last_state()
+
+        client = FakeClient()
+        with self.assertRaises(destroy.DestroyError):
+            self._run(_record(), [self.PROBE, "", (124, "")], client, load_hook=fake_load)
+
+        written_state = self._last_state()
+        written_record = written_state["hosts"][KEY]
+        self.assertNotIn("retired_at", written_record)
+        self.assertEqual(written_record["active_operation"]["action"], "destroy")
+
+        load_indices = [i for i, ev in enumerate(self.events) if ev == "load"]
+        self.assertEqual(len(load_indices), 2)
+        second_load_idx = load_indices[1]
+        self.assertEqual(self.events[second_load_idx - 1], "lock")
+        self.assertEqual(self.events[second_load_idx + 1], "write")
+        self.assertEqual(self.events[second_load_idx + 2], "unlock")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -1055,3 +1136,78 @@ class DestroyFenceAdmission(unittest.TestCase):
                     port.read_activation_nested(KEY)
             with port.atomic_host_state_transaction("r1/keep/sandbox"):
                 port.read_activation_nested("r1/keep/sandbox")
+
+    def test_recovery_on_a_destroy_placeholder_refuses_without_effects(self):
+        from sandbox.hosting.recovery.models import (
+            RecoveryAction, RecoveryRequest, TargetIdentity,
+        )
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        from sandbox.hosting.recovery.service import RecoveryService
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            target = TargetIdentity("r1", "site", "sandbox")
+            placeholder = {
+                "compose_project": "sandbox-host-site-sandbox",
+                "active_operation": {"action": "destroy", "started_at": 1},
+            }
+            repository._write({"version": 1, "hosts": {target.key: placeholder}})
+            before_bytes = (root / "hosts.json").read_bytes()
+
+            recorded_job_lookup = []
+            recorded_observer = []
+            recorded_edge_adapter = []
+
+            def fake_job_lookup(job_id):
+                recorded_job_lookup.append(job_id)
+                return {}
+
+            def fake_observer(*args, **kwargs):
+                recorded_observer.append((args, kwargs))
+                return {}
+
+            def fake_edge_adapter(*args, **kwargs):
+                recorded_edge_adapter.append((args, kwargs))
+                return {}
+
+            service = RecoveryService(
+                repository=repository,
+                job_lookup=fake_job_lookup,
+                source_check=lambda *args: True,
+                observer=fake_observer,
+                edge_adapter=fake_edge_adapter,
+            )
+            request = RecoveryRequest(
+                RecoveryAction.OBSERVE_RECONCILE, "recover-1", "job-1",
+                "apply-1", target, 0,
+            )
+            result = service.recover(request)
+            # The result family is 'failed' and code is 'persistence_failed'.
+            # Note: the code is misleading, and this test pins refusal, not the wording.
+            self.assertEqual(result["result_family"], "failed")
+            self.assertEqual(result["result_class"], "persistence_failed")
+            self.assertEqual(recorded_job_lookup, [])
+            self.assertEqual(recorded_observer, [])
+            self.assertEqual(recorded_edge_adapter, [])
+            self.assertEqual((root / "hosts.json").read_bytes(), before_bytes)
+
+    def test_activation_snapshot_refuses_under_a_destroy_fence(self):
+        from sandbox.hosting.images.activation.repository import ActivationRepository
+        from sandbox.hosting.recovery.repository import RecoveryRepository, _ActivationHostStatePort
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            repository._write({"version": 1, "hosts": {
+                KEY: {"active_operation": {"action": "destroy", "started_at": 1}}}})
+            before_bytes = (root / "hosts.json").read_bytes()
+
+            activation_repo = ActivationRepository(
+                host_state_port=_ActivationHostStatePort(repository),
+                stage_repository=mock.Mock(),
+                target_mutation_port=repository.target_mutation_port("activation"),
+            )
+            with self.assertRaisesRegex(ValueError, "operation_busy"):
+                activation_repo.snapshot(KEY)
+            self.assertEqual((root / "hosts.json").read_bytes(), before_bytes)

@@ -4678,8 +4678,34 @@ class TestPreviewList(unittest.TestCase):
             previews.update(extra_preview)
         return {"version": 1, "previews": previews}
 
-    def test_preview_list_never_prints_a_login_credential(self):
+    def test_preview_list_prints_no_query_string_or_userinfo(self):
+        urls = (
+            "https://a.test/?sandbox_autologin%3DSYNTHETIC",
+            "https://a.test/?x=https%3A%2F%2Fb.test%2F%3Fsandbox_autologin%3DSYNTHETIC",
+            "https://a.test/?other=SYNTHETIC",
+            "https://a.test/#SYNTHETIC",
+            "https://SYNTHETIC@a.test/",
+        )
+        for raw_url in urls:
+            state = self._synthetic_state()
+            state["previews"]["p1"]["url"] = raw_url
+            for as_json in (True, False):
+                with self.subTest(url=raw_url, json=as_json):
+                    with tempfile.TemporaryDirectory() as td:
+                        state_file = Path(td) / "remote-previews.json"
+                        state_file.write_text(json.dumps(state))
+                        with patch.object(preview, "_STATE_PATH", state_file):
+                            buf = io.StringIO()
+                            args = types.SimpleNamespace(action="list", remote=None, json=as_json)
+                            with redirect_stdout(buf):
+                                preview.cmd_preview(None, args)
+                            out = buf.getvalue()
+                            self.assertNotIn("SYNTHETIC", out)
+                            self.assertIn("https://a.test/", out)
+
+    def test_preview_list_prints_only_named_fields(self):
         state = self._synthetic_state()
+        state["previews"]["p1"]["future_secret"] = "SYNTHETIC"
         with tempfile.TemporaryDirectory() as td:
             state_file = Path(td) / "remote-previews.json"
             state_file.write_text(json.dumps(state))
@@ -4691,38 +4717,15 @@ class TestPreviewList(unittest.TestCase):
                         with redirect_stdout(buf):
                             preview.cmd_preview(None, args)
                         out = buf.getvalue()
-                        self.assertNotIn("SYNTHETIC", out)
+                        self.assertNotIn("future_secret", out)
                         self.assertNotIn("login_url", out)
-                        self.assertIn("p1", out)
-                        self.assertIn("https://p1.sandbox.asb.bd", out)
-                        self.assertIn("2026-11-05T00:00:00+00:00", out)
-                        self.assertIn("p2", out)
-                        self.assertIn("https://p2.sandbox.asb.bd", out)
-                        self.assertIn("2026-11-06T00:00:00+00:00", out)
+                        self.assertNotIn("SYNTHETIC", out)
                         if as_json:
                             payload = json.loads(out)
                             self.assertTrue(payload["ok"])
                             for row in payload["previews"]:
-                                self.assertIn("id", row)
-                                self.assertIn("url", row)
-                                self.assertIn("expires_at", row)
+                                self.assertNotIn("future_secret", row)
                                 self.assertNotIn("login_url", row)
-
-    def test_preview_list_redacts_a_token_inside_any_field(self):
-        state = self._synthetic_state()
-        state["previews"]["p1"]["url"] = "https://p1.sandbox.asb.bd/?sandbox_autologin=SYNTHETIC"
-        with tempfile.TemporaryDirectory() as td:
-            state_file = Path(td) / "remote-previews.json"
-            state_file.write_text(json.dumps(state))
-            with patch.object(preview, "_STATE_PATH", state_file):
-                for as_json in (True, False):
-                    with self.subTest(json=as_json):
-                        buf = io.StringIO()
-                        args = types.SimpleNamespace(action="list", remote=None, json=as_json)
-                        with redirect_stdout(buf):
-                            preview.cmd_preview(None, args)
-                        out = buf.getvalue()
-                        self.assertNotIn("SYNTHETIC", out)
 
     def test_preview_list_honours_remote(self):
         state = self._synthetic_state()

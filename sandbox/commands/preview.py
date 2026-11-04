@@ -8,6 +8,7 @@ import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sandbox.core import die, ok
 import sandbox.core as core
@@ -102,15 +103,28 @@ def _destroy(entry: dict, state: dict, preview_id: str) -> None:
     _save_state(state)
 
 
+# What `preview list` may print. A field added to a saved row stays private until named here.
+_PUBLIC_ROW_FIELDS = ("id", "remote", "project_root", "instance", "domain", "url",
+                      "zone_id", "dns_record_id", "expires_at")
+
+
+def _public_row(row: dict) -> dict:
+    public = {key: row[key] for key in _PUBLIC_ROW_FIELDS if key in row}
+    if isinstance(public.get("url"), str):
+        parts = urlsplit(public["url"])
+        public["url"] = parts._replace(netloc=parts.netloc.rpartition("@")[2],
+                                       query="", fragment="").geturl()
+    return public
+
+
 def _cmd_preview(cfg, args) -> None:
     action = args.action
     state = _load_state()
     if action == "list":
-        from sandbox.commands.lifecycle import _public_status_json
         rows = sorted((row for row in state["previews"].values()
                        if not args.remote or row.get("remote") == args.remote),
                       key=lambda row: row["expires_at"])
-        rows = _public_status_json(rows)
+        rows = [_public_row(row) for row in rows]
         if args.json:
             print(json.dumps({"ok": True, "previews": rows}))
         else:

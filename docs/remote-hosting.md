@@ -1350,7 +1350,7 @@ expiry record stored only under `$SANDBOX_HOME/runtime/remote-previews.json`.
 ./sb preview cleanup --remote myvps --confirm
 ```
 
-`preview list` never prints a login URL or token; `--remote` limits it to one remote.
+`preview list` prints only the identifying fields and URLs without a query string, so it holds no login URL or token; `--remote` limits it to one remote. `preview create` is the one place a login URL is printed: it is how you get it.
 
 Creation is confirmation-gated because it deploys the selected checkout, creates
 one Cloudflare-proxied A record, configures a Caddy route, and starts a remote

@@ -547,6 +547,7 @@ def _cmd_host_image_push_local(args) -> None:
     from sandbox.jobs.models import ResolvedTarget
     from sandbox.readiness.gate import require_ready
     from sandbox.transports.remote_jobs import RemoteJobAdmissionError
+    from sandbox.resources.host_memory.remote import RemoteProtocolError
 
     if not args.confirm:
         die("host image push-local is protected; pass --confirm")
@@ -571,10 +572,27 @@ def _cmd_host_image_push_local(args) -> None:
             home = remote.resolve_sandbox_home(entry)
             progress = None if args.json else lambda message: info(
                 "host image push-local: " + remote.redact_text(message)[:500])
+            try:
+                machine_identity = _authenticated_machine_identity(args.remote)
+            except RemoteProtocolError as exc:
+                if exc.code != "remote_runtime_revision_mismatch":
+                    raise
+                service = entry.get("mcp_service") or {}
+                registered = service.get("runtime_revision") if isinstance(service, dict) else None
+                controller = remote._remote_mcp_runtime_revision()
+                def fingerprint(value):
+                    return value if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{24}", value) else "unknown"
+                status = shlex.join(["./sb", "remote", "service", "status", args.remote, "--json"])
+                raise remote_local_images.RemoteLocalImageError(
+                    "remote_runtime_revision_mismatch",
+                    f"Identity refused before archive transfer: registered {fingerprint(registered)}, "
+                    f"controller {fingerprint(controller)}, live unknown through this error; inspect with `{status}`. "
+                    "Use a compatible reviewed controller; runtime adoption needs owner approval. "
+                    "Retry the same receipt after reconciliation; bypass none.") from None
             result = remote_local_images.push_receipt(
                 args.remote, args.receipt, timeout=timeout,
                 artifact_timeout=artifact_timeout,
-                machine_identity=_authenticated_machine_identity(args.remote),
+                machine_identity=machine_identity,
                 registered_host_digest=registered_host_digest(entry, args.remote, home),
                 progress=progress, entry=entry)
         payload = {"ok": True, "action": "push-local", "remote": args.remote,

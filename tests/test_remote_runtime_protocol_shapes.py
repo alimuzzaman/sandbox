@@ -13,6 +13,10 @@ from sandbox.remote_runtime.protocol import CONTROL_PROTOCOL_SPOKEN  # noqa: E40
 
 
 class ShapeGuardTests(unittest.TestCase):
+    def test_resumable_upload_controller_and_worker_are_guarded(self):
+        self.assertIn("sandbox/hosting/local_images.py", shapes.SHAPE_SOURCES)
+        self.assertIn("sandbox/hosting/resumable_upload.py", shapes.SHAPE_SOURCES)
+
     def test_recorded_shapes_match_the_spoken_protocol(self):
         recorded = shapes.read_manifest()
         diff = shapes.shape_diff(recorded["shapes"], shapes.current_shapes())

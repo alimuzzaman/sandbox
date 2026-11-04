@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from sandbox.core import _remote
-from sandbox.hosting import local_images
+from sandbox.hosting import local_images, resumable_upload
 from sandbox.resources.storage_floor import RESERVATION_RELEASE_PROGRAM
 
 _REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -189,9 +189,12 @@ finally:
 '''
 
 
+_RESUMABLE_STAGE_PROGRAM = RESERVATION_RELEASE_PROGRAM + resumable_upload.STAGE_PROGRAM
+
+
 def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: int,
                  progress=None, cancelled=None, entry: dict | None = None,
-                 reservation_id: str | None = None, on_started=None) -> dict:
+                 reservation_id: str | None = None, on_started=None, resume_context: dict | None = None) -> dict:
     """Verify the complete staged bytes before invoking the fixed Docker load."""
     started = time.monotonic()
     entry = _entry(remote_name) if entry is None else entry
@@ -215,16 +218,40 @@ def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: in
         argv.append(str(1800 + (size + 1048575) // 1048576))
         if reservation_id is not None:
             argv.append(reservation_id)
+    if resume_context is not None:
+        if ("members" not in artifact or reservation_id is None
+                or resume_context.get("bundle_digest") != digest or resume_context.get("archive_bytes") != size):
+            raise RemoteLocalImageError("local_images_receipt_invalid")
+        argv = ["python3", "-c", _RESUMABLE_STAGE_PROGRAM, root,
+                json.dumps(resume_context, sort_keys=True, separators=(",", ":")), reservation_id,
+                str(1800 + (size + 1048575) // 1048576)]
     timeout -= time.monotonic() - started
     if timeout <= 0:
         raise RemoteLocalImageError("local_images_transfer_unknown")
     handshake = {}
-    if reservation_id is not None:
+    if resume_context is not None:
+        handshake["resume_frame"] = {"schema": 2, "state": "resume", "reservation_id": reservation_id,
+            "upload_id": local_images.canonical_digest(resume_context).split(":", 1)[1], "size": size}
+        handshake["on_started"] = on_started
+    elif reservation_id is not None:
         handshake["ready_frame"] = {"schema": 1, "state": "ready", "reservation_id": reservation_id}
         handshake["on_started"] = on_started
     result = local_images.stream_archive(
         _remote.ssh_command_args(entry, shlex.join(argv), multiplex=False),
         archive, timeout=timeout, progress=progress, cancelled=cancelled, **handshake)
+    if resume_context is not None:
+        preparation_errors = {
+            31: ("local_images_receipt_invalid", "Resume binding refused; use the original sealed v2 receipt and matching archives."),
+            36: ("local_images_partial_cache_full", "Retained upload cache is full; owner must inspect space/partials, then retry the same receipt; no cleanup bypass."),
+            37: ("local_images_partial_metadata_invalid", "Partial metadata was rejected; no archive bytes sent. Retry the same receipt to recreate its partial; no fallback."),
+            75: ("local_images_target_busy", "A worker fence or load quarantine blocks this upload; inspect the existing operation, then retry the same receipt; never delete its fence."),
+        }
+        if result["returncode"] in preparation_errors:
+            code, message = preparation_errors[result["returncode"]]
+            raise RemoteLocalImageError(code, message)
+    if result.get("resume_protocol_error"):
+        raise RemoteLocalImageError("local_images_resume_protocol_unsupported",
+            "worker did not offer upload protocol 2; no archive bytes sent, no automatic fallback; use a matching reviewed controller/runtime")
     if result["timed_out"] or result["cancelled"] or result["broken_pipe"]:
         raise RemoteLocalImageError("local_images_transfer_unknown")
     if result["returncode"] == 34 or ("members" in artifact and result["returncode"] != 0):
@@ -237,7 +264,7 @@ def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: in
         raise RemoteLocalImageError("local_images_transfer_unknown") from None
     if frame != {"schema": 1, "state": "loaded", "bytes": size}:
         raise RemoteLocalImageError("local_images_transfer_unknown")
-    return frame
+    return {**frame, "resumed_bytes": result["resumed_bytes"]} if resume_context is not None else frame
 
 
 _PUBLISH_PROGRAM = r'''import hashlib,json,os,stat,sys,tempfile
@@ -434,7 +461,7 @@ def target_image_lease(remote_name: str, project: str, environment: str,
     return _TransferLease(entry, timeout=timeout)
 
 
-_RECONCILE_PROGRAM = RESERVATION_RELEASE_PROGRAM + r"""
+_RECONCILE_PROGRAM = RESERVATION_RELEASE_PROGRAM + resumable_upload.UPLOAD_HELPERS_PROGRAM + r"""
 import fcntl,json,os,stat,sys
 root,target=sys.argv[1:]
 def done(safe): print(json.dumps({'safe':safe},separators=(',',':')))
@@ -448,6 +475,7 @@ try:
  try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
  except BlockingIOError: done(False);sys.exit(0)
  if os.path.lexists(root+'/load-unverified'): done(False);sys.exit(0)
+ cleanup_partials(root+'/uploads')
  store=os.path.dirname(root)+'/storage'
  if os.path.exists(store): release_storage_reservation(store,None,orphan_target=target)
  done(True)
@@ -623,7 +651,12 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                             load_archive(remote_name, path.parent / bundle["archive"], bundle,
                                          timeout=remaining(artifact_timeout), progress=progress,
                                          cancelled=lease.lost, entry=entry, reservation_id=reservation_id,
-                                         on_started=worker_started)
+                                         on_started=worker_started, resume_context={
+                                             "schema": 1, "machine_identity": machine_identity,
+                                             "registered_host_digest": registered_host_digest,
+                                             "project": receipt["project"], "environment": receipt["environment"],
+                                             "receipt_digest": receipt["receipt_digest"],
+                                             "bundle_digest": bundle["archive_sha256"], "archive_bytes": bundle["archive_bytes"]})
                         except Exception:
                             # Once the acknowledged worker exits before quarantine,
                             # a free fence proves these reservations are orphans.

@@ -378,13 +378,20 @@ def _retained(remote: dict) -> dict:
     return {key: remote[key] for key in _RETAINED_KEYS if key in remote}
 
 
+def _kept_shared_row(item: dict) -> dict:
+    previous = item.get("previous")
+    record_id = item.get("created_id") or (previous.get("id") if isinstance(previous, dict) else None)
+    return {"zone_id": item["zone_id"], "state": "kept_shared", "record_id": record_id}
+
+
 def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             clear_fenced: bool = False, client_factory=None,
             lock_wait: float = 600) -> dict:
     """Remove the target under its mutation transaction; state goes last.
 
-    The shared state lock is held only to read and to write state, never across
-    an SSH call, so a slow remote does not stall other targets.
+    The shared state lock is never held across an SSH call, so a slow remote does not
+    stall other targets. It is held across the Cloudflare calls and the state removal,
+    which are bounded per request, so another target's apply cannot land between them.
     """
     from sandbox.hosting.recovery.repository import RecoveryRepository
     key = f"{remote_name}/{project}/{environment}"
@@ -426,12 +433,21 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
         if result.returncode != 0 or "removed" not in result.stdout.split():
             raise DestroyError(f"remote teardown incomplete (exit {result.returncode}); state kept",
                                "remote_teardown_incomplete")
-        cloud = []
+        client = None
         if found["_records"] or found["origin_certificate"]:
             client = (client_factory or cloudflare.Client)()
-            cloud = _remove_cloudflare(found, client)
         with repository.state_lock(timeout_seconds=lock_wait):
+            # Read again: another target can apply onto one of these records during the
+            # teardown. Apply holds this lock across its provider writes and its save, so
+            # under it that target has either saved its row or has not started.
             state = hosting.load_host_state()
+            held = _records_held_elsewhere(state, key)
+            cloud = [_kept_shared_row(item) for item in found["_records"]
+                     if _record_identities(item) & held]
+            found["_records"] = [item for item in found["_records"]
+                                 if not (_record_identities(item) & held)]
+            if client is not None:
+                cloud += _remove_cloudflare(found, client)
             for owned_key in namesakes(remote_name, project, environment):
                 state.get("hosts", {}).pop(owned_key, None)
             repository._write(state)
@@ -483,6 +499,8 @@ def render(result: dict, *, confirmed: bool) -> str:
             lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} could not be verified; left in place")
         elif row.get("state") == "already_absent" and row.get("record_id"):
             lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} was already gone")
+        elif row.get("state") == "kept_shared":
+            lines.append(f"  DNS record {row['record_id']} in zone {row['zone_id']} is now held by another target; left in place")
     kept = _kept_text(r)
     if not confirmed:
         if kept:

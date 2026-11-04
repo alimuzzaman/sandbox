@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `host destroy` re-reads local state and makes its Cloudflare calls and state removal under the state lock, after the remote teardown. On one controller, a target that applies onto a record during teardown keeps it, reported as `kept_shared`.
 - `host destroy` reads `nothing to remove` once only images it does not own are left. The probe now counts the same `<compose-name>-*` tags teardown removes, and other labelled images are listed as kept, never removed.
 - `sb ensure --remote` reports SSH failures as `remote_authentication_failed`,
   `remote_unreachable` or `remote_connection_lost` instead of

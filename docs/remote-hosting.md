@@ -1315,11 +1315,19 @@ Records saved before this check have no snapshot, so destroy still acts on them 
 them first**, and can overwrite or delete a later change; their saved previous value may even be
 Sandbox's own record. The dry run marks these `check it by hand`: check them before confirming.
 
-Limits: nothing detects a concurrent writer. That covers another target applying onto the same
-record while destroy runs, a record changing between an apply's read and its write, and any
-change between destroy's read and its write. Local state also cannot see uses of a record outside
-Sandbox. A reused nginx Origin CA certificate keeps its recorded ID
-so destroy can revoke it.
+Destroy makes its Cloudflare calls and removes its state under the state lock that apply and
+edge-continue hold across their own provider writes, with a fresh read of local state. So on one
+controller, a target that applies onto a record during the teardown keeps it, and destroy reports
+`kept_shared`. The cost: a stalled Cloudflare request, up to 30 seconds each, can make other
+targets' short operations refuse `operation_busy`. A lock timeout or provider failure at this step keeps
+the fence and the state, and rerunning with `--clear-fenced` is safe.
+
+Limits: nothing detects a concurrent writer outside that lock. That covers another controller, which has
+its own `hosts.json`; disposable remote previews; anything outside Sandbox; a failed apply whose DNS
+rollback also failed, which leaves a provider record no state row names; and a record changing between
+an apply's read and its write. Local state also cannot see uses of a record outside Sandbox. Spec 064 is the
+planned fix for concurrent writers. A reused nginx Origin CA certificate keeps its recorded ID so destroy can
+revoke it.
 
 ### Disposable remote previews
 

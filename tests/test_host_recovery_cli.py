@@ -167,6 +167,7 @@ class HostRecoveryCliContractTests(unittest.TestCase):
             root = Path(temporary)
             directory = root / "remote-registration"
             directory.mkdir(mode=0o755)
+            directory.chmod(0o755)
             with patch.object(hosting_command.remote, "RUNTIME_DIR", root), \
                  self.assertRaisesRegex(ValueError, "directory is unsafe"):
                 with hosting_command.remote.registered_remote_lock():

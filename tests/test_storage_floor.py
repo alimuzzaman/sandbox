@@ -501,7 +501,7 @@ class FinalReleaseCompatibilityTests(unittest.TestCase):
                 engine=root/'runtime'/'host-local-images';engine.mkdir(mode=0o700)
                 uploads=engine/'uploads';uploads.mkdir(mode=0o777 if failure=='unsafe-root' else 0o700)
                 if failure=='unsafe-root':uploads.chmod(0o777)
-                if failure=='unsafe-fence':(engine/'load-fence.lock').touch(mode=0o644)
+                if failure=='unsafe-fence':(engine/'load-fence.lock').touch(mode=0o644);(engine/'load-fence.lock').chmod(0o644)
                 if failure=='marker':(engine/'load-unverified').write_text('other operation')
                 argv=[sys.executable,'-c',transfer._STAGE_PROGRAM,str(uploads),'../bad' if failure=='name' else 'bundle-1.tar',
                       'sha256:'+hashlib.sha256(b'archive').hexdigest(),'7','37','a'*32]

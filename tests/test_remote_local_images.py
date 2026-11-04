@@ -1932,3 +1932,22 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
         self.assertEqual(caught.exception.code,'local_images_coordinator_start_failed')
         self.assertEqual(caught.exception.failure['effects']['load'],'not_started')
         self.assertEqual(caught.exception.failure['values']['errno'],2)
+
+
+    def test_deeply_nested_invalid_manifest_rebuilds_and_reuses_good_chunks(self):
+        _manifest,plan=self.seed([0,2])
+        (plan/'manifest.json').write_bytes(b'['*200000+b']'*200000)
+        self.f.reservation();result=self.upload(1)
+        self.assertEqual(result['resumed_bytes'],2*65536)
+        self.assertEqual(result['uploaded_bytes'],self.f.archive.stat().st_size-2*65536)
+        self.assertFalse(plan.exists())
+
+    def test_deeply_nested_invalid_manifest_does_not_block_another_receipt(self):
+        _manifest,plan=self.seed([0,2])
+        (plan/'manifest.json').write_bytes(b'['*200000+b']'*200000)
+        receipt={'schema':local_images.RECEIPT_SCHEMA_V2,'project':'app','receipt_digest':'sha256:'+'f'*64}
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','production',receipt['receipt_digest'],entry={}):
+                self.assertTrue(remote_local_images._reconcile_reservations({},receipt))
+                self.assertFalse(plan.exists())
+        self.assertFalse(self.f.loaded.exists())

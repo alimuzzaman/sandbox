@@ -2548,7 +2548,8 @@ loads cannot be reclaimed; their safe refusal takes priority over deployment.
 The floor and full 3x admission estimate remain unchanged.
 
 Manifests are private temporary files, fsynced and atomically renamed; an invalid
-manifest can be rebuilt from the incoming digest-bound manifest immediately.
+manifest, including JSON that exceeds parser recursion depth, can be rebuilt
+from the incoming digest-bound manifest immediately.
 Worker refusals carry a stable cause, phase, safe actual values and known effects
 through text and JSON, plus an inspection/repair instruction, an exact same-receipt
 resume command and no bypass for shared-host integrity. An uncertain load never

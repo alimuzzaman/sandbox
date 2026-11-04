@@ -219,6 +219,7 @@ is revoked. Crash replay resumes only the recorded phase/generation.
 | Qualified Ubuntu 24.04/systemd 255 private-root mode after reviewed proof, active binding, and completed post-promotion ordinary fixture journey | `proven` | May permit future policy. |
 | Exact promoted disposable fixture while ordinary acceptance is pending | `implemented_unproven` | Only its fixture-validation promotion and active binding may permit `future`; no general adoption/support claim. |
 | Same mode before reviewed proof | `implemented_unproven` | Refuse normal authority mutation; permit only a separately authorized bounded qualification admission. |
+| Same mode with a complete ordinary chain and no verified protected review | `implemented_unproven`, `acceptance_state=complete`, `adoptable=false` | Refuse normal authority mutation. Named checks read `unknown`, except parity `fail` on drift. Identity digests are null until observed. Evidence and promotion IDs stay in the report. The protected writer replaces this row's evaluation with verified lineage, and only that may report `proven` or `human_review` `pass`. |
 | Linux without required syscall/filesystem/private-mount proof | `unsupported` | Retain; no fallback claim. |
 | NFS/network/unknown filesystem | `unsupported` | Retain; separate qualification required. |
 | macOS, Windows, Herd, Compose-local, generic host-job | `unsupported` | Existing legacy path only. |

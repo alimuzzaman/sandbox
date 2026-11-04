@@ -23,6 +23,16 @@ It is completely decoupled from OCI hosting (`hosts.json` / `RecoveryRepository`
 
 One lifecycle-owned observation for an exact remote platform and operating mode.
 
+Evaluation is a read-only projection computed from one snapshot of the lifecycle
+state; it never writes. Only the review, finalize and revoke transitions write
+stored capability state, and mutation admission re-evaluates. No consumer reads a
+saved evaluation. A saved evaluation also raced revocation and proved nothing fresh,
+so it is not the durable record the paragraph above describes.
+
+Until the protected lifecycle writer exists, no evaluation reports `proven` or
+`adoptable=true`. See the support matrix in
+[capability-evidence-v1.md](./contracts/capability-evidence-v1.md).
+
 | Field | Type | Rules |
 |---|---|---|
 | capability_id | opaque string | Stable identifier for `owned-storage-authority-v1`. |

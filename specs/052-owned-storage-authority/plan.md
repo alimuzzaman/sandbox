@@ -15,6 +15,15 @@ advisory locking, atomic file replacement, and generation CAS. Protected paths
 Implementation, service installation, privilege grants, live qualification,
 promotion, rollout, and production adoption remain separately gated.
 
+**Amendment (2026-11-04)**: capability evaluation is read-only, and until the protected
+lifecycle writer exists a complete ordinary chain reads `implemented_unproven` with
+`acceptance_state=complete`, never `proven`. No decision row can stand in for a review, because
+no code can show an authenticated human wrote one. See [data-model.md](./data-model.md) and
+[capability-evidence-v1.md](./contracts/capability-evidence-v1.md). This changes no requirement in
+[spec.md](./spec.md): FR-053, FR-057 and FR-058 require durable review, promotion, finalization
+and revocation state, not durable evaluation. It tightens a report, and the human security review of
+storage authority still owns reviewer identity, lineage, expiry and what may replace this rule.
+
 ## Summary
 
 Add an opt-in, Linux-only owned-storage authority for newly published remote

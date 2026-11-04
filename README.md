@@ -925,7 +925,10 @@ You can also invoke skills as slash commands, e.g.
 
 Instances are created per-project by `init`/`ensure`; the browser dashboard also offers
 a local **Create an instance** form backed by the same `ensure` operation. Remote
-creation remains unavailable until the remote lifecycle service exposes it. You can
+creation remains unavailable until the remote lifecycle service exposes it. Dashboard
+and wp-admin actions in one `sb web` process run one at a time; a job that has to wait
+says so in its console, and a console command that never exits holds up the rest until
+that `sb web` process restarts. You can
 view and drive instances with:
 
 ```bash

@@ -1315,11 +1315,25 @@ Records saved before this check have no snapshot, so destroy still acts on them 
 them first**, and can overwrite or delete a later change; their saved previous value may even be
 Sandbox's own record. The dry run marks these `check it by hand`: check them before confirming.
 
-Limits: nothing detects a concurrent writer. That covers another target applying onto the same
-record while destroy runs, a record changing between an apply's read and its write, and any
-change between destroy's read and its write. Local state also cannot see uses of a record outside
-Sandbox. A reused nginx Origin CA certificate keeps its recorded ID
-so destroy can revoke it.
+Destroy makes its Cloudflare calls and removes its state under the state lock that apply and
+edge-continue hold across their own provider writes, with a fresh read of local state. So on one
+controller, a target that applies onto a record during the teardown keeps it, and destroy reports
+`kept_shared`. The cost: a stalled Cloudflare request holds that lock for as long as it stalls (each socket
+operation has a 30-second timeout, which is not a total deadline), and other targets' short operations
+can refuse `operation_busy` meanwhile. A lock timeout or provider failure at this step keeps the fence and
+the state (a local read or write that times out promises less: dry-run first), and is reported as `state_lock_timeout`, `provider_timeout`, `state_timeout` or the provider's
+error; rerun with `--clear-fenced`. Earlier rows may already have been restored or deleted by then. A row with
+a usable snapshot is read first, so a rerun acts on it only if it still matches: one already acted on normally reads
+`already_absent` or `kept_changed`. A row another target now holds, or whose snapshot is unusable, is left alone
+unread. A row saved before snapshots existed is acted on unread, so a rerun repeats
+its restore or delete over any later change.
+
+Limits: nothing detects a concurrent writer outside that lock. That covers another controller, which has
+its own `hosts.json`; disposable remote previews; anything outside Sandbox; a failed apply whose DNS
+rollback also failed, which leaves a provider record no state row names; and a record changing between
+an apply's read and its write. Local state also cannot see uses of a record outside Sandbox. Spec 064 is the
+planned fix for concurrent writers. A reused nginx Origin CA certificate keeps its recorded ID so destroy can
+revoke it.
 
 ### Disposable remote previews
 

@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- `host destroy` re-reads local state and makes its Cloudflare calls and state removal under the state lock, after the remote teardown. On one controller, a target that applies onto a record during teardown keeps it, reported as `kept_shared`.
 - Recording a storage authority revocation refuses a row that names no remote, or neither a promotion nor a binding. Reading one that already exists still blocks authority.
 - Dashboard and wp-admin snapshot jobs no longer mix output when one starts while another runs, and no longer leave the process's stdout pointing at a finished job. Bridge jobs now wait their turn like every other dashboard action, and a waiting job's console says so.
 - `host destroy` reads `nothing to remove` once only images it does not own are left. The probe now counts the same `<compose-name>-*` tags teardown removes, and other labelled images are listed as kept, never removed.

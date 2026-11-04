@@ -1,3 +1,4 @@
+import contextlib
 import subprocess
 import tempfile
 import unittest
@@ -107,6 +108,16 @@ class Planning(unittest.TestCase):
             destroy.plan(state, ENTRY, "r1", "site", "blue-sandbox", probe=dict(EMPTY_PROBE))
         self.assertEqual(caught.exception.code, "target_ambiguous")
 
+        for variation in (
+            {"compose_project": "sandbox-host-site-blue-sandbox", "active_operation": {"action": "apply"}},
+            {"compose_project": "sandbox-host-site-blue-sandbox", "active_operation": {"action": "destroy"}, "records": []},
+        ):
+            with self.subTest(variation=variation):
+                st = {"hosts": {"r1/site-blue/sandbox": dict(variation)}}
+                with self.assertRaises(destroy.DestroyError) as caught:
+                    destroy.plan(st, ENTRY, "r1", "site", "blue-sandbox", probe=dict(EMPTY_PROBE))
+                self.assertEqual(caught.exception.code, "target_ambiguous")
+
     def test_a_failed_docker_listing_fails_the_probe(self):
         command = destroy._probe_command("sandbox-host-site-sandbox",
                                          destroy._paths("/h", "site", "sandbox"), "/r", ["/c"])
@@ -192,13 +203,17 @@ class FakeClient:
 
 @mock.patch.object(destroy.remote, "resolve_sandbox_home", lambda entry: "/home/u/sandbox")
 class Execution(unittest.TestCase):
-    def _run(self, record, ssh_outputs, client, extra_hosts=None, **kwargs):
+    def _run(self, record, ssh_outputs, client, extra_hosts=None,
+             project="site", environment="sandbox", record_ssh=False, **kwargs):
         from sandbox.hosting.recovery.repository import RecoveryRepository
+        self.events = []
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
         repository = RecoveryRepository(root / "hosts.json", root / "locks")
-        hosts = {KEY: record, "r1/keep/sandbox": {"x": 1}}
+        self.repository = repository
+        target_key = f"r1/{project}/{environment}"
+        hosts = {target_key: record, "r1/keep/sandbox": {"x": 1}}
         if extra_hosts:
             hosts.update(extra_hosts)
         repository._write({"version": 1, "hosts": hosts})
@@ -207,19 +222,44 @@ class Execution(unittest.TestCase):
         commands = []
 
         def ssh(entry, command, timeout=30):
+            if record_ssh:
+                self.events.append("ssh")
             commands.append(command)
             reply = next(replies)
+            if callable(reply):
+                reply = reply(repository)
             code, out = reply if isinstance(reply, tuple) else (0, reply)
             return subprocess.CompletedProcess([], code, out, "")
 
+        real_state_lock = repository.state_lock
+
+        @contextlib.contextmanager
+        def tracking_state_lock(*args, **kw):
+            self.events.append("lock")
+            try:
+                with real_state_lock(*args, **kw):
+                    yield
+            finally:
+                self.events.append("unlock")
+
+        real_write = repository._write
+
+        def tracking_write(*args, **kw):
+            self.events.append("write")
+            return real_write(*args, **kw)
+
+        repository.state_lock = tracking_state_lock
+        repository._write = tracking_write
+
         real_load = destroy.hosting.load_host_state
-        load = lambda: real_load(root / "hosts.json")
+        load = kwargs.pop("load_hook", None) or (lambda: real_load(root / "hosts.json"))
+        client_factory = kwargs.pop("client_factory", lambda: client)
         with mock.patch.object(destroy.remote, "ssh_run", ssh), \
                 mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository",
                            lambda: repository), \
                 mock.patch.object(destroy.hosting, "load_host_state", load):
-            result = destroy.execute(ENTRY, "r1", "site", "sandbox",
-                                     client_factory=lambda: client, **kwargs)
+            result = destroy.execute(ENTRY, "r1", project, environment,
+                                     client_factory=client_factory, **kwargs)
         return result, commands, load()
 
     PROBE = "containers=1\nvolumes=2\nnetworks=1\nimages=1\nretained_images=0\nretained_untagged=0\nruntime_kb=24\nsource_kb=9\nroute=0\ncerts=0\n"
@@ -780,6 +820,392 @@ class Execution(unittest.TestCase):
         self.assertIn("docker ps", commands[0])
         self.assertEqual(client.calls, [])
 
+    def test_record_adopted_during_teardown_is_kept(self):
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client = FakeClient()
+        client.current = {"x": {"id": "x", **applied}}
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "x", "previous": None,
+            "applied": dict(applied),
+        }])
+        record_calls = []
+        orig_record = client.record
+        client.record = lambda zone_id, record_id: record_calls.append((zone_id, record_id)) or orig_record(zone_id, record_id)
+
+        def teardown_reply(repo):
+            st = self._last_state()
+            st.setdefault("hosts", {})["r1/other/sandbox"] = {
+                "records": [{"zone_id": "z1", "created_id": "x", "previous": None}],
+            }
+            repo._write(st)
+            return "removed\n"
+
+        result, _, state = self._run(record, [self.PROBE, "", teardown_reply], client)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertIn({"zone_id": "z1", "state": "kept_shared", "record_id": "x"},
+                      result["cloudflare"])
+        dns_calls = [call for call in client.calls if call[0] == "dns"]
+        self.assertEqual(dns_calls, [])
+        self.assertEqual(record_calls, [])
+        self.assertNotIn(KEY, state["hosts"])
+        self.assertIn("r1/other/sandbox", state["hosts"])
+        self.assertEqual(state["hosts"]["r1/other/sandbox"]["records"],
+                         [{"zone_id": "z1", "created_id": "x", "previous": None}])
+        rendered = destroy.render(result, confirmed=True)
+        self.assertIn("left in place", rendered)
+        self.assertIn("is now held by another target", rendered)
+
+    def test_previous_only_row_adopted_during_teardown_is_kept(self):
+        client = FakeClient()
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": None, "previous": {"id": "x"},
+        }])
+        record_calls = []
+        orig_record = client.record
+        client.record = lambda zone_id, record_id: record_calls.append((zone_id, record_id)) or orig_record(zone_id, record_id)
+
+        def teardown_reply(repo):
+            st = self._last_state()
+            st.setdefault("hosts", {})["r1/other/sandbox"] = {
+                "records": [{"zone_id": "z1", "created_id": "x", "previous": None}],
+            }
+            repo._write(st)
+            return "removed\n"
+
+        result, _, state = self._run(record, [self.PROBE, "", teardown_reply], client)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertIn({"zone_id": "z1", "state": "kept_shared", "record_id": "x"},
+                      result["cloudflare"])
+        dns_calls = [call for call in client.calls if call[0] == "dns"]
+        self.assertEqual(dns_calls, [])
+        self.assertEqual(record_calls, [])
+        self.assertNotIn(KEY, state["hosts"])
+        self.assertIn("r1/other/sandbox", state["hosts"])
+        rendered = destroy.render(result, confirmed=True)
+        self.assertIn("left in place", rendered)
+
+    def test_provider_step_and_state_removal_share_one_lock(self):
+        test_self = self
+
+        class TrackingClient(FakeClient):
+            def record(self, zone_id, record_id):
+                test_self.events.append("record")
+                return super().record(zone_id, record_id)
+
+            def restore_record(self, zone_id, previous, created_id=None):
+                test_self.events.append("restore")
+                return super().restore_record(zone_id, previous, created_id)
+
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client = TrackingClient()
+        client.current = {"rec1": {"id": "rec1", **applied}}
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "rec1", "previous": None,
+            "applied": dict(applied),
+        }], certificate=None)
+
+        result, _, _ = self._run(
+            record, [self.PROBE, "", "removed\n"], client, record_ssh=True)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertEqual(self.events[-5:],
+                         ["lock", "record", "restore", "write", "unlock"])
+
+        in_lock = False
+        for event in self.events:
+            if event == "lock":
+                self.assertFalse(in_lock)
+                in_lock = True
+            elif event == "unlock":
+                self.assertTrue(in_lock)
+                in_lock = False
+            elif event == "ssh":
+                self.assertFalse(in_lock, "ssh called while state lock held")
+
+    def test_no_cloudflare_work_needs_no_token(self):
+        record = _record(records=[], certificate=None)
+
+        def raising_factory():
+            raise cloudflare.CloudflareError("Cloudflare is not connected")
+
+        result, _, _ = self._run(
+            record, [self.PROBE, "", "removed\n"], None, client_factory=raising_factory)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertEqual(result["cloudflare"], [])
+
+    def test_missing_token_fails_before_the_lock_and_keeps_the_fence(self):
+        def raising_factory():
+            raise cloudflare.CloudflareError("Cloudflare is not connected")
+
+        with self.assertRaises(cloudflare.CloudflareError):
+            self._run(_record(), [self.PROBE, "", "removed\n"], None, client_factory=raising_factory)
+        state = self._last_state()
+        self.assertIn(KEY, state["hosts"])
+        self.assertEqual(state["hosts"][KEY]["active_operation"]["action"], "destroy")
+        self.assertEqual(self.events[-1], "unlock")
+
+    def test_row_dropped_before_teardown_is_not_added_back(self):
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "x", "previous": None,
+        }], certificate=None)
+        extra_hosts = {
+            "r1/other/sandbox": {
+                "records": [{"zone_id": "z1", "created_id": "x", "previous": None}],
+            }
+        }
+
+        def teardown_reply(repo):
+            st = self._last_state()
+            st.setdefault("hosts", {}).pop("r1/other/sandbox", None)
+            repo._write(st)
+            return "removed\n"
+
+        def raising_factory():
+            raise AssertionError("client factory must not be called")
+
+        result, _, state = self._run(
+            record, [self.PROBE, "", teardown_reply], None,
+            extra_hosts=extra_hosts, client_factory=raising_factory)
+        self.assertEqual(result["state"], "destroyed")
+        self.assertNotIn(KEY, state["hosts"])
+
+    def test_lock_timeout_after_teardown_keeps_state_and_retry_works(self):
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            client = FakeClient()
+            record = _record()
+            repository._write({"version": 1, "hosts": {KEY: record, "r1/keep/sandbox": {"x": 1}}})
+
+            replies = iter([self.PROBE, "", "removed\n", self.PROBE, "", "removed\n"])
+
+            def ssh(entry, command, timeout=30):
+                reply = next(replies)
+                code, out = reply if isinstance(reply, tuple) else (0, reply)
+                return subprocess.CompletedProcess([], code, out, "")
+
+            real_lock = repository.state_lock
+            lock_count = 0
+            fail_third_lock = True
+
+            @contextlib.contextmanager
+            def conditional_state_lock(*args, **kwargs):
+                nonlocal lock_count
+                lock_count += 1
+                if fail_third_lock and lock_count == 3:
+                    raise TimeoutError("operation_busy")
+                with real_lock(*args, **kwargs):
+                    yield
+
+            repository.state_lock = conditional_state_lock
+            real_load = destroy.hosting.load_host_state
+            load = lambda: real_load(root / "hosts.json")
+
+            with mock.patch.object(destroy.remote, "ssh_run", ssh), \
+                    mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository",
+                               lambda: repository), \
+                    mock.patch.object(destroy.hosting, "load_host_state", load):
+                with self.assertRaises(destroy.DestroyError) as ctx:
+                    destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+                self.assertEqual(ctx.exception.code, "state_lock_timeout")
+                self.assertEqual(client.calls, [])
+                state = load()
+                self.assertIn(KEY, state["hosts"])
+                self.assertEqual(state["hosts"][KEY]["active_operation"]["action"], "destroy")
+
+                fail_third_lock = False
+                result = destroy.execute(ENTRY, "r1", "site", "sandbox",
+                                         client_factory=lambda: client, clear_fenced=True)
+                self.assertEqual(result["state"], "destroyed")
+                end_state = load()
+                self.assertNotIn(KEY, end_state["hosts"])
+                self.assertIn("r1/keep/sandbox", end_state["hosts"])
+
+    def test_a_local_timeout_is_not_blamed_on_cloudflare(self):
+        real = destroy._records_held_elsewhere
+        calls = []
+
+        def held(state, key):
+            calls.append(key)
+            # plan and the first read in execute are 1 and 2; 3 is under the final lock.
+            if len(calls) == 3:
+                raise TimeoutError("local")
+            return real(state, key)
+
+        client = FakeClient()
+        with mock.patch.object(destroy, "_records_held_elsewhere", held), \
+                self.assertRaises(destroy.DestroyError) as caught:
+            self._run(_record(), [self.PROBE, "", "removed\n"], client)
+        self.assertEqual(caught.exception.code, "state_timeout")
+        self.assertEqual(client.calls, [])
+
+    def test_provider_read_timeout_is_not_called_a_busy_lock(self):
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client = FakeClient()
+
+        def raising_record(zone_id, record_id):
+            raise TimeoutError("read timed out")
+
+        client.record = raising_record
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "rec1", "previous": None,
+            "applied": dict(applied),
+        }])
+
+        with self.assertRaises(destroy.DestroyError) as ctx:
+            self._run(record, [self.PROBE, "", "removed\n"], client)
+        self.assertEqual(ctx.exception.code, "provider_timeout")
+        state = self._last_state()
+        self.assertIn(KEY, state["hosts"])
+        self.assertEqual(state["hosts"][KEY]["active_operation"]["action"], "destroy")
+
+    def test_provider_failure_midway_keeps_state_and_retry_finishes(self):
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+
+        class FlakyClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.y_failed = False
+
+            def restore_record(self, zone_id, previous, created_id=None):
+                super().restore_record(zone_id, previous, created_id=created_id)
+                if created_id == "y" and not self.y_failed:
+                    self.y_failed = True
+                    raise cloudflare.CloudflareError("Cloudflare request failed: HTTP 500: internal error")
+                self.current.pop(created_id, None)
+
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client = FlakyClient()
+        client.current = {
+            "x": {"id": "x", **applied},
+            "y": {"id": "y", **applied},
+        }
+        record = _record(records=[
+            {"zone_id": "z1", "created_id": "x", "previous": None, "applied": dict(applied)},
+            {"zone_id": "z1", "created_id": "y", "previous": None, "applied": dict(applied)},
+        ], certificate=None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            repository._write({"version": 1, "hosts": {KEY: record, "r1/keep/sandbox": {"x": 1}}})
+
+            replies = iter([self.PROBE, "", "removed\n", self.PROBE, "", "removed\n"])
+
+            def ssh(entry, command, timeout=30):
+                reply = next(replies)
+                code, out = reply if isinstance(reply, tuple) else (0, reply)
+                return subprocess.CompletedProcess([], code, out, "")
+
+            real_load = destroy.hosting.load_host_state
+            load = lambda: real_load(root / "hosts.json")
+
+            with mock.patch.object(destroy.remote, "ssh_run", ssh), \
+                    mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository",
+                               lambda: repository), \
+                    mock.patch.object(destroy.hosting, "load_host_state", load):
+                with self.assertRaises(cloudflare.CloudflareError):
+                    destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+                self.assertIn(("dns", "z1", "x"), client.calls)
+                self.assertNotIn("x", client.current)
+                state = load()
+                self.assertIn(KEY, state["hosts"])
+                self.assertEqual(state["hosts"][KEY]["active_operation"]["action"], "destroy")
+
+                result = destroy.execute(ENTRY, "r1", "site", "sandbox",
+                                         client_factory=lambda: client, clear_fenced=True)
+                self.assertEqual(result["state"], "destroyed")
+                self.assertEqual(result["cloudflare"], [
+                    {"zone_id": "z1", "state": "already_absent", "record_id": "x"},
+                    {"zone_id": "z1", "state": "removed"},
+                ])
+                end_state = load()
+                self.assertNotIn(KEY, end_state["hosts"])
+                self.assertIn("r1/keep/sandbox", end_state["hosts"])
+
+    def test_interrupted_destroy_fences_the_real_namesake_pair(self):
+        from sandbox.commands import hosting as cmd_hosting
+        from sandbox.hosting.recovery.repository import _ActivationHostStatePort
+
+        record = _record(compose_project="sandbox-host-site-blue-sandbox")
+        client = FakeClient()
+        with self.assertRaises(destroy.DestroyError):
+            self._run(record, [self.PROBE, "", (124, "")], client,
+                      project="site-blue", environment="sandbox")
+
+        state = self._last_state()
+        port = _ActivationHostStatePort(self.repository)
+
+        for key in ("r1/site-blue/sandbox", "r1/site/blue-sandbox"):
+            self.assertIn(key, state["hosts"])
+            self.assertEqual(state["hosts"][key]["active_operation"]["action"], "destroy")
+            with self.assertRaises(destroy.hosting.HostingError):
+                cmd_hosting._assert_no_active_host_operation(state, key)
+            with port.atomic_host_state_transaction(key):
+                with self.assertRaisesRegex(ValueError, "operation_busy"):
+                    port.read_activation_nested(key)
+
+        with port.atomic_host_state_transaction("r1/keep/sandbox"):
+            port.read_activation_nested("r1/keep/sandbox")
+
+    def test_retry_with_clear_fenced_removes_the_real_namesake_pair(self):
+        fence = {"compose_project": "sandbox-host-site-blue-sandbox",
+                 "active_operation": {"action": "destroy", "started_at": 1}}
+        record = dict(fence)
+        extra = {"r1/site/blue-sandbox": dict(fence)}
+        result, _, state = self._run(
+            record, [self.PROBE, "", "removed\n"], FakeClient(),
+            extra_hosts=extra, project="site-blue", environment="sandbox",
+            clear_fenced=True)
+        self.assertEqual(result["state"], "destroyed")
+        for key in ("r1/site-blue/sandbox", "r1/site/blue-sandbox"):
+            self.assertNotIn(key, state["hosts"])
+        self.assertIn("r1/keep/sandbox", state["hosts"])
+
+    def test_fence_write_reloads_state_under_the_lock(self):
+        record_retired = _record(retired_at=123)
+        record_cleared = _record()
+        self.assertNotIn("retired_at", record_cleared)
+
+        loads = [
+            {"version": 1, "hosts": {KEY: record_retired, "r1/keep/sandbox": {"x": 1}}},
+            {"version": 1, "hosts": {KEY: record_cleared, "r1/keep/sandbox": {"x": 1}}},
+        ]
+
+        def fake_load():
+            self.events.append("load")
+            if loads:
+                return loads.pop(0)
+            return self._last_state()
+
+        client = FakeClient()
+        with self.assertRaises(destroy.DestroyError):
+            self._run(_record(), [self.PROBE, "", (124, "")], client, load_hook=fake_load)
+
+        written_state = self._last_state()
+        written_record = written_state["hosts"][KEY]
+        self.assertNotIn("retired_at", written_record)
+        self.assertEqual(written_record["active_operation"]["action"], "destroy")
+
+        load_indices = [i for i, ev in enumerate(self.events) if ev == "load"]
+        self.assertEqual(len(load_indices), 2)
+        second_load_idx = load_indices[1]
+        self.assertEqual(self.events[second_load_idx - 1], "lock")
+        self.assertEqual(self.events[second_load_idx + 1], "write")
+        self.assertEqual(self.events[second_load_idx + 2], "unlock")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -819,3 +1245,78 @@ class DestroyFenceAdmission(unittest.TestCase):
                     port.read_activation_nested(KEY)
             with port.atomic_host_state_transaction("r1/keep/sandbox"):
                 port.read_activation_nested("r1/keep/sandbox")
+
+    def test_recovery_on_a_destroy_placeholder_refuses_without_effects(self):
+        from sandbox.hosting.recovery.models import (
+            RecoveryAction, RecoveryRequest, TargetIdentity,
+        )
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        from sandbox.hosting.recovery.service import RecoveryService
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            target = TargetIdentity("r1", "site", "sandbox")
+            placeholder = {
+                "compose_project": "sandbox-host-site-sandbox",
+                "active_operation": {"action": "destroy", "started_at": 1},
+            }
+            repository._write({"version": 1, "hosts": {target.key: placeholder}})
+            before_bytes = (root / "hosts.json").read_bytes()
+
+            recorded_job_lookup = []
+            recorded_observer = []
+            recorded_edge_adapter = []
+
+            def fake_job_lookup(job_id):
+                recorded_job_lookup.append(job_id)
+                return {}
+
+            def fake_observer(*args, **kwargs):
+                recorded_observer.append((args, kwargs))
+                return {}
+
+            def fake_edge_adapter(*args, **kwargs):
+                recorded_edge_adapter.append((args, kwargs))
+                return {}
+
+            service = RecoveryService(
+                repository=repository,
+                job_lookup=fake_job_lookup,
+                source_check=lambda *args: True,
+                observer=fake_observer,
+                edge_adapter=fake_edge_adapter,
+            )
+            request = RecoveryRequest(
+                RecoveryAction.OBSERVE_RECONCILE, "recover-1", "job-1",
+                "apply-1", target, 0,
+            )
+            result = service.recover(request)
+            # The result family is 'failed' and code is 'persistence_failed'.
+            # Note: the code is misleading, and this test pins refusal, not the wording.
+            self.assertEqual(result["result_family"], "failed")
+            self.assertEqual(result["result_class"], "persistence_failed")
+            self.assertEqual(recorded_job_lookup, [])
+            self.assertEqual(recorded_observer, [])
+            self.assertEqual(recorded_edge_adapter, [])
+            self.assertEqual((root / "hosts.json").read_bytes(), before_bytes)
+
+    def test_activation_snapshot_refuses_under_a_destroy_fence(self):
+        from sandbox.hosting.images.activation.repository import ActivationRepository
+        from sandbox.hosting.recovery.repository import RecoveryRepository, _ActivationHostStatePort
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            repository._write({"version": 1, "hosts": {
+                KEY: {"active_operation": {"action": "destroy", "started_at": 1}}}})
+            before_bytes = (root / "hosts.json").read_bytes()
+
+            activation_repo = ActivationRepository(
+                host_state_port=_ActivationHostStatePort(repository),
+                stage_repository=mock.Mock(),
+                target_mutation_port=repository.target_mutation_port("activate"),
+            )
+            with self.assertRaisesRegex(ValueError, "operation_busy"):
+                activation_repo.snapshot(KEY)
+            self.assertEqual((root / "hosts.json").read_bytes(), before_bytes)

@@ -47,7 +47,7 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 "{ test -f /var/www/html/wp-includes/Requests/src/Requests.php "
                 "|| test -f /var/www/html/wp-includes/Requests/Requests.php "
                 "|| { test -f /var/www/html/wp-includes/class-requests.php "
-                "&& grep -Eq \"^[$]wp_version = '([0-5]\\.|6\\.[01][.'-])\" /var/www/html/wp-includes/version.php; }; }",
+                "&& grep -Eq \"^[$]wp_version = '([0-5]\\.[^']+|6\\.[01]([.-][^']*)?)';\" /var/www/html/wp-includes/version.php; }; }",
                 instance="preview-demo", check=False, capture=True, timeout=5,
             ),
             call(
@@ -101,6 +101,47 @@ class TestWordPressCoreDownload(unittest.TestCase):
         wpcli.assert_called_once_with(
             args, instance="preview-demo", check=True
         )
+
+    @patch("sandbox.commands.lifecycle.wpcli")
+    @patch("sandbox.commands.lifecycle.compose")
+    def test_bootstrap_readiness_refuses_an_incomplete_version_or_no_marker(
+            self, compose, wpcli):
+        compose.return_value = SimpleNamespace(returncode=0)
+        lifecycle._download_wordpress_core("preview-demo", ["core", "download"], "apache")
+        cmd_template = compose.call_args_list[0].args[5]
+        shim = "wp-includes/class-requests.php"
+        modern = "wp-includes/Requests/src/Requests.php"
+        legacy = "wp-includes/Requests/Requests.php"
+        cases = [
+            # A version.php still being written: nothing says this core is old yet.
+            (shim, "<?php\n$wp_version = '6.1."),
+            (shim, "<?php\n$wp_version = '6.1"),
+            (shim, "<?php\n$wp_version = '6.1.1'"),
+            (shim, "<?php\n$wp_version = '5."),
+            (shim, "<?php\n$wp_version = '5.';\n"),
+            (shim, "<?php\n$wp_version = '"),
+            # No version.php, whatever else is there.
+            (modern, None),
+            (legacy, None),
+            (shim, None),
+            # version.php alone: no Requests marker of any layout.
+            (None, "<?php\n$wp_version = '6.1.1';\n"),
+            (None, "<?php\n$wp_version = '6.4.3';\n"),
+        ]
+        for marker, content in cases:
+            with self.subTest(marker=marker, content=content), \
+                    tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                (root / "wp-includes").mkdir()
+                if marker:
+                    (root / marker).parent.mkdir(parents=True, exist_ok=True)
+                    (root / marker).touch()
+                if content is not None:
+                    (root / "wp-includes" / "version.php").write_text(content)
+                result = run_test_process(
+                    ["sh", "-c", cmd_template.replace("/var/www/html", str(root))],
+                    env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
 
     @patch("sandbox.commands.lifecycle.wpcli")
     @patch("sandbox.commands.lifecycle.compose")

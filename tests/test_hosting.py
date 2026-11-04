@@ -4709,6 +4709,29 @@ class TestPreviewList(unittest.TestCase):
                             self.assertIn("https://p1.sandbox.asb.bd", out)
                             self.assertIn("https://p2.sandbox.asb.bd", out)
 
+    def test_preview_list_preserves_public_inventory_fields(self):
+        state = self._synthetic_state()
+        with tempfile.TemporaryDirectory() as td:
+            state_file = Path(td) / "remote-previews.json"
+            state_file.write_text(json.dumps(state))
+            with patch.object(preview, "_STATE_PATH", state_file):
+                buf = io.StringIO()
+                args = types.SimpleNamespace(action="list", remote="r1", json=True)
+                with redirect_stdout(buf):
+                    preview.cmd_preview(None, args)
+                self.assertEqual(json.loads(buf.getvalue())["previews"], [{
+                    "id": "p1", "remote": "r1", "project_root": "/path/to/p1", "instance": "inst1",
+                    "domain": "p1.sandbox.asb.bd", "url": "https://p1.sandbox.asb.bd",
+                    "zone_id": "z1", "dns_record_id": "dns1",
+                    "expires_at": "2026-11-05T00:00:00+00:00",
+                }])
+                buf = io.StringIO()
+                args = types.SimpleNamespace(action="list", remote="r1", json=False)
+                with redirect_stdout(buf):
+                    preview.cmd_preview(None, args)
+                self.assertEqual(buf.getvalue().strip(),
+                                 "p1  https://p1.sandbox.asb.bd  expires 2026-11-05T00:00:00+00:00")
+
     def test_preview_list_survives_a_row_with_no_usable_domain(self):
         state = self._synthetic_state()
         del state["previews"]["p1"]["domain"]

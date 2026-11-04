@@ -9,7 +9,7 @@ from __future__ import annotations
 import inspect
 
 
-def chunk_runtime():
+def chunk_runtime(status):
     import array
     import fcntl
     import hashlib
@@ -29,6 +29,7 @@ def chunk_runtime():
         info=os.fstat(fd)
         if (info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=(0o700 if directory else 0o600)
                 or not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode) and info.st_nlink==1)):
+            status['values']={'expected_mode':448 if directory else 384,'actual_mode':stat.S_IMODE(info.st_mode),'expected_uid':os.geteuid(),'actual_uid':info.st_uid,'links':info.st_nlink}
             raise ValueError('unsafe_chunk_entry')
         return info
     def opened(name, flags=os.O_RDONLY, directory=False):
@@ -105,10 +106,12 @@ def chunk_runtime():
         return fd
 
     mode,root,reservation,timeout=sys.argv[1:5]
+    status.update(phase='receiver_setup' if mode=='put' else 'coordinator_setup', values={}, effects={'cache':'unchanged','load':'not_started','reservation':'unknown'})
     if not root.startswith('/') or not re.fullmatch(r'[a-f0-9]{32}',reservation):raise ValueError('chunk_protocol_invalid')
     timeout=int(timeout)
     if not 1<=timeout<=86400:raise ValueError('chunk_protocol_invalid')
-    signal.alarm(timeout)
+    def expired(_number,_frame):raise TimeoutError('chunk_deadline')
+    signal.signal(signal.SIGALRM,expired);signal.alarm(timeout)
     verify_quarantine(root)
     # The root was prepared by the existing target-engine lease.
     check=opened(root,directory=True);os.close(check)
@@ -129,6 +132,7 @@ def chunk_runtime():
             for fd in received:os.close(fd)
             raise ValueError('chunk_session_unavailable')
         fence=received[0];lock=-1
+        status['effects']['reservation']='retained'
         try:
             private(fence)
             if (os.fstat(fence).st_dev,os.fstat(fence).st_ino)!=(os.stat(root+'/load-fence.lock').st_dev,os.stat(root+'/load-fence.lock').st_ino):raise ValueError('chunk_session_unavailable')
@@ -147,6 +151,8 @@ def chunk_runtime():
                 os.unlink(ready)
             part=leaf(plan,item,'.part');fd=opened(part,os.O_CREAT|os.O_RDWR)
             try:
+                status.update(phase='chunk_receive', values={'index':index,'expected_bytes':item['bytes'],'expected_sha256':item['sha256']})
+                status['effects']['cache']='partial_may_exist'
                 os.ftruncate(fd,0);emit(chunk_frame('chunk-ready',mid,item))
                 count=0;digest=hashlib.sha256()
                 while count<=item['bytes']:
@@ -154,7 +160,9 @@ def chunk_runtime():
                     if not raw:break
                     write(fd,raw);digest.update(raw);count+=len(raw)
                 os.fsync(fd)
-                if count!=item['bytes'] or 'sha256:'+digest.hexdigest()!=item['sha256']:raise ValueError('chunk_hash_mismatch')
+                if count!=item['bytes'] or 'sha256:'+digest.hexdigest()!=item['sha256']:
+                    status['values'].update(actual_bytes=count,actual_sha256='sha256:'+digest.hexdigest())
+                    raise ValueError('chunk_hash_mismatch')
             finally:os.close(fd)
             os.replace(part,ready);syncdir(plan);emit(chunk_frame('chunk-verified',mid,item))
         finally:
@@ -168,23 +176,38 @@ def chunk_runtime():
     load_may_run=False;docker=None
     try:
         release_storage_reservation(store,reservation,verify_only=True)
+        status['effects']['reservation']='retained'
+        status['phase']='manifest'
         raw=sys.stdin.buffer.readline(2097153)
         if len(raw)>2097152 or not raw.endswith(b'\n'):raise ValueError('chunk_manifest_invalid')
         manifest=validate(json.loads(raw,object_pairs_hook=closed));mid=identity(manifest)
         cache=root+'/chunks';os.makedirs(cache,mode=0o700,exist_ok=True)
         check=opened(cache,directory=True);os.close(check)
         names=os.listdir(cache)
-        if len(names)>32 or (mid not in names and len(names)>=32):raise ValueError('partial_cache_full')
+        if len(names)>4 or (mid not in names and len(names)>=4):
+            status['values']={'plans':len(names),'max_plans':4,'retained_bytes_limit':2*1024**3}
+            raise ValueError('partial_cache_full')
         plan=cache+'/'+mid;os.makedirs(plan,mode=0o700,exist_ok=True)
-        check=opened(plan,directory=True);os.close(check)
+        check=opened(plan,directory=True);os.close(check);syncdir(cache);syncdir(root)
         manifest_path=plan+'/manifest.json'
+        # Validate file ownership/mode before replacing invalid content. The
+        # incoming, digest-bound manifest is authoritative; never trust a torn
+        # manifest. Known temporary files are reclaimed under the worker fence.
+        status['effects']['cache']='manifest_or_chunks_may_exist'
+        for name in os.listdir(plan):
+            if re.fullmatch(r'\.manifest-[a-f0-9]{32}\.tmp',name):
+                check=opened(plan+'/'+name);os.close(check);os.unlink(plan+'/'+name)
+        valid=False
         if os.path.lexists(manifest_path):
-            if load_manifest(manifest_path)!=manifest:raise ValueError('chunk_manifest_invalid')
-        else:
-            fd=os.open(manifest_path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+            check=opened(manifest_path);os.close(check)
+            try:valid=load_manifest(manifest_path)==manifest
+            except (ValueError,UnicodeError):pass
+        if not valid:
+            temporary=plan+'/.manifest-'+os.urandom(16).hex()+'.tmp'
+            fd=os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
             try:write(fd,canonical(manifest));os.fsync(fd)
             finally:os.close(fd)
-            syncdir(plan)
+            os.replace(temporary,manifest_path);syncdir(plan)
         os.utime(plan,None)
         inventory=[]
         for item in manifest['chunks']:
@@ -205,7 +228,10 @@ def chunk_runtime():
                 try:cached+=os.fstat(fd).st_size
                 finally:os.close(fd)
         missing=sum(item['bytes'] for item in manifest['chunks'] if item['index'] not in inventory)
-        if cached+missing>128*1024**3:raise ValueError('partial_cache_full')
+        # Only this active, fully reserved bundle may exceed the idle 2 GiB cap.
+        if cached+missing>manifest['context']['archive_bytes']+2*1024**3:
+            status['values']={'cached_bytes':cached,'missing_bytes':missing,'active_bundle_bytes':manifest['context']['archive_bytes'],'retained_bytes_limit':2*1024**3}
+            raise ValueError('partial_cache_full')
         nonce=os.urandom(16).hex();listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
         listener.bind('\0sandbox-upload-'+nonce);listener.listen(8);listener.settimeout(.1)
         def serve(peer):
@@ -242,6 +268,7 @@ def chunk_runtime():
                 threading.Thread(target=serve_bounded,args=(peer,),daemon=True).start()
         threading.Thread(target=accept,daemon=True).start()
         emit({'schema':1,'state':'chunk-session','manifest_id':mid,'token':nonce,'streams':streams,'inventory':inventory})
+        status.update(phase='await_finalize',values={'chunks':len(manifest['chunks']),'verified_chunks':len(inventory)})
         raw=sys.stdin.buffer.readline(4097)
         if not raw:return
         request=json.loads(raw,object_pairs_hook=closed)
@@ -255,10 +282,14 @@ def chunk_runtime():
                 condition.wait(left)
         # Complete-file proof without writing a second archive: 3x admission
         # covers retained chunks plus the same Docker import/unpack as before.
+        status.update(phase='bundle_verify',values={'expected_bytes':manifest['context']['archive_bytes'],'expected_sha256':manifest['context']['bundle_digest']})
         whole=hashlib.sha256();count=0
         for item in manifest['chunks']:
             name=leaf(plan,item,'.chunk')
-            if file_hash(name,item['bytes'])!=item['sha256']:raise ValueError('chunk_hash_mismatch')
+            actual=file_hash(name,item['bytes'])
+            if actual!=item['sha256']:
+                status['values']={'index':item['index'],'expected_bytes':item['bytes'],'expected_sha256':item['sha256'],'actual_sha256':actual}
+                raise ValueError('chunk_hash_mismatch')
             fd=opened(name)
             try:
                 while True:
@@ -266,12 +297,16 @@ def chunk_runtime():
                     if not raw:break
                     whole.update(raw);count+=len(raw)
             finally:os.close(fd)
-        if count!=manifest['context']['archive_bytes'] or 'sha256:'+whole.hexdigest()!=manifest['context']['bundle_digest']:raise ValueError('bundle_hash_mismatch')
+        if count!=manifest['context']['archive_bytes'] or 'sha256:'+whole.hexdigest()!=manifest['context']['bundle_digest']:
+            status['values'].update(actual_bytes=count,actual_sha256='sha256:'+whole.hexdigest())
+            raise ValueError('bundle_hash_mismatch')
         marker=os.open(root+'/load-unverified',os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
         try:write(marker,canonical({'reservation_id':reservation}));os.fsync(marker)
         finally:os.close(marker)
         os.fchmod(fence,0o400);os.fsync(fence);syncdir(root)
         load_may_run=True
+        status.update(phase='docker_load',values={})
+        status['effects'].update(load='may_have_run',quarantine=True)
         docker=subprocess.Popen(['docker','image','load'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,pass_fds=(fence,))
         for item in manifest['chunks']:
             fd=opened(leaf(plan,item,'.chunk'))
@@ -282,50 +317,101 @@ def chunk_runtime():
                     docker.stdin.write(raw)
             finally:os.close(fd)
         docker.stdin.close()
-        if docker.wait(timeout=timeout)!=0:raise ValueError('chunk_load_unknown')
+        status['values']={'docker_exit':docker.wait(timeout=timeout)}
+        if status['values']['docker_exit']!=0:raise ValueError('chunk_load_unknown')
+        status['effects']['load']='completed'
+        status['phase']='cache_cleanup'
+        cleanup_chunk_plans(cache,finish_manifest=mid)
+        status['effects']['cache']='removed'
+        status['phase']='reservation_release'
         release_storage_reservation(store,reservation)
+        status['effects']['reservation']='released'
         os.fchmod(fence,0o600);os.fsync(fence);os.unlink(root+'/load-unverified');syncdir(root)
         emit({'schema':1,'state':'loaded','bytes':count})
     finally:
         stopping.set()
         if listener is not None:listener.close()
         with condition:idle=not active
-        if not load_may_run and idle:release_storage_reservation(store,reservation)
+        if not load_may_run and idle:
+            # Preserve the primary failure, including its phase/values. Cleanup
+            # may fail independently; retain the reservation if cache GC fails.
+            try:
+                cleanup_chunk_plans(root+'/chunks',keep_manifest=locals().get('mid'))
+                release_storage_reservation(store,reservation)
+                status['effects']['reservation']='released'
+            except Exception:status['effects']['cleanup']='pending'
         os.close(fence)
 
 
-def cleanup_chunk_plans(root):
-    """Existing reconciliation holds the exclusive worker fence and no marker."""
+def cleanup_chunk_plans(root, *, keep_receipt=None, keep_manifest=None, evict_other=False, finish_manifest=None):
+    """Caller holds EX worker fence and proved no quarantine (success excepted).
+
+    Scan at most the legacy 32 plans, 24578 entries each. New sessions permit
+    four plans; idle retention is at most 2 GiB. Before unrelated admission all
+    foreign idle plans are removed, regardless of TTL. Never called unfenced.
+    """
+    import json
     import os
     import re
     import stat
     import time
     if not os.path.lexists(root):return
-    info=os.lstat(root)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:raise ValueError('unsafe_chunk_cache')
-    names=os.listdir(root)
-    if len(names)>32:raise ValueError('partial_cache_full')
+    def directory(name):
+        info=os.lstat(name)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:raise ValueError('unsafe_chunk_cache',{'expected_mode':448,'actual_mode':stat.S_IMODE(info.st_mode),'expected_uid':os.geteuid(),'actual_uid':info.st_uid})
+        return info
+    directory(root);names=os.listdir(root)
+    if len(names)>32:raise ValueError('partial_cache_full',{'plans':len(names),'max_plans':32})
+    plans=[]
     for name in names:
         if not re.fullmatch(r'[a-f0-9]{64}',name):raise ValueError('unsafe_chunk_cache')
-        plan=root+'/'+name;info=os.lstat(plan)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:raise ValueError('unsafe_chunk_cache')
-        entries=os.listdir(plan)
-        if len(entries)>24577:raise ValueError('partial_cache_full')
-        newest=info.st_mtime
+        plan=root+'/'+name;info=directory(plan);entries=os.listdir(plan)
+        if len(entries)>24578:raise ValueError('partial_cache_full',{'entries':len(entries),'max_entries':24578})
+        newest=info.st_mtime;size=0
         for entry in entries:
-            if entry!='manifest.json' and not re.fullmatch(r'[0-9]{1,4}-[a-f0-9]{64}\.(?:chunk|part|lock)',entry):raise ValueError('unsafe_chunk_cache')
+            if entry!='manifest.json' and not re.fullmatch(r'(?:[0-9]{1,4}-[a-f0-9]{64}\.(?:chunk|part|lock)|\.manifest-[a-f0-9]{32}\.tmp)',entry):raise ValueError('unsafe_chunk_cache')
             info=os.lstat(plan+'/'+entry)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1:raise ValueError('unsafe_chunk_cache')
-            newest=max(newest,info.st_mtime)
-        if newest<time.time()-86400:
-            for entry in entries:os.unlink(plan+'/'+entry)
-            os.rmdir(plan)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1:raise ValueError('unsafe_chunk_cache',{'expected_mode':384,'actual_mode':stat.S_IMODE(info.st_mode),'expected_uid':os.geteuid(),'actual_uid':info.st_uid,'links':info.st_nlink})
+            newest=max(newest,info.st_mtime);size+=info.st_size
+        keep=name==keep_manifest
+        if keep_receipt is not None and 'manifest.json' in entries:
+            fd=os.open(plan+'/manifest.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                info=os.fstat(fd)
+                if info.st_size<=2097152:
+                    try:keep=keep or json.loads(os.read(fd,2097153)).get('context',{}).get('receipt_digest')==keep_receipt
+                    except (ValueError,UnicodeError,AttributeError):pass
+            finally:os.close(fd)
+        plans.append((not keep,newest,name,entries,size))
+    retained=0;count=0
+    for foreign,newest,name,entries,size in sorted(plans):
+        remove=(name==finish_manifest or newest<time.time()-86400 or
+                (evict_other and foreign) or retained+size>2*1024**3 or count>=4)
+        if remove:
+            for entry in entries:os.unlink(root+'/'+name+'/'+entry)
+            os.rmdir(root+'/'+name)
+        else:retained+=size;count+=1
+    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(fd)
+    finally:os.close(fd)
 
 
-RUNTIME_PROGRAM=inspect.getsource(chunk_runtime)+'''\ntry:
- chunk_runtime()
-except Exception:
- print('{"schema":1,"state":"refused","code":"chunk_operation_failed"}',flush=True)
- raise SystemExit(74)
-'''
 CLEANUP_PROGRAM=inspect.getsource(cleanup_chunk_plans)
+RUNTIME_PROGRAM=CLEANUP_PROGRAM+inspect.getsource(chunk_runtime)+"""
+status={'phase':'worker_start','values':{},'effects':{'cache':'unknown','load':'unknown','reservation':'unknown'}}
+try:
+ chunk_runtime(status)
+except Exception as error:
+ import errno,json,subprocess
+ known={'unsafe_chunk_entry','unsafe_chunk_cache','duplicate_chunk_key','chunk_manifest_invalid','chunk_protocol_invalid','chunk_streams_invalid','chunk_session_unavailable','chunk_duplicate_busy','chunk_hash_mismatch','bundle_hash_mismatch','target_busy','partial_cache_full','chunk_writers_active','chunk_load_unknown'}
+ reservation={'operation reservation missing':'reservation_missing','reservation ownership differs':'reservation_owner_mismatch','unsafe reservation store':'reservation_store_unsafe','unsafe reservation lock':'reservation_store_unsafe','unsafe reservation ledger':'reservation_ledger_unsafe','invalid reservation ledger':'reservation_ledger_invalid','reservation lock busy':'reservation_lock_busy'}
+ code=error.args[0] if error.args and isinstance(error.args[0],str) and error.args[0] in known else reservation.get(error.args[0] if error.args and isinstance(error.args[0],str) else '')
+ if code is not None and len(error.args)>1 and isinstance(error.args[1],dict):status['values']=error.args[1]
+ if code is None:
+  number=getattr(error,'errno',None)
+  code='chunk_no_space' if number==errno.ENOSPC else 'chunk_permission_denied' if number==errno.EACCES else 'chunk_missing' if number==errno.ENOENT else 'target_busy' if number in (errno.EAGAIN,errno.EWOULDBLOCK) else 'chunk_timeout' if isinstance(error,(TimeoutError,subprocess.TimeoutExpired)) else 'chunk_operation_failed'
+  if isinstance(number,int):status['values']={'errno':number}
+  if code=='chunk_timeout':status['values']={'timeout_seconds':timeout if 'timeout' in globals() else int(__import__('sys').argv[4])}
+ print(json.dumps({'schema':1,'state':'refused','code':code,**status},separators=(',',':')),flush=True)
+ raise SystemExit(74)
+"""

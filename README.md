@@ -1352,7 +1352,7 @@ Re-run the same protected command with its original sealed v2 receipt:
 
 ```sh
 ./sb host image push-local --receipt /path/to/receipt.json --remote NAME --confirm
-# Explicit serial fallback; no automatic retries or transport fallback:
+# Explicit serial fallback; no automatic chunk retry or transport fallback:
 ./sb host image push-local --receipt /path/to/receipt.json --remote NAME --upload-streams 1 --confirm
 ```
 
@@ -1366,7 +1366,13 @@ it does not detach the orchestrator or attach an apply job.
 
 `--upload-streams` accepts 1–8, default 8 for v2. Stream count 1 is the explicit
 fallback. A bounded pool submits no more than that many sends and stops new
-work on the first failure; there are no automatic connection or chunk retries.
+work on the first failure; there are no automatic chunk retries. Upload-owned
+SSH masters authenticate serially, at least 250 ms apart, and are reused across
+chunks. Transient setup refusal gets at most three attempts (1 s and 2 s backoff);
+credential denial is never retried. A channel cannot silently open a fresh TCP
+connection if its master is lost. Worst case: one upload-owned unauthenticated
+connection at once, eight authenticated data masters plus lease/coordinator.
+Masters exit normally or after 60 idle seconds following controller death.
 Human progress shows active/configured streams, chunks done, retained/written
 bytes and aggregate decimal MB/s. JSON `upload` exposes streams, chunk count,
 uploaded/resumed bytes and elapsed seconds. `transferred_bytes` remains the
@@ -1381,11 +1387,18 @@ competing controllers refuse. Quarantine and mode 0400 precede Docker; failed or
 unknown loads retain quarantine, chunk evidence and the reservation. No automatic
 quarantine reset, host build or storage-floor bypass is added.
 
-Stale >24h chunk plans are cleaned only under the exclusive fence without
-quarantine. Private 0700 directories, 0600 regular single-link files, bounded
+Successful load deletes its chunks before releasing its reservation. Idle failed
+retention is limited to 2 GiB/four plans. Before later v1/v2 admission, unrelated
+idle chunks and orphan image reservations are reclaimed under the engine lease
+and exclusive worker fence; active writers or quarantine forbid cleanup.
+Stale >24h plans also expire under that fence. Manifests use fsynced private temp
+files and atomic rename; a torn manifest is immediately rebuilt from incoming
+digest-bound metadata. Private 0700 directories, 0600 regular single-link files, bounded
 manifests/cache and per-chunk locks reject unsafe paths or duplicate writers.
 The full 3x storage reservation remains; chunks plus Docker import need no second
 assembled tar. Retained bytes receive no admission credit, so retry is conservative.
+Worker failures preserve safe code/phase/actual values and effect state, with
+inspection/repair guidance, an exact resume command and no integrity bypass.
 Old chunk handshakes refuse explicitly; v1/unbound legacy transport stays serial.
 
 Eight data streams mean up to ten non-multiplexed SSH connections including the
@@ -1398,7 +1411,7 @@ sshd/crypto/kernel-buffer memory and CPU require real-host measurement; bounded
 1MiB receiver buffers alone are not the total cost. This shared-host cost must
 be reviewed before rollout. Serial fallback does not bypass resource guards.
 
-This source speaks protocol 24 with a new fingerprint. It installs no runtime,
+This source speaks protocol 25 with a new fingerprint. It installs no runtime,
 changes no host limits and does not re-pin Lenzora; adopt only in the separately
 owner-approved batched Sandbox migration. Whole-tar chunks do not implement
 changed-layer-only transfer; future OCI/blob-aware reuse or signed registry
@@ -1412,7 +1425,7 @@ reconciles proven orphan reservations before admission, and retains reservations
 for uncertain imports until operator reconciliation. See the
 [reservation lifecycle and self-contained recovery commands](docs/remote-hosting.md#v2-reservation-lifecycle-and-quarantine-recovery).
 
-This checkout's current contract requires **protocol 24** (including parallel chunk resume). From the upgraded checkout,
+This checkout's current contract requires **protocol 25** (including parallel chunk resume). From the upgraded checkout,
 migrate each runtime **before bumping client pins**, including for v1-only
 verdict-gated commands:
 
@@ -1511,7 +1524,7 @@ Expired entries are counted against one sample time without pruning. The report
 is explicitly an advisory point-in-time snapshot, not an admission or lease. It creates no reservation, file, directory or lease. Results are advisory;
 the actual push must recheck and reserve. No cleanup runs automatically. Its
 payload was introduced under control protocol 22. This checkout now declares
-protocol 24; runtime adoption must be separately planned and owner-authorized.
+protocol 25; runtime adoption must be separately planned and owner-authorized.
 
 Secret commands classify a denied project context as `project_root_not_allowed`
 with a fixed remedy: use an allowed checkout or add its approved parent to

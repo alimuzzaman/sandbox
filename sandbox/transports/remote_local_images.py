@@ -23,8 +23,9 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class RemoteLocalImageError(RuntimeError):
-    def __init__(self, code: str, message: str = "local image transport failed"):
+    def __init__(self, code: str, message: str = "local image transport failed", *, failure=None):
         self.code = code
+        self.failure = failure
         super().__init__(f"{code}: {message}")
 
 
@@ -488,7 +489,8 @@ def target_image_lease(remote_name: str, project: str, environment: str,
 
 _RECONCILE_PROGRAM = RESERVATION_RELEASE_PROGRAM + resumable_upload.UPLOAD_HELPERS_PROGRAM + chunk_upload.CLEANUP_PROGRAM + r"""
 import fcntl,json,os,stat,sys
-root,target=sys.argv[1:]
+root,target=sys.argv[1:3]
+keep=sys.argv[3] if len(sys.argv)>3 and sys.argv[3]!='-' else None
 def done(safe): print(json.dumps({'safe':safe},separators=(',',':')))
 if os.path.lexists(root+'/load-unverified'):
  done(False);sys.exit(0)
@@ -501,9 +503,9 @@ try:
  except BlockingIOError: done(False);sys.exit(0)
  if os.path.lexists(root+'/load-unverified'): done(False);sys.exit(0)
  cleanup_partials(root+'/uploads')
- cleanup_chunk_plans(root+'/chunks')
+ cleanup_chunk_plans(root+'/chunks',keep_receipt=keep,evict_other=True)
  store=os.path.dirname(root)+'/storage'
- if os.path.exists(store): release_storage_reservation(store,None,orphan_target=target)
+ if os.path.exists(store): release_storage_reservation(store,None,orphan_engine=True)
  done(True)
 finally: os.close(fd)
 """
@@ -513,7 +515,7 @@ def _reconcile_reservations(entry: dict, receipt: dict, *, timeout: float = 30) 
     """Caller holds the engine lease; worker fence + marker prove orphans."""
     root = _local_image_root(entry)
     target = posixpath.normpath(posixpath.join(_remote.resolve_sandbox_home(entry), "deploy-src", receipt["project"]))
-    output = _checked(entry, shlex.join(["python3", "-c", _RECONCILE_PROGRAM, root, target]), timeout=timeout)
+    output = _checked(entry, shlex.join(["python3", "-c", _RECONCILE_PROGRAM, root, target, receipt["receipt_digest"] if receipt.get("schema") == local_images.RECEIPT_SCHEMA_V2 else "-"]), timeout=timeout)
     return json.loads(output) == {"safe": True}
 
 
@@ -573,7 +575,7 @@ def _storage_admission(entry: dict, receipt: dict, observation: dict, *,
         if mismatches:
             missing_bytes += artifact.get("archive_bytes", 0)
     if receipt["schema"] == local_images.RECEIPT_SCHEMA_V2:
-        # Reserve the complete immutable transport before the engine lease:
+        # Reserve the complete immutable transport under the engine lease:
         # a later locked observation can discover a changed tag.
         missing_bytes = sum(b["archive_bytes"] for b in receipt["bundles"].values())
     # The upload file and Docker's content-store import can coexist.
@@ -644,22 +646,18 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
         mismatches = local_images.compare_engine(receipt, observation)
         if mismatches:
             raise RemoteLocalImageError("local_images_platform_mismatch")
-        budget = remaining(60)
-        # Storage admission may create lock/reservation files even on refusal.
-        if not bundle_receipt:
-            reservation_id = _storage_admission(entry, receipt, observation, timeout=budget,
-                               before_write=mark_write)
         budget = remaining(30)
         wrote = True  # The lease creates remote lock files.
         loaded, skipped = [], []
         with target_image_lease(
                 remote_name, receipt["project"], receipt["environment"],
                 receipt["receipt_digest"], entry=entry, timeout=budget) as lease:
-            if bundle_receipt:
-                if not _reconcile_reservations(entry, receipt, timeout=remaining(30)):
-                    raise RemoteLocalImageError("local_images_target_busy")
-                reservation_id = _storage_admission(entry, receipt, observation,
-                    timeout=remaining(60), before_write=mark_write)
+            # Both formats reclaim unrelated idle chunks before admission. The
+            # engine lease and EX worker fence exclude active DEV/PROD writers.
+            if not _reconcile_reservations(entry, receipt, timeout=remaining(30)):
+                raise RemoteLocalImageError("local_images_target_busy")
+            reservation_id = _storage_admission(entry, receipt, observation,
+                timeout=remaining(60), before_write=mark_write)
             observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
             remaining(30)
             lease.require()
@@ -687,13 +685,15 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                                              "project": receipt["project"], "environment": receipt["environment"],
                                              "receipt_digest": receipt["receipt_digest"],
                                              "bundle_digest": bundle["archive_sha256"], "archive_bytes": bundle["archive_bytes"]})
-                        except Exception:
+                        except Exception as error:
                             # Once the acknowledged worker exits before quarantine,
                             # a free fence proves these reservations are orphans.
                             if worker_may_run:
                                 try:
                                     if _reconcile_reservations(entry, receipt, timeout=30):
                                         reservation_id = None
+                                        if isinstance(error,RemoteLocalImageError) and error.failure:
+                                            error.failure['effects']['reservation']='released'
                                 except Exception:
                                     pass  # Keep the original error and the pin.
                             raise

@@ -65,6 +65,8 @@ SHAPE_SOURCES = (
     "sandbox/hosting/resumable_upload.py",
     "sandbox/hosting/chunk_upload.py",
     "sandbox/transports/chunk_local_images.py",
+    "sandbox/transports/chunk_connections.py",
+    "sandbox/transports/chunk_failures.py",
     "sandbox/resources/storage_floor.py",
     "sandbox/transports/remote_hosting_activation.py",
     "sandbox/transports/remote_hosting_images.py",

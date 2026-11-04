@@ -14,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
 from sandbox.core import _remote
+from sandbox.transports.chunk_connections import UploadConnections, ConnectionFailure
+from sandbox.transports.chunk_failures import worker_failure
 from sandbox.hosting import local_images, chunk_upload
 from sandbox.resources.storage_floor import RESERVATION_RELEASE_PROGRAM
 from sandbox.transports.remote_local_images import RemoteLocalImageError
@@ -42,22 +44,27 @@ def manifest_for(archive: Path, context: dict) -> dict:
 class Session:
     def __init__(self,argv,manifest,streams,timeout,cancelled):
         self.argv=argv;self.manifest=manifest;self.streams=streams;self.timeout=timeout;self.cancelled=cancelled
-        self.process=None;self.timer=None;self.pending=b'';self.deadline=time.monotonic()+timeout
+        self.finalizing=False;self.process=None;self.timer=None;self.pending=b'';self.deadline=time.monotonic()+timeout
+    def channel_failure(self,cause):
+        return RemoteLocalImageError('local_images_coordinator_channel_lost',failure={'phase':'finalize' if self.finalizing else 'coordinator_setup','values':{'cause':cause,'exit_code':self.process.poll() if self.process else None},'effects':{'cache':'unknown','load':'unknown' if self.finalizing else 'not_started','reservation':'unknown'}})
     def read(self):
         assert self.process is not None
         with selectors.DefaultSelector() as selector:
             selector.register(self.process.stdout,selectors.EVENT_READ)
             while b'\n' not in self.pending:
                 if time.monotonic()>=self.deadline or (self.cancelled and self.cancelled()):
-                    raise RemoteLocalImageError('local_images_transfer_unknown','Chunk session interrupted; retry same receipt after reconciliation; use --upload-streams 1 for serial.')
+                    raise self.channel_failure('observation_interrupted')
                 if not selector.select(min(.1,max(.001,self.deadline-time.monotonic()))):continue
                 data=os.read(self.process.stdout.fileno(),65536)
-                if not data:raise RemoteLocalImageError('local_images_transfer_unknown','Chunk coordinator exited; preserve cache and reconcile before same-receipt retry.')
+                if not data:raise self.channel_failure('coordinator_channel_closed')
                 self.pending+=data
                 if len(self.pending)>1048576:raise RemoteLocalImageError('local_images_chunk_protocol_unsupported')
         raw,self.pending=self.pending.split(b'\n',1)
-        try:return local_images._json_loads_closed(raw)
+        try:value=local_images._json_loads_closed(raw)
         except (ValueError,UnicodeError):raise RemoteLocalImageError('local_images_chunk_protocol_unsupported') from None
+        detail=worker_failure(value)
+        if detail:raise RemoteLocalImageError('local_images_'+value['code'],failure=detail)
+        return value
     def __enter__(self):
         try:
             self.process=subprocess.Popen(self.argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
@@ -73,7 +80,9 @@ class Session:
                 raise RemoteLocalImageError('local_images_chunk_protocol_unsupported','Worker refused chunk protocol or capacity; no archive bytes sent. Inspect limits, then retry same receipt with --upload-streams 1; no legacy fallback.')
             self.ready=value;return self
         except BaseException:
-            self.stop();raise
+            try:self.stop()
+            except Exception:pass
+            raise
     def stop(self):
         if self.timer:self.timer.cancel()
         if self.process:
@@ -83,16 +92,23 @@ class Session:
             except subprocess.TimeoutExpired:
                 self.process.kill();self.process.wait(timeout=5)
             self.process.stdout.close()
-    def __exit__(self,*_args):self.stop();return False
+    def __exit__(self,kind,*_args):
+        try:self.stop()
+        except Exception:
+            if kind is None:raise self.channel_failure('coordinator_stop_unverified') from None
+        return False
     def finalize(self):
-        self.process.stdin.write(json.dumps({'schema':1,'action':'finalize','manifest_id':self.ready['manifest_id']}).encode()+b'\n');self.process.stdin.flush()
+        self.finalizing=True
+        try:
+            self.process.stdin.write(json.dumps({'schema':1,'action':'finalize','manifest_id':self.ready['manifest_id']}).encode()+b'\n');self.process.stdin.flush()
+        except (BrokenPipeError,OSError):raise self.channel_failure('coordinator_write_failed') from None
         value=self.read()
         expected={'schema':1,'state':'loaded','bytes':self.manifest['context']['archive_bytes']}
         if value!=expected:raise RemoteLocalImageError('local_images_transfer_unknown','Chunk finalization unverified; inspect quarantine and same receipt before retry; no automatic retry.')
         return value
 
 
-def load_chunks(entry,archive,context,reservation,*,timeout,streams,progress=None,cancelled=None,on_started=None):
+def _load_chunks(entry,archive,context,reservation,*,timeout,streams,progress=None,cancelled=None,on_started=None):
     if type(streams) is not int or not 1<=streams<=8:raise RemoteLocalImageError('local_images_upload_streams_invalid','--upload-streams must be 1–8; default 8, serial fallback 1.')
     started=time.monotonic();deadline=started+timeout;manifest=manifest_for(archive,context)
     def budget():
@@ -117,7 +133,7 @@ def load_chunks(entry,archive,context,reservation,*,timeout,streams,progress=Non
         with lock:report(True)
         first_error=None
         def send(item):
-            nonlocal active, first_error
+            nonlocal active, first_error, retained_bytes
             if stopped(): raise RemoteLocalImageError("local_images_transfer_unknown", "Chunk scheduling cancelled; no retry was started.")
             index=item['index'];expected={'schema':3,'state':'chunk-verified','manifest_id':session.ready['manifest_id'],'index':index,'bytes':item['bytes'],'sha256':item['sha256']}
             ready={**expected,'state':'chunk-ready'}
@@ -126,15 +142,20 @@ def load_chunks(entry,archive,context,reservation,*,timeout,streams,progress=Non
                 with lock:sent[index]=count;report()
             with lock:active+=1
             try:
-                result=local_images.stream_archive(_remote.ssh_command_args(entry,shlex.join(argv),multiplex=False),archive,
-                    timeout=min(180,budget()),cancelled=stopped,ready_frame=ready,complete_frame=expected,
-                    range_start=item['offset'],range_bytes=item['bytes'],on_progress=update)
+                with connections.channel(shlex.join(argv)) as command:
+                    result=local_images.stream_archive(command,archive,
+                        timeout=min(180,budget()),cancelled=stopped,ready_frame=ready,complete_frame=expected,
+                        range_start=item['offset'],range_bytes=item['bytes'],on_progress=update)
                 try:value=local_images._json_loads_closed(result['output_tail'].splitlines()[-1])
                 except (ValueError,IndexError,UnicodeError):value=None
+                detail=worker_failure(value)
+                if detail:raise RemoteLocalImageError('local_images_'+value['code'],failure=detail)
                 if (result['returncode']!=0 or result['timed_out'] or result['cancelled'] or result['broken_pipe'] or value!=expected
                         or (not result.get('already_present') and result['sha256']!=item['sha256'])):
-                    raise RemoteLocalImageError('local_images_chunk_transfer_failed',f'Chunk {index} failed; no automatic retries. Preserve verified chunks; retry same receipt with --upload-streams 1 if SSH capacity is constrained.')
-                with lock:completed.add(index);report(True)
+                    raise RemoteLocalImageError('local_images_chunk_transfer_failed',failure={'phase':'chunk_receive','values':{'index':index,'exit_code':result['returncode'],'timed_out':result['timed_out'],'cancelled':result['cancelled'],'sent_bytes':result['sent_bytes'],'cause':('master_or_connection_lost' if result['returncode']==255 else 'transfer_interrupted' if result['timed_out'] or result['cancelled'] else 'chunk_ack_unverified')},'effects':{'cache':'partial_may_exist','load':'not_started','reservation':'unknown'}})
+                with lock:
+                    if result.get('already_present') and index not in completed:retained_bytes+=item['bytes']
+                    completed.add(index);report(True)
             except Exception as error:
                 with lock:
                     if first_error is None: first_error=error
@@ -142,8 +163,9 @@ def load_chunks(entry,archive,context,reservation,*,timeout,streams,progress=Non
                 raise
             finally:
                 with lock:active-=1
+        if progress:progress(f'upload streams {streams}; authenticating reusable channels serially (maximum 1 unauthenticated); no chunk retries')
         pending_items=iter(item for item in manifest['chunks'] if item['index'] not in retained)
-        with ThreadPoolExecutor(max_workers=streams) as pool:
+        with UploadConnections(entry,streams,budget,stopped) as connections, ThreadPoolExecutor(max_workers=streams) as pool:
             outstanding=set()
             def submit():
                 if stopped(): return
@@ -166,3 +188,15 @@ def load_chunks(entry,archive,context,reservation,*,timeout,streams,progress=Non
         with lock:report(True)
         return {**result,'streams':streams,'chunk_count':len(manifest['chunks']),'uploaded_bytes':sum(sent.values()),
                 'resumed_bytes':retained_bytes,'seconds':round(time.monotonic()-started,3)}
+
+
+def load_chunks(*args,**kwargs):
+    try:return _load_chunks(*args,**kwargs)
+    except RemoteLocalImageError as error:
+        if error.failure and error.failure['effects'].get('reservation')=='retained':
+            error.failure['effects']['reservation']='unknown'  # coordinator closes after the receiver refusal
+        raise
+    except ConnectionFailure as error:
+        raise RemoteLocalImageError('local_images_ssh_setup_failed',failure={
+            'phase':'ssh_setup','values':{'cause':error.cause,'attempts':error.attempts,'max_unauthenticated':1,'streams':kwargs['streams']},
+            'effects':{'cache':'unchanged_or_retained','load':'not_started','reservation':'unknown'}}) from None

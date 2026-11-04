@@ -432,6 +432,34 @@ class TestApplyServerChangePolicy(unittest.TestCase):
 
 
 class TestEnsureServerChangePolicyRefusal(unittest.TestCase):
+    def test_a_differently_spelled_declaration_is_not_a_change(self):
+        import sandbox.core._instances as _instances
+        with mock.patch.object(_instances, "resolve_instances",
+                               return_value={"site": {"server": "nginx"}}):
+            for spelled in ("NGINX", " nginx "):
+                with self.subTest(spelled=spelled):
+                    self.assertEqual(
+                        _instances._resolve_reconcile_server(
+                            {"instances": {}}, "site",
+                            {"server": spelled, "server_declared": True}, {"status": "stopped"}),
+                        "nginx")
+
+    def test_a_user_global_server_is_not_a_project_declaration(self):
+        import tempfile
+        from pathlib import Path
+        import sandbox_core as sc
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(sc, "_load_user_global", return_value={"server": "litespeed"}):
+            root = Path(directory)
+            (root / "sandbox.config.json").write_text("{}")
+            loaded = sc.load_project_config(str(root))
+            self.assertEqual(loaded["server"], "litespeed")
+            self.assertFalse(loaded["server_declared"])
+            (root / "sandbox.config.json").write_text('{"server": "apache"}')
+            loaded = sc.load_project_config(str(root))
+            self.assertEqual(loaded["server"], "apache")
+            self.assertTrue(loaded["server_declared"])
+
     def test_a_late_server_refusal_does_not_claim_nothing_changed(self):
         import sandbox.core._instances as _instances
         cfg = {"instances": {"site": {"server": "litespeed"}}}

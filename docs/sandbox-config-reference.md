@@ -1163,10 +1163,13 @@ database failure returns `instance_install_state_unavailable` with
 changed `wpVersion` on an installed site remains apply-only; `ensure` only
 warns about drift.
 
-`sb apply` (and `sb ensure`) refuses a declared change to `server` on an
-existing instance before modifying state (`apply_server_change_refused`); switch
-servers in place with `sb server <name> <server>`. Omitting `server` preserves
-the running web server rather than reverting to the default.
+`sb apply` (and `sb ensure`) refuses a change to `server` on an existing instance when
+the project declares it (`apply_server_change_refused`). The check runs before any change;
+`sb server` takes no project lock, so if one lands during a run, a later refusal says earlier
+steps may have changed local state. A `server` in the user-global config is a default for new
+instances, not a declaration. Switch servers in place with `sb server <name> <server>`, or set
+the project's `server` to what the instance runs. Omitting `server` preserves the running web
+server rather than reverting to the default.
 
 1. Rewrites the `instances.<name>` block in `sandbox.local.yml` from the
    current project config (constants, multisite flag, version pins, extra

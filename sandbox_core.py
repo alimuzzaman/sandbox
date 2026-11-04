@@ -668,11 +668,13 @@ def _load_project_config_legacy(project_dir, label: str | None = None,
     if label_doc:
         data = _deep_merge(data, label_doc)
         source = f"{source}+{label_path.name}"
+    # A machine-wide default is not this project stating what its instance runs.
+    server_declared = "server" in data
     if user_doc:
         data = _merge_layers(user_doc, data)
         source = f"user+{source}"
     merged = _deep_merge(DEFAULTS, data)
-    merged["server_declared"] = "server" in data
+    merged["server_declared"] = server_declared
     _normalize_wp_cron(data, merged)
     merged["root"] = str(root)
     merged["source"] = source

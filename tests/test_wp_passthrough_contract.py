@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from sandbox.commands import wp
 from sandbox.core import _docker, _ui
 from sandbox.wp_argv import is_eval_file_stdin, requires_stdin
+from tests.subprocess_support import synthetic_environment
 
 
 class TestWpPassthroughContract(unittest.TestCase):
@@ -114,9 +115,25 @@ class TestWpCliProbeAndExecStdin(unittest.TestCase):
         self.assertIsNone(exec_kwargs.get("stdin"))
 
 
+class TestStdinOperandCount(unittest.TestCase):
+    def test_a_negative_value_is_an_operand(self):
+        from sandbox.wp_argv import requires_stdin
+        for argv in (["option", "update", "offset", "-1"],
+                     ["post", "meta", "update", "1", "key", "-1"],
+                     ["option", "update", "sep", "-"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(requires_stdin(argv))
+        for argv in (["option", "update", "offset"],
+                     ["option", "update", "offset", "--format=json"],
+                     ["post", "meta", "update", "1", "key"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(requires_stdin(argv))
+
+
 class TestUiRunCaptureStdin(unittest.TestCase):
     def test_run_with_capture_and_stdin_no_longer_raises(self):
-        res = _ui.run(["true"], check=False, capture=True, stdin=subprocess.DEVNULL)
+        res = _ui.run(["true"], check=False, capture=True, stdin=subprocess.DEVNULL,
+                      env=synthetic_environment())
         self.assertEqual(res.returncode, 0)
 
     def test_run_with_capture_and_stdout_still_raises(self):

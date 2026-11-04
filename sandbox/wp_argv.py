@@ -83,7 +83,8 @@ def requires_stdin(argv) -> bool:
 
     operands = [
         argv[i] for i in range(cmd_end, len(argv))
-        if argv[i] != "--" and (argv[i] == "-" or not argv[i].startswith("-"))
+        # WP-CLI options always start with `--`, so `-` and `-1` are positional values.
+        if not argv[i].startswith("--")
     ]
 
     if matched_cmd == ("eval-file",):
@@ -106,7 +107,8 @@ def is_eval_file_stdin(argv) -> bool:
     if index < len(argv) and tuple(argv[index:index + 1]) == ("eval-file",):
         operands = [
             argv[i] for i in range(index + 1, len(argv))
-            if argv[i] != "--" and (argv[i] == "-" or not argv[i].startswith("-"))
+            # WP-CLI options always start with `--`, so `-` and `-1` are positional values.
+        if not argv[i].startswith("--")
         ]
         return bool(operands and operands[0] == "-")
     return False

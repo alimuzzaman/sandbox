@@ -962,7 +962,8 @@ def _resolve_reconcile_server(cfg: dict, name: str, pconf: dict,
                "Earlier steps of this run may have changed local state; check it before rerunning.")
     block = (resolve_instances(cfg).get(name) or {}) if cfg else {}
     current = block.get("server") or (existing.get("server") if existing else None)
-    declared = pconf.get("server") if pconf.get("server_declared") else None
+    current = _valid_server(current) if current else None
+    declared = _valid_server(pconf.get("server")) if pconf.get("server_declared") else None
     desired = declared or current or "nginx"
     if declared is not None and current and declared != current:
         if "herd" in (current, desired):

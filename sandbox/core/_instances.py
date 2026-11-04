@@ -951,9 +951,15 @@ def _external_vendor_mount_targets(plugin_sources: list[str],
 
 
 def _resolve_reconcile_server(cfg: dict, name: str, pconf: dict,
-                              existing: dict | None) -> str:
-    """Resolve the desired web server for apply/ensure, refusing declared server changes."""
+                              existing: dict | None, *, before_effects: bool = True) -> str:
+    """Resolve the desired web server for apply/ensure, refusing declared server changes.
+
+    ``before_effects`` says no step of this run has changed anything yet. `sb server` takes no
+    project lock, so it can land after the early check; a later refusal must not claim otherwise.
+    """
     sc = _core()
+    outcome = ("No state was changed." if before_effects else
+               "Earlier steps of this run may have changed local state; check it before rerunning.")
     block = (resolve_instances(cfg).get(name) or {}) if cfg else {}
     current = block.get("server") or (existing.get("server") if existing else None)
     declared = pconf.get("server") if pconf.get("server_declared") else None
@@ -962,14 +968,14 @@ def _resolve_reconcile_server(cfg: dict, name: str, pconf: dict,
         if "herd" in (current, desired):
             msg = (
                 f"apply_server_change_refused: cannot change web server from '{current}' "
-                f"to '{desired}' for instance '{name}'. No state was changed. "
+                f"to '{desired}' for instance '{name}'. {outcome} "
                 "A herd crossing is a re-provision that deletes the DB and files and "
                 "needs its own plan."
             )
         else:
             msg = (
                 f"apply_server_change_refused: cannot change web server from '{current}' "
-                f"to '{desired}' for instance '{name}'. No state was changed. "
+                f"to '{desired}' for instance '{name}'. {outcome} "
                 f"Run `sb server {name} {desired}` on the host that runs this instance to switch servers "
                 f"(it does not verify the result or roll back; check the site after), "
                 f"or set the project's `server` to '{current}' if that is what you want."
@@ -1779,7 +1785,7 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
             server_config_identity = _server_config_registry_identity_fields(existing)
 
             if existing and existing.get("status") != "pending":
-                server = _resolve_reconcile_server(cfg, name, pconf, existing)
+                server = _resolve_reconcile_server(cfg, name, pconf, existing, before_effects=False)
             else:
                 server = _valid_server(pconf.get("server") or "nginx")
             php_v = pconf.get("phpVersion")

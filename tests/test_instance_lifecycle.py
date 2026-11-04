@@ -432,6 +432,21 @@ class TestApplyServerChangePolicy(unittest.TestCase):
 
 
 class TestEnsureServerChangePolicyRefusal(unittest.TestCase):
+    def test_a_late_server_refusal_does_not_claim_nothing_changed(self):
+        cfg = {"instances": {"site": {"server": "litespeed"}}}
+        pconf = {"server": "nginx", "server_declared": True}
+        with mock.patch.object(_instances, "resolve_instances",
+                               return_value={"site": {"server": "litespeed"}}):
+            with self.assertRaises(Exception) as early:
+                _instances._resolve_reconcile_server(cfg, "site", pconf, {"status": "stopped"})
+            with self.assertRaises(Exception) as late:
+                _instances._resolve_reconcile_server(cfg, "site", pconf, {"status": "stopped"},
+                                                     before_effects=False)
+        self.assertIn("No state was changed", str(early.exception))
+        self.assertNotIn("No state was changed", str(late.exception))
+        self.assertIn("may have changed local state", str(late.exception))
+        self.assertEqual(late.exception.code, "apply_server_change_refused")
+
     def test_ensure_refuses_a_declared_change_before_any_effect(self):
         import contextlib
         import sandbox_core as sc

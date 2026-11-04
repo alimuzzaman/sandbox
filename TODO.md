@@ -300,6 +300,15 @@ not close the external or human gates listed below.
   an expired incomplete shared lease can be reacquired and the replacement is
   complete; an oversized pid at lease expiry still creates the fence.
 
+- [ ] **`instance delete` reports success while leaving files (feedback 16a074af).** Decided, not built:
+  `.scratch/sandbox/branch-wrapup-2026-11-04/decisions2/DECISIONS.md` section E1. Reproduced live on
+  2026-11-04: exit 0 and 3261 files left, including `wp-config.php`, all uid 33. A one-mount container as
+  uid 33, with no root and no capabilities, removed them. Needs human review of the helper. Separate and
+  not decided: deleting a registry-less leftover by name, and the 34 leftover directories on xcloud-london.
+- [ ] **`sb restore --exact-uploads`.** Through spec-kit, after the `instance delete` helper passes review.
+  Stage before the DB reset; check tar members first (no links, absolute paths or `..`); never reachable
+  from the bridge or dashboard; a rerun converges from any crash state. Merge stays the default. Also check
+  whether merge fails partway on uid-33 directories after the DB is already replaced (`data.py:346-348`).
 - [ ] **Spec 060 coordination: repair path for `remote.json`. Blocked on T028, and must land
   before T028 enables any remote.** A corrupt remote record, or an unexpired malformed shared lease,
   refuses `remote_record_unreadable` on list, cap, registration, shared, build and target-release

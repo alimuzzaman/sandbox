@@ -258,17 +258,30 @@ not close the external or human gates listed below.
 
 ## P2 — protected recovery, hosting, and product gates
 
-- Host destroy leaves explicitly named images (`image: xspeed-sandbox/wordpress:<env>`
-  in the project's compose file): teardown only removes `<compose-name>-*` tags, while
-  the probe counts every project-labelled image, so the target never reads "nothing to
-  remove". Seen on 7 xspeed targets on xcloud-london 2026-10-12; removed by hand with a
-  non-forced `rmi` of the labelled tags no container used. Remove labelled images no
-  container references (non-forced), and make probe and teardown agree.
-- Host destroy tests the review asked for: an interrupted destroy on a real
-  two-key namesake pair (`site-blue/sandbox` + `site/blue-sandbox`) followed by
-  apply and image activation refusing through the placeholder; a retire-delivery
-  vs destroy fence race in both lock orders; public-path v1/v2 activation,
-  rollback, recovery and containment refusing with zero effects under a destroy fence.
+- Named images `host destroy` keeps: since 2026-11-04 destroy owns only tags with the project
+  label and a `<compose-name>-` prefix, lists other labelled images as kept, and reads "nothing
+  to remove" when only those are left. They still use disk until removed by hand with a non-forced
+  `rmi`. If a storage floor refuses deploys because of them, build image receipts for new builds
+  and keep today's rule for targets with no receipt.
+- Host destroy fence coverage: the namesake pair, recovery on a placeholder, activation snapshot,
+  fence-write reload and `_fence_only` are tested. Declined on 2026-11-04, on purpose: threaded
+  lock-order races (both orders reload under one flock, so a barrier adds flake and no coverage)
+  and a v1/v2 public-path matrix (every path reaches one of three traced gates, so it would
+  re-test them through large fixtures). Recovery on a placeholder refuses as `persistence_failed`,
+  which is safe but misleading: fix the code separately if it confuses an operator.
+- [ ] **`tools/owned-storage-controller.py` cannot start, and no client uses it.** Fix these
+  together, with the protected lifecycle work and human review, never one at a time: the import
+  at `:21-24` names a class that does not exist; `:99` passes a keyword-only argument positionally;
+  `:36` passes a directory where the service expects the lifecycle file; `reconcile` at `:100-101`
+  reports success having done nothing; and the daemon rebinds the socket the `.socket` unit owns
+  (`:44-51`, effect under systemd unverified). A partial fix gives a daemon that always answers
+  `authority_unavailable` and exposes the false `reconcile` success.
+- [ ] **Storage authority protected writer: prerequisite for `proven`.** Evaluation reports no
+  `proven` or adoptable until this exists. The writer must verify an authenticated reviewer,
+  request and candidate lineage, decision identity and expiry, then replace the held arm in
+  `evaluate_capability`; `human_review` reads `pass` only from that. A decision row alone proves
+  nothing. The reviewer also decides recovery for a revocation with no readable remote, which
+  today blocks every remote, through the protected revoke (a superseding record, not deletion).
 - [ ] **Spec 060 coordination: tests the 2026-10-11 merge-gate review asked
   for.** No known defect behind them; they pin behaviour shipped in `0239e1e`
   (protocol 8) in `tests/test_hosting_coordination_program.py`:
@@ -283,13 +296,17 @@ not close the external or human gates listed below.
   an expired incomplete shared lease can be reacquired and the replacement is
   complete; an oversized pid at lease expiry still creates the fence.
 
-- [ ] **Spec 060 coordination: repair path for `remote.json`.** A corrupt
-  remote record, or an unexpired malformed shared lease, refuses
-  `remote_record_unreadable` on list, cap, registration, shared, build and
-  target-release actions until someone edits the file by hand on the host.
-  Add a confirmed, operator-run repair (quarantine the bad file, rebuild
-  from the target records, hold the shared lease for one lease bound) through
-  `speckit-converge` on spec 060; never repair automatically on read.
+- [ ] **Spec 060 coordination: repair path for `remote.json`. Blocked on T028, and must land
+  before T028 enables any remote.** A corrupt remote record, or an unexpired malformed shared lease,
+  refuses `remote_record_unreadable` on list, cap, registration, shared, build and target-release
+  actions until someone edits the file by hand on the host. No production client exists yet, so no
+  remote reaches this through supported paths (hand-enabled remotes unverified). **Nothing
+  mechanical enforces this ordering: reconcile it through Spec Kit when 060 resumes, before T028 is
+  implemented.** Add a confirmed, operator-run repair; never repair automatically on read. It needs a
+  protocol bump and human review, since it can release a remote-wide lease. Crash rules: durable
+  quarantine and receipt before replacement; refusal kept across crashes and replay; validated
+  complete reconstruction; build cap, holds and unknown-running predecessors preserved; cessation
+  never inferred from one timer; a crash after quarantine must not reopen `read_remote`'s defaults.
 
 - [ ] **Evaluate an opt-in rsync transport for bounded remote source updates.**
   Keep `git push` plus reset/diff-overlay as the default exact-revision deploy

@@ -45,6 +45,11 @@ class TestWebDashboardRemoteSummaries(unittest.TestCase):
         self.assertNotIn("ssh", str(rows))
 
 
+# How long a job with no lock gets to reach its body or install its stream. Only the bug's
+# detection depends on this: correct code passes however slow the machine is.
+OVERLAP_WINDOW = 0.5
+
+
 class JobCaptureIsolation(unittest.TestCase):
     def tearDown(self):
         if _web_lock.locked():
@@ -71,10 +76,22 @@ class JobCaptureIsolation(unittest.TestCase):
             time.sleep(0.01)
         self.fail(f"job {job_id} output did not contain {substring!r} within {timeout}s deadline")
 
-    def test_two_jobs_keep_their_own_output(self):
+    def _overlap(self):
+        """Start job B while job A is mid-output, then let A finish. Returns both snapshots."""
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+
+        def restore():
+            # Code with the bug leaves the streams wrong: keep that out of later tests.
+            sys.stdout, sys.stderr = orig_stdout, orig_stderr
+            _WEB_STREAM[0] = False
+        self.addCleanup(restore)
+
         a_started = threading.Event()
         release_a = threading.Event()
-        b_stream_active = []
+        a_printed = threading.Event()
+        b_entered = threading.Event()
+        self.addCleanup(release_a.set)
+        self.b_stream_active = []
 
         def fn_a():
             print("A1")
@@ -82,24 +99,27 @@ class JobCaptureIsolation(unittest.TestCase):
             if not release_a.wait(timeout=10.0):
                 return False
             print("A2")
+            a_printed.set()
             return True
 
         def fn_b():
-            b_stream_active.append(_WEB_STREAM[0])
+            b_entered.set()
+            # With the lock, A is already done. Without it, this holds B's redirect open
+            # while A prints.
+            a_printed.wait(timeout=10.0)
+            self.b_stream_active.append(_WEB_STREAM[0])
             print("B1")
             return True
 
         job_a_id = _start_job("Job A", fn_a)
         self.assertTrue(a_started.wait(timeout=10.0), "Job A did not start within 10s")
-
         job_b_id = _start_job("Job B", fn_b)
-        self._wait_for_output(job_b_id, "waiting for another dashboard action to finish")
-
+        b_entered.wait(timeout=OVERLAP_WINDOW)
         release_a.set()
+        return self._wait_for_job(job_a_id), self._wait_for_job(job_b_id)
 
-        snap_a = self._wait_for_job(job_a_id)
-        snap_b = self._wait_for_job(job_b_id)
-
+    def test_two_jobs_keep_their_own_output(self):
+        snap_a, snap_b = self._overlap()
         out_a = snap_a.get("chunk", "")
         out_b = snap_b.get("chunk", "")
 
@@ -111,43 +131,86 @@ class JobCaptureIsolation(unittest.TestCase):
         self.assertNotIn("A1", out_b)
         self.assertNotIn("A2", out_b)
 
-        self.assertEqual(b_stream_active, [True])
+        self.assertEqual(self.b_stream_active, [True])
         self.assertTrue(snap_a.get("ok"))
         self.assertTrue(snap_b.get("ok"))
 
-    def test_stdout_is_restored_after_overlapping_jobs(self):
-        orig_stdout = sys.stdout
-        orig_stderr = sys.stderr
-
-        a_started = threading.Event()
-        release_a = threading.Event()
-
-        def fn_a():
-            print("A1")
-            a_started.set()
-            if not release_a.wait(timeout=10.0):
-                return False
-            print("A2")
-            return True
-
-        def fn_b():
-            print("B1")
-            return True
-
-        job_a_id = _start_job("Job A", fn_a)
-        self.assertTrue(a_started.wait(timeout=10.0), "Job A did not start within 10s")
-
-        job_b_id = _start_job("Job B", fn_b)
-        self._wait_for_output(job_b_id, "waiting for another dashboard action to finish")
-
-        release_a.set()
-
-        self._wait_for_job(job_a_id)
-        self._wait_for_job(job_b_id)
-
+    def test_streams_are_restored_after_overlapping_jobs(self):
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+        self._overlap()
         self.assertIs(sys.stdout, orig_stdout)
         self.assertIs(sys.stderr, orig_stderr)
         self.assertFalse(_WEB_STREAM[0])
+
+    def test_two_dashboard_actions_keep_their_own_output(self):
+        """The dashboard's own path: a queued action must not take the running one's output."""
+        import sandbox.core._dash as dashboard
+
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+
+        def restore():
+            sys.stdout, sys.stderr = orig_stdout, orig_stderr
+            _WEB_STREAM[0] = False
+        self.addCleanup(restore)
+
+        one_started = threading.Event()
+        release_one = threading.Event()
+        self.addCleanup(release_one.set)
+
+        def status(_cfg, args):
+            if args.resolved_instance == "one":
+                print("A1")
+                one_started.set()
+                release_one.wait(timeout=10.0)
+                print("A2")
+            else:
+                print("B1")
+
+        with patch.object(dashboard, "load_config", return_value={}), \
+                patch("sandbox.commands.lifecycle.cmd_status", side_effect=status):
+            job_one = _web_do_action({"action": "status", "instance": "one"})["job_id"]
+            self.assertTrue(one_started.wait(timeout=10.0), "first action did not start within 10s")
+            job_two = _web_do_action({"action": "status", "instance": "two"})["job_id"]
+            # The second action never reaches its body while the first holds the lock, so
+            # there is no event to wait on. This window only gives it time to redirect.
+            time.sleep(OVERLAP_WINDOW)
+            release_one.set()
+            out_one = self._wait_for_job(job_one).get("chunk", "")
+            out_two = self._wait_for_job(job_two).get("chunk", "")
+
+        self.assertIn("A2", out_one)
+        self.assertNotIn("A2", out_two)
+        self.assertIn("B1", out_two)
+        self.assertNotIn("B1", out_one)
+
+    def test_a_queued_job_says_it_is_waiting(self):
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def fn_a():
+            started.set()
+            release.wait(timeout=10.0)
+            return True
+
+        job_a_id = _start_job("Job A", fn_a)
+        self.assertTrue(started.wait(timeout=10.0), "Job A did not start within 10s")
+        job_b_id = _start_job("Job B", lambda: True)
+        self._wait_for_output(job_b_id, "waiting for another dashboard action to finish")
+        release.set()
+        self._wait_for_job(job_a_id)
+        self.assertTrue(self._wait_for_job(job_b_id).get("ok"))
+
+    def test_an_interrupted_job_still_ends(self):
+        def fn_interrupted():
+            raise KeyboardInterrupt()
+
+        with patch.object(threading, "excepthook"):  # the thread re-raises it by design
+            job_id = _start_job("interrupted", fn_interrupted)
+            snap = self._wait_for_job(job_id)
+        self.assertFalse(snap.get("ok"))
+        self.assertTrue(_web_lock.acquire(blocking=False), "lock was not released")
+        _web_lock.release()
 
     def test_failed_job_releases_the_lock(self):
         def fn_value_error():
@@ -218,7 +281,10 @@ class JobCaptureIsolation(unittest.TestCase):
                 self.assertTrue(data.get("ok"))
                 bridge_job_id = data["job_id"]
 
-                self._wait_for_output(bridge_job_id, "waiting for another dashboard action to finish")
+                # Unserialised, the snapshot runs at once. This window only gives it time to.
+                deadline = time.time() + OVERLAP_WINDOW
+                while time.time() < deadline and not stub_calls:
+                    time.sleep(0.01)
                 self.assertEqual(len(stub_calls), 0, "cmd_snapshot was called while Job A was holding lock")
 
                 release_a.set()

@@ -320,28 +320,31 @@ def _start_job(label: str, fn) -> str:
     stream = _JobStream(job)
 
     def worker():
-        ok_flag = True
-        if not _web_lock.acquire(blocking=False):
-            stream.write("waiting for another dashboard action to finish\n")
-            _web_lock.acquire()
+        ok_flag = False
         try:
-            with redirect_stdout(stream), redirect_stderr(stream):
-                _WEB_STREAM[0] = True       # stream real subprocess output → console
-                try:
-                    ok_flag = fn() is not False
-                finally:
-                    _WEB_STREAM[0] = False
-        except SystemExit as e:
-            ok_flag = (str(e) in ("0", "None"))
-        except Exception as e:
-            ok_flag = False
-            stream.write(f"\nerror: {e}\n")
+            if not _web_lock.acquire(blocking=False):
+                stream.write("waiting for another dashboard action to finish\n")
+                _web_lock.acquire()
+            try:
+                with redirect_stdout(stream), redirect_stderr(stream):
+                    _WEB_STREAM[0] = True       # stream real subprocess output → console
+                    try:
+                        ok_flag = fn() is not False
+                    finally:
+                        _WEB_STREAM[0] = False
+            except SystemExit as e:
+                ok_flag = (str(e) in ("0", "None"))
+            except Exception as e:
+                ok_flag = False
+                stream.write(f"\nerror: {e}\n")
+            finally:
+                _web_lock.release()
         finally:
-            _web_lock.release()
-        with _web_jobs_lock:
-            job["done"] = True
-            job["ok"] = ok_flag
-            job["status"] = label + (" ✓" if ok_flag else " ✗")
+            # Also on anything else raised, or the job would poll as running forever.
+            with _web_jobs_lock:
+                job["done"] = True
+                job["ok"] = ok_flag
+                job["status"] = label + (" ✓" if ok_flag else " ✗")
 
     threading.Thread(target=worker, daemon=True).start()
     return job_id

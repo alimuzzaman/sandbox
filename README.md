@@ -927,7 +927,8 @@ Instances are created per-project by `init`/`ensure`; the browser dashboard also
 a local **Create an instance** form backed by the same `ensure` operation. Remote
 creation remains unavailable until the remote lifecycle service exposes it. Dashboard
 and wp-admin actions in one `sb web` process run one at a time; a job that has to wait
-says so in its console. You can
+says so in its console, and a console command that never exits holds up the rest until
+that `sb web` process restarts. You can
 view and drive instances with:
 
 ```bash

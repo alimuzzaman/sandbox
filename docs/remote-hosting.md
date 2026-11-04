@@ -1318,9 +1318,13 @@ Sandbox's own record. The dry run marks these `check it by hand`: check them bef
 Destroy makes its Cloudflare calls and removes its state under the state lock that apply and
 edge-continue hold across their own provider writes, with a fresh read of local state. So on one
 controller, a target that applies onto a record during the teardown keeps it, and destroy reports
-`kept_shared`. The cost: a stalled Cloudflare request, up to 30 seconds each, can make other
-targets' short operations refuse `operation_busy`. A lock timeout or provider failure at this step keeps
-the fence and the state, and rerunning with `--clear-fenced` is safe.
+`kept_shared`. The cost: a stalled Cloudflare request holds that lock for as long as it stalls (each socket
+operation has a 30-second timeout, which is not a total deadline), and other targets' short operations
+can refuse `operation_busy` meanwhile. A lock timeout or provider failure at this step keeps the fence and
+the state, and is reported as `state_lock_timeout`, `provider_timeout` or the provider's error; rerun with
+`--clear-fenced`. Earlier rows may already have been restored or deleted by then. A row with a snapshot is
+read first, so a rerun reports it `already_absent` or `kept_changed`. A row saved before snapshots existed is
+acted on unread, so a rerun repeats its restore or delete over any later change.
 
 Limits: nothing detects a concurrent writer outside that lock. That covers another controller, which has
 its own `hosts.json`; disposable remote previews; anything outside Sandbox; a failed apply whose DNS

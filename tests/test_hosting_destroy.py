@@ -1011,8 +1011,9 @@ class Execution(unittest.TestCase):
                     mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository",
                                lambda: repository), \
                     mock.patch.object(destroy.hosting, "load_host_state", load):
-                with self.assertRaises(TimeoutError):
+                with self.assertRaises(destroy.DestroyError) as ctx:
                     destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+                self.assertEqual(ctx.exception.code, "state_lock_timeout")
                 self.assertEqual(client.calls, [])
                 state = load()
                 self.assertIn(KEY, state["hosts"])
@@ -1022,6 +1023,96 @@ class Execution(unittest.TestCase):
                 result = destroy.execute(ENTRY, "r1", "site", "sandbox",
                                          client_factory=lambda: client, clear_fenced=True)
                 self.assertEqual(result["state"], "destroyed")
+                end_state = load()
+                self.assertNotIn(KEY, end_state["hosts"])
+                self.assertIn("r1/keep/sandbox", end_state["hosts"])
+
+    def test_provider_read_timeout_is_not_called_a_busy_lock(self):
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client = FakeClient()
+
+        def raising_record(zone_id, record_id):
+            raise TimeoutError("read timed out")
+
+        client.record = raising_record
+        record = _record(records=[{
+            "zone_id": "z1", "created_id": "rec1", "previous": None,
+            "applied": dict(applied),
+        }])
+
+        with self.assertRaises(destroy.DestroyError) as ctx:
+            self._run(record, [self.PROBE, "", "removed\n"], client)
+        self.assertEqual(ctx.exception.code, "provider_timeout")
+        state = self._last_state()
+        self.assertIn(KEY, state["hosts"])
+        self.assertEqual(state["hosts"][KEY]["active_operation"]["action"], "destroy")
+
+    def test_provider_failure_midway_keeps_state_and_retry_finishes(self):
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+
+        class FlakyClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.y_failed = False
+
+            def restore_record(self, zone_id, previous, created_id=None):
+                super().restore_record(zone_id, previous, created_id=created_id)
+                if created_id == "y" and not self.y_failed:
+                    self.y_failed = True
+                    raise cloudflare.CloudflareError("Cloudflare request failed: HTTP 500: internal error")
+                self.current.pop(created_id, None)
+
+        applied = {
+            "name": "a.test", "type": "A", "content": "192.0.2.1",
+            "proxied": True, "ttl": 1, "comment": "managed by Sandbox hosting",
+        }
+        client = FlakyClient()
+        client.current = {
+            "x": {"id": "x", **applied},
+            "y": {"id": "y", **applied},
+        }
+        record = _record(records=[
+            {"zone_id": "z1", "created_id": "x", "previous": None, "applied": dict(applied)},
+            {"zone_id": "z1", "created_id": "y", "previous": None, "applied": dict(applied)},
+        ], certificate=None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            repository._write({"version": 1, "hosts": {KEY: record, "r1/keep/sandbox": {"x": 1}}})
+
+            replies = iter([self.PROBE, "", "removed\n", self.PROBE, "", "removed\n"])
+
+            def ssh(entry, command, timeout=30):
+                reply = next(replies)
+                code, out = reply if isinstance(reply, tuple) else (0, reply)
+                return subprocess.CompletedProcess([], code, out, "")
+
+            real_load = destroy.hosting.load_host_state
+            load = lambda: real_load(root / "hosts.json")
+
+            with mock.patch.object(destroy.remote, "ssh_run", ssh), \
+                    mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository",
+                               lambda: repository), \
+                    mock.patch.object(destroy.hosting, "load_host_state", load):
+                with self.assertRaises(cloudflare.CloudflareError):
+                    destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+                self.assertIn(("dns", "z1", "x"), client.calls)
+                self.assertNotIn("x", client.current)
+                state = load()
+                self.assertIn(KEY, state["hosts"])
+                self.assertEqual(state["hosts"][KEY]["active_operation"]["action"], "destroy")
+
+                result = destroy.execute(ENTRY, "r1", "site", "sandbox",
+                                         client_factory=lambda: client, clear_fenced=True)
+                self.assertEqual(result["state"], "destroyed")
+                self.assertEqual(result["cloudflare"], [
+                    {"zone_id": "z1", "state": "already_absent", "record_id": "x"},
+                    {"zone_id": "z1", "state": "removed"},
+                ])
                 end_state = load()
                 self.assertNotIn(KEY, end_state["hosts"])
                 self.assertIn("r1/keep/sandbox", end_state["hosts"])
@@ -1042,7 +1133,7 @@ class Execution(unittest.TestCase):
         for key in ("r1/site-blue/sandbox", "r1/site/blue-sandbox"):
             self.assertIn(key, state["hosts"])
             self.assertEqual(state["hosts"][key]["active_operation"]["action"], "destroy")
-            with self.assertRaises(cmd_hosting.HostingError):
+            with self.assertRaises(destroy.hosting.HostingError):
                 cmd_hosting._assert_no_active_host_operation(state, key)
             with port.atomic_host_state_transaction(key):
                 with self.assertRaisesRegex(ValueError, "operation_busy"):
@@ -1206,7 +1297,7 @@ class DestroyFenceAdmission(unittest.TestCase):
             activation_repo = ActivationRepository(
                 host_state_port=_ActivationHostStatePort(repository),
                 stage_repository=mock.Mock(),
-                target_mutation_port=repository.target_mutation_port("activation"),
+                target_mutation_port=repository.target_mutation_port("activate"),
             )
             with self.assertRaisesRegex(ValueError, "operation_busy"):
                 activation_repo.snapshot(KEY)

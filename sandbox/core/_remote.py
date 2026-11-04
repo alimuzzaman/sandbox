@@ -2953,6 +2953,12 @@ def remote_wp_cli(
         require_safe_argv(validated_argv)
     except ValueError:
         raise ValueError("remote WordPress requires a safe, explicit argv list") from None
+    from sandbox.wp_argv import requires_stdin
+    if requires_stdin(validated_argv):
+        raise RemoteWpRefusalError(
+            "stdin_unsupported",
+            "remote WordPress does not support stdin; pass the value as an argument, or for eval-file, a path",
+        )
     service = remote.get("mcp_service") if isinstance(remote, dict) else None
     marker = service.get("ownership_marker") if isinstance(service, dict) else None
     if not isinstance(marker, str) or not _REMOTE_MCP_REVISION_RE.fullmatch(marker):
@@ -3005,6 +3011,9 @@ def remote_wp_cli(
             "remote_deploy_path_changed": "the remote deployment path changed before dispatch",
             "host_file_staging_unsupported": (
                 "remote WordPress host-file staging commands are unsupported"
+            ),
+            "stdin_unsupported": (
+                "remote WordPress does not support stdin; pass the value as an argument, or for eval-file, a path"
             ),
         }
         raise RemoteWpRefusalError(

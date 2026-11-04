@@ -884,7 +884,7 @@ def _wp_has_builtin_cli(instance: str, timeout: float | None = None) -> bool:
     results are cached for the process; negatives are retried (transient downtime)."""
     if _WP_CLI_BUILTIN.get(instance):
         return True
-    kwargs = {"instance": instance, "check": False, "capture": True}
+    kwargs = {"instance": instance, "check": False, "capture": True, "stdin": subprocess.DEVNULL}
     if timeout is not None:
         kwargs["timeout"] = timeout
     r = compose("exec", "-T", "wp", "test", "-f", "/usr/local/bin/wp", **kwargs)
@@ -972,6 +972,13 @@ def _managed_execution_gate(instance: str, capability: str, entry_path: str, arg
              if config_file is not None else managed_native_instance_selected(instance))
     if owner is None:
         return None
+    if capability == "wordpress.cli":
+        from sandbox.wp_argv import requires_stdin
+        wp_args = list(argv[1:] if argv and argv[0] == "wp" else argv)
+        if requires_stdin(wp_args):
+            raise RuntimeError(
+                "managed-native wp does not support stdin; pass the value as an argument, or for eval-file, a path"
+            )
     root, label = owner
     request = ExecutionRequest(str(root), label, entry_path, tuple(argv), timeout,
                                config_file)

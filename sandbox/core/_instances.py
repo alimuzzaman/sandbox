@@ -950,6 +950,42 @@ def _external_vendor_mount_targets(plugin_sources: list[str],
     return list(dict.fromkeys(targets))
 
 
+def _resolve_reconcile_server(cfg: dict, name: str, pconf: dict,
+                              existing: dict | None, *, before_effects: bool = True) -> str:
+    """Resolve the desired web server for apply/ensure, refusing declared server changes.
+
+    ``before_effects`` says no step of this run has changed anything yet. `sb server` takes no
+    project lock, so it can land after the early check; a later refusal must not claim otherwise.
+    """
+    sc = _core()
+    outcome = ("No state was changed." if before_effects else
+               "Earlier steps of this run may have changed local state; check it before rerunning.")
+    block = (resolve_instances(cfg).get(name) or {}) if cfg else {}
+    current = block.get("server") or (existing.get("server") if existing else None)
+    declared = pconf.get("server") if pconf.get("server_declared") else None
+    desired = declared or current or "nginx"
+    if declared is not None and current and declared != current:
+        if "herd" in (current, desired):
+            msg = (
+                f"apply_server_change_refused: cannot change web server from '{current}' "
+                f"to '{desired}' for instance '{name}'. {outcome} "
+                "A herd crossing is a re-provision that deletes the DB and files and "
+                "needs its own plan."
+            )
+        else:
+            msg = (
+                f"apply_server_change_refused: cannot change web server from '{current}' "
+                f"to '{desired}' for instance '{name}'. {outcome} "
+                f"Run `sb server {name} {desired}` on the host that runs this instance to switch servers "
+                f"(it does not verify the result or roll back; check the site after), "
+                f"or set the project's `server` to '{current}' if that is what you want."
+            )
+        err = sc.ConfigError(msg)
+        err.code = "apply_server_change_refused"
+        raise err
+    return _valid_server(desired)
+
+
 def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
                           ports: dict, server: str) -> dict:
     """Construct the sandbox.local.yml `instances.<name>` block from a project's
@@ -1567,6 +1603,8 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
     ready_install_state = None
     with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
+        if existing and existing.get("instance") and existing.get("status") != "pending":
+            _resolve_reconcile_server(cfg, existing["instance"], pconf, existing)
         if creation_context is not None:
             from sandbox.server_config.creation_requests import (
                 validate_resolved_context, reserve_creation_request, scope_key,
@@ -1746,7 +1784,10 @@ def _ensure_instance_impl(cfg: dict, project_dir: str, label: str = "default",
             # ordinary ensure/reconcile operation.
             server_config_identity = _server_config_registry_identity_fields(existing)
 
-            server = _valid_server(pconf.get("server") or "nginx")
+            if existing and existing.get("status") != "pending":
+                server = _resolve_reconcile_server(cfg, name, pconf, existing, before_effects=False)
+            else:
+                server = _valid_server(pconf.get("server") or "nginx")
             php_v = pconf.get("phpVersion")
             wp_v = pconf.get("wpVersion")
             info(f"ensure_instance: {root} → instance '{name}' "
@@ -2005,8 +2046,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None,
             for k in ("wordpress_port", "db_port", "mailpit_port")
         }
         ports = _ensure_distinct_ports(ports, used_others)
-        server = _valid_server(pconf.get("server") or existing.get("server")
-                               or "nginx")
+        server = _resolve_reconcile_server(cfg, name, pconf, existing)
         _assert_apply_runtime_dependencies(
             name, server, error_factory=sc.ConfigError,
         )

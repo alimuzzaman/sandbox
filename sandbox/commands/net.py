@@ -68,10 +68,8 @@ def cmd_server(cfg, args) -> None:
         ok(f"{name} already uses {current} — nothing to change.")
         return
     if "herd" in (current, target):
-        die("docker↔herd isn't a hot web-tier swap — it's a re-provision. "
-            "Set `server` in the project's sandbox.config.json (or override) "
-            f"and recreate: ./sb instance delete {name} && ./sb ensure "
-            "--project-dir <project>")
+        die("docker↔herd isn't a hot web-tier swap — it's a re-provision that "
+            "deletes the DB and files and needs its own plan.")
 
     info(f"switching {name}: {current} → {target}")
 

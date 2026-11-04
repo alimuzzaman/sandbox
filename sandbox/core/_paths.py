@@ -386,7 +386,7 @@ function sandbox_snapshots_render() {
     say('Resetting to fresh install…'); call('reset',{confirm:1}).then(function(r){
       if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
   tb.addEventListener('click',function(e){ var r=e.target.getAttribute('data-r'), d=e.target.getAttribute('data-d');
-    if(r&&confirm('Restore '+r+'? This REPLACES the current DB + uploads.')){ say('Restoring…');
+    if(r&&confirm('Restore '+r+'? This replaces the current DB. Uploads in the snapshot are extracted over existing uploads and files added since are kept. A DB-only snapshot leaves uploads unchanged.')){ say('Restoring…');
       call('restore',{name:r,confirm:1}).then(function(x){ if(x.job_id){return poll(x.job_id);} say(x.error||'error',true); }); }
     if(d&&confirm('Delete snapshot '+d+'?')){ call('delete',{name:d}).then(function(x){ if(x&&x.ok===false){say(x.reason||x.error||'error',true);} return refresh(); }); } });
   refresh();

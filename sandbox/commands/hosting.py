@@ -3910,9 +3910,10 @@ def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
     port = runtime["loopback_port"]
     path = runtime["healthcheck"]["path"]
     minimum, maximum = min(runtime["healthcheck"]["statuses"]), max(runtime["healthcheck"]["statuses"])
+    deadline = int(runtime.get("healthcheck", {}).get("deadline_seconds") or 60)
     payload = base64.b64encode(json.dumps({
         "url": f"http://127.0.0.1:{port}{path}",
-        "minimum": minimum, "maximum": maximum, "deadline": 60,
+        "minimum": minimum, "maximum": maximum, "deadline": deadline,
     }, separators=(",", ":")).encode()).decode()
     program = "\n".join((
         "import base64,json,subprocess,sys,time",
@@ -3935,7 +3936,7 @@ def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
         "print(json.dumps(r,separators=(',',':')))",
     ))
     result = remote.ssh_run(
-        entry, shlex.join(["python3", "-c", program, payload]), timeout=65,
+        entry, shlex.join(["python3", "-c", program, payload]), timeout=deadline + 5,
     )
     try:
         receipt = json.loads((result.stdout or "").strip())
@@ -3944,7 +3945,7 @@ def _verify_remote_health(entry: dict, runtime: dict, progress=None) -> dict:
                    "phases": [{"phase": "health", "state": "unavailable"}]}
     if receipt.get("complete") is not True:
         raise RuntimeError(
-            f"remote healthcheck did not return {minimum}-{maximum} within 60 seconds"
+            f"remote healthcheck did not return {minimum}-{maximum} within {deadline} seconds"
         )
     if progress is not None:
         progress("remote healthcheck passed")

@@ -383,6 +383,12 @@ def _remote_wp_contract(payload: dict) -> dict:
             "host_file_staging_unsupported",
             "remote WP-CLI does not accept commands that can stage host files",
         )
+    from sandbox.wp_argv import requires_stdin
+    if requires_stdin(argv):
+        return _remote_wp_error(
+            "stdin_unsupported",
+            "remote WP-CLI does not support stdin; pass the value as an argument, or for eval-file, a path",
+        )
     if "allow_missing" in payload and not isinstance(payload.get("allow_missing"), bool):
         raise ValueError("remote WP-CLI allow_missing must be boolean")
     installed_revision = os.environ.get("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", "")

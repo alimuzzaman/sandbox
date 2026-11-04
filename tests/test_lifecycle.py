@@ -10,7 +10,7 @@ import tempfile
 from types import SimpleNamespace
 import types
 import unittest
-from unittest.mock import patch, call
+from unittest.mock import patch, call, MagicMock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -735,3 +735,190 @@ class TestComposeUpAddressPools(unittest.TestCase):
         self.assertEqual(removed, ["sandbox-a_default"])
         self.assertNotIn(["docker", "network", "rm", "sandbox-b_default"], calls)
         self.assertNotIn(["docker", "network", "rm", "other"], calls)
+
+
+class TestEnsureServerChangePolicy(unittest.TestCase):
+    def test_ensure_after_down_undeclared_keeps_litespeed(self):
+        import contextlib
+        import sandbox_core as sc
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "nginx",  # default in pconf
+            "server_declared": False,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "status": "stopped",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "litespeed",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "litespeed", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(patch.object(sc, "registry_get", return_value=existing))
+            stack.enter_context(patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(instances, "_proxy_sudoers_installed", return_value=False))
+            stack.enter_context(patch.object(instances, "_secure_at_create", return_value=False))
+            stack.enter_context(patch.object(instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(patch.object(instances, "_resolve_port_conflicts", side_effect=lambda c, **kw: c))
+            stack.enter_context(patch.object(instances, "_docker_preflight"))
+            mock_build = stack.enter_context(patch.object(instances, "_build_instance_block", return_value={"server": "litespeed"}))
+            stack.enter_context(patch.object(instances, "prepare_php_extension_runtime", return_value=None))
+            stack.enter_context(patch.object(instances, "_write_local_yaml"))
+            stack.enter_context(patch.object(instances, "load_config", return_value=cfg))
+            stack.enter_context(patch.object(instances, "write_compose_files"))
+            stack.enter_context(patch.object(lifecycle, "cmd_up"))
+            stack.enter_context(patch.object(lifecycle, "cmd_install"))
+            stack.enter_context(patch.object(instances, "_instance_web_services_running", return_value=(True, "")))
+            stack.enter_context(patch.object(instances, "_auto_heal_wp_url"))
+            stack.enter_context(patch.object(instances, "_wait_http", return_value=True))
+            stack.enter_context(patch.object(instances, "_wait_reachable", return_value=True))
+            stack.enter_context(patch.object(instances, "_wire_project_plugins"))
+            stack.enter_context(patch.object(instances, "_wire_project_themes"))
+            stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8088"))
+            stack.enter_context(patch.object(instances, "_refresh_registered_url", return_value=existing))
+            stack.enter_context(patch("sandbox.commands.data.capture_install_snapshots"))
+            stack.enter_context(patch.object(sc, "registry_put", return_value=existing))
+            instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+            self.assertEqual(mock_build.call_args[0][5], "litespeed")
+
+    def test_ensure_declared_server_difference_refuses_before_any_write(self):
+        import contextlib
+        import sandbox_core as sc
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        existing = {
+            "instance": "demo",
+            "label": "default",
+            "status": "stopped",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "nginx",
+        }
+        cfg = {
+            "instances": {
+                "demo": {"server": "nginx", "wordpress_port": 8088, "db_port": 3307, "mailpit_port": 8025},
+            }
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(patch.object(sc, "registry_get", return_value=existing))
+            stack.enter_context(patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(instances, "_proxy_sudoers_installed", return_value=False))
+            stack.enter_context(patch.object(instances, "_secure_at_create", return_value=False))
+            stack.enter_context(patch.object(instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(patch.object(instances, "_resolve_port_conflicts", side_effect=lambda c, **kw: c))
+            stack.enter_context(patch.object(instances, "_docker_preflight"))
+            mock_compose = stack.enter_context(patch.object(instances, "compose"))
+            mock_write_local = stack.enter_context(patch.object(instances, "_write_local_yaml"))
+            mock_registry_put = stack.enter_context(patch.object(sc, "registry_put"))
+            with self.assertRaises(sc.ConfigError) as ctx:
+                instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+
+            err = ctx.exception
+            self.assertEqual(getattr(err, "code", None), "apply_server_change_refused")
+            msg = str(err)
+            self.assertIn("apply_server_change_refused", msg)
+            self.assertIn("nginx", msg)
+            self.assertIn("litespeed", msg)
+            self.assertIn("No state was changed", msg)
+            mock_compose.assert_not_called()
+            mock_write_local.assert_not_called()
+            mock_registry_put.assert_not_called()
+
+    def test_ensure_pending_row_and_brand_new_row_are_unchanged(self):
+        import contextlib
+        import sandbox_core as sc
+
+        pconf = {
+            "root": "/tmp/fake-project",
+            "server": "litespeed",
+            "server_declared": True,
+        }
+        cfg = {"instances": {"fake-project": {"server": "litespeed"}, "demo": {"server": "litespeed"}}}
+
+        # 1. Brand-new row (existing is None)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(patch.object(sc, "registry_get", return_value=None))
+            stack.enter_context(patch.object(sc, "registry_list_for_root", return_value=[]))
+            stack.enter_context(patch.object(sc, "registry_all", return_value={}))
+            stack.enter_context(patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(instances, "_derive_instance_name", return_value="fake-project"))
+            stack.enter_context(patch.object(instances, "_proxy_sudoers_installed", return_value=False))
+            stack.enter_context(patch.object(instances, "_secure_at_create", return_value=False))
+            stack.enter_context(patch.object(instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(patch.object(instances, "_resolve_port_conflicts", side_effect=lambda c, **kw: c))
+            stack.enter_context(patch.object(instances, "_docker_preflight"))
+            mock_build = stack.enter_context(patch.object(instances, "_build_instance_block", return_value={"server": "litespeed"}))
+            stack.enter_context(patch.object(instances, "prepare_php_extension_runtime", return_value=None))
+            stack.enter_context(patch.object(instances, "_write_local_yaml"))
+            stack.enter_context(patch.object(instances, "load_config", return_value=cfg))
+            stack.enter_context(patch.object(instances, "write_compose_files"))
+            stack.enter_context(patch.object(lifecycle, "cmd_up"))
+            stack.enter_context(patch.object(lifecycle, "cmd_install"))
+            stack.enter_context(patch.object(instances, "_instance_web_services_running", return_value=(True, "")))
+            stack.enter_context(patch.object(instances, "_auto_heal_wp_url"))
+            stack.enter_context(patch.object(instances, "_wait_http", return_value=True))
+            stack.enter_context(patch.object(instances, "_wait_reachable", return_value=True))
+            stack.enter_context(patch.object(instances, "_wire_project_plugins"))
+            stack.enter_context(patch.object(instances, "_wire_project_themes"))
+            stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8088"))
+            stack.enter_context(patch.object(instances, "_refresh_registered_url", return_value={"instance": "fake-project"}))
+            stack.enter_context(patch("sandbox.commands.data.capture_install_snapshots"))
+            stack.enter_context(patch.object(sc, "registry_put", return_value={"instance": "fake-project"}))
+            instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+            self.assertEqual(mock_build.call_args[0][5], "litespeed")
+
+        # 2. Pending row (existing has status='pending', server='nginx')
+        pending_existing = {
+            "instance": "demo",
+            "label": "default",
+            "status": "pending",
+            "wordpress_port": 8088,
+            "db_port": 3307,
+            "mailpit_port": 8025,
+            "server": "nginx",
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sc, "load_project_config", return_value=pconf))
+            stack.enter_context(patch.object(sc, "registry_get", return_value=pending_existing))
+            stack.enter_context(patch.object(sc, "project_lock", return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(instances, "_derive_instance_name", return_value="demo"))
+            stack.enter_context(patch.object(instances, "_proxy_sudoers_installed", return_value=False))
+            stack.enter_context(patch.object(instances, "_secure_at_create", return_value=False))
+            stack.enter_context(patch.object(instances, "docker_daemon_preflight", return_value={"ok": True}))
+            stack.enter_context(patch.object(instances, "_resolve_port_conflicts", side_effect=lambda c, **kw: c))
+            stack.enter_context(patch.object(instances, "_docker_preflight"))
+            mock_build_pending = stack.enter_context(patch.object(instances, "_build_instance_block", return_value={"server": "litespeed"}))
+            stack.enter_context(patch.object(instances, "prepare_php_extension_runtime", return_value=None))
+            stack.enter_context(patch.object(instances, "_write_local_yaml"))
+            stack.enter_context(patch.object(instances, "load_config", return_value=cfg))
+            stack.enter_context(patch.object(instances, "write_compose_files"))
+            stack.enter_context(patch.object(lifecycle, "cmd_up"))
+            stack.enter_context(patch.object(lifecycle, "cmd_install"))
+            stack.enter_context(patch.object(instances, "_instance_web_services_running", return_value=(True, "")))
+            stack.enter_context(patch.object(instances, "_auto_heal_wp_url"))
+            stack.enter_context(patch.object(instances, "_wait_http", return_value=True))
+            stack.enter_context(patch.object(instances, "_wait_reachable", return_value=True))
+            stack.enter_context(patch.object(instances, "_wire_project_plugins"))
+            stack.enter_context(patch.object(instances, "_wire_project_themes"))
+            stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8088"))
+            stack.enter_context(patch.object(instances, "_refresh_registered_url", return_value=pending_existing))
+            stack.enter_context(patch("sandbox.commands.data.capture_install_snapshots"))
+            stack.enter_context(patch.object(sc, "registry_put", return_value=pending_existing))
+            instances._ensure_instance_impl(cfg, "/tmp/fake-project", "default")
+            self.assertEqual(mock_build_pending.call_args[0][5], "litespeed")

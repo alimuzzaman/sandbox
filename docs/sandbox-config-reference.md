@@ -462,6 +462,9 @@ file path.
 
   // Web stack. apache/nginx/litespeed are docker (only the compose web tier
   // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
+  // Declaring a change to server on an existing instance is refused by `apply`
+  // and `ensure` (apply_server_change_refused); omitting it preserves the live
+  // server rather than reverting to nginx. Use `sb server <name> <server>`.
   "server": "nginx",    // nginx (default) | apache | litespeed | herd
 
   // Scoped local hostname policy. Omission defaults new identity to .test;
@@ -1160,6 +1163,11 @@ database failure returns `instance_install_state_unavailable` with
 changed `wpVersion` on an installed site remains apply-only; `ensure` only
 warns about drift.
 
+`sb apply` (and `sb ensure`) refuses a declared change to `server` on an
+existing instance before modifying state (`apply_server_change_refused`); switch
+servers in place with `sb server <name> <server>`. Omitting `server` preserves
+the running web server rather than reverting to the default.
+
 1. Rewrites the `instances.<name>` block in `sandbox.local.yml` from the
    current project config (constants, multisite flag, version pins, extra
    bind-mounts).
@@ -1231,10 +1239,12 @@ Without it the official `wordpress` image's `sendmail` is absent, so
 `./sb snapshot <name>` exports the DB (`wp db export --add-drop-table`) and
 tars uploads. Add `--db-only` to omit uploads; when forcing a DB-only overwrite,
 any old uploads archive is removed. `./sb restore <name>` runs **`wp db reset --yes` before the
-import**, so restore is a true point-in-time replacement: tables created
+import**, so DB restore is a true point-in-time replacement: tables created
 *after* the snapshot (e.g. multisite sub-site `wp_2_*` tables from an FSI run)
 are dropped, not merged. `--add-drop-table` alone only drops tables present in
-the dump, so without the pre-reset those newer tables would survive.
+the dump, so without the pre-reset those newer tables would survive. Uploads in
+the snapshot are extracted over existing uploads and files added since are
+kept (merge stays the default).
 
 Each newly provisioned Docker instance captures a protected DB-only `@install`
 baseline and a full `install-baseline` snapshot after final setup or plugin/theme

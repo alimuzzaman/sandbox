@@ -679,6 +679,68 @@ class TestDashboardResetDispatch(unittest.TestCase):
         self.assertIn("'POST', '/restore', array( 'name' => $name, 'confirm' => $confirm )", template)
         self.assertIn("call('restore',{name:r,confirm:1})", template)
 
+    def test_restore_confirmation_states_the_merge(self):
+        from sandbox.core import _paths
+
+        template = _paths._SNAPSHOT_MU_TEMPLATE
+        self.assertNotIn("REPLACES the current DB + uploads", template)
+        self.assertIn(
+            "Restore '+r+'? This replaces the current DB. Uploads in the snapshot are extracted over existing uploads and files added since are kept. A DB-only snapshot leaves uploads unchanged.",
+            template,
+        )
+
+    def test_restore_prompt_names_uploads_and_reset_prompt_does_not(self):
+        from sandbox.commands import data
+
+        prompts = []
+
+        def fake_input(prompt_text):
+            prompts.append(prompt_text)
+            return "n"
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            snap = root / "fixture"
+            snap.mkdir(parents=True)
+            (snap / "db.sql").write_text("test db")
+
+            args_restore = mock.MagicMock(
+                resolved_instance="demo",
+                yes=False,
+                confirm=False,
+            )
+            args_restore.name = "fixture"
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data.sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=fake_input):
+                data.cmd_restore({}, args_restore)
+
+            args_reset = mock.MagicMock(
+                resolved_instance="demo",
+                yes=False,
+                confirm=False,
+                rebaseline=False,
+            )
+            baseline = root / "__install__"
+            baseline.mkdir(parents=True)
+            (baseline / "db.sql").write_text("baseline db")
+
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data.sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=fake_input):
+                data.cmd_reset({}, args_reset)
+
+        self.assertEqual(len(prompts), 2)
+        restore_prompt, reset_prompt = prompts
+        self.assertIn("Uploads in the snapshot are extracted over existing uploads and files added since are kept.", restore_prompt)
+        self.assertIn("A DB-only snapshot leaves uploads unchanged.", restore_prompt)
+        self.assertNotIn("Uploads", reset_prompt)
+        self.assertNotIn("uploads", reset_prompt)
+
     def test_wp_admin_delete_shows_a_refusal(self):
         from sandbox.core import _paths
 

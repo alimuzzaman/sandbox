@@ -102,16 +102,34 @@ def _destroy(entry: dict, state: dict, preview_id: str) -> None:
     _save_state(state)
 
 
+# What `preview list` may print. A field added to a saved row stays private until named here.
+_PUBLIC_ROW_FIELDS = ("id", "remote", "project_root", "instance", "domain",
+                      "zone_id", "dns_record_id", "expires_at")
+
+
+def _public_row(row: dict) -> dict:
+    public = {key: row[key] for key in _PUBLIC_ROW_FIELDS if key in row}
+    # A preview's address is always https://<domain> (see create). Rebuilding it means whatever
+    # the saved url holds, a path, a query or a malformed value, is neither printed nor parsed.
+    domain = row.get("domain")
+    if isinstance(domain, str) and domain:
+        public["url"] = f"https://{domain}"
+    return public
+
+
 def _cmd_preview(cfg, args) -> None:
     action = args.action
     state = _load_state()
     if action == "list":
-        rows = sorted(state["previews"].values(), key=lambda row: row["expires_at"])
+        rows = sorted((row for row in state["previews"].values()
+                       if not args.remote or row.get("remote") == args.remote),
+                      key=lambda row: row["expires_at"])
+        rows = [_public_row(row) for row in rows]
         if args.json:
             print(json.dumps({"ok": True, "previews": rows}))
         else:
             for row in rows:
-                print(f"{row['id']}  {row['url']}  expires {row['expires_at']}")
+                print(f"{row['id']}  {row.get('url', '')}  expires {row['expires_at']}")
         return
     if action in {"destroy", "cleanup"} and not args.confirm:
         die("remote preview deletion requires --confirm")

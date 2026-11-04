@@ -4646,6 +4646,162 @@ class TestRemotePreviewIdentity(unittest.TestCase):
             preview.preview_domain("login-1234abcd", "plugin", "bad/domain")
 
 
+class TestPreviewList(unittest.TestCase):
+    def _synthetic_state(self, *, extra_preview=None):
+        previews = {
+            "p1": {
+                "id": "p1",
+                "remote": "r1",
+                "project_root": "/path/to/p1",
+                "instance": "inst1",
+                "domain": "p1.sandbox.asb.bd",
+                "url": "https://p1.sandbox.asb.bd",
+                "login_url": "https://a.test/?sandbox_autologin=SYNTHETIC",
+                "zone_id": "z1",
+                "dns_record_id": "dns1",
+                "expires_at": "2026-11-05T00:00:00+00:00",
+            },
+            "p2": {
+                "id": "p2",
+                "remote": "r2",
+                "project_root": "/path/to/p2",
+                "instance": "inst2",
+                "domain": "p2.sandbox.asb.bd",
+                "url": "https://p2.sandbox.asb.bd",
+                "login_url": "https://a.test/?sandbox_autologin=SYNTHETIC",
+                "zone_id": "z2",
+                "dns_record_id": "dns2",
+                "expires_at": "2026-11-06T00:00:00+00:00",
+            },
+        }
+        if extra_preview:
+            previews.update(extra_preview)
+        return {"version": 1, "previews": previews}
+
+    def test_preview_list_never_prints_the_saved_url(self):
+        urls = (
+            "https://a.test/?sandbox_autologin%3DSYNTHETIC",
+            "https://a.test/?x=https%3A%2F%2Fb.test%2F%3Fsandbox_autologin%3DSYNTHETIC",
+            "https://a.test/?other=SYNTHETIC",
+            "https://a.test/#SYNTHETIC",
+            "https://SYNTHETIC@a.test/",
+            "https://a.test/;token=SYNTHETIC",
+            "https://a.test/\\SYNTHETIC",
+            "odd:SYNTHETIC",
+            {"token": "SYNTHETIC"},
+            "https://[SYNTHETIC",
+        )
+        for raw_url in urls:
+            state = self._synthetic_state()
+            state["previews"]["p1"]["url"] = raw_url
+            for as_json in (True, False):
+                with self.subTest(url=raw_url, json=as_json):
+                    with tempfile.TemporaryDirectory() as td:
+                        state_file = Path(td) / "remote-previews.json"
+                        state_file.write_text(json.dumps(state))
+                        with patch.object(preview, "_STATE_PATH", state_file):
+                            buf = io.StringIO()
+                            args = types.SimpleNamespace(action="list", remote=None, json=as_json)
+                            with redirect_stdout(buf):
+                                preview.cmd_preview(None, args)
+                            out = buf.getvalue()
+                            self.assertNotIn("SYNTHETIC", out)
+                            self.assertIn("https://p1.sandbox.asb.bd", out)
+                            self.assertIn("https://p2.sandbox.asb.bd", out)
+
+    def test_preview_list_survives_a_row_with_no_usable_domain(self):
+        state = self._synthetic_state()
+        del state["previews"]["p1"]["domain"]
+        state["previews"]["p1"]["url"] = "https://[SYNTHETIC"
+        for as_json in (True, False):
+            with self.subTest(json=as_json), tempfile.TemporaryDirectory() as td:
+                state_file = Path(td) / "remote-previews.json"
+                state_file.write_text(json.dumps(state))
+                with patch.object(preview, "_STATE_PATH", state_file):
+                    buf = io.StringIO()
+                    args = types.SimpleNamespace(action="list", remote=None, json=as_json)
+                    with redirect_stdout(buf):
+                        preview.cmd_preview(None, args)
+                    out = buf.getvalue()
+                    self.assertNotIn("SYNTHETIC", out)
+                    self.assertIn("p1", out)
+                    self.assertIn("https://p2.sandbox.asb.bd", out)
+
+    def test_preview_list_prints_only_named_fields(self):
+        state = self._synthetic_state()
+        state["previews"]["p1"]["future_secret"] = "SYNTHETIC"
+        with tempfile.TemporaryDirectory() as td:
+            state_file = Path(td) / "remote-previews.json"
+            state_file.write_text(json.dumps(state))
+            with patch.object(preview, "_STATE_PATH", state_file):
+                for as_json in (True, False):
+                    with self.subTest(json=as_json):
+                        buf = io.StringIO()
+                        args = types.SimpleNamespace(action="list", remote=None, json=as_json)
+                        with redirect_stdout(buf):
+                            preview.cmd_preview(None, args)
+                        out = buf.getvalue()
+                        self.assertNotIn("future_secret", out)
+                        self.assertNotIn("login_url", out)
+                        self.assertNotIn("SYNTHETIC", out)
+                        if as_json:
+                            payload = json.loads(out)
+                            self.assertTrue(payload["ok"])
+                            for row in payload["previews"]:
+                                self.assertNotIn("future_secret", row)
+                                self.assertNotIn("login_url", row)
+
+    def test_preview_list_honours_remote(self):
+        state = self._synthetic_state()
+        with tempfile.TemporaryDirectory() as td:
+            state_file = Path(td) / "remote-previews.json"
+            state_file.write_text(json.dumps(state))
+            with patch.object(preview, "_STATE_PATH", state_file):
+                # with remote="r1", only r1's row
+                for as_json in (True, False):
+                    with self.subTest(remote="r1", json=as_json):
+                        buf = io.StringIO()
+                        args = types.SimpleNamespace(action="list", remote="r1", json=as_json)
+                        with redirect_stdout(buf):
+                            preview.cmd_preview(None, args)
+                        out = buf.getvalue()
+                        self.assertIn("p1", out)
+                        self.assertNotIn("p2", out)
+                        if as_json:
+                            payload = json.loads(out)
+                            self.assertEqual(len(payload["previews"]), 1)
+                            self.assertEqual(payload["previews"][0]["id"], "p1")
+
+                # with no remote, both
+                for as_json in (True, False):
+                    with self.subTest(remote=None, json=as_json):
+                        buf = io.StringIO()
+                        args = types.SimpleNamespace(action="list", remote=None, json=as_json)
+                        with redirect_stdout(buf):
+                            preview.cmd_preview(None, args)
+                        out = buf.getvalue()
+                        self.assertIn("p1", out)
+                        self.assertIn("p2", out)
+                        if as_json:
+                            payload = json.loads(out)
+                            self.assertEqual(len(payload["previews"]), 2)
+
+    def test_preview_state_keeps_the_login_url(self):
+        state = self._synthetic_state()
+        raw_json = (json.dumps(state, indent=2, sort_keys=True) + "\n").encode()
+        with tempfile.TemporaryDirectory() as td:
+            state_file = Path(td) / "remote-previews.json"
+            state_file.write_bytes(raw_json)
+            with patch.object(preview, "_STATE_PATH", state_file):
+                args = types.SimpleNamespace(action="list", remote=None, json=True)
+                with redirect_stdout(io.StringIO()):
+                    preview.cmd_preview(None, args)
+                after = state_file.read_bytes()
+                self.assertEqual(raw_json, after)
+                self.assertIn(b"login_url", after)
+                self.assertIn(b"SYNTHETIC", after)
+
+
 class TestPersonalSecretFile(unittest.TestCase):
     def test_reads_quoted_export_and_environment_wins(self):
         with tempfile.TemporaryDirectory() as directory:

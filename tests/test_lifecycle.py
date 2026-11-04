@@ -3,6 +3,8 @@ from pathlib import Path
 import contextlib
 import io
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 import sandbox.commands.lifecycle as lifecycle  # noqa: E402
 import sandbox.core._instances as instances  # noqa: E402
 from sandbox.runtimes.base import OperationResult  # noqa: E402
+from tests.subprocess_support import run_test_process  # noqa: E402
 
 
 def _run_install_capture_stdout(args):
@@ -42,7 +45,9 @@ class TestWordPressCoreDownload(unittest.TestCase):
                 "exec", "-T", "wp", "sh", "-c",
                 "test -f /var/www/html/wp-includes/version.php && "
                 "{ test -f /var/www/html/wp-includes/Requests/src/Requests.php "
-                "|| test -f /var/www/html/wp-includes/Requests/Requests.php; }",
+                "|| test -f /var/www/html/wp-includes/Requests/Requests.php "
+                "|| { test -f /var/www/html/wp-includes/class-requests.php "
+                "&& grep -Eq \"^[$]wp_version = '([0-5]\\.|6\\.[01][.'-])\" /var/www/html/wp-includes/version.php; }; }",
                 instance="preview-demo", check=False, capture=True, timeout=5,
             ),
             call(
@@ -96,6 +101,59 @@ class TestWordPressCoreDownload(unittest.TestCase):
         wpcli.assert_called_once_with(
             args, instance="preview-demo", check=True
         )
+
+    @patch("sandbox.commands.lifecycle.wpcli")
+    @patch("sandbox.commands.lifecycle.compose")
+    def test_bootstrap_readiness_accepts_each_bundled_requests_layout(
+            self, compose, wpcli):
+        compose.return_value = SimpleNamespace(returncode=0)
+        lifecycle._download_wordpress_core("preview-demo", ["core", "download"], "apache")
+        cmd_template = compose.call_args_list[0].args[5]
+
+        cases = [
+            ("wp-includes/Requests/src/Requests.php", "6.4.3", True),
+            ("wp-includes/Requests/Requests.php", "5.9", True),
+            ("wp-includes/class-requests.php", "5.9.10", True),
+            ("wp-includes/class-requests.php", "6.1.1", True),
+            ("wp-includes/class-requests.php", "6.1-RC1", True),
+            ("wp-includes/class-requests.php", "4.9", True),
+            ("wp-includes/class-requests.php", "6.2", False),
+            ("wp-includes/class-requests.php", "6.4.3", False),
+            ("wp-includes/class-requests.php", "6.10.1", False),
+            ("wp-includes/class-requests.php", "10.0", False),
+            ("wp-includes/class-requests.php", "", False),
+            ("wp-includes/class-requests.php", None, False),
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            temp_docroot = Path(td)
+            cmd = cmd_template.replace("/var/www/html", str(temp_docroot))
+
+            for layout, ver, should_pass in cases:
+                with self.subTest(layout=layout, version=ver, should_pass=should_pass):
+                    shutil.rmtree(temp_docroot)
+                    temp_docroot.mkdir()
+                    lfile = temp_docroot / layout
+                    lfile.parent.mkdir(parents=True, exist_ok=True)
+                    lfile.touch()
+
+                    vfile = temp_docroot / "wp-includes" / "version.php"
+                    vfile.parent.mkdir(parents=True, exist_ok=True)
+                    if ver is not None:
+                        if ver == "":
+                            vfile.touch()
+                        else:
+                            vfile.write_text(f"<?php\n$wp_version = '{ver}';\n")
+
+                    res = run_test_process(
+                        ["sh", "-c", cmd],
+                        env={"PATH": "/usr/bin:/bin"},
+                        capture_output=True,
+                    )
+                    if should_pass:
+                        self.assertEqual(res.returncode, 0, f"Expected {layout} with version {ver} to pass")
+                    else:
+                        self.assertNotEqual(res.returncode, 0, f"Expected {layout} with version {ver} to fail")
 
     def test_litespeed_install_downloads_core_then_generates_config(self):
         args = SimpleNamespace(resolved_instance="preview-demo")
@@ -585,6 +643,7 @@ class TestDoctorJson(unittest.TestCase):
         with patch.object(lifecycle, "resolve_instances", return_value={"fixture": inst_cfg}), \
                 patch.object(lifecycle, "_web_services", return_value=["wp"]), \
                 patch.object(lifecycle, "_compose_up"), \
+                patch.object(lifecycle, "prepare_php_extension_runtime"), \
                 patch.object(lifecycle, "wp_is_installed", return_value=False), \
                 patch.object(lifecycle, "wp_dir", return_value=Path("/tmp/nonexistent-wp-dir")), \
                 patch.object(lifecycle, "php_extension_status", return_value={"drift": {"state": "drift", "issues": []}}):

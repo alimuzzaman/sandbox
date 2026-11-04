@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { jobFlags, startPoll, MAX_CONSECUTIVE_FAILURES, busyHolder, withTimeout } from "../src/ui/poller.ts";
+import { jobFlags, startPoll, MAX_CONSECUTIVE_FAILURES, busyHolder, withTimeout, actionFailureText } from "../src/ui/poller.ts";
 
 const INTERVAL = 1;
 const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -297,4 +297,11 @@ test("withTimeout passes through a value that arrives first", async () => {
   const quick = new Promise<string>((resolve) => setTimeout(() => resolve("ok"), 5));
   const res = await withTimeout(quick, 50);
   assert.equal(res, "ok");
+});
+
+test("a timed-out action is not called failed", async () => {
+  const never = new Promise<string>(() => {});
+  const timedOut = await withTimeout(never, 1).catch((error: unknown) => error);
+  assert.match(actionFailureText(timedOut), /may still be running/);
+  assert.equal(actionFailureText(new Error("boom")), "request failed: Error: boom");
 });

@@ -7,7 +7,7 @@ import { postAction, fetchSnapshots, fetchUsage } from "./api";
 import { toast } from "./ui/toast";
 import { modal } from "./ui/modal";
 import { pollJob } from "./ui/console";
-import { busyHolder, withTimeout, ACTION_REQUEST_TIMEOUT_MS } from "./ui/poller";
+import { busyHolder, withTimeout, ACTION_REQUEST_TIMEOUT_MS, actionFailureText } from "./ui/poller";
 
 // main.ts injects these to avoid circular imports.
 let refresh: () => Promise<void> = async () => {};
@@ -33,7 +33,7 @@ export async function act(instance: string, action: string,
   try {
     r = await withTimeout(postAction(Object.assign({ instance, action }, extra)), ACTION_REQUEST_TIMEOUT_MS);
   } catch (e) {
-    delete store.busy[instance]; toast("request failed: " + e, "err"); render(); return;
+    delete store.busy[instance]; toast(actionFailureText(e), "err"); render(); return;
   }
   if (r.job_id) {
     const lbl = ACTION_LABELS[action] ? ACTION_LABELS[action](instance) : cap(action) + " " + instance;
@@ -82,7 +82,7 @@ export async function doServer(name: string, server: string): Promise<void> {
   render();
   let r;
   try { r = await withTimeout(postAction({ instance: name, action: "server", server }), ACTION_REQUEST_TIMEOUT_MS); }
-  catch (e) { delete store.busy[name]; render(); toast("request failed: " + e, "err"); return; }
+  catch (e) { delete store.busy[name]; render(); toast(actionFailureText(e), "err"); return; }
   if (r.job_id) {
     toast("switching " + name + " → " + server + "…", "info");
     pollJob(r.job_id, name, "Switching " + name + " → " + server);

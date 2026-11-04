@@ -18,6 +18,13 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 // Inline actions answer only when they finish, and `start` can take minutes.
 export const ACTION_REQUEST_TIMEOUT_MS = 15 * 60_000;
 
+// A timed-out action may still be running on the server, so do not call it failed.
+export function actionFailureText(error: unknown): string {
+  return String(error).includes("request timed out")
+    ? "No answer after 15 minutes. It may still be running: check the instance before retrying."
+    : "request failed: " + error;
+}
+
 // A request that never settles counts as a failure; a late answer is ignored.
 export function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;

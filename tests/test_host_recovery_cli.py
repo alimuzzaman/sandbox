@@ -123,6 +123,7 @@ class HostRecoveryCliContractTests(unittest.TestCase):
                 "routes": [{"hostname": "example.test", "mode": "proxy"}],
                 "cloudflare": {"proxied": False},
                 "healthcheck": {"path": "/health"}, "basic_auth": None,
+                "deploy": {}, "secrets": {"required": {}, "generated": {}},
             }
             with patch.object(hosting_command, "_cloudflare_drift",
                               return_value={"configured": False}) as drift:

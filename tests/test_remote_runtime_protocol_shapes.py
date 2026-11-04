@@ -16,6 +16,8 @@ class ShapeGuardTests(unittest.TestCase):
     def test_resumable_upload_controller_and_worker_are_guarded(self):
         self.assertIn("sandbox/hosting/local_images.py", shapes.SHAPE_SOURCES)
         self.assertIn("sandbox/hosting/resumable_upload.py", shapes.SHAPE_SOURCES)
+        self.assertIn("sandbox/hosting/chunk_upload.py", shapes.SHAPE_SOURCES)
+        self.assertIn("sandbox/transports/chunk_local_images.py", shapes.SHAPE_SOURCES)
 
     def test_recorded_shapes_match_the_spoken_protocol(self):
         recorded = shapes.read_manifest()

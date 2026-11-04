@@ -1348,34 +1348,61 @@ operator handoff; see [remote hosting](docs/remote-hosting.md).
 
 ### Resuming an interrupted v2 upload
 
-Re-run the **same** `host image push-local --receipt ... --remote ...` command
-with its original sealed v2 receipt and archives. A matching worker retains a
-private partial across controller/app termination and dropped connections. Under
-the target engine lease and worker fence, it offers the actual prefix length and
-hash; the controller verifies its own prefix and sends only the remainder. A
-corrupt prefix resets before sending, and receipt/bundle/target changes never
-reuse it. Full size/hash and fsync still precede Docker load and receipt proof.
-This resumes transport bytes; it does not detach the controller or automatically
-reattach an apply job, and cannot deduplicate Docker layers.
+Re-run the same protected command with its original sealed v2 receipt:
 
-A retry reconciles only proven orphan reservations, then takes the existing full
-3x-bundle reservation. Retained bytes already reduce free space and receive no
-admission credit: retry may conservatively require up to one extra bundle of
-headroom. The floor never decreases. Under the same worker fence, inactive
-partials older than 24 hours are reaped before admission; superseded same-target
-partials are discarded during negotiation. Cache entries are bounded (128
-entries / 128 GiB of archive lengths). Unsafe entries refuse; quarantine or an
-active worker prevents cleanup. Never manually remove `load-unverified` or a
-reservation to force a retry. An uncertain load retains its full archive and
-quarantine for supported operator reconciliation.
+```sh
+./sb host image push-local --receipt /path/to/receipt.json --remote NAME --confirm
+# Explicit serial fallback; no automatic retries or transport fallback:
+./sb host image push-local --receipt /path/to/receipt.json --remote NAME --upload-streams 1 --confirm
+```
 
-Upload handshake schema2 is explicit: an old/incorrect worker refuses with
-`local_images_resume_protocol_unsupported`, before archive bytes, with no silent
-fallback. v1 and unbound legacy callers retain their previous transport. The
-new fixed worker travels over SSH, but ordinary exact runtime/controller gates
-still apply. This source change requires a separately approved runtime adoption;
-**no migration or Lenzora re-pin is part of this implementation**. Keep the
-previous CLI/runtime until the owner authorizes that rollout.
+V2 uses independently verified 8 MiB chunks (the final chunk can be shorter).
+Chunks are retained separately; retry rehashes the inventory and sends only
+missing/corrupt chunks, in any order. A killed controller or connection loses at
+most unfinished chunks, rather than all earlier bytes. Completed chunk hashes
+and the entire ordered bundle hash are checked before Docker load. The immutable
+manifest/disk format is identical for one or eight streams. This resumes bytes;
+it does not detach the orchestrator or attach an apply job.
+
+`--upload-streams` accepts 1–8, default 8 for v2. Stream count 1 is the explicit
+fallback. A bounded pool submits no more than that many sends and stops new
+work on the first failure; there are no automatic connection or chunk retries.
+Human progress shows active/configured streams, chunks done, retained/written
+bytes and aggregate decimal MB/s. JSON `upload` exposes streams, chunk count,
+uploaded/resumed bytes and elapsed seconds. `transferred_bytes` remains the
+logical complete-bundle size. Registry/image mode is never an invisible fallback.
+
+The same exclusive worker fence covers the entire operation. An ephemeral
+same-UID Unix socket passes duplicates of its locked file descriptor to data
+receivers with SCM_RIGHTS. Killing the coordinator cannot release that lock
+while any receiver retains a copy. Receivers never unlock the shared description
+or release reservations. The existing engine lease remains outside the session;
+competing controllers refuse. Quarantine and mode 0400 precede Docker; failed or
+unknown loads retain quarantine, chunk evidence and the reservation. No automatic
+quarantine reset, host build or storage-floor bypass is added.
+
+Stale >24h chunk plans are cleaned only under the exclusive fence without
+quarantine. Private 0700 directories, 0600 regular single-link files, bounded
+manifests/cache and per-chunk locks reject unsafe paths or duplicate writers.
+The full 3x storage reservation remains; chunks plus Docker import need no second
+assembled tar. Retained bytes receive no admission credit, so retry is conservative.
+Old chunk handshakes refuse explicitly; v1/unbound legacy transport stays serial.
+
+Eight data streams mean up to ten non-multiplexed SSH connections including the
+engine lease and coordinator, plus sshd/session and Python receiver processes.
+Data connections are per missing chunk, with at most eight active; no retry
+storm is hidden. MaxStartups covers unauthenticated connections and can drop
+new connections while other users authenticate. MaxSessions concerns sessions
+within one connection, not a global eight-connection cap. Per-connection Python,
+sshd/crypto/kernel-buffer memory and CPU require real-host measurement; bounded
+1MiB receiver buffers alone are not the total cost. This shared-host cost must
+be reviewed before rollout. Serial fallback does not bypass resource guards.
+
+This source speaks protocol 24 with a new fingerprint. It installs no runtime,
+changes no host limits and does not re-pin Lenzora; adopt only in the separately
+owner-approved batched Sandbox migration. Whole-tar chunks do not implement
+changed-layer-only transfer; future OCI/blob-aware reuse or signed registry
+transport remains explicit and separately reviewed.
 
 ### Upgrading shared-bundle clients
 
@@ -1385,7 +1412,7 @@ reconciles proven orphan reservations before admission, and retains reservations
 for uncertain imports until operator reconciliation. See the
 [reservation lifecycle and self-contained recovery commands](docs/remote-hosting.md#v2-reservation-lifecycle-and-quarantine-recovery).
 
-This checkout's current contract requires **protocol 23** (including resumable v2 uploads). From the upgraded checkout,
+This checkout's current contract requires **protocol 24** (including parallel chunk resume). From the upgraded checkout,
 migrate each runtime **before bumping client pins**, including for v1-only
 verdict-gated commands:
 
@@ -1484,7 +1511,7 @@ Expired entries are counted against one sample time without pruning. The report
 is explicitly an advisory point-in-time snapshot, not an admission or lease. It creates no reservation, file, directory or lease. Results are advisory;
 the actual push must recheck and reserve. No cleanup runs automatically. Its
 payload was introduced under control protocol 22. This checkout now declares
-protocol 23; runtime adoption must be separately planned and owner-authorized.
+protocol 24; runtime adoption must be separately planned and owner-authorized.
 
 Secret commands classify a denied project context as `project_root_not_allowed`
 with a fixed remedy: use an allowed checkout or add its approved parent to

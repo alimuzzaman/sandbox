@@ -970,7 +970,8 @@ class SSHReadinessWarningTests(unittest.TestCase):
                 with patch.object(remote_local_images,'observe',side_effect=[missing,missing,matching]), \
                      patch.object(remote_local_images._remote,'ssh_command_args',return_value=['synthetic']), \
                      patch.object(local_images.subprocess,'Popen',side_effect=spawn), \
-                     patch.object(local_images,'stream_archive',side_effect=stream):
+                     patch.object(local_images,'stream_archive',side_effect=stream), \
+                     patch.object(remote_local_images,'load_archive',side_effect=lambda *a,**k:remote_local_images._prefix_load_archive(*a,**{key:value for key,value in k.items() if key!='upload_streams'})):
                     if garbage:
                         with self.assertRaises(remote_local_images.RemoteLocalImageError):helper.push()
                         publish.assert_not_called();release.assert_called_once()
@@ -1265,7 +1266,7 @@ class ResumableWorkerTests(unittest.TestCase):
         with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value=str(self.home)), \
              patch.object(remote_local_images._remote,'ssh_command_args',return_value=self.command()), \
              patch.object(local_images.subprocess,'Popen',side_effect=spawn):
-            return remote_local_images.load_archive('local',self.archive,artifact,timeout=10,entry={},
+            return remote_local_images._prefix_load_archive('local',self.archive,artifact,timeout=10,entry={},
                 reservation_id=self.token,resume_context=self.context)
 
     def test_connection_drop_keeps_prefix_and_rerun_sends_only_suffix(self):
@@ -1303,7 +1304,7 @@ def kill_after_chunk(message):
  if 'MiB (' in message: os.kill(os.getpid(),signal.SIGKILL)
 with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home)),patch.object(transport._remote,'ssh_command_args',side_effect=command):
  with transport.target_image_lease('local','app','development',ctx['receipt_digest'],entry={}) as lease:
-  transport.load_archive('local',archive,artifact,timeout=10,entry={},reservation_id=sys.argv[4],resume_context=ctx,progress=kill_after_chunk,cancelled=lease.lost)
+  transport._prefix_load_archive('local',archive,artifact,timeout=10,entry={},reservation_id=sys.argv[4],resume_context=ctx,progress=kill_after_chunk,cancelled=lease.lost)
 """
         result=run_test_process([sys.executable,'-c',harness,str(self.home),str(self.archive),json.dumps(self.context),self.token],env=self.child_env,capture_output=True,text=True,timeout=15)
         self.assertEqual(result.returncode,-signal.SIGKILL,result.stderr)
@@ -1413,7 +1414,7 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
              patch.object(remote_local_images._remote,'ssh_command_args',return_value=[sys.executable,'-c',legacy,self.token]), \
              patch.object(local_images.subprocess,'Popen',side_effect=spawn):
             with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'local_images_resume_protocol_unsupported'):
-                remote_local_images.load_archive('local',self.archive,artifact,timeout=3,entry={},reservation_id=self.token,resume_context=self.context)
+                remote_local_images._prefix_load_archive('local',self.archive,artifact,timeout=3,entry={},reservation_id=self.token,resume_context=self.context)
 
     def test_old_runtime_identity_failure_is_a_clear_pretransfer_refusal(self):
         from sandbox.resources.host_memory.remote import RemoteProtocolError
@@ -1453,3 +1454,290 @@ with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home
         self.assertFalse(self.loaded.exists())
         self.reservation()
         self.assertEqual(self.transfer()['resumed_bytes'],0)
+
+class ChunkUploadTests(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        self.fixture=ResumableWorkerTests();self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.f=self.fixture
+        self.f.archive.write_bytes(bytes(range(256))*1024+b'last')
+        self.f.want='sha256:'+hashlib.sha256(self.f.archive.read_bytes()).hexdigest()
+        self.f.context.update(bundle_digest=self.f.want,archive_bytes=self.f.archive.stat().st_size)
+        (self.f.bin/'docker').write_text('#!'+sys.executable+'\nimport hashlib,pathlib,sys\ndata=sys.stdin.buffer.read()\nassert "sha256:"+hashlib.sha256(data).hexdigest()=='+repr(self.f.want)+'\npathlib.Path('+repr(str(self.f.loaded))+').write_text(str(len(data)))\n')
+        self.messages=[]
+
+    @contextmanager
+    def ports(self):
+        real_spawn=subprocess.Popen
+        def spawn(*args,**kwargs):
+            kwargs['env']=synthetic_environment(self.f.child_env)
+            return real_spawn(*args,**kwargs)
+        def argv(_entry,command,**kwargs):
+            parsed=shlex.split(command);parsed[0]=sys.executable;return parsed
+        with patch.object(remote_local_images._remote,'resolve_sandbox_home',return_value=str(self.f.home)), \
+             patch.object(remote_local_images._remote,'ssh_command_args',side_effect=argv), \
+             patch.object(local_images.subprocess,'Popen',side_effect=spawn):yield
+
+    def upload(self,streams=8):
+        from sandbox.transports import chunk_local_images
+        artifact={'archive':self.f.archive.name,'archive_sha256':self.f.want,'archive_bytes':self.f.archive.stat().st_size,'members':['image-1']}
+        with self.ports(),patch.object(chunk_local_images,'CHUNK_BYTES',65536):
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}) as lease:
+                return remote_local_images.load_archive('local',self.f.archive,artifact,timeout=15,entry={},reservation_id=self.f.token,
+                    resume_context=self.f.context,upload_streams=streams,progress=self.messages.append,cancelled=lease.lost)
+
+    def test_eight_streams_and_serial_use_same_verified_chunk_format(self):
+        for count in (8,1):
+            with self.subTest(streams=count):
+                self.f.reservation();result=self.upload(count)
+                self.assertEqual(result['bytes'],self.f.archive.stat().st_size)
+                self.assertEqual(result['streams'],count)
+                self.assertEqual(result['chunk_count'],5)
+                self.assertEqual(self.f.loaded.read_text(),str(self.f.archive.stat().st_size))
+                self.assertTrue(any('MB/s' in line and 'streams' in line and 'chunks' in line for line in self.messages))
+
+    def seed(self,indices):
+        from sandbox.transports import chunk_local_images
+        with patch.object(chunk_local_images,'CHUNK_BYTES',65536):manifest=chunk_local_images.manifest_for(self.f.archive,self.f.context)
+        mid=local_images.canonical_digest(manifest)[7:]
+        plan=self.f.root/'chunks'/mid;plan.mkdir(parents=True,mode=0o700)
+        (self.f.root/'chunks').chmod(0o700)
+        meta=plan/'manifest.json';meta.write_text(json.dumps(manifest));meta.chmod(0o600)
+        for i in indices:
+            item=manifest['chunks'][i]
+            target=plan/(str(i)+'-'+item['sha256'][7:]+'.chunk')
+            target.write_bytes(self.f.archive.read_bytes()[item['offset']:item['offset']+item['bytes']]);target.chmod(0o600)
+        return manifest,plan
+
+    def test_nonprefix_resume_resends_only_missing_or_corrupt_chunks(self):
+        manifest,plan=self.seed([0,2,4])
+        bad=next(plan.glob('2-*.chunk'));bad.write_bytes(b'corrupt')
+        self.f.reservation();result=self.upload(8)
+        self.assertEqual(result['resumed_bytes'],65540)
+        self.assertEqual(result['uploaded_bytes'],3*65536)
+        self.assertEqual(len(list(plan.glob('*.chunk'))),5)
+        self.assertTrue(self.f.loaded.exists())
+
+    @contextmanager
+    def session(self,streams=8):
+        from sandbox.transports import chunk_local_images as chunks
+        from sandbox.hosting import chunk_upload
+        with patch.object(chunks,'CHUNK_BYTES',65536):manifest=chunks.manifest_for(self.f.archive,self.f.context)
+        args=[sys.executable,'-c',chunks.PROGRAM,'coordinate',str(self.f.root),self.f.token,'15',str(streams)]
+        with chunks.Session(args,manifest,streams,15,None) as session:yield chunks,manifest,session
+
+    def put(self,chunks,manifest,session,index):
+        args=[sys.executable,'-c',chunks.PROGRAM,'put',str(self.f.root),self.f.token,'10',session.ready['manifest_id'],session.ready['token'],str(index)]
+        child=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=synthetic_environment(self.f.child_env))
+        self.addCleanup(ResumableWorkerTests.stop,child)
+        return child
+
+    def test_duplicate_chunk_cannot_append_or_release_owner_reservation(self):
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
+                with self.session() as (chunks,manifest,session):
+                    first=self.put(chunks,manifest,session,0)
+                    self.assertEqual(ResumableWorkerTests.offer(first)['state'],'chunk-ready')
+                    second=self.put(chunks,manifest,session,0);out,_=second.communicate(timeout=3)
+                    self.assertNotEqual(second.returncode,0)
+                    self.assertEqual(json.loads((self.f.home/'runtime/storage/reservations.json').read_text())[0]['id'],self.f.token)
+                    first.stdin.write(self.f.archive.read_bytes()[:65536]);first.stdin.close();first.stdin=None
+                    out,error=first.communicate(timeout=3)
+                    self.assertEqual(first.returncode,0,error)
+                    self.assertEqual(json.loads(out)['state'],'chunk-verified')
+                    duplicate=self.put(chunks,manifest,session,0);out,error=duplicate.communicate(timeout=3)
+                    self.assertEqual(duplicate.returncode,0,error)
+                    self.assertEqual(json.loads(out)['state'],'chunk-verified')
+
+    def test_coordinator_and_engine_lease_death_leave_fence_with_receiver(self):
+        import fcntl
+        with self.ports():
+            lease=remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={})
+            lease.__enter__();self.addCleanup(lease._stop)
+            with self.session() as (chunks,manifest,session):
+                receiver=self.put(chunks,manifest,session,0);self.assertEqual(ResumableWorkerTests.offer(receiver)['state'],'chunk-ready')
+                session.process.kill();session.process.wait(timeout=3)
+                lease.process.kill();lease.process.wait(timeout=3)
+                with open(self.f.root/'load-fence.lock','rb') as probe:
+                    with self.assertRaises(BlockingIOError):fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                other=run_test_process([sys.executable,'-c',remote_local_images._ENGINE_LOCK_PROGRAM,str(self.f.root)],input=b'',capture_output=True,timeout=3)
+                self.assertEqual(other.returncode,75,other.stderr)
+                self.assertEqual(len(json.loads((self.f.home/'runtime/storage/reservations.json').read_text())),1)
+                receiver.communicate(timeout=3)
+                with open(self.f.root/'load-fence.lock','rb') as probe:fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+
+    def test_competing_coordinator_refuses_without_releasing_the_owner(self):
+        from sandbox.transports.chunk_local_images import Session
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
+                with self.session() as (chunks,manifest,first):
+                    args=[sys.executable,'-c',chunks.PROGRAM,'coordinate',str(self.f.root),self.f.token,'10','8']
+                    with self.assertRaises(remote_local_images.RemoteLocalImageError):
+                        with Session(args,manifest,8,10,None):self.fail('competing controller admitted')
+                    self.assertEqual(len(json.loads((self.f.home/'runtime/storage/reservations.json').read_text())),1)
+
+    def test_killed_controller_retains_independent_chunks_and_rerun_fills_gaps(self):
+        import signal,fcntl,time
+        harness='''
+import json,os,shlex,signal,sys
+from pathlib import Path
+from unittest.mock import patch
+from sandbox.transports import remote_local_images as transport,chunk_local_images as chunks
+home=Path(sys.argv[1]);archive=Path(sys.argv[2]);ctx=json.loads(sys.argv[3]);chunks.CHUNK_BYTES=65536
+artifact={'archive':archive.name,'archive_bytes':ctx['archive_bytes'],'archive_sha256':ctx['bundle_digest'],'members':['image-1']}
+def command(entry,value,**kwargs):
+ argv=shlex.split(value);argv[0]=sys.executable;return argv
+def progress(line):
+ if 'chunks 1/' in line:os.kill(os.getpid(),signal.SIGKILL)
+with patch.object(transport._remote,'resolve_sandbox_home',return_value=str(home)),patch.object(transport._remote,'ssh_command_args',side_effect=command):
+ with transport.target_image_lease('local','app','development',ctx['receipt_digest'],entry={}) as lease:
+  transport.load_archive('local',archive,artifact,timeout=15,entry={},reservation_id=sys.argv[4],resume_context=ctx,upload_streams=8,progress=progress,cancelled=lease.lost)
+'''
+        result=run_test_process([sys.executable,'-c',harness,str(self.f.home),str(self.f.archive),json.dumps(self.f.context),self.f.token],env=self.f.child_env,capture_output=True,text=True,timeout=20)
+        self.assertEqual(result.returncode,-signal.SIGKILL,result.stderr)
+        deadline=time.monotonic()+5
+        while True:
+            with open(self.f.root/'load-fence.lock','rb') as handle:
+                try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:
+                    if time.monotonic()>=deadline:raise AssertionError('chunk receivers retained fence past deadline')
+                    time.sleep(.01);continue
+                break
+        saved=list((self.f.root/'chunks').glob('*/*.chunk'));self.assertGreater(len(saved),0)
+        self.assertFalse(self.f.loaded.exists())
+        self.f.token='e'*32;self.f.reservation()
+        follow=self.upload(8)
+        self.assertEqual(follow['resumed_bytes'],sum(path.stat().st_size for path in saved))
+        self.assertEqual(follow['uploaded_bytes']+follow['resumed_bytes'],self.f.archive.stat().st_size)
+
+    def test_one_stream_failure_stops_scheduling_without_retry_storm(self):
+        from sandbox.transports import chunk_local_images as chunks
+        from pathlib import Path
+        self.seed([0]);attempts=[];real_stream=local_images.stream_archive
+        def fail(argv,*args,**kwargs):
+            index=int(argv[-1]);attempts.append(index)
+            if index==1:
+                argv=[sys.executable,'-c','raise SystemExit(75)']
+            return real_stream(argv,*args,**kwargs)
+        with patch.object(local_images,'stream_archive',side_effect=fail):
+            with self.assertRaises(remote_local_images.RemoteLocalImageError):self.upload(8)
+        self.assertEqual(attempts.count(1),1)
+        self.assertLessEqual(len(attempts),4)
+        self.assertFalse(self.f.loaded.exists())
+        self.f.token='e'*32;self.f.reservation()
+        result=self.upload(1)
+        self.assertGreaterEqual(result['resumed_bytes'],65536)
+        self.assertTrue(self.f.loaded.exists())
+
+    def test_stream_bounds_refuse_before_starting_ssh(self):
+        artifact={'archive':self.f.archive.name,'archive_sha256':self.f.want,'archive_bytes':self.f.archive.stat().st_size,'members':['image-1']}
+        for value in (0,9,True,1.5):
+            with patch.object(remote_local_images._remote,'ssh_command_args') as ssh:
+                with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'upload_streams_invalid'):
+                    remote_local_images.load_archive('local',self.f.archive,artifact,timeout=2,entry={},reservation_id=self.f.token,resume_context=self.f.context,upload_streams=value)
+                ssh.assert_not_called()
+
+    def test_parallel_load_quarantines_and_marks_fence_0400_before_docker(self):
+        audit=self.f.home/'load-guard-proof'
+        (self.f.bin/'docker').write_text('#!'+sys.executable+'\nimport pathlib,stat,sys\nroot=pathlib.Path('+repr(str(self.f.root))+')\nassert (root/"load-unverified").exists()\nassert stat.S_IMODE((root/"load-fence.lock").stat().st_mode)==0o400\npathlib.Path('+repr(str(audit))+').write_text("guarded")\nraise SystemExit(1)\n')
+        with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'transfer_unknown'):self.upload(8)
+        self.assertEqual(audit.read_text(),'guarded')
+        self.assertTrue((self.f.root/'load-unverified').exists())
+        self.assertEqual((self.f.root/'load-fence.lock').stat().st_mode&0o777,0o400)
+        self.assertEqual(len(list((self.f.root/'chunks').glob('*/*.chunk'))),5)
+        self.assertEqual(len(json.loads((self.f.home/'runtime/storage/reservations.json').read_text())),1)
+
+    def test_corrupt_stream_never_becomes_a_verified_chunk(self):
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
+                with self.session() as (chunks,manifest,session):
+                    child=self.put(chunks,manifest,session,2)
+                    self.assertEqual(ResumableWorkerTests.offer(child)['state'],'chunk-ready')
+                    child.stdin.write(b'x'*65536);child.stdin.close();child.stdin=None
+                    output,error=child.communicate(timeout=3)
+                    self.assertNotEqual(child.returncode,0)
+                    self.assertEqual(json.loads(output)['state'],'refused')
+                    self.assertEqual(list((self.f.root/'chunks').glob('*/2-*.chunk')),[])
+                    self.assertFalse(self.f.loaded.exists())
+        self.f.token='e'*32;self.f.reservation()
+        self.assertEqual(self.upload(8)['uploaded_bytes'],self.f.archive.stat().st_size)
+
+    def test_whole_bundle_hash_is_required_even_when_all_chunk_hashes_match(self):
+        from sandbox.transports import chunk_local_images as chunks
+        with patch.object(chunks,'CHUNK_BYTES',65536):manifest=chunks.manifest_for(self.f.archive,self.f.context)
+        manifest['context']['bundle_digest']='sha256:'+'f'*64
+        mid=local_images.canonical_digest(manifest)[7:]
+        plan=self.f.root/'chunks'/mid;plan.mkdir(parents=True,mode=0o700);(self.f.root/'chunks').chmod(0o700)
+        meta=plan/'manifest.json';meta.write_text(json.dumps(manifest));meta.chmod(0o600)
+        for item in manifest['chunks']:
+            name=plan/(str(item['index'])+'-'+item['sha256'][7:]+'.chunk')
+            name.write_bytes(self.f.archive.read_bytes()[item['offset']:item['offset']+item['bytes']]);name.chmod(0o600)
+        args=[sys.executable,'-c',chunks.PROGRAM,'coordinate',str(self.f.root),self.f.token,'10','8']
+        with self.ports():
+            with remote_local_images.target_image_lease('local','app','development',self.f.context['receipt_digest'],entry={}):
+                with chunks.Session(args,manifest,8,10,None) as session:
+                    self.assertEqual(session.ready['inventory'],list(range(5)))
+                    with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'transfer_unknown'):session.finalize()
+        self.assertFalse(self.f.loaded.exists());self.assertFalse((self.f.root/'load-unverified').exists())
+
+    def test_old_handshake_is_refused_without_any_data_connections(self):
+        from sandbox.transports import chunk_local_images as chunks
+        with patch.object(chunks,'CHUNK_BYTES',65536):manifest=chunks.manifest_for(self.f.archive,self.f.context)
+        script='import json,sys;sys.stdin.buffer.readline();print(json.dumps({"schema":1,"state":"ready"}),flush=True);sys.stdin.buffer.read()'
+        args=[sys.executable,'-c',script]
+        with self.ports():
+            with self.assertRaisesRegex(remote_local_images.RemoteLocalImageError,'chunk_protocol_unsupported'):
+                with chunks.Session(args,manifest,8,3,None):self.fail('old peer accepted')
+        self.assertFalse(self.f.loaded.exists())
+
+    def test_stale_chunks_are_cleaned_only_without_active_worker_or_quarantine(self):
+        import time,os
+        manifest,plan=self.seed([0,2])
+        for path in plan.iterdir():os.utime(path,(time.time()-90000,)*2)
+        os.utime(plan,(time.time()-90000,)*2)
+        (self.f.root/'load-fence.lock').touch(mode=0o600)
+        (self.f.root/'load-unverified').write_text('{}')
+        args=[sys.executable,'-c',remote_local_images._RECONCILE_PROGRAM,str(self.f.root),str(self.f.home/'deploy-src/app')]
+        held=run_test_process(args,capture_output=True,text=True,timeout=3)
+        self.assertEqual(json.loads(held.stdout),{'safe':False});self.assertTrue(plan.exists())
+        (self.f.root/'load-unverified').unlink()
+        cleared=run_test_process(args,capture_output=True,text=True,timeout=3)
+        self.assertEqual(cleared.returncode,0,cleared.stderr)
+        self.assertEqual(json.loads(cleared.stdout),{'safe':True});self.assertFalse(plan.exists())
+
+    def test_maximum_active_receivers_is_bounded_by_configured_pool(self):
+        import threading,time
+        current=0;peak=0;guard=threading.Lock();actual=local_images.stream_archive
+        def measured(*args,**kwargs):
+            nonlocal current,peak
+            with guard:current+=1;peak=max(peak,current)
+            try:time.sleep(.03);return actual(*args,**kwargs)
+            finally:
+                with guard:current-=1
+        with patch.object(local_images,'stream_archive',side_effect=measured):result=self.upload(2)
+        self.assertEqual(peak,2);self.assertEqual(current,0)
+        self.assertEqual(result['streams'],2)
+        self.assertEqual(result['uploaded_bytes'],self.f.archive.stat().st_size)
+
+    def test_command_rejects_invalid_stream_count_before_registration_lock(self):
+        args=SimpleNamespace(confirm=True,remote='target',receipt='/synthetic/receipt',timeout=60,artifact_timeout=30,json=True,upload_streams=9)
+        with patch.object(hosting_cmd.remote,'registered_remote_lock') as lock,redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):hosting_cmd._cmd_host_image_push_local(args)
+        lock.assert_not_called()
+
+    def test_chunk_objects_are_never_followed_through_symlinks_or_hardlinks(self):
+        import os
+        for mode in ('symlink','hardlink'):
+            with self.subTest(mode=mode):
+                manifest,plan=self.seed([0]) if not (self.f.root/'chunks').exists() else (None,next((self.f.root/'chunks').iterdir()))
+                path=next(plan.glob('0-*.chunk'));path.unlink()
+                victim=self.f.home/'victim';victim.write_bytes(b'private-untouched');victim.chmod(0o600)
+                if mode=='symlink':path.symlink_to(victim)
+                else:os.link(victim,path)
+                self.f.reservation()
+                with self.assertRaises(remote_local_images.RemoteLocalImageError):self.upload(8)
+                self.assertEqual(victim.read_bytes(),b'private-untouched')
+                path.unlink();victim.unlink()
+                item=json.loads((plan/'manifest.json').read_text())['chunks'][0]
+                path.write_bytes(self.f.archive.read_bytes()[:item['bytes']]);path.chmod(0o600)

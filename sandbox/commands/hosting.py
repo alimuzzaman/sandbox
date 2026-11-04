@@ -557,6 +557,9 @@ def _cmd_host_image_push_local(args) -> None:
     artifact_timeout = 3600 if args.artifact_timeout is None else args.artifact_timeout
     if not 1 <= timeout <= 86400 or not 1 <= artifact_timeout <= 86400:
         die("local image transfer timeouts must be between 1 and 86400 seconds")
+    upload_streams = getattr(args, "upload_streams", None)
+    if upload_streams is not None and (type(upload_streams) is not int or not 1 <= upload_streams <= 8):
+        die("--upload-streams must be 1–8; default 8 for v2, serial fallback 1")
     try:
         with remote.registered_remote_lock(remote.registration_lock_name(args.remote)):
             entry = remote_local_images._entry(args.remote)
@@ -594,7 +597,7 @@ def _cmd_host_image_push_local(args) -> None:
                 artifact_timeout=artifact_timeout,
                 machine_identity=machine_identity,
                 registered_host_digest=registered_host_digest(entry, args.remote, home),
-                progress=progress, entry=entry)
+                progress=progress, entry=entry, upload_streams=upload_streams)
         payload = {"ok": True, "action": "push-local", "remote": args.remote,
                    "receipt_digest": result["receipt"]["receipt_digest"],
                    "remote_receipt_digest": result["remote_receipt_digest"],
@@ -603,6 +606,7 @@ def _cmd_host_image_push_local(args) -> None:
                    "transferred_bytes": result.get("transferred_bytes", 0)}
         if result["receipt"]["schema"] == local_images.RECEIPT_SCHEMA_V2:
             payload["reservation_cleanup_pending"] = result.get("reservation_cleanup_pending", False)
+            payload["upload"] = result.get("upload")
     except RemoteJobAdmissionError as exc:
         if args.json:
             print(json.dumps(exc.to_payload(remote=args.remote, operation="push-local"),
@@ -7116,7 +7120,8 @@ def cmd_host(cfg, args) -> None:
     for value, expected, label in (
             (getattr(args, "revision", None), "build-local", "--revision"),
             (getattr(args, "receipt", None), "push-local", "--receipt"),
-            (getattr(args, "artifact_timeout", None), "push-local", "--artifact-timeout")):
+            (getattr(args, "artifact_timeout", None), "push-local", "--artifact-timeout"),
+            (getattr(args, "upload_streams", None), "push-local", "--upload-streams")):
         if value is not None and image_action != expected and not (label == "--receipt" and image_action == "storage-admission"):
             die(f"{label} is only available with `host image {expected}`")
     if getattr(args, "timeout", None) is not None \

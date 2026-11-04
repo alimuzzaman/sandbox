@@ -1243,18 +1243,23 @@ def _builder_identity(environment: dict, engine: str | None) -> dict:
 
 def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress=None,
                    label: str = "", cancelled=None, ready_frame=None, on_started=None,
-                   resume_frame: dict | None = None) -> dict:
+                   resume_frame: dict | None = None, range_start: int = 0,
+                   range_bytes: int | None = None, complete_frame=None, on_progress=None) -> dict:
     """Stream one archive into a remote command's stdin with a hard deadline.
 
     The archive is hashed while it is sent; the caller compares the digest with
     the receipt. A timeout kills the local SSH client; the remote load outcome
     is then unknown and is decided only by the following observation.
     """
-    total = archive.stat().st_size
+    archive_size = archive.stat().st_size
+    total = archive_size if range_bytes is None else range_bytes
+    if type(range_start) is not int or type(total) is not int or range_start < 0 or total < 0 or range_start + total > archive_size:
+        raise ValueError("invalid archive range")
     digest = hashlib.sha256()
     sent = 0
     offset = 0
     protocol_error = False
+    already_present = False
     started = time.monotonic()
     timed_out = {"value": False}
     cancelled_state = {"value": False}
@@ -1266,9 +1271,20 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
 
         def kill():
             timed_out["value"] = True
-            process.kill()
+            try: process.kill()
+            except ProcessLookupError: pass
         timer = threading.Timer(timeout, kill)
         timer.start()
+        done = threading.Event()
+        def watch_cancellation():
+            while not done.wait(.05):
+                if cancelled is not None and cancelled():
+                    cancelled_state["value"] = True
+                    try: process.kill()
+                    except ProcessLookupError: pass
+                    return
+        watcher = threading.Thread(target=watch_cancellation, daemon=True)
+        if cancelled is not None: watcher.start()
         broken = False
         try:
             assert process.stdin is not None
@@ -1278,7 +1294,7 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
 
             def worker_frame():
                 nonlocal read_position
-                while process.poll() is None and not timed_out["value"]:
+                while not timed_out["value"]:
                     raw = os.pread(output.fileno(), 4097, read_position)
                     if b"\n" in raw or len(raw) > 4096:
                         line, _, _rest = raw.partition(b"\n")
@@ -1287,6 +1303,7 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
                             return _json_loads_closed(line)
                         except (ValueError, UnicodeError):
                             return None
+                    if process.poll() is not None: return None
                     if cancelled is not None and cancelled():
                         cancelled_state["value"] = True
                         return None
@@ -1307,6 +1324,7 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
                         on_started()
                     offset = offer["offset"]
                     with open(archive, "rb") as prefix:
+                        prefix.seek(range_start)
                         remaining = offset
                         while remaining and not timed_out["value"]:
                             if cancelled is not None and cancelled():
@@ -1337,22 +1355,25 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
                         if acknowledged and progress is not None:
                             progress(f"Verified retained prefix {offset} bytes; sending {total - offset} remaining bytes")
             elif ready_frame is not None:
-                if worker_frame() == ready_frame:
+                initial_frame = worker_frame()
+                if complete_frame is not None and initial_frame == complete_frame:
+                    already_present = True
+                elif initial_frame == ready_frame:
                     if on_started is not None:
                         on_started()
                     acknowledged = True
-            if not acknowledged:
+            if not acknowledged and not already_present:
                 broken = True
                 if process.poll() is None:
                     process.kill()
             with open(archive, "rb") as handle:
-                handle.seek(offset)
+                handle.seek(range_start + offset)
                 while acknowledged:
                     if cancelled is not None and cancelled():
                         cancelled_state["value"] = True
                         process.kill()
                         break
-                    chunk = handle.read(1 << 20)
+                    chunk = handle.read(min(1 << 20, total - offset - sent))
                     if not chunk:
                         break
                     digest.update(chunk)
@@ -1362,6 +1383,7 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
                         broken = True
                         break
                     sent += len(chunk)
+                    if on_progress is not None: on_progress(sent)
                     if progress is not None and (sent >= next_report or sent == total):
                         elapsed = max(time.monotonic() - started, 0.001)
                         progress(f"{label}{(offset + sent) // 1048576}/{total // 1048576} MiB "
@@ -1374,10 +1396,15 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
                 broken = True
             returncode = process.wait()
         finally:
+            done.set()
             timer.cancel()
+            if cancelled is not None: watcher.join(timeout=1)
             if process.poll() is None:
                 process.kill()
                 process.wait()
+            if process.stdin is not None and not process.stdin.closed:
+                try: process.stdin.close()
+                except (BrokenPipeError, OSError): pass
         output.seek(0, os.SEEK_END)
         output.seek(max(0, output.tell() - 4000))
         tail = output.read(4000).decode("utf-8", errors="replace")
@@ -1393,4 +1420,5 @@ def stream_archive(ssh_argv: list[str], archive: Path, *, timeout: int, progress
         result["stderr_tail"] = stderr_tail
     if resume_frame is not None:
         result.update(resumed_bytes=offset, resume_protocol_error=protocol_error)
+    if complete_frame is not None: result["already_present"] = already_present
     return result

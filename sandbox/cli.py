@@ -1040,6 +1040,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded local image build or aggregate transfer timeout")
     host_p.add_argument("--artifact-timeout", type=int, default=None, metavar="SECONDS",
         help="per-artifact local image transfer timeout")
+    host_p.add_argument("--upload-streams", type=int, default=None, metavar="N",
+        help="v2 push-local data streams: 1–8, default 8; explicit serial fallback 1")
     host_p.add_argument("--purge-edge-cache", action="store_true",
         help="with an approved manifest policy, purge all Cloudflare edge cache zones")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",

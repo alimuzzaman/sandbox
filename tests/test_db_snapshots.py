@@ -631,12 +631,18 @@ class TestDashboardResetDispatch(unittest.TestCase):
         self.assertIn("'POST', '/restore', array( 'name' => $name, 'confirm' => $confirm )", template)
         self.assertIn("call('restore',{name:r,confirm:1})", template)
 
+    def test_wp_admin_delete_shows_a_refusal(self):
+        from sandbox.core import _paths
+
+        template = _paths._SNAPSHOT_MU_TEMPLATE
+        self.assertIn("x.reason||x.error", template)
+
     def test_reset_dispatches_confirmed_reset_command(self):
         import sandbox.core._dash as dashboard
 
         called = []
 
-        def inline_job(_label, operation):
+        def inline_job(_label, operation, instance=None):
             operation()
             return "job-1"
 
@@ -659,7 +665,7 @@ class TestDashboardResetDispatch(unittest.TestCase):
 
         outcome = []
 
-        def inline_job(_label, operation):
+        def inline_job(_label, operation, instance=None):
             outcome.append(operation())
             return "job-1"
 

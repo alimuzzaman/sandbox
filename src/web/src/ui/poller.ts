@@ -15,8 +15,18 @@ export interface PollHandlers<T extends PollSnapshot> {
 export const MAX_CONSECUTIVE_FAILURES = 5;
 export const REQUEST_TIMEOUT_MS = 30_000;
 
+// Inline actions answer only when they finish, and `start` can take minutes.
+export const ACTION_REQUEST_TIMEOUT_MS = 15 * 60_000;
+
+// A timed-out action may still be running on the server, so do not call it failed.
+export function actionFailureText(error: unknown): string {
+  return String(error).includes("request timed out")
+    ? "No answer after 15 minutes. It may still be running: check the instance before retrying."
+    : "request failed: " + error;
+}
+
 // A request that never settles counts as a failure; a late answer is ignored.
-function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
+export function withTimeout<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const expired = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => reject(new Error("request timed out")), timeoutMs);
@@ -90,4 +100,15 @@ export function jobFlags(store: JobFlagStore): { begin(instance: string | null):
       };
     },
   };
+}
+
+export function busyHolder(busy: Record<string, unknown>, instance: string): string | null {
+  const v = busy[instance] ?? busy["*"];
+  if (v != null) return String(v);
+  if (instance === "*") {
+    for (const k of Object.keys(busy)) {
+      if (busy[k] != null) return String(busy[k]);
+    }
+  }
+  return null;
 }

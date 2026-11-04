@@ -27,6 +27,7 @@ class WebPollerTests(unittest.TestCase):
         bundle = (ROOT / "config" / "sandbox-web.js").read_text(encoding="utf-8")
         self.assertIn("Lost contact with this job", bundle)
         self.assertIn("Lost contact with this command", bundle)
+        self.assertIn("is busy:", bundle)
 
 
 if __name__ == "__main__":

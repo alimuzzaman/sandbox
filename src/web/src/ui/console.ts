@@ -110,7 +110,7 @@ async function runTerm(): Promise<void> {
   let r;
   try { r = await postAction({ instance: termInstance, action: "term", cmd }); }
   catch (e) { consoleWrite("error: " + e + "\n"); termBusy = false; return; }
-  if (!r.job_id) { consoleWrite((r.output || "failed") + "\n"); termBusy = false; return; }
+  if (!r.job_id) { consoleWrite((r.output || "failed") + "\n"); termBusy = false; $("conDot").className = "w-2 h-2 rounded-full bg-red-500"; return; }
   const ownsDrawer = (): boolean => drawerOwner === TERMINAL;
   const finish = (color: string): void => {
     termBusy = false;

@@ -7,6 +7,7 @@ import { postAction, fetchSnapshots, fetchUsage } from "./api";
 import { toast } from "./ui/toast";
 import { modal } from "./ui/modal";
 import { pollJob } from "./ui/console";
+import { busyHolder, withTimeout, ACTION_REQUEST_TIMEOUT_MS, actionFailureText } from "./ui/poller";
 
 // main.ts injects these to avoid circular imports.
 let refresh: () => Promise<void> = async () => {};
@@ -24,13 +25,15 @@ const ACTION_LABELS: Record<string, (n: string) => string> = {
 
 export async function act(instance: string, action: string,
                           extra: Record<string, unknown> = {}): Promise<void> {
+  const holder = busyHolder(store.busy, instance);
+  if (holder !== null) { toast(`${instance} is busy: ${holder}`, "info"); return; }
   store.busy[instance] = action;
   render();
   let r;
   try {
-    r = await postAction(Object.assign({ instance, action }, extra));
+    r = await withTimeout(postAction(Object.assign({ instance, action }, extra)), ACTION_REQUEST_TIMEOUT_MS);
   } catch (e) {
-    delete store.busy[instance]; toast("request failed: " + e, "err"); render(); return;
+    delete store.busy[instance]; toast(actionFailureText(e), "err"); render(); return;
   }
   if (r.job_id) {
     const lbl = ACTION_LABELS[action] ? ACTION_LABELS[action](instance) : cap(action) + " " + instance;
@@ -73,11 +76,13 @@ export async function doFocus(name: string, slug: string): Promise<void> {
 export async function doServer(name: string, server: string): Promise<void> {
   const cur = store.data.instances.find((i) => i.name === name);
   if (!server || (cur && cur.server === server)) return;
+  const holder = busyHolder(store.busy, name);
+  if (holder !== null) { toast(`${name} is busy: ${holder}`, "info"); return; }
   store.busy[name] = "server";
   render();
   let r;
-  try { r = await postAction({ instance: name, action: "server", server }); }
-  catch (e) { delete store.busy[name]; render(); toast("request failed: " + e, "err"); return; }
+  try { r = await withTimeout(postAction({ instance: name, action: "server", server }), ACTION_REQUEST_TIMEOUT_MS); }
+  catch (e) { delete store.busy[name]; render(); toast(actionFailureText(e), "err"); return; }
   if (r.job_id) {
     toast("switching " + name + " → " + server + "…", "info");
     pollJob(r.job_id, name, "Switching " + name + " → " + server);

@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Web dashboard and wp-admin snapshot bridge: refuse overlapping mutations on the same instance with an immediate refusal (HTTP 409 from the bridge; an info toast from the dashboard) rather than queuing behind an in-flight mutation; read-only actions (logs, status, doctor) continue to stream concurrently.
 - Dashboard and wp-admin snapshot jobs no longer mix output when one starts while another runs, and no longer leave the process's stdout pointing at a finished job. Bridge jobs now wait their turn like every other dashboard action, and a waiting job's console says so.
 - `host destroy` reads `nothing to remove` once only images it does not own are left. The probe now counts the same `<compose-name>-*` tags teardown removes, and other labelled images are listed as kept, never removed.
 - `sb ensure --remote` reports SSH failures as `remote_authentication_failed`,

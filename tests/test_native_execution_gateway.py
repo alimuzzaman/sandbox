@@ -36,7 +36,7 @@ class TestNativeExecutionGateway(unittest.TestCase):
 
         outcomes = []
 
-        def inline(_label, operation):
+        def inline(_label, operation, instance=None):
             outcomes.append(operation())
             return "fixture-job"
 

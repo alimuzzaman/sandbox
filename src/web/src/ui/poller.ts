@@ -91,3 +91,14 @@ export function jobFlags(store: JobFlagStore): { begin(instance: string | null):
     },
   };
 }
+
+export function busyHolder(busy: Record<string, unknown>, instance: string): string | null {
+  const v = busy[instance] ?? busy["*"];
+  if (v != null) return String(v);
+  if (instance === "*") {
+    for (const k of Object.keys(busy)) {
+      if (busy[k] != null) return String(busy[k]);
+    }
+  }
+  return null;
+}

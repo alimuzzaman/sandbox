@@ -928,8 +928,11 @@ a local **Create an instance** form backed by the same `ensure` operation. Remot
 creation remains unavailable until the remote lifecycle service exposes it. Dashboard
 and wp-admin actions in one `sb web` process run one at a time; a job that has to wait
 says so in its console, and a console command that never exits holds up the rest until
-that `sb web` process restarts. You can
-view and drive instances with:
+that `sb web` process restarts.
+
+Mutations launched from the web dashboard or its wp-admin snapshot bridge claim that instance while their job runs. A second mutation on the same instance is refused immediately (HTTP 409 from the bridge, or an error toast from the dashboard) instead of queuing behind it, so two restores or a snapshot and a server switch cannot race. Read actions (logs, status, doctor) continue to stream concurrently.
+
+You can view and drive instances with:
 
 ```bash
 ./sb instances            # list every per-project instance + status + URL

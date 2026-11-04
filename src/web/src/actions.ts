@@ -7,6 +7,7 @@ import { postAction, fetchSnapshots, fetchUsage } from "./api";
 import { toast } from "./ui/toast";
 import { modal } from "./ui/modal";
 import { pollJob } from "./ui/console";
+import { busyHolder } from "./ui/poller";
 
 // main.ts injects these to avoid circular imports.
 let refresh: () => Promise<void> = async () => {};
@@ -24,6 +25,8 @@ const ACTION_LABELS: Record<string, (n: string) => string> = {
 
 export async function act(instance: string, action: string,
                           extra: Record<string, unknown> = {}): Promise<void> {
+  const holder = busyHolder(store.busy, instance);
+  if (holder) { toast(`${instance} is busy: ${holder}`, "info"); return; }
   store.busy[instance] = action;
   render();
   let r;
@@ -73,6 +76,8 @@ export async function doFocus(name: string, slug: string): Promise<void> {
 export async function doServer(name: string, server: string): Promise<void> {
   const cur = store.data.instances.find((i) => i.name === name);
   if (!server || (cur && cur.server === server)) return;
+  const holder = busyHolder(store.busy, name);
+  if (holder) { toast(`${name} is busy: ${holder}`, "info"); return; }
   store.busy[name] = "server";
   render();
   let r;

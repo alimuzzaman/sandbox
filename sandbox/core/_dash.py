@@ -304,16 +304,54 @@ class _JobStream:
         pass
 
 
-def _start_job(label: str, fn) -> str:
+class _InstanceBusy(Exception):
+    """A mutation refused because another action holds that instance."""
+
+    def __init__(self, instance: str, holder: str):
+        super().__init__(f"{instance} is busy: {holder}")
+        self.message = f"{instance} is busy: {holder}"
+
+
+# instance name, or "*" for a sweep over every instance -> label of the action holding it.
+# One dashboard process only: `sb web` on another port has its own. Guarded by _web_jobs_lock.
+_web_claims: dict[str, str] = {}
+
+
+def _take_claim_locked(instance: str, label: str) -> None:
+    """Take a claim or raise _InstanceBusy. The caller holds _web_jobs_lock."""
+    holder = _web_claims.get(instance) or _web_claims.get("*")
+    if holder is None and instance == "*" and _web_claims:
+        holder = next(iter(_web_claims.values()))
+    if holder is not None:
+        raise _InstanceBusy(instance, holder)
+    _web_claims[instance] = label
+
+
+@contextmanager
+def _claim(instance: str, label: str):
+    """Hold a claim for work that is not a job. Take it before _web_lock, never after."""
+    with _web_jobs_lock:
+        _take_claim_locked(instance, label)
+    try:
+        yield
+    finally:
+        with _web_jobs_lock:
+            _web_claims.pop(instance, None)
+
+
+def _start_job(label: str, fn, instance: str | None = None) -> str:
     """Run `fn()` in a background thread, streaming its output into a new job.
     `fn` returns True/False for ok. Returns the job_id immediately so the page
-    can poll /api/job/<id>?offset=N for live output.
+    can poll /api/job/<id>?offset=N for live output. `instance` claims it for
+    the whole job; a refusal raises _InstanceBusy before any job exists.
 
     The worker holds `_web_lock` across the whole redirect. Redirection swaps the
     process-global sys.stdout, so two jobs must never hold it at once. `fn` must not
     take `_web_lock` itself: the lock is not reentrant."""
     job = {"status": label, "output": "", "done": False, "ok": None}
     with _web_jobs_lock:
+        if instance is not None:
+            _take_claim_locked(instance, label)
         _web_job_seq[0] += 1
         job_id = str(_web_job_seq[0])
         _web_jobs[job_id] = job
@@ -342,11 +380,20 @@ def _start_job(label: str, fn) -> str:
         finally:
             # Also on anything else raised, or the job would poll as running forever.
             with _web_jobs_lock:
+                if instance is not None:
+                    _web_claims.pop(instance, None)
                 job["done"] = True
                 job["ok"] = ok_flag
                 job["status"] = label + (" ✓" if ok_flag else " ✗")
 
-    threading.Thread(target=worker, daemon=True).start()
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception:
+        with _web_jobs_lock:
+            if instance is not None:
+                _web_claims.pop(instance, None)
+            job.update(done=True, ok=False, status=label + " ✗")
+        raise
     return job_id
 
 
@@ -511,6 +558,13 @@ def claude_usage(known_instances: list[str]) -> dict:
 
 
 def _web_do_action(payload: dict) -> dict:
+    try:
+        return _web_dispatch(payload)
+    except _InstanceBusy as busy:
+        return {"ok": False, "code": "instance_busy", "output": busy.message}
+
+
+def _web_dispatch(payload: dict) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_down, cmd_status, cmd_update, cmd_doctor
     from sandbox.commands.instances_cmd import cmd_focus, cmd_instance, cmd_ensure
     from sandbox.commands.debug import cmd_introspect, cmd_xdebug
@@ -529,7 +583,7 @@ def _web_do_action(payload: dict) -> dict:
     if action in valid_fast:
         if not name:
             return {"ok": False, "output": "missing instance"}
-        with _web_lock:
+        with _claim(name, action), _web_lock:
             if action == "start":
                 ok_f, out = _run_cmd_capture(
                     cmd_up, _types.SimpleNamespace(resolved_instance=name))
@@ -556,31 +610,45 @@ def _web_do_action(payload: dict) -> dict:
     # slow). The page polls the job and refreshes when done.
     if action in ("start-all", "stop-all"):
         with _web_jobs_lock:
+            _take_claim_locked("*", action)
             _web_job_seq[0] += 1
             job_id = str(_web_job_seq[0])
-            _web_jobs[job_id] = {"status": f"{action}…", "output": "",
-                                 "done": False, "ok": None}
+            job = {"status": f"{action}…", "output": "", "done": False, "ok": None}
+            _web_jobs[job_id] = job
 
         def sweep():
-            with _web_lock:
-                cfg = load_config()
-                names = list(resolve_instances(cfg).keys())
-                fn = cmd_up if action == "start-all" else cmd_down
-                buf = io.StringIO()
-                allok = True
-                for n in names:
-                    with redirect_stdout(buf), redirect_stderr(buf):
-                        try:
-                            fn(cfg, _types.SimpleNamespace(resolved_instance=n))
-                        except Exception as e:
-                            allok = False
-                            buf.write(f"\n{n}: error {e}\n")
-                    buf.write(f"— {action} {n} done\n")
-                _web_jobs[job_id].update(
-                    output=buf.getvalue(), done=True, ok=allok,
-                    status=f"{action} {'✓' if allok else '✗'}")
+            buf = io.StringIO()
+            allok = False
+            try:
+                with _web_lock:
+                    cfg = load_config()
+                    names = list(resolve_instances(cfg).keys())
+                    fn = cmd_up if action == "start-all" else cmd_down
+                    clean = True
+                    for n in names:
+                        with redirect_stdout(buf), redirect_stderr(buf):
+                            try:
+                                fn(cfg, _types.SimpleNamespace(resolved_instance=n))
+                            except Exception as e:
+                                clean = False
+                                buf.write(f"\n{n}: error {e}\n")
+                        buf.write(f"— {action} {n} done\n")
+                    allok = clean
+            except Exception as e:
+                buf.write(f"\nerror: {e}\n")
+            finally:
+                with _web_jobs_lock:
+                    _web_claims.pop("*", None)
+                    job.update(output=buf.getvalue(), done=True, ok=allok,
+                               status=f"{action} {'✓' if allok else '✗'}")
 
-        threading.Thread(target=sweep, daemon=True).start()
+        try:
+            threading.Thread(target=sweep, daemon=True).start()
+        except Exception:
+            with _web_jobs_lock:
+                _web_claims.pop("*", None)
+                job.update(done=True, ok=False, status=f"{action} ✗")
+            raise
         return {"ok": True, "job_id": job_id}
 
     # Ops / terminal actions — each streams output into a job the console
@@ -589,6 +657,7 @@ def _web_do_action(payload: dict) -> dict:
     # NOT exposed (interactive, can't work over HTTP).
     OPS = {"logs", "status", "doctor", "snapshot", "restore", "reset", "seed",
            "update", "xdebug", "wp", "introspect", "install", "term"}
+    READ_OPS = {"logs", "status", "doctor", "introspect"}
     if action in OPS:
         if not name:
             return {"ok": False, "output": "missing instance"}
@@ -695,7 +764,8 @@ def _web_do_action(payload: dict) -> dict:
 
         label = f"{action}" + (f" {name}" if action != "wp"
                                else f" {name}: {payload.get('args','')}")
-        return {"ok": True, "job_id": _start_job(label, run_op)}
+        return {"ok": True, "job_id": _start_job(
+            label, run_op, instance=None if action in READ_OPS else name)}
 
     # Switch an instance's web server in place. Backgrounded + streamed because
     # it recreates the web tier and may pull the OpenLiteSpeed image (slow).
@@ -711,7 +781,7 @@ def _web_do_action(payload: dict) -> dict:
         def do_server():
             cmd_server(load_config(), _types.SimpleNamespace(
                 name=name, server_type=target, resolved_instance=name))
-        return {"ok": True, "job_id": _start_job(label, do_server)}
+        return {"ok": True, "job_id": _start_job(label, do_server, instance=name)}
 
     if action == "create":
         # The web dashboard is loopback-only, but still validate the input
@@ -752,7 +822,7 @@ def _web_do_action(payload: dict) -> dict:
         def do_inst():
             cmd_instance(load_config(), _types.SimpleNamespace(
                 action="delete", name=name, yes=True, resolved_instance=name))
-        return {"ok": True, "job_id": _start_job(f"Deleting {name}", do_inst)}
+        return {"ok": True, "job_id": _start_job(f"Deleting {name}", do_inst, instance=name)}
 
     return {"ok": False, "output": f"unknown action '{action}'"}
 

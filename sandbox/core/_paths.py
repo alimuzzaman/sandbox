@@ -388,7 +388,7 @@ function sandbox_snapshots_render() {
   tb.addEventListener('click',function(e){ var r=e.target.getAttribute('data-r'), d=e.target.getAttribute('data-d');
     if(r&&confirm('Restore '+r+'? This REPLACES the current DB + uploads.')){ say('Restoring…');
       call('restore',{name:r,confirm:1}).then(function(x){ if(x.job_id){return poll(x.job_id);} say(x.error||'error',true); }); }
-    if(d&&confirm('Delete snapshot '+d+'?')){ call('delete',{name:d}).then(function(){refresh();}); } });
+    if(d&&confirm('Delete snapshot '+d+'?')){ call('delete',{name:d}).then(function(x){ if(x&&x.ok===false){say(x.reason||x.error||'error',true);} return refresh(); }); } });
   refresh();
 })();
 </script>

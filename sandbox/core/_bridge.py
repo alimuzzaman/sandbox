@@ -116,6 +116,14 @@ def _bridge_handle(method: str, instance: str, subpath: str,
       DELETE /snapshot/<name> · GET /job/<id>
     Snapshot/restore run out-of-band via the existing job machinery so a restore
     never severs the caller's request. NO arbitrary host commands (FR-010)."""
+    try:
+        return _bridge_route(method, instance, subpath, body, auth)
+    except _InstanceBusy as busy:
+        return 409, {"ok": False, "error": "instance_busy", "reason": busy.message}
+
+
+def _bridge_route(method: str, instance: str, subpath: str,
+                  body: dict, auth: str) -> tuple[int, dict]:
     import time, shutil as _sh, types as _types, hmac
     tok = _bridge_token_for(instance)
     if not tok:
@@ -179,7 +187,7 @@ def _bridge_handle(method: str, instance: str, subpath: str,
         ns = _types.SimpleNamespace(resolved_instance=instance, name=name,
                                     force=bool(body.get("force")),
                                     db_only=bool(body.get("db_only")))
-        jid = _start_job(f"snapshot {name}", lambda: cmd_snapshot(cfg, ns))
+        jid = _start_job(f"snapshot {name}", lambda: cmd_snapshot(cfg, ns), instance=instance)
         return 202, {"ok": True, "job_id": jid, "name": name}
 
     if method == "POST" and subpath == "/restore":
@@ -207,7 +215,7 @@ def _bridge_handle(method: str, instance: str, subpath: str,
         ns = _types.SimpleNamespace(
             resolved_instance=instance, name=name, yes=True, confirm=True,
         )
-        jid = _start_job(f"restore {name}", lambda: cmd_restore(cfg, ns))
+        jid = _start_job(f"restore {name}", lambda: cmd_restore(cfg, ns), instance=instance)
         return 202, {"ok": True, "job_id": jid, "name": name}
 
     if method == "POST" and subpath == "/reset":
@@ -225,7 +233,7 @@ def _bridge_handle(method: str, instance: str, subpath: str,
         # which would otherwise outlive the originating HTTP request.
         ns = _types.SimpleNamespace(resolved_instance=instance, yes=True,
                                     confirm=True, rebaseline=False)
-        jid = _start_job("reset to fresh install", lambda: cmd_reset(cfg, ns))
+        jid = _start_job("reset to fresh install", lambda: cmd_reset(cfg, ns), instance=instance)
         return 202, {"ok": True, "job_id": jid}
 
     if method == "DELETE" and subpath.startswith("/snapshot/"):
@@ -239,10 +247,11 @@ def _bridge_handle(method: str, instance: str, subpath: str,
             }
         if not _ok_name(name):
             return 400, {"ok": False, "error": "invalid snapshot name"}
-        d = snapshots_dir(instance) / name
-        if not d.exists():
-            return 404, {"ok": False, "error": "no such snapshot"}
-        _sh.rmtree(d)
+        with _claim(instance, f"delete snapshot {name}"):
+            d = snapshots_dir(instance) / name
+            if not d.exists():
+                return 404, {"ok": False, "error": "no such snapshot"}
+            _sh.rmtree(d)
         return 200, {"ok": True}
 
     if method == "GET" and subpath.startswith("/job/"):

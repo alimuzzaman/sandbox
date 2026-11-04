@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 import sandbox.core as core  # noqa: E402
 import sandbox.core._bridge as bridge  # noqa: E402  (_bridge_handle lives here)
+from sandbox.core._dash import _web_claims  # noqa: E402
 import sandbox_core  # noqa: E402
 
 TOK = "secrettoken123"
@@ -24,6 +25,7 @@ TOK = "secrettoken123"
 
 class TestBridgeHandle(unittest.TestCase):
     def setUp(self):
+        _web_claims.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="sb-bridge-"))
         # _bridge_handle resolves its helpers from the _bridge submodule's own
         # namespace (back-filled by sandbox.core/__init__), so patch there.
@@ -32,12 +34,13 @@ class TestBridgeHandle(unittest.TestCase):
             mock.patch.object(bridge, "_is_herd_instance", lambda inst: False),
             mock.patch.object(bridge, "snapshots_dir", lambda inst: self.tmp),
             mock.patch.object(bridge, "load_config", lambda: {}),
-            mock.patch.object(bridge, "_start_job", lambda label, fn: "job-1"),
+            mock.patch.object(bridge, "_start_job", lambda label, fn, instance=None: "job-1"),
         ]
         for p in self.p:
             p.start()
 
     def tearDown(self):
+        _web_claims.clear()
         for p in self.p:
             p.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -142,7 +145,7 @@ class TestBridgeHandle(unittest.TestCase):
     def test_reset_confirmed_dispatches_exact_command_arguments(self):
         captured = []
 
-        def start(label, fn):
+        def start(label, fn, instance=None):
             captured.append((label, fn))
             return "job-1"
 
@@ -199,7 +202,7 @@ class TestBridgeHandle(unittest.TestCase):
         self._mksnap("keep")
         captured = []
 
-        def start(label, fn):
+        def start(label, fn, instance=None):
             captured.append((label, fn))
             return "job-1"
 
@@ -249,6 +252,76 @@ class TestBridgeHandle(unittest.TestCase):
             self.assertTrue(outside.exists(), "traversal deleted an outside dir!")
         finally:
             shutil.rmtree(outside, ignore_errors=True)
+
+    def test_busy_instance_refuses_with_409(self):
+        from sandbox.core._dash import _start_job as real_start_job
+        _web_claims["demo"] = "holder-action"
+        self._mksnap("keep")
+        cases = [
+            ("snapshot", "POST", "/snapshot", {"name": "snap1"}, "sandbox.commands.data.cmd_snapshot"),
+            ("restore", "POST", "/restore", {"name": "keep", "confirm": True}, "sandbox.commands.data.cmd_restore"),
+            ("reset", "POST", "/reset", {"confirm": True}, "sandbox.commands.data.cmd_reset"),
+        ]
+        for name, method, path, body, target_cmd in cases:
+            with self.subTest(action=name):
+                with mock.patch.object(bridge, "_start_job", side_effect=real_start_job), \
+                        mock.patch(target_cmd) as cmd_mock:
+                    code, payload = self.call(method, path, body)
+                    self.assertEqual(code, 409)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error"], "instance_busy")
+                    self.assertIn("demo is busy: holder-action", payload["reason"])
+                    cmd_mock.assert_not_called()
+
+    def test_delete_snapshot_refuses_while_the_instance_is_busy(self):
+        d = self._mksnap("snap-busy")
+        _web_claims["demo"] = "some-holder"
+        code, payload = self.call("DELETE", "/snapshot/snap-busy")
+        self.assertEqual(code, 409)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "instance_busy")
+        self.assertIn("demo is busy: some-holder", payload["reason"])
+        self.assertTrue(d.exists(), "snapshot dir was deleted while instance was busy!")
+
+    def test_delete_snapshot_releases_its_claim(self):
+        # on success
+        self._mksnap("snap-ok")
+        code, payload = self.call("DELETE", "/snapshot/snap-ok")
+        self.assertEqual(code, 200)
+        self.assertNotIn("demo", _web_claims)
+
+        # on 404
+        code, payload = self.call("DELETE", "/snapshot/ghost-none")
+        self.assertEqual(code, 404)
+        self.assertNotIn("demo", _web_claims)
+
+        # when _sh.rmtree raises OSError
+        self._mksnap("snap-err")
+        with mock.patch("shutil.rmtree", side_effect=OSError("disk error")):
+            with self.assertRaises(OSError):
+                self.call("DELETE", "/snapshot/snap-err")
+        self.assertNotIn("demo", _web_claims)
+
+    def test_bridge_jobs_pass_their_instance(self):
+        captured = []
+
+        def recording_start(label, fn, instance=None):
+            captured.append((label, fn, instance))
+            return "job-rec"
+
+        self._mksnap("keep")
+        with mock.patch.object(bridge, "_start_job", side_effect=recording_start), \
+                mock.patch("sandbox.commands.data.cmd_snapshot"), \
+                mock.patch("sandbox.commands.data.cmd_restore"), \
+                mock.patch("sandbox.commands.data.cmd_reset"):
+            self.call("POST", "/snapshot", {"name": "test-snap"})
+            self.call("POST", "/restore", {"name": "keep", "confirm": True})
+            self.call("POST", "/reset", {"confirm": True})
+
+        self.assertEqual(len(captured), 3)
+        self.assertEqual(captured[0][2], "demo")
+        self.assertEqual(captured[1][2], "demo")
+        self.assertEqual(captured[2][2], "demo")
 
 
 class TestRegistryOverlay(unittest.TestCase):

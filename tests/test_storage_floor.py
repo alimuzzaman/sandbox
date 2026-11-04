@@ -538,6 +538,14 @@ class FinalRecoveryDocumentationTests(unittest.TestCase):
             self.assertEqual(ledger.stat().st_mode & 0o777,0o600)
             self.assertEqual(json.loads(ledger.read_text()),[])
 
+    def test_reservation_release_source_defines_without_evaluating_annotations(self):
+        namespace = {}
+        code = compile(sf.RESERVATION_RELEASE_PROGRAM, "<release_program>", "exec")
+        exec(code, namespace)
+        fn = namespace["release_storage_reservation"]
+        self.assertIsInstance(fn.__annotations__["reservation_id"], str)
+        self.assertIsInstance(fn.__annotations__["orphan_target"], str)
+
 
 
 class UnsafeReservationLedgerTests(unittest.TestCase):

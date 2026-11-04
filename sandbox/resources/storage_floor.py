@@ -140,8 +140,8 @@ def _run_probe(remote: dict, request: dict, *, timeout: int) -> dict | None:
     return found[0] if len(found) == 1 else None
 
 
-def release_storage_reservation(store: str, reservation_id: str | None, *,
-                                orphan_target: str | None = None, verify_only: bool = False,
+def release_storage_reservation(store: str, reservation_id: "str | None", *,
+                                orphan_target: "str | None" = None, verify_only: bool = False,
                                 lock_timeout: float = 10) -> None:
     """Atomically release only one owned operation reservation; usable in workers."""
     import fcntl

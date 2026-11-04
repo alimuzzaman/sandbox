@@ -2306,33 +2306,41 @@ Those images still travel inside a transferred full bundle and may be re-importe
 `transferred_bytes` and `transferred_bundles` expose the transport cost.
 
 Legacy workers can leave private `.upload-*.tar` files after a hard kill;
-these legacy names still require operator reconciliation. Protocol23 v2 pushes
-instead retain digest-bound `.resume-*` pairs. Retry the same sealed receipt:
-the worker rehashes its actual prefix, the controller independently verifies it,
-and only the suffix is sent. A corrupt prefix resets; changed receipt/bundle or
-target identity never authorizes append. Full size/hash/fsync still precede load.
+those names still require operator reconciliation. Protocol24 v2 pushes use
+independent 8 MiB chunks instead of a single contiguous prefix. Re-run the same
+sealed-receipt push: verified chunks can be present in any order, corrupt chunks
+are invalidated individually and only missing chunks are sent. The full bundle
+hash is recomputed from ordered chunks before Docker; no second assembled tar
+is written. See [chunk resume and connection costs](../README.md#resuming-an-interrupted-v2-upload).
 
-The engine lease and worker fence cover negotiation and upload. Proven orphan
-reservations are reconciled, then the existing full3x reservation is recreated;
-retained bytes receive no storage credit and can conservatively require up to
-one extra bundle of headroom. Under the worker fence, inactive partials older
-than24h are reaped before admission. During negotiation, superseded same-target
-pairs are removed. Cache count/bytes are bounded; unsafe files, active workers
-and quarantine refuse cleanup. Load uncertainty retains full bytes and quarantine.
-No automatic quarantine reset or storage-floor bypass exists.
+`--upload-streams N` (1–8) defaults to8 for v2; explicit 1 is the serial fallback.
+The pool is bounded, stops scheduling on failure and performs no automatic
+connection/chunk retries. Progress gives stream count, chunks done and aggregate
+decimalMB/s; JSON upload statistics distinguish retained and uploaded bytes.
+The logical `transferred_bytes` compatibility field remains full-bundle bytes.
+No implicit switch to a legacy upload or registry mode occurs.
 
-This resumes bytes after a controller/app restart or connection loss; it does
-not detach the controller or automatically attach an apply job. The existing
-`transferred_bytes` reports logical full-bundle bytes; human progress names the
-verified retained prefix and remaining wire bytes. An old/incorrect upload
-handshake gives `local_images_resume_protocol_unsupported` before archive bytes,
-with no invisible fallback. Legacy v1 keeps its existing path.
+One exclusive worker flock spans coordinator and receivers: same-UID private
+Unix IPC duplicates its open file description via SCM_RIGHTS. Closing/killing
+the coordinator leaves receivers holding the same fence. Receivers do not
+release reservations or unlock that description. Duplicate chunk writers refuse
+under per-chunk locks; finalization waits for every receiver to settle. The
+outer target-engine lease, storage reservation, mode 0400 fence and durable
+quarantine remain. Unknown loads require operator reconciliation, never a force
+retry. Stale >24h plans are reaped under the exclusive fence only with no load
+quarantine or active worker. The full 3x budget remains conservative on retries.
 
-The current checkout speaks protocol23 and has a new runtime fingerprint.
-Runtime adoption and client re-pins require separate owner approval; this change
-installs nothing. A pre-transfer identity revision refusal is retained as
-`remote_runtime_revision_mismatch` with safe registered/controller values, live
-unknown through that error, and a status command instead of `transfer_unknown`.
+The fixed workers use Linux Unix sockets and SCM_RIGHTS; an unavailable or old
+chunk handshake refuses rather than bypassing the fence. At eight data streams,
+up to ten SSH connections (engine lease, coordinator and eight receivers) can
+coexist. MaxStartups/authentication contention, sshd/Python memory, crypto CPU,
+file descriptors and buffers are shared-host rollout concerns. The implementation
+changes no sshd setting and offers explicit serial fallback. No real-host
+throughput or memory headroom is guaranteed by fake tests.
+
+Runtime adoption/re-pin requires separate owner approval; nothing is installed
+by this source change. Pre-transfer identity revision refusal remains
+`remote_runtime_revision_mismatch`, with safe revision values and a status command.
 
 ### V2 reservation lifecycle and quarantine recovery
 
@@ -2363,7 +2371,7 @@ other write access, links and foreign ownership refuse. Release waits up to ten
 seconds for the ledger lock. A tight all-present v2 host can still fail the full
 budget check; select a separately exported v1 receipt for that fallback.
 
-The reservation lifecycle was introduced in protocol17; this checkout requires **protocol23**. Migrate runtimes first using the
+The reservation lifecycle was introduced in protocol17; this checkout requires **protocol 24**. Migrate runtimes first using the
 plan/confirmed migration/status workflow above, then bump client pins. No remote
 migration is performed by this change.
 

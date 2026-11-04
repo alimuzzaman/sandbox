@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from sandbox.core import _remote
-from sandbox.hosting import local_images, resumable_upload
+from sandbox.hosting import local_images, resumable_upload, chunk_upload
 from sandbox.resources.storage_floor import RESERVATION_RELEASE_PROGRAM
 
 _REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -193,6 +193,29 @@ _RESUMABLE_STAGE_PROGRAM = RESERVATION_RELEASE_PROGRAM + resumable_upload.STAGE_
 
 
 def load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: int,
+                 progress=None, cancelled=None, entry: dict | None = None,
+                 reservation_id: str | None = None, on_started=None,
+                 resume_context: dict | None = None, upload_streams: int = 8) -> dict:
+    """V2 uses independent chunks; the legacy path remains for unbound callers."""
+    if type(upload_streams) is not int or not 1 <= upload_streams <= 8:
+        raise RemoteLocalImageError("local_images_upload_streams_invalid", "--upload-streams must be 1–8; default 8, explicit serial fallback 1.")
+    if resume_context is None:
+        return _prefix_load_archive(remote_name, archive, artifact, timeout=timeout, progress=progress,
+            cancelled=cancelled, entry=entry, reservation_id=reservation_id, on_started=on_started)
+    archive = Path(archive)
+    try: info = archive.lstat()
+    except OSError: raise RemoteLocalImageError("local_images_archive_unavailable") from None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
+        raise RemoteLocalImageError("local_images_archive_unsafe")
+    if ("members" not in artifact or reservation_id is None or resume_context.get("bundle_digest") != artifact["archive_sha256"]
+            or resume_context.get("archive_bytes") != artifact["archive_bytes"]):
+        raise RemoteLocalImageError("local_images_receipt_invalid")
+    from sandbox.transports.chunk_local_images import load_chunks
+    return load_chunks(_entry(remote_name) if entry is None else entry, archive, resume_context, reservation_id,
+        timeout=timeout, streams=upload_streams, progress=progress, cancelled=cancelled, on_started=on_started)
+
+
+def _prefix_load_archive(remote_name: str, archive: Path, artifact: dict, *, timeout: int,
                  progress=None, cancelled=None, entry: dict | None = None,
                  reservation_id: str | None = None, on_started=None, resume_context: dict | None = None) -> dict:
     """Verify the complete staged bytes before invoking the fixed Docker load."""
@@ -442,6 +465,8 @@ class _TransferLease:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
 
     def __exit__(self, exc_type, _exc, _traceback):
         lost = self.lost()
@@ -461,7 +486,7 @@ def target_image_lease(remote_name: str, project: str, environment: str,
     return _TransferLease(entry, timeout=timeout)
 
 
-_RECONCILE_PROGRAM = RESERVATION_RELEASE_PROGRAM + resumable_upload.UPLOAD_HELPERS_PROGRAM + r"""
+_RECONCILE_PROGRAM = RESERVATION_RELEASE_PROGRAM + resumable_upload.UPLOAD_HELPERS_PROGRAM + chunk_upload.CLEANUP_PROGRAM + r"""
 import fcntl,json,os,stat,sys
 root,target=sys.argv[1:]
 def done(safe): print(json.dumps({'safe':safe},separators=(',',':')))
@@ -476,6 +501,7 @@ try:
  except BlockingIOError: done(False);sys.exit(0)
  if os.path.lexists(root+'/load-unverified'): done(False);sys.exit(0)
  cleanup_partials(root+'/uploads')
+ cleanup_chunk_plans(root+'/chunks')
  store=os.path.dirname(root)+'/storage'
  if os.path.exists(store): release_storage_reservation(store,None,orphan_target=target)
  done(True)
@@ -582,7 +608,7 @@ def _release_reservation(entry: dict, receipt: dict, reservation_id: str) -> Non
 
 def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: int,
                  artifact_timeout: int, machine_identity: str,
-                 registered_host_digest: str, progress=None,
+                 registered_host_digest: str, progress=None, upload_streams: int | None = None,
                  entry: dict | None = None) -> dict:
     deadline = time.monotonic() + timeout
     wrote = False
@@ -608,6 +634,9 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
 
     receipt, path = local_images.load_receipt(receipt_path_value)
     bundle_receipt = receipt["schema"] == local_images.RECEIPT_SCHEMA_V2
+    streams = (8 if bundle_receipt else 1) if upload_streams is None else upload_streams
+    if type(streams) is not int or not 1 <= streams <= 8 or (not bundle_receipt and streams != 1):
+        raise RemoteLocalImageError("local_images_upload_streams_invalid", "v2 --upload-streams must be 1–8 (default 8); v1 uses 1. Retry explicitly with --upload-streams 1.")
     entry = _entry(remote_name) if entry is None else entry
     try:
         observation = observe(remote_name, receipt, timeout=remaining(120), entry=entry)
@@ -640,6 +669,7 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
             if not daemon_id_before or len(daemon_id_before) > 256:
                 raise RemoteLocalImageError("local_images_daemon_unavailable")
             transferred_bundles, transferred_bytes = [], 0
+            upload_stats = None
             if receipt["schema"] == local_images.RECEIPT_SCHEMA_V2:
                 for key in sorted(receipt["artifacts"]):
                     mismatch, _ = local_images.compare_images(receipt, observation, artifacts={key})
@@ -648,10 +678,10 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
                     for key, bundle in receipt["bundles"].items():
                         local_images.bundle_identities(path.parent / bundle["archive"], receipt["artifacts"])
                         try:
-                            load_archive(remote_name, path.parent / bundle["archive"], bundle,
+                            upload_stats = load_archive(remote_name, path.parent / bundle["archive"], bundle,
                                          timeout=remaining(artifact_timeout), progress=progress,
                                          cancelled=lease.lost, entry=entry, reservation_id=reservation_id,
-                                         on_started=worker_started, resume_context={
+                                         on_started=worker_started, upload_streams=streams, resume_context={
                                              "schema": 1, "machine_identity": machine_identity,
                                              "registered_host_digest": registered_host_digest,
                                              "project": receipt["project"], "environment": receipt["environment"],
@@ -734,4 +764,4 @@ def push_receipt(remote_name: str, receipt_path_value: str | Path, *, timeout: i
     return {"receipt": receipt, "remote_receipt_digest": digest,
             "loaded": loaded, "skipped": skipped, "daemon_identity": engine_id,
             "transferred_bundles": transferred_bundles, "transferred_bytes": transferred_bytes,
-            "reservation_cleanup_pending": cleanup_pending}
+            "reservation_cleanup_pending": cleanup_pending, "upload": upload_stats}

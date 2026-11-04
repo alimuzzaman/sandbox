@@ -29,6 +29,13 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_host_push_local_advertises_bounded_upload_streams(self):
+        result = run_sb("host", "image", "push-local", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--upload-streams", result.stdout)
+        self.assertIn("default 8", result.stdout)
+
+
     def test_test_routing_normalizer_does_not_rewrite_ci_job_named_test(self):
         import sandbox.cli as cli
 

@@ -27,8 +27,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Storage authority capability evaluation never reports `proven` or adoptable until a protected
   writer provides a verified human review. A complete chain, one whose promotion names the requested
   remote, the same binding and both observed revisions and is unexpired and unrevoked, reads
-  `implemented_unproven` with `acceptance_state: complete`. Every named check reads `unknown`, except
-  parity `fail` on drift, and the unobserved identity digests are null. Malformed values and unreadable revocations
+  `implemented_unproven` with `acceptance_state: complete`. On a supported platform every named check
+  reads `unknown`, except parity `fail` on drift, and the unobserved identity digests are null. Malformed values and unreadable revocations
   never count as a chain. Evaluation no longer writes lifecycle state, and unreadable state is refused and left
   in place instead of being reset, which used to erase recorded revocations; the capability check then
   fails with `authority_unavailable`.

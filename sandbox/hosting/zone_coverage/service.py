@@ -42,6 +42,23 @@ def _is_valid_fallback_probe_response(status: int, headers: Any, body: str) -> b
     return status == 404 and hdr_val == "1" and body == fallback.FALLBACK_BODY
 
 
+def _inspect_error_path_call(res: Any, call_name: str) -> str:
+    """Inspect phase or finish call in error path per spec 070 G4/G9."""
+    if isinstance(res, dict):
+        if res.get("refused"):
+            reason = res.get("reason", res["refused"])
+            return f"; store refused {call_name}: {reason}"
+        if res.get("error"):
+            return f"; store {call_name} error: {res['error']}"
+        if res.get("ok") is not True:
+            return f"; store {call_name} failed"
+    elif isinstance(res, Exception):
+        return f"; store {call_name} failed: {type(res).__name__}"
+    elif res is None:
+        return f"; store {call_name} failed"
+    return ""
+
+
 def public_probe(
     zone: str,
     *,
@@ -345,15 +362,25 @@ def enable(
     _check_store_res(begin_res)
     op_id = begin_res["operation_id"]
 
-    # Probe nginx facts to extract host features
+    # Probe nginx facts to extract host features per G8
     try:
         facts = nginx.probe(entry)
-        feat = nginx.features(facts) if facts else {}
-    except Exception:
-        facts = {}
-        feat = plan.get("features") or {}
-    http2_directive = feat.get("http2_directive", True)
-    ipv6 = bool(facts.get("ipv6") or feat.get("ipv6") or entry.get("origin_ipv6"))
+        if not facts:
+            raise FrontDoorError("front_door_nginx_invalid", "nginx probe returned empty facts")
+        feat = nginx.features(facts)
+    except Exception as exc:
+        finish_res = None
+        try:
+            finish_res = store_client.finish(clean_zone, op_id, "incomplete", interrupted_kind="enable")
+        except Exception as fe:
+            finish_res = {"error": str(fe)}
+        err_suffix = _inspect_error_path_call(finish_res, "finish")
+        raise CoverageError(
+            COVERAGE_FALLBACK_UNVERIFIED,
+            f"nginx probe failed: {type(exc).__name__}{err_suffix}",
+        ) from None
+    http2_directive = bool(feat.get("http2_directive"))
+    ipv6 = bool(entry.get("origin_ipv6"))
 
     # Fallback installation phase
     phase_res = store_client.phase(clean_zone, op_id, "fallback_install")

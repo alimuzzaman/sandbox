@@ -6,10 +6,13 @@ from unittest.mock import MagicMock, patch
 from sandbox.hosting.front_door import FrontDoorError, ZONE_COVERAGE
 from sandbox.hosting.zone_coverage import (
     COVERAGE_CONFLICT,
+    COVERAGE_DOCUMENT_CORRUPT,
+    COVERAGE_FALLBACK_UNVERIFIED,
     COVERAGE_OPERATION_ACTIVE,
     COVERAGE_PLAN_STALE,
     COVERAGE_RECORD_EXISTS,
     COVERAGE_SSL_NOT_STRICT,
+    COVERAGE_STORE_UNAVAILABLE,
     CoverageError,
 )
 from sandbox.hosting.zone_coverage.service import (
@@ -122,6 +125,12 @@ class TestZoneCoverageService(unittest.TestCase):
             "front_door": "nginx",
             "origin_ipv4": "198.51.100.1",
         }
+        self._default_probe_patcher = patch(
+            "sandbox.hosting.front_door.nginx.probe",
+            return_value={"config_valid": True, "version": [1, 26, 0]},
+        )
+        self._default_probe_patcher.start()
+        self.addCleanup(self._default_probe_patcher.stop)
 
     def test_f1_phase_and_finish_refusals_stop_work_and_never_return_active(self):
         store = FakeStoreClient()
@@ -732,6 +741,45 @@ class TestZoneCoverageService(unittest.TestCase):
             public_probe("asb.bd", sleep=lambda s: None, opener=FakeOpener(FakeResponse), max_tries=1),
             "public_probe must reject standard responses with non-exact body"
         )
+
+
+    def test_g8_nginx_probe_failure_stops_before_effect_and_no_guessing(self):
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z1",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "*.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+
+        # 1. When nginx.probe fails, stop before any effect, finish incomplete, raise COVERAGE_FALLBACK_UNVERIFIED
+        with patch("sandbox.hosting.front_door.nginx.probe", side_effect=RuntimeError("nginx probe crashed")),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback") as mock_install,              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            try:
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+                self.fail("enable must raise on nginx.probe error")
+            except CoverageError as exc:
+                self.assertEqual(exc.code, COVERAGE_FALLBACK_UNVERIFIED)
+            mock_install.assert_not_called()
+            self.assertEqual(store.doc.get("state"), "incomplete")
+            self.assertEqual(store.doc.get("interrupted_kind"), "enable")
+
+        # 2. When nginx.probe returns empty, stop before any effect, finish incomplete
+        store2 = FakeStoreClient()
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={}),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback") as mock_install,              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            try:
+                enable(self.entry, "asb.bd", plan, store_client=store2, cf_client=cf)
+                self.fail("enable must raise on empty nginx.probe facts")
+            except CoverageError as exc:
+                self.assertEqual(exc.code, COVERAGE_FALLBACK_UNVERIFIED)
+            mock_install.assert_not_called()
+            self.assertEqual(store2.doc.get("state"), "incomplete")
 
 
 if __name__ == "__main__":

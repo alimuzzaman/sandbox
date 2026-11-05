@@ -610,19 +610,37 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                         f_bad = store.finish("matrix.bd", op_id, bad_target)
                         self.assertEqual(f_bad.get("refused"), "coverage_kind_mismatch")
 
-                        # Finish transition validation: valid finish targets succeed
+                        # Finish transition validation: every valid target, each from a
+                        # fresh document and operation, because a finish ends its operation.
                         for good_target in sorted(valid_finishes[kind]):
-                            # Re-read doc and verify state before finish
-                            f_good = store.finish("matrix.bd", op_id, good_target)
+                            if state == "absent":
+                                if os.path.exists(doc_path):
+                                    os.remove(doc_path)
+                            else:
+                                with open(doc_path, "w") as f:
+                                    json.dump(doc, f)
+                            fresh = store.begin("matrix.bd", kind, "tester")
+                            self.assertIsNone(fresh.get("refused"), (state, kind, good_target))
+                            fresh_id = fresh["operation_id"]
+                            self.assertTrue(store.phase("matrix.bd", fresh_id, "preflight").get("ok"))
+                            f_good = store.finish("matrix.bd", fresh_id, good_target)
                             self.assertTrue(f_good.get("ok"))
-                            self.assertEqual(f_good["document"]["state"], good_target)
+                            finished = f_good["document"]
+                            self.assertEqual(finished["state"], good_target)
+                            self.assertIsNone(finished.get("operation"))
 
-                            if kind == "repair" and state == "incomplete_enable":
-                                if good_target == "incomplete":
-                                    self.assertEqual(f_good["document"]["interrupted_kind"], "enable")
-                                else:
-                                    self.assertIsNone(f_good["document"].get("interrupted_kind"))
-                            break
+                            if good_target != "incomplete":
+                                self.assertIsNone(finished.get("interrupted_kind"))
+                                continue
+                            # A failed repair of an interrupted enable keeps enable as the
+                            # kind to retry; any other failure records its own kind.
+                            expected_kind = "enable" if kind == "repair" and state == "incomplete_enable" else kind
+                            self.assertEqual(finished["interrupted_kind"], expected_kind)
+                            # The retry of that kind is allowed, and a read-back still validates.
+                            self.assertEqual(store.read("matrix.bd")["document"]["state"], "incomplete")
+                            retry = store.begin("matrix.bd", expected_kind, "tester")
+                            self.assertIsNone(retry.get("refused"), (state, kind, good_target))
+                            store.finish("matrix.bd", retry["operation_id"], "incomplete")
 
     # 11. Store reads own document in every state after finish
     def test_11_store_reads_own_doc_after_each_finish(self):

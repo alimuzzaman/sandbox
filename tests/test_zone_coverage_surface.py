@@ -20,6 +20,7 @@ import types
 import unittest
 from unittest.mock import patch, MagicMock
 
+import sandbox.commands.remote as remote_cmd
 from sandbox.hosting.front_door import nginx as current_nginx
 from sandbox.hosting.zone_coverage import (
     COVERAGE_FALLBACK_UNVERIFIED,
@@ -377,6 +378,26 @@ exit(0)
             # Summarize reports no certificate problems
             summary = current_nginx.summarize(probe_facts)
             self.assertEqual(summary.get("certificate_problems"), [])
+
+            # The real conflict survives summarize, with no fallback exceptions in it.
+            conflict_files = {row["route_file"] for row in summary["conflicts"]}
+            self.assertEqual(conflict_files, {dup1_file, dup2_file})
+            self.assertTrue(all(row["server_name"] == "dup.other.net" for row in summary["conflicts"]))
+
+            # Edge health follows those facts: unhealthy with the conflict, healthy without.
+            def edge_health(report):
+                ready = dict(report, nginx_active=True, config_valid=True, unloaded_routes=[],
+                             certificate_problems=[])
+                args = types.SimpleNamespace(name="r1", remove_route=None, action="edge")
+                out = io.StringIO()
+                with patch.object(remote_cmd.sr, "get_remote", return_value={"front_door": "nginx"}), \
+                        patch.object(current_nginx, "status", return_value=ready), \
+                        contextlib.redirect_stdout(out):
+                    remote_cmd._cmd_edge(args, as_json=True)
+                return json.loads(out.getvalue())["healthy"]
+
+            self.assertIs(edge_health(summary), False)
+            self.assertIs(edge_health(dict(summary, conflicts=[])), True)
 
             # Overdue fallback certificate reports exact advice
             probe_facts_overdue = {
@@ -877,9 +898,8 @@ http {{
 
     # J14 / K7. Generic error, executed: all paths and methods return generic error via real local nginx
     def test_fallback_all_paths_and_methods_return_generic_error(self):
-        import http.client, shutil, socket, ssl, tempfile, time
+        import http.client, socket
         from sandbox.hosting.zone_coverage.fallback import render_fallback_conf, FALLBACK_BODY
-        from tests.subprocess_support import synthetic_environment
 
         nginx_bin = shutil.which("nginx") or next(
             (p for p in ("/opt/homebrew/bin/nginx", "/usr/local/bin/nginx", "/usr/sbin/nginx")
@@ -887,40 +907,45 @@ http {{
         if not nginx_bin:
             self.skipTest("nginx not installed locally")
 
-        with tempfile.TemporaryDirectory() as td:
-            def get_port():
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("127.0.0.1", 0))
-                    return s.getsockname()[1]
-            h_port = get_port()
-            s_port = get_port()
+        # Registered first so it runs last: nginx stops before its prefix goes away.
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        td = holder.name
 
-            cert_path = os.path.join(td, "cert.pem")
-            key_path = os.path.join(td, "key.pem")
-            subprocess.run([
-                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
-                "-out", cert_path, "-days", "1", "-nodes", "-subj", "/CN=*.asb.bd"
-            ], check=True, capture_output=True, env=synthetic_environment({"HOME": td}))
+        def get_port():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                return s.getsockname()[1]
+        h_port, s_port = get_port(), get_port()
 
-            fb_conf = render_fallback_conf(
-                "asb.bd",
-                cert_path=cert_path,
-                key_path=key_path,
-                http_port=h_port,
-                https_port=s_port,
-                http2_directive=True,
-            )
-            fb_path = os.path.join(td, "fallback.conf")
-            with open(fb_path, "w") as f:
-                f.write(fb_conf)
+        cert_path = os.path.join(td, "cert.pem")
+        key_path = os.path.join(td, "key.pem")
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
+            "-out", cert_path, "-days", "1", "-nodes", "-subj", "/CN=*.asb.bd"
+        ], check=True, capture_output=True, env=synthetic_environment({"HOME": td}))
 
-            nginx_conf = f"""
+        fb_conf = render_fallback_conf(
+            "asb.bd", cert_path=cert_path, key_path=key_path,
+            http_port=h_port, https_port=s_port, http2_directive=True,
+        )
+        # Test-only: keep the listeners on loopback. The rule under test is unchanged.
+        for port in (h_port, s_port):
+            self.assertIn(f"listen {port}", fb_conf)
+            fb_conf = fb_conf.replace(f"listen {port}", f"listen 127.0.0.1:{port}")
+        fb_path = os.path.join(td, "fallback.conf")
+        with open(fb_path, "w") as f:
+            f.write(fb_conf)
+
+        # A decoy default server stands in for a panel site, so a pass proves the fallback
+        # was selected by name rather than being the only server present.
+        main_conf = os.path.join(td, "nginx.conf")
+        with open(main_conf, "w") as f:
+            f.write(f"""
 daemon off;
 error_log {td}/error.log;
 pid {td}/nginx.pid;
-events {{
-    worker_connections 64;
-}}
+events {{ worker_connections 64; }}
 http {{
     access_log {td}/access.log;
     client_body_temp_path {td}/client_body;
@@ -928,74 +953,83 @@ http {{
     fastcgi_temp_path {td}/fastcgi;
     uwsgi_temp_path {td}/uwsgi;
     scgi_temp_path {td}/scgi;
+    server {{
+        listen 127.0.0.1:{h_port} default_server;
+        listen 127.0.0.1:{s_port} ssl default_server;
+        server_name _;
+        ssl_certificate {cert_path};
+        ssl_certificate_key {key_path};
+        return 418 "decoy";
+    }}
     include {fb_path};
 }}
-"""
-            main_conf = os.path.join(td, "nginx.conf")
-            with open(main_conf, "w") as f:
-                f.write(nginx_conf)
+""")
 
-            # Test config
-            t_res = subprocess.run([nginx_bin, "-t", "-c", main_conf, "-p", td], capture_output=True, text=True, env=synthetic_environment({"HOME": td}))
-            self.assertEqual(t_res.returncode, 0, f"nginx -t failed:\n{t_res.stderr}")
+        env = synthetic_environment({"HOME": td})
+        t_res = subprocess.run([nginx_bin, "-t", "-c", main_conf, "-p", td], capture_output=True, text=True, env=env)
+        self.assertEqual(t_res.returncode, 0, f"nginx -t failed:\n{t_res.stderr}")
 
-            proc = subprocess.Popen([nginx_bin, "-c", main_conf, "-p", td], env=synthetic_environment({"HOME": td}))
+        proc = subprocess.Popen([nginx_bin, "-c", main_conf, "-p", td], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            def _cleanup_proc():
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-            self.addCleanup(_cleanup_proc)
+        def _stop():
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        self.addCleanup(_stop)
 
-            # Poll readiness up to 10s before issuing requests
-            deadline = time.time() + 10
-            ready = False
-            while time.time() < deadline:
-                try:
-                    with socket.create_connection(("127.0.0.1", h_port), timeout=0.2):
-                        with socket.create_connection(("127.0.0.1", s_port), timeout=0.2):
-                            ready = True
-                            break
-                except (ConnectionRefusedError, socket.timeout, OSError):
-                    time.sleep(0.05)
-            self.assertTrue(ready, "nginx did not become ready within 10s")
+        deadline = time.time() + 10
+        ready = False
+        while time.time() < deadline and not ready:
+            try:
+                for port in (h_port, s_port):
+                    socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                ready = True
+            except OSError:
+                time.sleep(0.05)
+        self.assertTrue(ready, "nginx did not become ready within 10s")
 
-            methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
-            paths = ["/", "/test", "/path/to/resource.json", "/another/long/path?param=1"]
-            hosts = ["asb.bd", "sub.asb.bd"]
-            schemes = ["http", "https"]
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
 
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
+        def request(scheme, host, method, path):
+            port = h_port if scheme == "http" else s_port
+            raw = socket.create_connection(("127.0.0.1", port), timeout=5)
+            sock = raw if scheme == "http" else ssl_ctx.wrap_socket(raw, server_hostname=host)
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.sock = sock
+            try:
+                body_in = b"payload" if method in ("POST", "PUT", "PATCH") else None
+                conn.request(method, path, body=body_in, headers={"Host": host})
+                resp = conn.getresponse()
+                return resp.status, resp.getheader("X-Sandbox-Fallback"), resp.getheader("X-Robots-Tag"), resp.read()
+            finally:
+                conn.close()
 
-            for scheme in schemes:
-                for host in hosts:
-                    for path in paths:
-                        for m in methods:
-                            if scheme == "http":
-                                conn = http.client.HTTPConnection("127.0.0.1", h_port, timeout=5)
-                            else:
-                                conn = http.client.HTTPSConnection("127.0.0.1", s_port, context=ssl_ctx, timeout=5)
-                            try:
-                                body_in = b"payload" if m in ("POST", "PUT", "PATCH") else None
-                                conn.request(m, path, body=body_in, headers={"Host": host})
-                                resp = conn.getresponse()
-                                self.assertEqual(resp.status, 404, f"{scheme} {host} {m} {path} returned status {resp.status}")
-                                self.assertEqual(resp.getheader("X-Sandbox-Fallback"), "1")
-                                self.assertEqual(resp.getheader("X-Robots-Tag"), "noindex, nofollow")
-                                body_out = resp.read()
-                                if m == "HEAD":
-                                    self.assertEqual(body_out, b"", f"HEAD body not empty on {scheme} {host} {path}")
-                                else:
-                                    self.assertEqual(body_out.decode("utf-8"), FALLBACK_BODY)
-                            finally:
-                                conn.close()
+        methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        paths = ["/", "/robots.txt", "/.well-known/acme-challenge/x", current_nginx.MARKER_PATH]
+        hosts = ["sb-x.asb.bd", "a.b.asb.bd"]
+        for scheme in ("http", "https"):
+            for host in hosts:
+                for path in paths:
+                    for method in methods:
+                        with self.subTest(scheme=scheme, host=host, path=path, method=method):
+                            status, marker, robots, body = request(scheme, host, method, path)
+                            self.assertEqual(status, 404)
+                            self.assertEqual(marker, "1")
+                            self.assertEqual(robots, "noindex, nofollow")
+                            self.assertEqual(body.decode("utf-8"), "" if method == "HEAD" else FALLBACK_BODY)
+
+        # The documented limit: a host outside the zone is not caught, and goes to the default.
+        for scheme in ("http", "https"):
+            with self.subTest(scheme=scheme, host="outside"):
+                status, marker, _, _ = request(scheme, "example.org", "GET", "/")
+                self.assertEqual(status, 418)
+                self.assertIsNone(marker)
 
     def test_subprocess_calls_supply_explicit_env(self):
         import ast

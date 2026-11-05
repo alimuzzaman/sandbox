@@ -124,6 +124,36 @@ class Client:
         path = f"/zones/{zone_id}/dns_records?name={urllib.parse.quote(hostname)}"
         return list(self._request("GET", path).get("result") or [])
 
+    def zone_records(self, zone_id: str, *, per_page: int = 100, max_pages: int = 50) -> list[dict]:
+        """List all DNS records for a zone with pagination, bounded."""
+        records: list[dict] = []
+        page = 1
+        while True:
+            if page > max_pages:
+                raise CloudflareError(
+                    f"Cloudflare zone records exceeded page bound of {max_pages} pages",
+                    "provider_records_bounded",
+                )
+            path = f"/zones/{zone_id}/dns_records?page={page}&per_page={per_page}"
+            data = self._request("GET", path)
+            result = data.get("result")
+            if not isinstance(result, list):
+                raise CloudflareError("Cloudflare returned an invalid DNS record list", "provider_response_invalid")
+            for item in result:
+                if not isinstance(item, dict):
+                    raise CloudflareError("Cloudflare returned an invalid DNS record", "provider_response_invalid")
+            records.extend(result)
+            info = data.get("result_info") or {}
+            total_pages = info.get("total_pages")
+            if total_pages is not None:
+                if page >= total_pages:
+                    break
+            else:
+                if len(result) < per_page:
+                    break
+            page += 1
+        return records
+
     def tunnels(self, account_id: str) -> list[dict]:
         """Return account tunnels for strict attach-only validation."""
         result = self._request("GET", f"/accounts/{account_id}/cfd_tunnel").get("result")

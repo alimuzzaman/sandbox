@@ -444,6 +444,98 @@ class TestZoneCoverageProgram(unittest.TestCase):
         self.assertEqual(proc.returncode, 3)
 
 
+    def test_g1_publish_intent_and_unknown_effects_validation_phase_and_finish(self):
+        zones_dir = os.path.join(self.home, "runtime", "zone-coverage", "zones")
+        os.makedirs(zones_dir, exist_ok=True)
+        doc_path = os.path.join(zones_dir, "asb.bd.json")
+
+        base_valid = {
+            "schema_version": 1,
+            "zone": "asb.bd",
+            "state": "fallback_only",
+            "generation": 0,
+            "dependents_revision": 0,
+            "dependents": {},
+            "history": [],
+        }
+
+        # 1. Validation in load_doc (must be null or list of dicts)
+        invalid_intent_cases = [
+            {"publish_intent": "not-a-list"},
+            {"publish_intent": 123},
+            {"publish_intent": ["string-item"]},
+            {"unknown_effects": "not-a-list"},
+            {"unknown_effects": [123]},
+        ]
+        for extra in invalid_intent_cases:
+            bad = dict(base_valid, **extra)
+            with open(doc_path, "w") as f:
+                json.dump(bad, f)
+            rc, out = _run_program(self.home, {"action": "read", "zone": "asb.bd"})
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.get("refused"), "coverage_document_corrupt", f"Expected corrupt for {extra}")
+
+        # 2. Clean doc and begin operation, phase stores publish_intent and unknown_effects
+        if os.path.exists(doc_path):
+            os.remove(doc_path)
+        rc, out = _run_program(self.home, {"action": "begin", "zone": "asb.bd", "kind": "enable", "controller": "c1"})
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.get("ok"))
+        op_id = out["operation_id"]
+
+        intent = [{"name": "*.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}]
+        effects = [{"name": "*.asb.bd", "action": "create_record"}]
+
+        rc, out = _run_program(self.home, {
+            "action": "phase",
+            "zone": "asb.bd",
+            "operation_id": op_id,
+            "phase": "dns_publish",
+            "updates": {"publish_intent": intent, "unknown_effects": effects},
+        })
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.get("ok"))
+
+        # Verify persisted in doc
+        with open(doc_path) as f:
+            saved = json.load(f)
+        self.assertEqual(saved.get("publish_intent"), intent)
+        self.assertEqual(saved.get("unknown_effects"), effects)
+
+        # 3. Finish incomplete keeps publish_intent
+        rc, out = _run_program(self.home, {
+            "action": "finish",
+            "zone": "asb.bd",
+            "operation_id": op_id,
+            "state": "incomplete",
+            "interrupted_kind": "enable",
+        })
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.get("ok"))
+        with open(doc_path) as f:
+            saved = json.load(f)
+        self.assertEqual(saved.get("publish_intent"), intent, "incomplete finish must preserve publish_intent")
+
+        # 4. Resume and finish active clears publish_intent and unknown_effects
+        rc, out = _run_program(self.home, {"action": "begin", "zone": "asb.bd", "kind": "enable", "controller": "c2", "resume": True})
+        self.assertEqual(rc, 0)
+        op_id2 = out["operation_id"]
+
+        rc, out = _run_program(self.home, {
+            "action": "finish",
+            "zone": "asb.bd",
+            "operation_id": op_id2,
+            "state": "active",
+        })
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.get("ok"))
+        with open(doc_path) as f:
+            saved = json.load(f)
+        self.assertIsNone(saved.get("publish_intent"), "active finish must clear publish_intent")
+        self.assertIsNone(saved.get("unknown_effects"), "active finish must clear unknown_effects")
+
+
+
 class TestZoneCoverageClient(unittest.TestCase):
     def test_fake_ssh_run_success(self):
         def fake_ssh_run(entry, cmd, timeout=15):

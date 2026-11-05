@@ -166,6 +166,12 @@ def load_doc(zone):
     if not isinstance(val.get("history"), list):
         out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_history"})
 
+    for field in ("publish_intent", "unknown_effects"):
+        if field in val and val[field] is not None:
+            items = val[field]
+            if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
+                out({"ok": True, "refused": "coverage_document_corrupt", "reason": f"invalid_{field}"})
+
     return val
 
 def save_doc(zone, doc):
@@ -248,6 +254,8 @@ elif action == "begin":
             "shared_records": [],
             "fallback": None,
             "exceptions": [],
+            "publish_intent": None,
+            "unknown_effects": None,
             "dependents": request.get("dependents") or {},
             "dependents_revision": 0,
             "history": [],
@@ -333,7 +341,7 @@ elif action == "phase":
 
     cur_op["lease_expires_at"] = now + LEASE_SECONDS
     cur_op["phase"] = phase_name
-    for k in ("fallback", "shared_records", "exceptions", "zone_id"):
+    for k in ("fallback", "shared_records", "exceptions", "zone_id", "publish_intent", "unknown_effects"):
         if k in updates:
             doc[k] = updates[k]
 
@@ -362,6 +370,8 @@ elif action == "finish":
             doc["unknown_effects"] = request["unknown_effects"]
     else:
         doc["interrupted_kind"] = None
+        doc["publish_intent"] = None
+        doc["unknown_effects"] = None
 
     if raise_gen:
         doc["generation"] = doc.get("generation", 0) + 1

@@ -78,6 +78,9 @@ class FakeStoreClient:
             self.doc["unknown_effects"] = unknown_effects
         if raise_generation:
             self.doc["generation"] = self.doc.get("generation", 0) + 1
+        if state in ("active", "fallback_only"):
+            self.doc["publish_intent"] = None
+            self.doc["unknown_effects"] = None
         return {"ok": True, "action": "finish", "document": self.doc}
 
 
@@ -107,7 +110,8 @@ class FakeCfClient:
         return list(self._records)
 
     def upsert_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True):
-        rec = {"id": f"rec-{len(self._records)+1}", "name": hostname, "type": "A", "content": address, "proxied": proxied}
+        rec_type = "AAAA" if ":" in address else "A"
+        rec = {"id": f"rec-{len(self._records)+1}", "name": hostname, "type": rec_type, "content": address, "proxied": proxied}
         self._records.append(rec)
         self.created_records.append(rec)
         return rec
@@ -780,6 +784,241 @@ class TestZoneCoverageService(unittest.TestCase):
                 self.assertEqual(exc.code, COVERAGE_FALLBACK_UNVERIFIED)
             mock_install.assert_not_called()
             self.assertEqual(store2.doc.get("state"), "incomplete")
+
+
+
+    def test_crash_after_each_write_then_resume_no_duplicate(self):
+        entry = dict(self.entry, origin_ipv6="2001:db8::1")
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan1 = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf)
+        self.assertEqual(len(plan1["records_to_create"]), 2)
+
+        # Simulate crash on second write during enable
+        orig_upsert = cf.upsert_address
+        calls = 0
+        def fail_second_upsert(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("simulated provider crash on 2nd write")
+            return orig_upsert(*args, **kwargs)
+
+        with patch.object(cf, "upsert_address", side_effect=fail_second_upsert),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
+            try:
+                enable(entry, "asb.bd", plan1, store_client=store, cf_client=cf)
+            except Exception:
+                pass
+
+        self.assertEqual(store.doc.get("state"), "incomplete")
+        self.assertIsNotNone(store.doc.get("publish_intent"))
+        self.assertEqual(len(cf.created_records), 1)
+
+        # Resume plan: first record is recognized as owned from prior attempt, NOT re-created
+        plan2 = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf, resume=True)
+        self.assertEqual(len(plan2.get("records_owned_from_prior_attempt", [])), 1)
+        self.assertEqual(len(plan2["records_to_create"]), 1)
+        self.assertEqual(len(plan2["records_to_adopt"]), 0)
+
+        # Resume enable completes without duplicate
+        cf.created_records.clear()
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback"),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            res = enable(entry, "asb.bd", plan2, store_client=store, cf_client=cf, resume=True)
+            self.assertEqual(res["state"], "active")
+            # Exactly 1 new record was written (the 2nd one), no duplicate of the 1st
+            self.assertEqual(len(cf.created_records), 1)
+            self.assertEqual(len(res["shared_records"]), 2)
+
+    def test_resume_then_probe_failure_removes_own_records(self):
+        entry = dict(self.entry, origin_ipv6="2001:db8::1")
+        # Setup incomplete doc with publish_intent and 1 pre-existing record on CF matching intent
+        rec1 = {"id": "r1", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}
+        cf = FakeCfClient(records=[rec1])
+        store = FakeStoreClient(doc={
+            "schema_version": 1,
+            "zone": "asb.bd",
+            "state": "incomplete",
+            "generation": 0,
+            "publish_intent": [
+                {"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True},
+                {"name": "*.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True},
+            ],
+            "shared_records": [],
+            "dependents": {},
+            "dependents_revision": 0,
+            "history": [],
+        })
+
+        plan = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf, resume=True)
+        self.assertEqual(len(plan["records_owned_from_prior_attempt"]), 1)
+        self.assertEqual(len(plan["records_to_create"]), 1)
+
+        # Probe fails: rollback must remove BOTH records (the owned one and the newly created one)
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback"),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError) as ctx:
+                enable(entry, "asb.bd", plan, store_client=store, cf_client=cf, resume=True)
+            self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
+
+        # Both records deleted from CF
+        self.assertEqual(len(cf.records("z-test", "*.asb.bd")), 0)
+        self.assertIn("r1", cf.deleted_records)
+        self.assertEqual(store.doc.get("state"), "fallback_only")
+
+    def test_rollback_keeps_record_changed_out_of_band(self):
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+
+        # Tamper record right before probe
+        orig_public_probe = False
+        def probe_and_tamper(zone):
+            # Change record content out-of-band on CF
+            for r in cf._records:
+                if r["name"] == "*.asb.bd":
+                    r["content"] = "9.9.9.9"
+            return False
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback"),              patch("sandbox.hosting.zone_coverage.service.public_probe", side_effect=probe_and_tamper):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+
+        # Modified record was NOT deleted
+        recs = cf.records("z-test", "*.asb.bd")
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["content"], "9.9.9.9")
+        self.assertEqual(store.doc.get("state"), "incomplete")
+        effects = store.doc.get("unknown_effects") or []
+        self.assertTrue(any(e.get("reason") == "record_modified_out_of_band" for e in effects))
+
+    def test_rollback_never_deletes_adopted_record(self):
+        store = FakeStoreClient()
+        adopted = {"id": "r-adopt", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}
+        cf = FakeCfClient(records=[adopted])
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "sub.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}],
+            "records_to_adopt": [adopted],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback"),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+
+        # Adopted record is NEVER deleted
+        self.assertNotIn("r-adopt", cf.deleted_records)
+        self.assertEqual(len(cf.records("z-test", "*.asb.bd")), 1)
+
+    def test_write_exception_records_inflight_name(self):
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+
+        with patch.object(cf, "upsert_address", side_effect=RuntimeError("CF write failed")),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+
+        self.assertEqual(store.doc.get("state"), "incomplete")
+        effects = store.doc.get("unknown_effects") or []
+        names = [e.get("name") for e in effects]
+        self.assertIn("*.asb.bd", names)
+
+    def test_store_failure_during_unknown_effects_reported(self):
+        store = FakeStoreClient()
+        store.finish_refusal = "coverage_store_unavailable"
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+
+        with patch.object(cf, "upsert_address", side_effect=RuntimeError("CF network error")),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
+            with self.assertRaises(CoverageError) as ctx:
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            self.assertIn("store was not updated with unknown effects", str(ctx.exception))
+
+    def test_digest_stable_across_resume(self):
+        from sandbox.hosting.zone_coverage.service import compute_plan_digest
+        p1 = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "dependents": {},
+            "exceptions": [],
+            "blockers": [],
+            "records_to_create": [{"name": "b.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
+            "records_to_adopt": [],
+            "records_owned_from_prior_attempt": [{"id": "r1", "name": "a.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
+        }
+        p2 = dict(p1)
+        # Identical plan reproduces exact same digest
+        self.assertEqual(compute_plan_digest(p1), compute_plan_digest(p2))
+
+        # Changing records_owned_from_prior_attempt alters the digest
+        p3 = dict(p1, records_owned_from_prior_attempt=[])
+        self.assertNotEqual(compute_plan_digest(p1), compute_plan_digest(p3))
+
+
+    def test_g5_dual_stack_differing_records_block_and_matching_adopted(self):
+        entry = dict(self.entry, origin_ipv6="2001:db8::1")
+        store = FakeStoreClient()
+
+        # Differing AAAA blocks with COVERAGE_RECORD_EXISTS
+        cf_diff = FakeCfClient(records=[
+            {"id": "r1", "name": "*.asb.bd", "type": "AAAA", "content": "2001:db8::999", "proxied": True},
+        ])
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={"config_valid": True}),              patch("sandbox.hosting.front_door.nginx.parse_server_names", return_value=[]):
+            with self.assertRaises(CoverageError) as ctx:
+                plan_enable(entry, "asb.bd", store_client=store, cf_client=cf_diff)
+            self.assertEqual(ctx.exception.code, COVERAGE_RECORD_EXISTS)
+
+        # Matching AAAA is adopted
+        cf_match = FakeCfClient(records=[
+            {"id": "r-aaaa", "name": "*.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True},
+        ])
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={"config_valid": True}),              patch("sandbox.hosting.front_door.nginx.parse_server_names", return_value=[]):
+            plan = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf_match)
+            self.assertEqual(len(plan["records_to_adopt"]), 1)
+            self.assertEqual(plan["records_to_adopt"][0]["id"], "r-aaaa")
+            self.assertEqual(len(plan["records_to_create"]), 1)
+            self.assertEqual(plan["records_to_create"][0]["type"], "A")
 
 
 if __name__ == "__main__":

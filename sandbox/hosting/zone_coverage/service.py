@@ -115,6 +115,7 @@ def plan_enable(
     entry: dict[str, Any],
     zone: str,
     *,
+    resume: bool = False,
     cf_client: Any = None,
     store_client: Any = None,
 ) -> dict[str, Any]:
@@ -226,38 +227,92 @@ def plan_enable(
     if not target_ip:
         raise CoverageError(COVERAGE_ZONE_UNAVAILABLE, "remote entry has no origin_ipv4 configured")
 
-    try:
-        existing_records = cf_client.records(zone_id, f"*.{clean_zone}")
-    except Exception:
-        raise CoverageError(COVERAGE_STORE_UNAVAILABLE, "failed to read DNS records from Cloudflare") from None
-
     wanted_name = f"*.{clean_zone}"
-    records_to_create = []
-    records_to_adopt = []
-
-    if existing_records:
-        for r in existing_records:
-            if r.get("type") == "A":
-                if r.get("content") == target_ip and r.get("proxied") is True:
-                    records_to_adopt.append(r)
-                else:
-                    raise CoverageError(
-                        COVERAGE_RECORD_EXISTS,
-                        f"existing {wanted_name} record differs: content={r.get('content')}, proxied={r.get('proxied')}",
-                    )
-            elif r.get("type") in ("CNAME", "AAAA"):
-                raise CoverageError(
-                    COVERAGE_RECORD_EXISTS,
-                    f"existing {wanted_name} record has conflicting type {r.get('type')}",
-                )
-
-    if not records_to_adopt:
-        records_to_create.append({
+    needed_records = [
+        {
             "name": wanted_name,
             "type": "A",
             "content": target_ip,
             "proxied": True,
+        }
+    ]
+    origin_ipv6 = entry.get("origin_ipv6")
+    if origin_ipv6:
+        needed_records.append({
+            "name": wanted_name,
+            "type": "AAAA",
+            "content": origin_ipv6,
+            "proxied": True,
         })
+
+    try:
+        existing_records = cf_client.records(zone_id, wanted_name)
+    except Exception:
+        raise CoverageError(COVERAGE_STORE_UNAVAILABLE, "failed to read DNS records from Cloudflare") from None
+
+    stored_intent = (doc.get("publish_intent") if doc else None) or []
+    is_resume_context = resume or (doc is not None and doc.get("state") == "incomplete" and bool(stored_intent))
+
+    records_to_create = []
+    records_to_adopt = []
+    records_owned_from_prior_attempt = []
+
+    existing_by_type: dict[str, list[dict]] = {}
+    for r in existing_records:
+        existing_by_type.setdefault(r.get("type", "A"), []).append(r)
+
+    if "CNAME" in existing_by_type:
+        raise CoverageError(
+            COVERAGE_RECORD_EXISTS,
+            f"existing {wanted_name} record has conflicting type CNAME",
+        )
+
+    if not origin_ipv6 and "AAAA" in existing_by_type:
+        raise CoverageError(
+            COVERAGE_RECORD_EXISTS,
+            f"existing {wanted_name} record has conflicting type AAAA",
+        )
+
+    for cand in needed_records:
+        rtype = cand["type"]
+        cand_content = cand["content"]
+        cand_proxied = cand["proxied"]
+
+        in_intent = False
+        if is_resume_context and stored_intent:
+            for pi in stored_intent:
+                if (
+                    pi.get("name") == cand["name"]
+                    and pi.get("type", "A") == rtype
+                    and pi.get("content") == cand_content
+                    and bool(pi.get("proxied", True)) == cand_proxied
+                ):
+                    in_intent = True
+                    break
+
+        recs_of_type = existing_by_type.get(rtype, [])
+        if recs_of_type:
+            exact_match = None
+            differing = None
+            for er in recs_of_type:
+                if er.get("content") == cand_content and bool(er.get("proxied", True)) == cand_proxied:
+                    exact_match = er
+                    break
+                else:
+                    differing = er
+            if exact_match:
+                if in_intent:
+                    records_owned_from_prior_attempt.append(exact_match)
+                else:
+                    records_to_adopt.append(exact_match)
+            else:
+                diff_rec = differing or recs_of_type[0]
+                raise CoverageError(
+                    COVERAGE_RECORD_EXISTS,
+                    f"existing {wanted_name} record differs: content={diff_rec.get('content')}, proxied={diff_rec.get('proxied')}",
+                )
+        else:
+            records_to_create.append(cand)
 
     dependents: dict[str, Any] = dict(doc.get("dependents", {})) if doc else {}
     if records_to_adopt:
@@ -285,6 +340,7 @@ def plan_enable(
         "expected_dependents_revision": cur_dep_rev,
         "records_to_create": records_to_create,
         "records_to_adopt": records_to_adopt,
+        "records_owned_from_prior_attempt": records_owned_from_prior_attempt,
         "exceptions": exceptions,
         "blockers": blockers,
         "dependents": dependents,
@@ -310,6 +366,7 @@ def compute_plan_digest(plan: dict[str, Any]) -> str:
         "blockers": plan.get("blockers", []),
         "records_to_create": plan.get("records_to_create", []),
         "records_to_adopt": plan.get("records_to_adopt", []),
+        "records_owned_from_prior_attempt": plan.get("records_owned_from_prior_attempt", []),
     }
     raw = json.dumps(content, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -413,31 +470,53 @@ def enable(
     # DNS publish phase
     phase_res = store_client.phase(clean_zone, op_id, "dns_publish")
     _check_store_res(phase_res)
-    records_written = []
-    shared_records = []
+
+    # Durable publish intent before any provider write per G1
+    publish_intent = [
+        {
+            "name": r["name"],
+            "type": r.get("type", "A"),
+            "content": r["content"],
+            "proxied": bool(r.get("proxied", True)),
+        }
+        for r in (plan.get("records_to_create", []) + plan.get("records_owned_from_prior_attempt", []))
+    ]
+    phase_res = store_client.phase(
+        clean_zone,
+        op_id,
+        "publish_intent",
+        updates={"publish_intent": publish_intent},
+    )
+    _check_store_res(phase_res)
+
+    records_written = list(plan.get("records_owned_from_prior_attempt", []))
+    shared_records = list(plan.get("records_owned_from_prior_attempt", []))
     try:
         for r in plan.get("records_to_create", []):
+            in_flight = r
             exact_records = cf_client.records(plan["zone_id"], hostname=r["name"])
             already_equal = None
             for existing in exact_records:
                 if (
                     existing.get("type") == r.get("type", "A")
                     and existing.get("content") == r["content"]
-                    and existing.get("proxied") == r.get("proxied", True)
+                    and bool(existing.get("proxied", True)) == bool(r.get("proxied", True))
                 ):
                     already_equal = existing
                     break
-                elif existing.get("type") in ("A", "CNAME", "AAAA"):
+                elif existing.get("type") == r.get("type", "A"):
                     raise CoverageError(
                         COVERAGE_RECORD_EXISTS,
                         f"record {r['name']} already exists in Cloudflare with differing value",
                     )
             if already_equal:
+                if already_equal not in records_written:
+                    records_written.append(already_equal)
                 shared_records.append({
                     "id": already_equal["id"],
                     "type": already_equal.get("type", "A"),
                     "content": already_equal.get("content", r["content"]),
-                    "proxied": already_equal.get("proxied", True),
+                    "proxied": bool(already_equal.get("proxied", True)),
                 })
             else:
                 created = cf_client.upsert_address(
@@ -446,15 +525,17 @@ def enable(
                     r["content"],
                     proxied=r.get("proxied", True),
                 )
-                records_written.append({
+                rec_entry = {
                     "id": created["id"],
                     "name": r["name"],
                     "content": r["content"],
-                    "type": created.get("type", "A"),
-                })
+                    "type": created.get("type", r.get("type", "A")),
+                    "proxied": r.get("proxied", True),
+                }
+                records_written.append(rec_entry)
                 shared_records.append({
                     "id": created["id"],
-                    "type": created.get("type", "A"),
+                    "type": created.get("type", r.get("type", "A")),
                     "content": created.get("content", r["content"]),
                     "proxied": created.get("proxied", True),
                 })
@@ -473,23 +554,50 @@ def enable(
         )
         _check_store_res(phase_res)
     except CoverageError:
-        store_client.finish(clean_zone, op_id, "incomplete", interrupted_kind="enable")
-        raise
-    except Exception:
-        unknown_names = [rw["name"] for rw in records_written]
-        unknown_effects = [{"action": "create_record", "name": name} for name in unknown_names]
+        finish_res = None
         try:
-            store_client.phase(clean_zone, op_id, "dns_publish_failed", updates={"unknown_effects": unknown_effects})
+            finish_res = store_client.finish(clean_zone, op_id, "incomplete", interrupted_kind="enable")
+        except Exception as fe:
+            finish_res = {"error": str(fe)}
+        err_suffix = _inspect_error_path_call(finish_res, "finish")
+        raise
+    except Exception as exc:
+        unknown_names = [rw["name"] for rw in records_written]
+        if "in_flight" in locals() and in_flight["name"] not in unknown_names:
+            unknown_names.append(in_flight["name"])
+        unknown_effects = [
+            {"action": "create_record", "name": name} for name in unknown_names
+        ]
+        store_failed = False
+        try:
+            p_res = store_client.phase(
+                clean_zone,
+                op_id,
+                "dns_publish_failed",
+                updates={"unknown_effects": unknown_effects},
+            )
+            if not p_res or p_res.get("refused") or not p_res.get("ok"):
+                store_failed = True
         except Exception:
-            pass
-        store_client.finish(
-            clean_zone,
-            op_id,
-            "incomplete",
-            interrupted_kind="enable",
-            unknown_effects=unknown_effects,
-        )
-        raise CoverageError(COVERAGE_STORE_UNAVAILABLE, "failed during DNS record write loop") from None
+            store_failed = True
+
+        try:
+            f_res = store_client.finish(
+                clean_zone,
+                op_id,
+                "incomplete",
+                interrupted_kind="enable",
+                unknown_effects=unknown_effects,
+            )
+            if not f_res or f_res.get("refused") or not f_res.get("ok"):
+                store_failed = True
+        except Exception:
+            store_failed = True
+
+        msg = f"failed during DNS record write loop: {type(exc).__name__}"
+        if store_failed:
+            msg += "; store was not updated with unknown effects"
+        raise CoverageError(COVERAGE_STORE_UNAVAILABLE, msg) from None
 
     # Public probe check
     if probe_func is not None:
@@ -498,39 +606,80 @@ def enable(
         probe_ok = public_probe(clean_zone)
 
     if not probe_ok:
-        kept_records = []
-        delete_failures = []
-        for wr in records_written:
-            try:
-                curr_list = cf_client.records(plan["zone_id"], hostname=wr["name"])
-                matched = next((x for x in curr_list if x.get("id") == wr["id"]), None)
-                if matched and matched.get("content") == wr["content"]:
-                    cf_client.delete_record(plan["zone_id"], wr["id"])
-                else:
-                    kept_records.append({"id": wr["id"], "name": wr["name"], "reason": "record_modified_or_missing"})
-            except Exception:
-                delete_failures.append({"id": wr["id"], "name": wr["name"], "action": "delete_record"})
+        unknown_effects = []
+        intent_names = {pi["name"] for pi in publish_intent}
+        adopted_ids = {r["id"] for r in plan.get("records_to_adopt", []) if "id" in r}
 
-        if not kept_records and not delete_failures:
-            finish_res = store_client.finish(clean_zone, op_id, "fallback_only")
-            _check_store_res(finish_res)
+        provider_records = []
+        for n in intent_names:
+            try:
+                provider_records.extend(cf_client.records(plan["zone_id"], hostname=n))
+            except Exception as re:
+                unknown_effects.append({"name": n, "reason": f"record_list_failed: {type(re).__name__}"})
+
+        for pr in provider_records:
+            pr_id = pr.get("id")
+            if pr_id in adopted_ids:
+                continue
+
+            matching_intent = next(
+                (
+                    pi for pi in publish_intent
+                    if pi["name"] == pr.get("name") and pi.get("type", "A") == pr.get("type", "A")
+                ),
+                None,
+            )
+            if matching_intent:
+                same_content = pr.get("content") == matching_intent.get("content")
+                same_proxied = bool(pr.get("proxied", True)) == bool(matching_intent.get("proxied", True))
+                if same_content and same_proxied:
+                    try:
+                        cf_client.delete_record(plan["zone_id"], pr_id)
+                    except Exception as de:
+                        unknown_effects.append({
+                            "id": pr_id,
+                            "name": pr.get("name"),
+                            "reason": f"delete_failed: {type(de).__name__}",
+                        })
+                else:
+                    unknown_effects.append({
+                        "id": pr_id,
+                        "name": pr.get("name"),
+                        "reason": "record_modified_out_of_band",
+                    })
+
+        store_failed = False
+        if not unknown_effects:
+            finish_res = None
+            try:
+                finish_res = store_client.finish(clean_zone, op_id, "fallback_only")
+                if not finish_res or finish_res.get("refused") or not finish_res.get("ok"):
+                    store_failed = True
+            except Exception:
+                store_failed = True
+            err_suffix = "; store was not updated with unknown effects" if store_failed else ""
             raise CoverageError(
                 COVERAGE_FALLBACK_UNVERIFIED,
-                "public edge probe failed to reach fallback route; rolled back created DNS records to fallback_only",
+                f"public edge probe failed to reach fallback route; rolled back created DNS records to fallback_only{err_suffix}",
             )
         else:
-            effects = kept_records + delete_failures
-            finish_res = store_client.finish(
-                clean_zone,
-                op_id,
-                "incomplete",
-                interrupted_kind="enable",
-                unknown_effects=effects,
-            )
-            _check_store_res(finish_res)
+            finish_res = None
+            try:
+                finish_res = store_client.finish(
+                    clean_zone,
+                    op_id,
+                    "incomplete",
+                    interrupted_kind="enable",
+                    unknown_effects=unknown_effects,
+                )
+                if not finish_res or finish_res.get("refused") or not finish_res.get("ok"):
+                    store_failed = True
+            except Exception:
+                store_failed = True
+            err_suffix = "; store was not updated with unknown effects" if store_failed else ""
             raise CoverageError(
                 COVERAGE_FALLBACK_UNVERIFIED,
-                f"public edge probe failed and record rollback could not clean all records (kept: {len(effects)})",
+                f"public edge probe failed and rollback had unknown effects: {unknown_effects}{err_suffix}",
             )
 
     phase_res = store_client.phase(clean_zone, op_id, "edge_verified")

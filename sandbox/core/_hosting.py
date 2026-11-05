@@ -651,6 +651,10 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
             "Cloudflare must use either proxied Origin CA with strict SSL "
             "or DNS-only public ACME"
         )
+    cf_dns = cf.get("dns")
+    if cf_dns is not None:
+        if cf_dns not in {"auto", "exact"}:
+            raise HostingError("cloudflare.dns must be auto or exact")
     if public_acme and any(route["hostname"].startswith("*.") for route in routes):
         raise HostingError("public ACME does not support wildcard routes without a DNS challenge")
     basic_auth = _basic_auth(env)
@@ -1052,9 +1056,12 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
 def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | None = None) -> dict:
     addresses = [a for a in [origin_ipv4, origin_ipv6] if a]
     proxied = validated["cloudflare"]["proxied"]
-    records = [{"hostname": r["hostname"], "address": a, "proxied": proxied,
-                "mode": r["mode"], "target": r.get("target")}
-               for r in validated["routes"] for a in addresses]
+    if (validated.get("dns_coverage") or {}).get("mode") == "shared":
+        records = []
+    else:
+        records = [{"hostname": r["hostname"], "address": a, "proxied": proxied,
+                    "mode": r["mode"], "target": r.get("target")}
+                   for r in validated["routes"] for a in addresses]
     return {"project": validated["project"], "environment": validated["environment"],
             "warnings": _fingerprint_warnings(validated["deploy"], validated["secrets"]),
             "routes": validated["routes"], "records": records,

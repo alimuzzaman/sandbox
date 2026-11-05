@@ -63,8 +63,9 @@ class FrontDoorManifestTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "front_door_unknown")
 
     def test_caddy_keeps_every_surface(self):
-        for capability in (front_door.HOST_ROUTES, front_door.CONTROL_ROUTE,
-                           front_door.INSTANCE_ROUTES, front_door.PREVIEW_ROUTES):
+        for capability in front_door.CAPABILITIES:
+            if capability == front_door.ZONE_COVERAGE:
+                continue
             self.assertEqual(front_door.require_capability({}, capability), "caddy")
         with self.assertRaises(front_door.FrontDoorError) as ctx:
             front_door.require_capability({}, front_door.ZONE_COVERAGE)
@@ -573,7 +574,7 @@ class ProvisionPreflightTests(unittest.TestCase):
         self.assertTrue(res["routes"][0]["coverage_fallback"])
         self.assertFalse(res["routes"][1]["coverage_fallback"])
         self.assertEqual(len(res["certificate_problems"]), 1)
-        self.assertIn("sb remote coverage --renew-certificate", res["certificate_problems"][0])
+        self.assertIn("renewing a fallback certificate is not available yet", res["certificate_problems"][0])
 
 
 if __name__ == "__main__":

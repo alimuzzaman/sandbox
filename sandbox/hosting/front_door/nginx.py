@@ -988,7 +988,7 @@ def summarize(facts: dict) -> dict:
                 problems.append(f"{row['file']}: certificate expired {cert.get('not_after')}")
             elif cert.get("renewal_overdue"):
                 if is_coverage_fallback_file(row.get("file", "")):
-                    action = "run `sb remote coverage --renew-certificate` to reissue"
+                    action = "renewing a fallback certificate is not available yet"
                 else:
                     action = ("renewal has not succeeded" if cert.get("issuer") == "public"
                               else "re-apply to reissue the Origin CA certificate")

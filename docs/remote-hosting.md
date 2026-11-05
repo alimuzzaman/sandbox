@@ -1131,7 +1131,6 @@ Limits:
 - A request whose host is outside every covered zone behaves as it does today, and may reach another site on the server.
 - A covered name is not published in DNS, but it is not secret: Cloudflare, the server and anyone with the URL can see it. A private site still needs Basic Auth.
 - Sites still differ from unknown names at HTTP. Coverage does not prevent enumeration.
-
 **Limitations.** The nginx front door serves `sb host` routes and the HTTPS MCP control
 route only. `sb deploy --expose`, instance aliases and `sb preview` refuse before any side
 effect with `front_door_capability_unavailable`. Use a Caddy remote for those.

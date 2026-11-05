@@ -1516,7 +1516,7 @@ def _cmd_edge(args, as_json: bool) -> None:
         return
     if route:
         if route.startswith("coverage-") or nginx_edge.is_coverage_fallback_file(nginx_edge.route_file(route)):
-            die("refusing to remove coverage fallback route via --remove-route; use `sb remote coverage --remove-fallback`")
+            die("this route is the zone coverage fallback; removing it is not available yet")
         if not _arg_true(args, "confirm"):
             die("removing a Sandbox nginx route is protected; re-run with --confirm")
         try:

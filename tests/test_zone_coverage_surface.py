@@ -846,7 +846,9 @@ http {{
         from sandbox.hosting.zone_coverage.fallback import render_fallback_conf, FALLBACK_BODY
         from tests.subprocess_support import synthetic_environment
 
-        nginx_bin = shutil.which("nginx")
+        nginx_bin = shutil.which("nginx") or next(
+            (p for p in ("/opt/homebrew/bin/nginx", "/usr/local/bin/nginx", "/usr/sbin/nginx")
+             if os.path.exists(p)), None)
         if not nginx_bin:
             self.skipTest("nginx not installed locally")
 

@@ -72,5 +72,41 @@ class TestCloudflareZoneRecords(unittest.TestCase):
                 client.zone_records("zone123")
 
 
+    def test_create_address_post_only(self):
+        client = Client(token="fake-token")
+        with patch.object(client, "_request", return_value={"result": {"id": "rec-new"}}) as mock_req:
+            res = client.create_address("z1", "*.example.com", "1.2.3.4", proxied=True, comment="sandbox-zone-coverage 1234567890abcdef")
+            self.assertEqual(res["id"], "rec-new")
+            mock_req.assert_called_once_with(
+                "POST",
+                "/zones/z1/dns_records",
+                {
+                    "type": "A",
+                    "name": "*.example.com",
+                    "content": "1.2.3.4",
+                    "proxied": True,
+                    "ttl": 1,
+                    "comment": "sandbox-zone-coverage 1234567890abcdef",
+                }
+            )
+
+    def test_create_address_ipv6_unproxied(self):
+        client = Client(token="fake-token")
+        with patch.object(client, "_request", return_value={"result": {"id": "rec-6"}}) as mock_req:
+            res = client.create_address("z1", "*.example.com", "2001:db8::1", proxied=False, comment="sandbox-zone-coverage 1234567890abcdef")
+            self.assertEqual(res["id"], "rec-6")
+            mock_req.assert_called_once_with(
+                "POST",
+                "/zones/z1/dns_records",
+                {
+                    "type": "AAAA",
+                    "name": "*.example.com",
+                    "content": "2001:db8::1",
+                    "proxied": False,
+                    "ttl": 60,
+                    "comment": "sandbox-zone-coverage 1234567890abcdef",
+                }
+            )
+
 if __name__ == "__main__":
     unittest.main()

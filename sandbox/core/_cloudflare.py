@@ -168,6 +168,18 @@ class Client:
             raise CloudflareError("Cloudflare Access application list returned an invalid response")
         return result
 
+    def create_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True, comment: str = "") -> dict:
+        record_type = "AAAA" if ":" in address else "A"
+        body = {
+            "type": record_type,
+            "name": hostname,
+            "content": address,
+            "proxied": bool(proxied),
+            "ttl": 1 if proxied else DNS_ONLY_TTL_SECONDS,
+            "comment": comment,
+        }
+        return self._request("POST", f"/zones/{zone_id}/dns_records", body)["result"]
+
     def upsert_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True) -> dict:
         record_type = "AAAA" if ":" in address else "A"
         existing = [r for r in self.records(zone_id, hostname) if r.get("type") == record_type]

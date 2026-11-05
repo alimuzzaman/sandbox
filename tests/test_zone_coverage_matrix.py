@@ -632,9 +632,9 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                             if good_target != "incomplete":
                                 self.assertIsNone(finished.get("interrupted_kind"))
                                 continue
-                            # A failed repair of an interrupted enable keeps enable as the
-                            # kind to retry; any other failure records its own kind.
-                            expected_kind = "enable" if kind == "repair" and state == "incomplete_enable" else kind
+                            # data-model.md: a failed repair ends in incomplete(enable), and any
+                            # other failure records its own kind. Each must stay retryable.
+                            expected_kind = "enable" if kind == "repair" else kind
                             self.assertEqual(finished["interrupted_kind"], expected_kind)
                             # The retry of that kind is allowed, and a read-back still validates.
                             self.assertEqual(store.read("matrix.bd")["document"]["state"], "incomplete")

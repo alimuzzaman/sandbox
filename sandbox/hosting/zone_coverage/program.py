@@ -324,7 +324,7 @@ elif action == "begin":
             out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": cur_state, "requested_kind": kind})
         new_state = "disabling"
     elif kind == "remove-fallback":
-        if cur_state not in ("disabled", "fallback_only"):
+        if cur_state not in ("disabled", "fallback_only", "incomplete"):
             out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": cur_state, "requested_kind": kind})
         new_state = cur_state
     elif kind == "repair":

@@ -553,6 +553,7 @@ def enable(
     _check_store_res(phase_res)
 
     records_written = list(plan.get("records_owned_from_prior_attempt", []))
+    records_adopted = list(plan.get("records_to_adopt", []))
     shared_records = list(plan.get("records_owned_from_prior_attempt", []))
     try:
         for r in plan.get("records_to_create", []):
@@ -593,6 +594,8 @@ def enable(
                     "proxied": bool(ours.get("proxied", True)),
                 })
             elif adopted:
+                if adopted not in records_adopted:
+                    records_adopted.append(adopted)
                 shared_records.append({
                     "id": adopted["id"],
                     "type": adopted.get("type", rtype),
@@ -691,7 +694,7 @@ def enable(
     if not probe_ok:
         unknown_effects = []
         intent_names = {pi["name"] for pi in publish_intent["records"]}
-        adopted_ids = {r["id"] for r in plan.get("records_to_adopt", []) if "id" in r}
+        adopted_ids = {r["id"] for r in (list(plan.get("records_to_adopt", [])) + records_adopted) if "id" in r}
 
         provider_records = []
         for n in intent_names:
@@ -806,6 +809,8 @@ def enable(
         "state": "active",
         "generation": gen,
         "shared_records": shared_records,
+        "records_written": records_written,
+        "records_adopted": records_adopted,
         "fallback": fallback_meta,
     }
 

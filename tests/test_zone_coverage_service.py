@@ -1237,23 +1237,49 @@ class TestZoneCoverageService(unittest.TestCase):
 
     def test_j13_m07_third_party_record_adopted_never_in_intent_written_and_not_deleted_on_rollback(self):
         store = FakeStoreClient()
-        # Third-party record with same content but NO marker
+        # Case A: Third-party record with same content but NO marker already present at plan time
         cf = FakeCfClient(records=[
             {"id": "r-third", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": "not-our-marker"},
         ])
         plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
-        # Outcome 1: third party equal record appears in adopted list, not owned/create
         self.assertEqual(len(plan["records_to_adopt"]), 1)
         self.assertEqual(plan["records_to_adopt"][0]["id"], "r-third")
         self.assertEqual(len(plan["records_to_create"]), 0)
         self.assertEqual(len(plan["records_owned_from_prior_attempt"]), 0)
 
-        # Outcome 2: enable with failed probe never deletes adopted third-party record
-        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}), \
-             patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
             with self.assertRaises(CoverageError):
                 enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
         self.assertEqual(len(cf.deleted_records), 0)
+
+        # Case B: Record planned to be created, but third-party matching record exists in write loop
+        store2 = FakeStoreClient()
+        cf2 = FakeCfClient(records=[])
+        plan2 = plan_enable(self.entry, "asb.bd", store_client=store2, cf_client=cf2)
+        self.assertEqual(len(plan2["records_to_create"]), 1)
+
+        cf2._records = [
+            {"id": "r-third", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": "not-our-marker"},
+        ]
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            res = enable(self.entry, "asb.bd", plan2, store_client=store2, cf_client=cf2)
+
+        # Third-party equal record appears in result's adopted list and never in written list
+        self.assertEqual([r["id"] for r in res.get("records_adopted", [])], ["r-third"])
+        self.assertEqual(res.get("records_written", []), [])
+
+        # Case C: Write loop with probe failure rollback never deletes adopted record
+        store3 = FakeStoreClient()
+        cf3 = FakeCfClient(records=[])
+        plan3 = plan_enable(self.entry, "asb.bd", store_client=store3, cf_client=cf3)
+        cf3._records = [
+            {"id": "r-third", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": "not-our-marker"},
+        ]
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan3, store_client=store3, cf_client=cf3)
+        self.assertEqual(len(cf3.deleted_records), 0)
 
 if __name__ == "__main__":
     unittest.main()

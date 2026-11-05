@@ -100,6 +100,10 @@ class StatefulFakeProvider:
         self._records = [r for r in self._records if r.get("id") != record_id]
         return {"id": record_id}
 
+    def create_origin_certificate(self, csr_pem: str, hostnames: list[str]) -> dict:
+        self.calls.append(("create_origin_certificate", csr_pem, hostnames))
+        return {"certificate": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----", "id": "cert-1"}
+
 
 class TestZoneCoverageMatrix(unittest.TestCase):
     def setUp(self):
@@ -806,6 +810,9 @@ class TestZoneCoverageMatrix(unittest.TestCase):
             self.assertNotIn(secret, str(ctx.exception))
             self.assertNotIn(secret, out_buf.getvalue())
             self.assertNotIn(secret, err_buf.getvalue())
+        doc = self._read_doc("asb.bd")
+        if doc:
+            self.assertNotIn(secret, json.dumps(doc))
 
         # 2. cf._request (ssl settings)
         store = self._make_store_client()
@@ -818,6 +825,9 @@ class TestZoneCoverageMatrix(unittest.TestCase):
             self.assertNotIn(secret, str(ctx.exception))
             self.assertNotIn(secret, out_buf.getvalue())
             self.assertNotIn(secret, err_buf.getvalue())
+        doc = self._read_doc("asb.bd")
+        if doc:
+            self.assertNotIn(secret, json.dumps(doc))
 
         # 3. cf.zone_records (listing)
         store = self._make_store_client()
@@ -830,6 +840,9 @@ class TestZoneCoverageMatrix(unittest.TestCase):
             self.assertNotIn(secret, str(ctx.exception))
             self.assertNotIn(secret, out_buf.getvalue())
             self.assertNotIn(secret, err_buf.getvalue())
+        doc = self._read_doc("asb.bd")
+        if doc:
+            self.assertNotIn(secret, json.dumps(doc))
 
         # 4. cf.create_address
         store = self._make_store_client()
@@ -860,6 +873,26 @@ class TestZoneCoverageMatrix(unittest.TestCase):
             self.assertNotIn(secret, str(ctx.exception))
             self.assertNotIn(secret, out_buf.getvalue())
             self.assertNotIn(secret, err_buf.getvalue())
+        doc = self._read_doc("asb.bd")
+        if doc:
+            self.assertNotIn(secret, json.dumps(doc))
+
+        # 6. cf.create_origin_certificate
+        store = self._make_store_client()
+        cf = StatefulFakeProvider()
+        plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        self._install_patcher.stop()
+        try:
+            with patch.object(cf, "create_origin_certificate", side_effect=RuntimeError(f"internal {secret} in create_origin_certificate")),                  patch("sandbox.hosting.front_door.nginx.ensure_origin_certificate", side_effect=RuntimeError(f"internal {secret} in ensure_origin_certificate")):
+                with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                    with self.assertRaises(CoverageError) as ctx:
+                        enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+                self.assertNotIn(secret, str(ctx.exception))
+                self.assertNotIn(secret, out_buf.getvalue())
+                self.assertNotIn(secret, err_buf.getvalue())
+        finally:
+            self._install_patcher.start()
         doc = self._read_doc("asb.bd")
         if doc:
             self.assertNotIn(secret, json.dumps(doc))

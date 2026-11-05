@@ -517,9 +517,10 @@ def enable(
         err_suffix = _inspect_error_path_call(finish_res, "finish")
         if isinstance(exc, CoverageError):
             raise CoverageError(exc.code, f"{exc.message}{err_suffix}") from None
-        if err_suffix:
-            raise type(exc)(f"{exc}{err_suffix}") from exc
-        raise
+        raise CoverageError(
+            COVERAGE_ZONE_UNAVAILABLE,
+            f"fallback installation failed: {type(exc).__name__}{err_suffix}",
+        ) from None
 
     if stop_before_publish:
         finish_res = store_client.finish(clean_zone, op_id, "fallback_only")
@@ -730,11 +731,14 @@ def enable(
                     del_fence = store_client.phase(clean_zone, op_id, "dns_rollback_delete")
                 except Exception as de:
                     del_fence = de
-                if (isinstance(del_fence, dict) and del_fence.get("refused")) or isinstance(del_fence, Exception):
+                if not isinstance(del_fence, dict) or del_fence.get("refused"):
+                    reason_type = type(del_fence).__name__ if isinstance(del_fence, Exception) else (
+                        del_fence.get("refused") if isinstance(del_fence, dict) else type(del_fence).__name__
+                    )
                     unknown_effects.append({
                         "id": rec_id,
                         "name": rec_name,
-                        "reason": f"delete_fenced_out: {del_fence}",
+                        "reason": f"delete_fenced_out: {reason_type}",
                     })
                     return False
                 try:

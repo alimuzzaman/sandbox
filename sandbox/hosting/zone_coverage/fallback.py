@@ -170,12 +170,19 @@ def install_fallback(
     route_name = f"coverage-{clean_zone}"
     if before_effect is not None:
         before_effect("certificate")
-    cert_path, key_path, cert_meta = nginx.ensure_origin_certificate(
-        entry,
-        route_name,
-        [f"*.{clean_zone}", clean_zone],
-        client,
-    )
+    try:
+        cert_path, key_path, cert_meta = nginx.ensure_origin_certificate(
+            entry,
+            route_name,
+            [f"*.{clean_zone}", clean_zone],
+            client,
+        )
+    except Exception as exc:
+        from sandbox.core._cloudflare import CloudflareError
+        from sandbox.hosting.zone_coverage import COVERAGE_ZONE_UNAVAILABLE, CoverageError
+        if isinstance(exc, CloudflareError):
+            raise CoverageError(COVERAGE_ZONE_UNAVAILABLE, "Cloudflare origin certificate request failed") from None
+        raise CoverageError(COVERAGE_ZONE_UNAVAILABLE, f"origin certificate request failed: {type(exc).__name__}") from None
     conf = render_fallback_conf(
         clean_zone,
         cert_path=cert_path,

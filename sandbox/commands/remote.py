@@ -1632,7 +1632,8 @@ def _cmd_coverage(args, as_json: bool) -> None:
             code = getattr(exc, "code", "coverage_error")
             msg = str(exc)
         else:
-            raise
+            code = "coverage_error"
+            msg = f"operation failed: {type(exc).__name__}"
         if as_json:
             print(json.dumps({"ok": False, "error": {"code": code, "message": msg}}, sort_keys=True))
             raise SystemExit(1)

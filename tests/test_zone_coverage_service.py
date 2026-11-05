@@ -1480,5 +1480,64 @@ class TestZoneCoverageService(unittest.TestCase):
         self.assertEqual(ctx4.exception.code, COVERAGE_RECORD_EXISTS)
 
 
+    # K4: Origin certificate secret marker scrubbed from service, CLI, and store
+    def test_origin_certificate_issue_secret_marker_scrubbed_from_service_cli_and_store(self):
+        import contextlib, io, json, os, subprocess, tempfile
+        from types import SimpleNamespace
+        from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
+        from sandbox.commands.remote import _cmd_coverage
+        from tests.subprocess_support import synthetic_environment
+
+        secret = "SECRET-ORIGIN-CERT-MARKER-771122"
+
+        # 1. Service test with real store
+        with tempfile.TemporaryDirectory() as td:
+            def real_ssh_run(entry, command, timeout=15):
+                env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
+                return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
+
+            store = ZoneCoverageClient(self.entry, ssh_run=real_ssh_run)
+            cf = FakeCfClient()
+            cf.create_origin_certificate = lambda *a, **kw: None
+            plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+
+            def leaking_create_origin_cert(*args, **kwargs):
+                raise RuntimeError(f"provider error containing {secret}")
+
+            with patch.object(cf, "create_origin_certificate", side_effect=leaking_create_origin_cert),                  patch("sandbox.hosting.front_door.nginx.ensure_origin_certificate", side_effect=leaking_create_origin_cert):
+                with self.assertRaises(CoverageError) as ctx:
+                    enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+
+            # Assert secret not in service exception
+            self.assertNotIn(secret, str(ctx.exception))
+
+            # Assert secret not in store doc
+            doc_path = os.path.join(td, "runtime", "zone-coverage", "zones", "asb.bd.json")
+            if os.path.exists(doc_path):
+                with open(doc_path, "r") as f:
+                    doc = json.load(f)
+                self.assertNotIn(secret, json.dumps(doc))
+
+        # 2. CLI test: JSON mode and human mode
+        args_json = SimpleNamespace(
+            name="default",
+            zone="asb.bd",
+            enable=True,
+            confirm=True,
+            plan_digest=plan.get("plan_digest"),
+            stop_before_publish=False,
+            resume=False,
+        )
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        with patch("sandbox.commands.remote.sr.get_remote", return_value=self.entry),              patch("sandbox.hosting.front_door.require_capability"),              patch("sandbox.hosting.zone_coverage.service.plan_enable", return_value=plan),              patch("sandbox.hosting.zone_coverage.service.compute_plan_digest", return_value=plan.get("plan_digest")),              patch("sandbox.hosting.zone_coverage.service.enable", side_effect=RuntimeError(f"cert issue leaked {secret}")):
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                with self.assertRaises((SystemExit, Exception)):
+                    _cmd_coverage(args_json, as_json=True)
+
+        self.assertNotIn(secret, out_buf.getvalue())
+        self.assertNotIn(secret, err_buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

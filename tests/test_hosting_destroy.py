@@ -778,6 +778,29 @@ class Execution(unittest.TestCase):
         kept_idx = next(i for i, line in enumerate(lines) if "kept 1 labelled images not proven ours" in line)
         self.assertLess(removed_idx, kept_idx)
 
+    def test_shared_coverage_retained_in_plan_and_destroy_skips_cloudflare(self):
+        client = FakeClient()
+        cov_record = _record(
+            records=[{"zone_id": "z1", "created_id": "rec1"}],
+            dns_coverage={"mode": "shared", "zone": "example.com", "hostname": "site-sandbox.example.com"},
+        )
+        state = {"hosts": {KEY: cov_record}}
+        planned = destroy.plan(state, ENTRY, "r1", "site", "sandbox", probe=dict(EMPTY_PROBE))
+        self.assertEqual(planned["dns_records"], [])
+        self.assertEqual(planned.get("shared_coverage_retained"), [
+            {"hostname": "site-sandbox.example.com", "zone": "example.com"}
+        ])
+        rendered = destroy.render(planned, confirmed=False)
+        self.assertIn("shared zone coverage retained for site-sandbox.example.com in example.com", rendered)
+
+        with mock.patch("sandbox.hosting.zone_coverage.targets.release") as mock_release:
+            result, _, end_state = self._run(cov_record, [self.PROBE, "", "removed\n"], client)
+            self.assertEqual(result["state"], "destroyed")
+            self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
+            mock_release.assert_called_once()
+            self.assertNotIn(KEY, end_state["hosts"])
+
+
     def test_absent_target_reports_retained_images(self):
         from sandbox.hosting.recovery.repository import RecoveryRepository
         directory = tempfile.TemporaryDirectory()

@@ -479,12 +479,14 @@ Only a current-contract terminal failed apply with a pre-effect receipt can reco
 Legacy, dirty, changed, partial, stale, torn, or mutation-requiring evidence refuses
 before protected effects.
 
-## Shared zone coverage (partly built)
+## Shared zone coverage
 
 `sb remote coverage` plans, enables, and shows status of single-level wildcard coverage on nginx remotes.
 
-Status: partly built. Hosted targets do not use coverage yet (each still creates its own DNS record). Do not enable on real zones until disable, repair, cert renewal, and release are built.
-
+- Stage 2: hosted targets under an enabled zone use shared wildcard coverage without writing per-target DNS records. Targets bind as dependents in the remote's zone coverage store.
+- Target DNS mode: `cloudflare.dns: auto | exact` in `sandbox.hosting.yml` (default: `auto`). `exact` is required for apex domains, multi-route targets, image activation, or explicit individual records.
+- Overwriting drifted records: `sb host apply --allow-record-overwrite` allows adopting or overwriting existing drifted/unowned Cloudflare DNS records.
+- Target destroy: `sb host destroy` removes the target's routes and releases the dependent in the store, while retaining the shared `*.zone` record and fallback catch-all file.
 - Fallback route (`/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`) returns generic 404 (`noindex`) and is protected: `sb remote edge --remove-route` refuses it.
 - Older checkouts refuse applies under covered zones.
 

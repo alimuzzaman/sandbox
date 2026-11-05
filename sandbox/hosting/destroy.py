@@ -241,16 +241,34 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
     others = _other_environments(state, remote_name, project, environment)
     held = _records_held_elsewhere(state, key)
     dns = []
-    for item in (record or {}).get("records") or []:
-        if isinstance(item, dict) and item.get("zone_id") and (
-                item.get("created_id") or item.get("previous")):
-            shared = bool(_record_identities(item) & held)
-            action = ("keep_shared" if shared else
-                      "keep_unverifiable" if _snapshot_untrusted(item) else
-                      "restore_previous" if item.get("previous") else "delete")
-            dns.append({"zone_id": item["zone_id"], "action": action,
-                        "record_id": (item.get("previous") or {}).get("id") or item.get("created_id"),
-                        "verifiable": isinstance(item.get("applied"), dict) and not _snapshot_untrusted(item)})
+    shared_coverage_retained = None
+    dns_coverage = (record or {}).get("dns_coverage")
+    if dns_coverage and dns_coverage.get("mode") == "shared":
+        dns = []
+        hostname = (
+            dns_coverage.get("hostname")
+            or (record.get("hosting_operation") or {}).get("evidence", {}).get("edge_intent", {}).get("certificate_hostnames", [None])[0]
+            or (record.get("routes") or [{}])[0].get("hostname")
+        )
+        if not hostname:
+            try:
+                from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
+                doc = ZoneCoverageClient(entry).read(dns_coverage["zone"])
+                hostname = (doc.get("dependents", {}).get(key) or {}).get("hostname")
+            except Exception:
+                pass
+        shared_coverage_retained = [{"hostname": hostname or f"{project}-{environment}.{dns_coverage['zone']}", "zone": dns_coverage["zone"]}]
+    else:
+        for item in (record or {}).get("records") or []:
+            if isinstance(item, dict) and item.get("zone_id") and (
+                    item.get("created_id") or item.get("previous")):
+                shared = bool(_record_identities(item) & held)
+                action = ("keep_shared" if shared else
+                          "keep_unverifiable" if _snapshot_untrusted(item) else
+                          "restore_previous" if item.get("previous") else "delete")
+                dns.append({"zone_id": item["zone_id"], "action": action,
+                            "record_id": (item.get("previous") or {}).get("id") or item.get("created_id"),
+                            "verifiable": isinstance(item.get("applied"), dict) and not _snapshot_untrusted(item)})
     certificate = (record or {}).get("certificate")
     origin_cert = certificate.get("id") if isinstance(certificate, dict) else None
     fences = [field for field in ("active_operation", "recovery_uncertainty")
@@ -260,7 +278,7 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
         fences.append("image_activation")
     remote_present = any(probe[k] for k in ("containers", "volumes", "networks", "images", "route", "certs")) \
         or bool(probe["runtime_kb"])
-    return {
+    res = {
         "target": key, "compose_project": name, "front_door": front_door,
         "state_entry": record is not None, "fences": fences,
         "remote": {**probe, "route_file": route, "cert_dirs": certs,
@@ -270,6 +288,9 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
         "origin_certificate": origin_cert,
         "found": record is not None or remote_present,
     }
+    if shared_coverage_retained is not None:
+        res["shared_coverage_retained"] = shared_coverage_retained
+    return res
 
 
 def _remote_teardown_command(name: str, paths: dict) -> str:
@@ -404,10 +425,21 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             state = hosting.load_host_state()
         found = plan(state, entry, remote_name, project, environment)
         record = state.get("hosts", {}).get(key)
-        held = _records_held_elsewhere(state, key)
-        found["_records"] = [item for item in (record or {}).get("records") or []
-                             if isinstance(item, dict) and item.get("zone_id")
-                             and not (_record_identities(item) & held)]
+        dns_coverage = (record or {}).get("dns_coverage")
+        if dns_coverage and dns_coverage.get("mode") == "shared":
+            found["_records"] = []
+            try:
+                from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
+                from sandbox.hosting.zone_coverage import targets
+                cov_client = ZoneCoverageClient(entry)
+                targets.release(cov_client, dns_coverage["zone"], key)
+            except Exception:
+                pass
+        else:
+            held = _records_held_elsewhere(state, key)
+            found["_records"] = [item for item in (record or {}).get("records") or []
+                                 if isinstance(item, dict) and item.get("zone_id")
+                                 and not (_record_identities(item) & held)]
         if not found["found"]:
             return {"state": "absent", "target": key, "remote": _retained(found["remote"])}
         if found["fences"] and not clear_fenced:
@@ -495,6 +527,8 @@ def render(result: dict, *, confirmed: bool) -> str:
     if r.get("source_kb"):
         lines.append(f"  deploy source {r['source_kb']} KB kept (shared by the project's "
                      "environments; remove it by hand once none is left)")
+    for row in result.get("shared_coverage_retained") or []:
+        lines.append(f"  shared zone coverage retained for {row['hostname']} in {row['zone']}")
     for row in result["dns_records"]:
         note = "" if row.get("verifiable") else " (applied before verification; check it by hand)"
         lines.append(f"  DNS {row['action']} {row['record_id']}{note}")

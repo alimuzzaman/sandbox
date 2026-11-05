@@ -1121,7 +1121,36 @@ Moving every site from one remote to another: [server-migration.md](server-migra
 
 ### Shared zone coverage
 
-Status: partly built. `sb remote coverage` can plan, enable and show one zone on an nginx remote. Hosted targets do not use coverage yet, so every target still creates its own DNS record. Disable, repair, certificate renewal, fallback removal and releasing a dependent are not available yet. Do not enable coverage on a real zone until they are.
+Stage 2: hosted targets use an enabled zone with shared wildcard coverage and no per-target DNS write. `sb remote coverage` plans, enables, and manages covered zones on nginx remotes.
+
+When a target is hosted under an active covered zone:
+- The target binds as a dependent in the remote's coverage store.
+- No individual DNS record is created on Cloudflare for the target hostname; traffic resolves via the shared `*.<zone>` record.
+- Destroying a target (`sb host destroy`) drops the target's web service and nginx routes, releasing the store dependent, but leaves the shared `*.<zone>` record and the fallback catch-all configuration file intact.
+
+#### Target DNS Mode (`cloudflare.dns`)
+
+In `sandbox.hosting.yml`, environments can configure the DNS mode under `cloudflare:`:
+
+```yaml
+cloudflare:
+  proxied: true
+  tls: origin-ca
+  ssl_mode: strict
+  dns: auto # auto (default) | exact
+```
+
+- `auto` (default): Uses shared zone coverage whenever the remote has an nginx front door with an active covered zone matching the target hostname. If no zone covers the target or the remote uses Caddy, it falls back to creating an exact DNS record.
+- `exact`: Forces creation of an individual DNS record on Cloudflare. Required when:
+  - The hostname is an apex domain (e.g. `example.com`).
+  - The hostname is a multi-level subdomain with no covering parent zone.
+  - The target declares multiple routes (`routes` has > 1 entry).
+  - Using image activation (`host image ...`).
+  - The operator explicitly wants a dedicated per-target DNS record.
+
+#### Overwriting Drifted DNS Records (`--allow-record-overwrite`)
+
+When applying host configuration (`sb host apply`), if an existing DNS record on Cloudflare differs from the target's desired IP or was created outside Sandbox, apply refuses by default (`managed_record_drift` or `record_not_owned`). Passing `--allow-record-overwrite` permits updating/overwriting the drifted record.
 
 Enabling installs one error-only nginx route, `/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`, with its own wildcard origin certificate, checks it at the origin, then publishes a proxied `*.<zone>` record and checks it through the public edge. Names under the zone with no site get a generic 404 marked `noindex`, including multi-level names that reach the server.
 

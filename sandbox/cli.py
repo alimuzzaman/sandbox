@@ -1063,6 +1063,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="with an approved manifest policy, purge all Cloudflare edge cache zones")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
+    host_p.add_argument("--allow-record-overwrite", action="store_true",
+        help="allow overwriting drifted DNS records")
     host_p.add_argument("--lock-wait", type=int, default=600, metavar="SECONDS",
         help="how long host apply waits for another apply's host lock (1-3600, default 600)")
     host_p.add_argument("--set", dest="set_secret", default=None, metavar="SECRET_KEY",

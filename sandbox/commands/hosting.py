@@ -33,6 +33,8 @@ import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
 from sandbox.hosting import edge_cache
+from sandbox.hosting.zone_coverage import CoverageError, targets
+from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
 from sandbox.delivery.hosting import HostingAttempt, RetainedDelivery
 from sandbox.delivery.models import DeliveryError, operation_summary
 from sandbox.hosting.recovery.models import (
@@ -2450,6 +2452,9 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
     cache_purge = (validated.get("cloudflare") or {}).get("cache_purge") or {}
     if cache_purge.get("enabled") is True:
         intent["cache_purge"] = cache_purge
+    dns_coverage = validated.get("dns_coverage") or {}
+    if dns_coverage.get("mode") == "shared":
+        intent["dns_coverage"] = {"mode": "shared", "zone": dns_coverage["zone"]}
     return validate_edge_intent(intent)
 
 
@@ -2508,8 +2513,11 @@ def _registered_recovery_authority(validated: dict, remote_name: str, operation:
         if machine_identity != expected.get("machine_identity"):
             raise RecoveryAuthorityError("stable machine identity changed")
         try:
-            current_edge_intent = _desired_edge_intent(validated, current)
             expected_edge_intent = validate_edge_intent(expected.get("edge_intent"))
+            val = validated
+            if "dns_coverage" in expected_edge_intent:
+                val = {**validated, "dns_coverage": expected_edge_intent["dns_coverage"]}
+            current_edge_intent = _desired_edge_intent(val, current)
         except ValueError:
             raise RecoveryAuthorityError("registered edge intent is invalid") from None
         if (canonical_digest(current_edge_intent) !=
@@ -3704,6 +3712,7 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
         content = edge.render(validated, port, cert_path, key_path, secret_values)
         edge.configure(caddy_name, content, previous_caddy, log_path=apply_log)
         zones: dict[str, dict] = {}
+        drift_rule = bool((validated.get("dns_coverage") or {}).get("drift_rule")) and ("dns_coverage" not in edge_intent)
         for wanted in edge_intent["records"]:
             hostname = wanted["hostname"]
             zone = zones.setdefault(hostname, _zone_for_hostname(client, hostname))
@@ -3716,6 +3725,17 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                 raise RuntimeError(
                     f"declared hostname {hostname} has a conflicting CNAME; edge recovery does not replace it")
             previous = next((item for item in records if item.get("type") == kind), None)
+            if drift_rule:
+                record_check = targets.check_exact_record(
+                    wanted, records, recorded.get("records"),
+                    allow_overwrite=False,
+                )
+                if record_check.get("action") == "adopt":
+                    existing = record_check.get("existing") or previous
+                    changes.append({"zone_id": zone["id"], "previous": previous,
+                                    "created_id": (existing or {}).get("id"),
+                                    "applied": _applied_record(existing)})
+                    continue
             created = client.upsert_address(
                 zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous,
@@ -3732,11 +3752,24 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                   "basic_auth_enabled": edge_intent["basic_auth"]["enabled"]}
         if credentials is not None:
             kwargs["basic_auth_credentials"] = credentials
-        _verify_edge(edge_intent["routes"], **kwargs)
+        evidence = None
+        if "dns_coverage" in edge_intent and edge_intent["dns_coverage"].get("mode") == "shared":
+            cov_zone = edge_intent["dns_coverage"]["zone"]
+            evidence = targets.verify_shared(
+                edge_intent["routes"],
+                cov_zone,
+                _verify_edge,
+                **kwargs,
+            )
+        else:
+            _verify_edge(edge_intent["routes"], **kwargs)
+        edge_state = {"state": "ready"}
+        if evidence is not None:
+            edge_state["evidence"] = evidence
         result["record"] = {
             "certificate": certificate,
             "records": _first_adoption_records(recorded.get("records"), changes),
-            "caddy_name": caddy_name, "edge": {"state": "ready"},
+            "caddy_name": caddy_name, "edge": edge_state,
         }
         if edge.mode != "caddy":
             result["record"]["front_door"] = edge.mode
@@ -3986,6 +4019,7 @@ def _verify_edge(
     basic_auth_enabled: bool = False,
     basic_auth_credentials: tuple[str, str] | None = None,
     fresh_hostnames: frozenset[str] = frozenset(),
+    handlers: tuple = (),
 ) -> None:
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
@@ -3997,7 +4031,7 @@ def _verify_edge(
         def redirect_request(self, request, fp, code, msg, headers, newurl):
             return None
 
-    opener = urllib.request.build_opener(_NoRedirect)
+    opener = urllib.request.build_opener(_NoRedirect, *handlers)
     if any(route["hostname"] in fresh_hostnames for route in routes):
         time.sleep(_NEW_DNS_RECORD_GRACE_SECONDS)
     for route in routes:
@@ -4340,7 +4374,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 progress=None, recovery_repository=None,
                 purge_edge_cache: bool = False, delivery_holder=None,
                 local_images_digest: str | None = None,
-                active_image_lease=None) -> dict:
+                active_image_lease=None,
+                allow_record_overwrite: bool = False) -> dict:
     # Validate genuine retained child/source evidence before secret publication or effects.
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities(['delivery_outcomes_v1',
@@ -4701,6 +4736,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         edge.configure(caddy_name, rendered, previous_caddy, log_path=apply_log)
         zones: dict[str, dict] = {}
         fresh_hostnames: set[str] = set()
+        drift_rule = bool((validated.get("dns_coverage") or {}).get("drift_rule"))
         for wanted in runtime["records"]:
             hostname = wanted["hostname"]
             zone = zones.get(hostname)
@@ -4734,6 +4770,17 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             previous = next((record for record in all_records if record.get("type") == kind), None)
             if previous is None:
                 fresh_hostnames.add(hostname)
+            if drift_rule:
+                record_check = targets.check_exact_record(
+                    wanted, all_records, state["hosts"][key].get("records"),
+                    allow_overwrite=allow_record_overwrite,
+                )
+                if record_check.get("action") == "adopt":
+                    existing = record_check.get("existing") or previous
+                    changes.append({"zone_id": zone["id"], "previous": previous,
+                                    "created_id": (existing or {}).get("id"),
+                                    "applied": _applied_record(existing)})
+                    continue
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id"),
                             "applied": _applied_record(created)})
@@ -4752,7 +4799,17 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             verify_kwargs["fresh_hostnames"] = frozenset(fresh_hostnames)
         if basic_credentials is not None:
             verify_kwargs["basic_auth_credentials"] = basic_credentials
-        _verify_edge(validated["routes"], **verify_kwargs)
+        evidence = None
+        dns_cov = validated.get("dns_coverage") or {}
+        if dns_cov.get("mode") == "shared":
+            evidence = targets.verify_shared(
+                validated["routes"],
+                dns_cov["zone"],
+                _verify_edge,
+                **verify_kwargs,
+            )
+        else:
+            _verify_edge(validated["routes"], **verify_kwargs)
         cache_policy = (validated.get("cloudflare") or {}).get("cache_purge") or {}
         if cache_policy.get("on_deploy") is True or purge_edge_cache:
             if cache_policy.get("enabled") is not True:
@@ -4807,6 +4864,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 durable_save(state)
         _release_host_apply_reservation(entry, reservation)
         reservation = None
+        edge_state = {"state": "ready"}
+        if evidence is not None:
+            edge_state["evidence"] = evidence
         state["hosts"][key].update({
             "loopback_port": runtime["loopback_port"],
             "compose_project": runtime["compose_project"],
@@ -4815,8 +4875,16 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             "commit": sha,
             "recorded_revision": sha,
             "caddy_name": caddy_name,
-            "edge": {"state": "ready"},
+            "edge": edge_state,
         })
+        if dns_cov.get("mode") == "shared":
+            state["hosts"][key]["dns_coverage"] = {
+                "mode": "shared",
+                "zone": dns_cov["zone"],
+                "hostname": validated["routes"][0]["hostname"],
+            }
+        else:
+            state["hosts"][key].pop("dns_coverage", None)
         if edge.mode != "caddy":
             state["hosts"][key]["front_door"] = edge.mode
         if edge_cache_receipt is not None:
@@ -5079,6 +5147,12 @@ class _HostImageEdgeAdapter:
 
     def preflight(self, entry, remote_name):
         """Check known provider failures before runtime; origin proof follows it."""
+        import copy
+        val_copy = copy.deepcopy(self.validated)
+        state = hosting.load_host_state()
+        target_key = hosting.state_key(remote_name, self.validated) if (isinstance(self.validated, dict) and "project" in self.validated and "environment" in self.validated) else None
+        target_rec = state.get("hosts", {}).get(target_key) if target_key else None
+        targets.decide(val_copy, entry, target_rec, image=True)
         plan = _guarded_host_apply_plan(self.validated, entry, remote_name,
                                        allow_zone_ssl_change=False)
         provider = plan.get("cloudflare")
@@ -7383,6 +7457,12 @@ def cmd_host(cfg, args) -> None:
             print(result["url"])
         return
     if args.action == "plan":
+        target_key = hosting.state_key(args.remote, validated)
+        target_rec = state.get("hosts", {}).get(target_key)
+        coverage_decision = targets.decide(validated, entry, target_rec, report=True)
+        if coverage_decision.get("mode") == "refused" or coverage_decision.get("zone"):
+            validated["dns_coverage"] = coverage_decision
+
         plan = hosting.desired_plan(
             validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
         # Planning is read-only. Apply separately rebuilds this entire shape
@@ -7404,6 +7484,8 @@ def cmd_host(cfg, args) -> None:
         plan["cloudflare"] = _cloudflare_drift(plan)
         plan["edge_cache_purge"] = (validated.get("cloudflare") or {}).get("cache_purge")
         _add_front_door_plan(plan, validated, entry)
+        if coverage_decision.get("mode") == "refused" or coverage_decision.get("zone"):
+            plan["dns_coverage"] = coverage_decision
         _emit({"ok": True, **plan}, args.json)
         return
     progress = (lambda _message: None) if args.json else (
@@ -7424,6 +7506,11 @@ def cmd_host(cfg, args) -> None:
                 current_entry = remote.get_remote(args.remote)
                 if not isinstance(current_entry, dict):
                     raise hosting.HostingError("registered remote changed before host apply")
+                target_rec = state.get("hosts", {}).get(target_key)
+                decision = targets.decide(validated, current_entry, target_rec, report=False)
+                if decision.get("mode") == "shared" or decision.get("zone"):
+                    validated["dns_coverage"] = decision
+
                 current_plan = _guarded_host_apply_plan(
                     validated, current_entry, args.remote,
                     allow_zone_ssl_change=bool(getattr(
@@ -7434,6 +7521,18 @@ def cmd_host(cfg, args) -> None:
                 state = hosting.load_host_state()
                 runtime = hosting.desired_runtime(validated, args.remote, state)
                 runtime["records"] = current_plan["records"]
+
+                store_client = None
+                if decision.get("mode") == "shared":
+                    store_client = ZoneCoverageClient(current_entry)
+                    targets.bind_pending(
+                        store_client,
+                        decision["zone"],
+                        target_key,
+                        validated["routes"][0]["hostname"],
+                        generation=decision.get("generation"),
+                    )
+
                 with _hold_controller_awake(), _local_image_apply_lease(
                         validated, args.remote,
                         getattr(args, "local_images", None)) as active_image_lease:
@@ -7445,7 +7544,26 @@ def cmd_host(cfg, args) -> None:
                         delivery_holder=delivery_holder,
                         local_images_digest=getattr(args, "local_images", None),
                         active_image_lease=active_image_lease,
+                        allow_record_overwrite=bool(getattr(args, "allow_record_overwrite", False)),
                     )
+
+                if decision.get("mode") == "shared":
+                    try:
+                        targets.bind_bound(
+                            store_client,
+                            decision["zone"],
+                            target_key,
+                            validated["routes"][0]["hostname"],
+                            generation=decision.get("generation"),
+                        )
+                    except Exception:
+                        result["coverage_binding"] = "unknown"
+                elif decision.get("zone"):
+                    try:
+                        store_client = store_client or ZoneCoverageClient(current_entry)
+                        targets.release(store_client, decision["zone"], target_key)
+                    except Exception:
+                        result["coverage_binding"] = "unknown"
     except RetainedDelivery as exc:
         retained = operation_summary(exc.operation) if exc.operation else None
         payload = {'ok': bool(exc.status == 'existing' and retained and retained['delivery_succeeded']),
@@ -7535,6 +7653,8 @@ def cmd_host(cfg, args) -> None:
         evidence["apply_log"] = result["apply_log"]
     if result.get("edge_cache_purge") is not None:
         evidence["edge_cache_purge"] = result["edge_cache_purge"]
+    if result.get("coverage_binding") is not None:
+        evidence["coverage_binding"] = result["coverage_binding"]
     if args.json:
         print(json.dumps(evidence))
     else:

@@ -94,6 +94,7 @@ class ZoneCoverageClient:
         expected_dependents_revision: int | None = None,
         resume: bool = False,
         zone_id: str = "",
+        dependents: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         req: dict[str, Any] = {
             "action": "begin",
@@ -107,6 +108,8 @@ class ZoneCoverageClient:
             req["expected_generation"] = expected_generation
         if expected_dependents_revision is not None:
             req["expected_dependents_revision"] = expected_dependents_revision
+        if dependents is not None:
+            req["dependents"] = dependents
         return self._call(req)
 
     def phase(
@@ -133,15 +136,19 @@ class ZoneCoverageClient:
         *,
         interrupted_kind: str | None = None,
         raise_generation: bool = False,
+        unknown_effects: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        return self._call({
+        req: dict[str, Any] = {
             "action": "finish",
             "zone": zone,
             "operation_id": operation_id,
             "state": state,
             "interrupted_kind": interrupted_kind,
             "raise_generation": raise_generation,
-        })
+        }
+        if unknown_effects is not None:
+            req["unknown_effects"] = unknown_effects
+        return self._call(req)
 
     def dependent_bind(
         self,

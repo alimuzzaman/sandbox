@@ -1593,6 +1593,8 @@ def _cmd_coverage(args, as_json: bool) -> None:
                 expected_digest = compute_plan_digest(plan)
                 if expected_digest != plan_digest:
                     raise CoverageError("coverage_plan_stale", "plan digest does not match current state; re-run plan")
+                if plan.get("resumable") and not resume:
+                    raise CoverageError("coverage_operation_active", "operation has an expired lease; pass --resume to resume it")
                 res = enable(entry, zone, plan, stop_before_publish=stop_before_publish, resume=resume)
                 if as_json:
                     print(json.dumps({"ok": True, **res}, sort_keys=True))
@@ -1603,7 +1605,8 @@ def _cmd_coverage(args, as_json: bool) -> None:
                 plan = plan_enable(entry, zone)
                 digest = compute_plan_digest(plan)
                 plan["plan_digest"] = digest
-                plan["note"] = "Older sandbox checkouts will not recognize shared wildcard coverage for this zone"
+                plan.pop("note", None)
+                plan["older_checkouts"] = "From fallback install, every checkout without this feature refuses applies and control-route configuration under this zone."
                 if as_json:
                     print(json.dumps({"ok": True, **plan}, sort_keys=True))
                 else:
@@ -1611,6 +1614,7 @@ def _cmd_coverage(args, as_json: bool) -> None:
                     print(f"  Current state: {plan['current_state']}")
                     print(f"  Records to create: {len(plan['records_to_create'])}")
                     print(f"  Exceptions: {len(plan['exceptions'])}")
+                    print(f"  Note: {plan['older_checkouts']}")
                 return
         else:
             res = status(entry, zone)
@@ -1618,9 +1622,16 @@ def _cmd_coverage(args, as_json: bool) -> None:
                 print(json.dumps({"ok": True, **res}, sort_keys=True))
             else:
                 print(f"Coverage status for {zone}: state={res.get('state')}")
-    except (CoverageError, FrontDoorError) as exc:
-        code = getattr(exc, "code", "coverage_error")
-        msg = str(exc)
+    except Exception as exc:
+        from sandbox.core._cloudflare import CloudflareError
+        if isinstance(exc, CloudflareError):
+            code = "coverage_zone_unavailable"
+            msg = "Cloudflare provider request failed"
+        elif isinstance(exc, (CoverageError, FrontDoorError)):
+            code = getattr(exc, "code", "coverage_error")
+            msg = str(exc)
+        else:
+            raise
         if as_json:
             print(json.dumps({"ok": False, "error": {"code": code, "message": msg}}, sort_keys=True))
             raise SystemExit(1)

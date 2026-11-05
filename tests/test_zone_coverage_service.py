@@ -23,13 +23,15 @@ class FakeStoreClient:
     def __init__(self, doc=None):
         self.doc = doc
         self.history = []
+        self.phase_refusal = None
+        self.finish_refusal = None
 
     def read(self, zone: str):
         if self.doc is None:
             return {"ok": True, "action": "read", "state": "absent", "document": None}
         return {"ok": True, "action": "read", "state": self.doc.get("state"), "document": self.doc}
 
-    def begin(self, zone: str, kind: str, controller: str, *, expected_generation=None, expected_dependents_revision=None, resume=False, zone_id=""):
+    def begin(self, zone: str, kind: str, controller: str, *, expected_generation=None, expected_dependents_revision=None, resume=False, zone_id="", dependents=None):
         if self.doc:
             cur_gen = self.doc.get("generation", 0)
             if expected_generation is not None and expected_generation != cur_gen:
@@ -49,22 +51,28 @@ class FakeStoreClient:
             "shared_records": [],
             "fallback": None,
             "exceptions": [],
-            "dependents": {},
+            "dependents": dependents or (self.doc.get("dependents", {}) if self.doc else {}),
             "dependents_revision": 0,
             "history": [],
         }
         return {"ok": True, "action": "begin", "operation_id": op_id, "document": self.doc}
 
     def phase(self, zone: str, operation_id: str, phase: str, *, updates=None):
+        if self.phase_refusal:
+            return {"ok": True, "action": "phase", "refused": self.phase_refusal}
         if updates:
             self.doc.update(updates)
         self.doc["operation"]["phase"] = phase
         return {"ok": True, "action": "phase", "document": self.doc}
 
-    def finish(self, zone: str, operation_id: str, state: str, *, interrupted_kind=None, raise_generation=False):
+    def finish(self, zone: str, operation_id: str, state: str, *, interrupted_kind=None, raise_generation=False, unknown_effects=None):
+        if self.finish_refusal:
+            return {"ok": True, "action": "finish", "refused": self.finish_refusal}
         self.doc["state"] = state
         self.doc["operation"] = None
         self.doc["interrupted_kind"] = interrupted_kind
+        if unknown_effects:
+            self.doc["unknown_effects"] = unknown_effects
         if raise_generation:
             self.doc["generation"] = self.doc.get("generation", 0) + 1
         return {"ok": True, "action": "finish", "document": self.doc}
@@ -75,22 +83,36 @@ class FakeCfClient:
         self.zone_id = zone_id
         self.ssl_mode = ssl_mode
         self._records = records or []
+        self.created_records = []
+        self.deleted_records = []
 
     def zone(self, name: str):
         return {"id": self.zone_id, "name": name}
+
+    def zones(self, name: str | None = None):
+        return [{"id": self.zone_id, "name": name or "asb.bd"}]
 
     def _request(self, method: str, path: str):
         if "/settings/ssl" in path:
             return {"success": True, "result": {"value": self.ssl_mode}}
         return {"success": True, "result": []}
 
-    def records(self, zone_id: str, hostname: str):
-        return [r for r in self._records if r.get("name") == hostname]
+    def records(self, zone_id: str, hostname: str | None = None, name: str | None = None):
+        target = hostname or name
+        if target:
+            return [r for r in self._records if r.get("name") == target]
+        return list(self._records)
 
     def upsert_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True):
         rec = {"id": f"rec-{len(self._records)+1}", "name": hostname, "type": "A", "content": address, "proxied": proxied}
         self._records.append(rec)
+        self.created_records.append(rec)
         return rec
+
+    def delete_record(self, zone_id: str, record_id: str):
+        self.deleted_records.append(record_id)
+        self._records = [r for r in self._records if r.get("id") != record_id]
+        return {"id": record_id}
 
 
 class TestZoneCoverageService(unittest.TestCase):
@@ -100,6 +122,118 @@ class TestZoneCoverageService(unittest.TestCase):
             "front_door": "nginx",
             "origin_ipv4": "198.51.100.1",
         }
+
+    def test_f1_phase_and_finish_refusals_stop_work_and_never_return_active(self):
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z1",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"type": "A", "name": "*.asb.bd", "content": "1.2.3.4", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+
+        # 1. Refusal on phase stops work before DNS write
+        store.phase_refusal = "coverage_operation_active"
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/etc/fallback.conf"}):
+            with self.assertRaises(CoverageError) as ctx:
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            self.assertEqual(ctx.exception.code, "coverage_operation_active")
+            self.assertEqual(len(cf.created_records), 0, "Provider DNS write must not be called after phase refusal")
+
+        # 2. Refusal on finish must never return state: active
+        store2 = FakeStoreClient()
+        store2.finish_refusal = "coverage_generation_stale"
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/etc/fallback.conf"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            with self.assertRaises(CoverageError) as ctx:
+                res = enable(self.entry, "asb.bd", plan, store_client=store2, cf_client=cf)
+                self.assertNotEqual(res.get("state"), "active")
+            self.assertEqual(ctx.exception.code, "coverage_generation_stale")
+
+    def test_f2_public_check_safe_rollback_unknown_effects_and_exact_name_reread(self):
+        # 1. Public check failure triggers DNS record rollback and marks fallback_only
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z1",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"type": "A", "name": "*.asb.bd", "content": "1.2.3.4", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/etc/fallback.conf"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            self.assertEqual(store.doc.get("state"), "fallback_only")
+            self.assertEqual(len(cf.deleted_records), 1, "Created records must be deleted on rollback")
+
+        # 2. Rollback provider error records unknown_effects and marks incomplete
+        store2 = FakeStoreClient()
+        cf2 = FakeCfClient()
+        def fail_delete(*args, **kwargs):
+            raise RuntimeError("Cloudflare delete failed")
+        cf2.delete_record = fail_delete
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/etc/fallback.conf"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan, store_client=store2, cf_client=cf2)
+            self.assertEqual(store2.doc.get("state"), "incomplete")
+            self.assertTrue(store2.doc.get("unknown_effects"))
+
+    def test_f11_cloudflare_errors_fixed_messages_and_secret_scrubbing(self):
+        from sandbox.core._cloudflare import CloudflareError
+        cf = FakeCfClient()
+        SECRET = "SECRET-MARKER-XYZ-987"
+        def fail_zones(*args, **kwargs):
+            raise CloudflareError(f"Cloudflare failure leaking {SECRET}")
+        cf.zones = fail_zones
+
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={"config_valid": True, "routes": []}):
+            with self.assertRaises(CoverageError) as ctx:
+                plan_enable(self.entry, "asb.bd", store_client=FakeStoreClient(), cf_client=cf)
+            self.assertNotIn(SECRET, str(ctx.exception))
+            self.assertEqual(ctx.exception.code, "coverage_zone_unavailable")
+
+    def test_f12_features_forwarded_to_fallback_rendering(self):
+        cf = FakeCfClient()
+        store = FakeStoreClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z1",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+        # Fake probe facts with legacy http2 and no ipv6
+        fake_facts = {
+            "config_valid": True,
+            "features": {"http2_directive": False, "ipv6": False},
+            "ipv6": False,
+            "routes": [],
+        }
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value=fake_facts),              patch("sandbox.hosting.zone_coverage.fallback.render_fallback_conf") as mock_render,              patch("sandbox.hosting.front_door.nginx.ensure_origin_certificate", return_value=("/c.pem", "/k.pem", {})),              patch("sandbox.hosting.front_door.nginx.apply_route", return_value={"file": "/r.conf"}),              patch("sandbox.hosting.zone_coverage.fallback.run_origin_probe", return_value={"status": 404, "fallback_header": "1"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            mock_render.assert_called_once()
+            _, kwargs = mock_render.call_args
+            self.assertFalse(kwargs.get("http2_directive"))
+            self.assertFalse(kwargs.get("ipv6"))
 
     def test_f10_digest_nine_keys_and_infer_recovered_dependents(self):
         from sandbox.hosting.zone_coverage.service import compute_plan_digest
@@ -120,8 +254,7 @@ class TestZoneCoverageService(unittest.TestCase):
         self.assertNotEqual(compute_plan_digest(p1), compute_plan_digest(p2))
 
         # Infer recovered dependents when adopted record exists
-        cf = FakeCfClient()
-        cf.records = [{"id": "r-wild", "type": "A", "name": "*.asb.bd", "content": "1.2.3.4", "proxied": True}]
+        cf = FakeCfClient(records=[{"id": "r-wild", "type": "A", "name": "*.asb.bd", "content": "198.51.100.1", "proxied": True}])
         # Mock nginx route for site.asb.bd (sandbox owned)
         with patch("sandbox.hosting.front_door.nginx.probe", return_value={
             "config_valid": True,
@@ -188,7 +321,8 @@ class TestZoneCoverageService(unittest.TestCase):
             return orig_begin(*args, **kwargs)
         store.begin = spy_begin
 
-        enable(self.entry, "asb.bd", plan, resume=True, store_client=store, cf_client=cf)
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/etc/fallback.conf"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            enable(self.entry, "asb.bd", plan, resume=True, store_client=store, cf_client=cf)
         self.assertTrue(any(kwargs.get("resume") is True for args, kwargs in begin_calls),
                         f"Expected store_client.begin to be called with resume=True, calls: {begin_calls}")
 
@@ -283,7 +417,8 @@ class TestZoneCoverageService(unittest.TestCase):
             "exceptions": [],
         }
         with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}), \
-             patch("sandbox.hosting.zone_coverage.fallback.run_origin_probe", return_value={"status": 404}):
+             patch("sandbox.hosting.zone_coverage.fallback.run_origin_probe", return_value={"status": 404}), \
+             patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
             res = enable(self.entry, "asb.bd", plan, cf_client=cf, store_client=store)
 
         self.assertEqual(res["state"], "active")
@@ -495,6 +630,65 @@ class TestZoneCoverageService(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 remote_cmd._cmd_coverage(args_confirm_bad_digest, as_json=True)
 
+
+    def test_f2_public_probe_unit_behavior(self):
+        import io
+        import urllib.error
+        from sandbox.hosting.zone_coverage.fallback import FALLBACK_BODY
+        from sandbox.hosting.zone_coverage.service import public_probe
+
+        class FakeHeaders(dict):
+            def get(self, k, default=None):
+                for key, val in self.items():
+                    if key.lower() == k.lower():
+                        return val
+                return default
+
+        class FakeResponse:
+            def __init__(self, status=404, headers=None, body=FALLBACK_BODY):
+                self.status = status
+                self.headers = FakeHeaders({"X-Sandbox-Fallback": "1"} if headers is None else headers)
+                self._body = body.encode("utf-8")
+            def read(self):
+                return self._body
+
+        class FakeOpener:
+            def __init__(self, response_factory):
+                self.factory = response_factory
+                self.calls = []
+            def open(self, req, timeout=10.0):
+                self.calls.append(req.get_full_url())
+                res = self.factory(len(self.calls))
+                if isinstance(res, Exception):
+                    raise res
+                return res
+
+        # 1. urllib.error.HTTPError with 404, fallback header and body returns True
+        def make_http_error(attempt):
+            return urllib.error.HTTPError("https://...", 404, "Not Found",
+                                         FakeHeaders({"X-Sandbox-Fallback": "1"}),
+                                         io.BytesIO(FALLBACK_BODY.encode("utf-8")))
+
+        opener_ok = FakeOpener(make_http_error)
+        labels = ["a1b2c3d4e5f60718"]
+        self.assertTrue(public_probe("asb.bd", sleep=lambda s: None, label_source=lambda: labels[0], opener=opener_ok))
+        self.assertEqual(opener_ok.calls[0], "https://sb-verify-a1b2c3d4e5f60718.asb.bd/")
+
+        # 2. HTTP 200 returns False after max tries
+        def make_200(attempt):
+            return FakeResponse(status=200, body="Normal site")
+
+        opener_200 = FakeOpener(make_200)
+        sleeper_calls = []
+        self.assertFalse(public_probe("asb.bd", sleep=sleeper_calls.append, opener=opener_200, max_tries=3, delay=1.0))
+        self.assertEqual(len(sleeper_calls), 2)
+
+        # 3. 404 missing fallback header returns False
+        def make_no_header(attempt):
+            return FakeResponse(status=404, headers={}, body=FALLBACK_BODY)
+
+        opener_no_hdr = FakeOpener(make_no_header)
+        self.assertFalse(public_probe("asb.bd", sleep=lambda s: None, opener=opener_no_hdr, max_tries=2))
 
 if __name__ == "__main__":
     unittest.main()

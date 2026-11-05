@@ -248,7 +248,7 @@ elif action == "begin":
             "shared_records": [],
             "fallback": None,
             "exceptions": [],
-            "dependents": {},
+            "dependents": request.get("dependents") or {},
             "dependents_revision": 0,
             "history": [],
         }
@@ -302,6 +302,8 @@ elif action == "begin":
         new_state = cur_state
 
     new_op_id = f"op-{secrets.token_hex(8)}"
+    if request.get("dependents"):
+        doc.setdefault("dependents", {}).update(request.get("dependents"))
     doc["state"] = new_state
     doc["interrupted_kind"] = None
     doc["operation"] = {
@@ -356,6 +358,8 @@ elif action == "finish":
     doc["state"] = final_state
     if final_state == "incomplete":
         doc["interrupted_kind"] = interrupted_kind or cur_op.get("kind")
+        if "unknown_effects" in request:
+            doc["unknown_effects"] = request["unknown_effects"]
     else:
         doc["interrupted_kind"] = None
 

@@ -276,15 +276,34 @@ elif action == "begin":
         if existing_op.get("kind") != kind:
             out({"ok": True, "refused": "coverage_kind_mismatch", "operation": existing_op, "requested_kind": kind})
 
-    new_op_id = f"op-{secrets.token_hex(8)}"
+    cur_state = doc.get("state")
+    if cur_state == "incomplete":
+        interrupted = doc.get("interrupted_kind")
+        if kind != interrupted:
+            out({"ok": True, "refused": "coverage_kind_mismatch", "interrupted_kind": interrupted, "requested_kind": kind})
+
     if kind == "enable":
+        if cur_state not in ("absent", "retired", "fallback_only", "disabled", "enabling", "incomplete"):
+            out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": cur_state, "requested_kind": kind})
         new_state = "enabling"
     elif kind == "disable":
+        if cur_state not in ("active", "disabling", "incomplete"):
+            out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": cur_state, "requested_kind": kind})
         new_state = "disabling"
+    elif kind == "remove-fallback":
+        if cur_state not in ("disabled", "fallback_only"):
+            out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": cur_state, "requested_kind": kind})
+        new_state = cur_state
+    elif kind == "repair":
+        if cur_state not in ("active", "incomplete"):
+            out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": cur_state, "requested_kind": kind})
+        new_state = cur_state
     else:
-        new_state = doc.get("state", "active")
+        new_state = cur_state
 
+    new_op_id = f"op-{secrets.token_hex(8)}"
     doc["state"] = new_state
+    doc["interrupted_kind"] = None
     doc["operation"] = {
         "id": new_op_id,
         "kind": kind,

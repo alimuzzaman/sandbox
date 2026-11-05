@@ -137,6 +137,68 @@ class TestZoneCoverageProgram(unittest.TestCase):
             with open(doc_path, "rb") as f:
                 self.assertEqual(f.read(), corrupt_bytes)
 
+    def test_f6_transitions_incomplete_allows_only_interrupted_kind(self):
+        zones_dir = os.path.join(self.home, "runtime", "zone-coverage", "zones")
+        os.makedirs(zones_dir, exist_ok=True)
+        doc_path = os.path.join(zones_dir, "asb.bd.json")
+
+        # 1. Start with active document
+        doc = {
+            "schema_version": 1,
+            "zone": "asb.bd",
+            "zone_id": "z-1",
+            "state": "active",
+            "generation": 1,
+            "operation": None,
+            "interrupted_kind": None,
+            "shared_records": [],
+            "fallback": None,
+            "exceptions": [],
+            "dependents": {},
+            "dependents_revision": 0,
+            "history": [],
+        }
+        with open(doc_path, "wb") as f:
+            f.write(json.dumps(doc).encode("utf-8"))
+
+        # 2. Begin disable
+        rc, out = _run_program(self.home, {"action": "begin", "zone": "asb.bd", "kind": "disable", "controller": "ctrl"})
+        self.assertEqual(rc, 0)
+        self.assertNotIn("refused", out)
+        op_id = out["operation_id"]
+
+        # 3. Finish incomplete with interrupted_kind=disable
+        rc, out = _run_program(self.home, {
+            "action": "finish",
+            "zone": "asb.bd",
+            "operation_id": op_id,
+            "state": "incomplete",
+            "interrupted_kind": "disable",
+        })
+        self.assertEqual(rc, 0)
+        self.assertNotIn("refused", out)
+
+        with open(doc_path, "rb") as f:
+            saved_bytes = f.read()
+        saved_doc = json.loads(saved_bytes)
+        self.assertEqual(saved_doc["state"], "incomplete")
+        self.assertEqual(saved_doc["interrupted_kind"], "disable")
+
+        # 4. Begin enable on incomplete(disable) must be refused
+        rc, out = _run_program(self.home, {"action": "begin", "zone": "asb.bd", "kind": "enable", "controller": "ctrl"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.get("refused"), COVERAGE_KIND_MISMATCH)
+
+        # Document on disk must remain unchanged
+        with open(doc_path, "rb") as f:
+            self.assertEqual(f.read(), saved_bytes)
+
+        # 5. Retrying disable succeeds
+        rc, out = _run_program(self.home, {"action": "begin", "zone": "asb.bd", "kind": "disable", "controller": "ctrl"})
+        self.assertEqual(rc, 0)
+        self.assertNotIn("refused", out)
+        self.assertEqual(out["document"]["state"], "disabling")
+
     def test_read_absent_and_list(self):
         rc, out = _run_program(self.home, {"action": "read", "zone": "asb.bd"})
         self.assertEqual(rc, 0)

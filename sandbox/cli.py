@@ -881,7 +881,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Readiness (spec 063):\n"
             "  ./sb remote readiness [NAME] [--project-dir DIR] [--json]"
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "set-storage-floor", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "set-storage-floor", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness", "coverage"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
@@ -891,11 +891,30 @@ Per-project (each plugin carries its own sandbox.config.json):
              "instance and hosted-route domains; remove: forget a remote "
              "locally (never touches the VPS itself); ssh: explicit operator-only "
              "direct SSH escape hatch; edge: report the nginx front door (routes "
-             "loaded, conflicts, certificates) or remove one Sandbox route")
+             "loaded, conflicts, certificates) or remove one Sandbox route; "
+             "coverage: wildcard subdomain hosting status, plan, and enable")
     remote_p.add_argument("name", nargs="?", default=None,
         help="remote name (required for every action except 'list')")
     remote_p.add_argument("ssh_url", nargs="?", default=None,
         help="SSH connection string (required for 'add')")
+    remote_p.add_argument("--zone", default=None,
+        help="for `remote coverage`: target DNS zone (e.g. asb.bd)")
+    remote_p.add_argument("--enable", action="store_true",
+        help="for `remote coverage`: enable zone coverage (use with --plan or --confirm)")
+    remote_p.add_argument("--disable", action="store_true",
+        help="for `remote coverage`: disable zone coverage (use with --plan or --confirm)")
+    remote_p.add_argument("--repair", action="store_true",
+        help="for `remote coverage`: repair zone coverage (use with --plan or --confirm)")
+    remote_p.add_argument("--renew-certificate", dest="renew_certificate", action="store_true",
+        help="for `remote coverage`: force reissue of origin certificate (requires --confirm)")
+    remote_p.add_argument("--remove-fallback", dest="remove_fallback", action="store_true",
+        help="for `remote coverage`: remove fallback route (requires --confirm)")
+    remote_p.add_argument("--release-dependent", dest="release_dependent", default=None,
+        help="for `remote coverage`: manually release dependent state key (requires --confirm)")
+    remote_p.add_argument("--stop-before-publish", dest="stop_before_publish", action="store_true",
+        help="for `remote coverage --enable`: install fallback, verify origin, stop before DNS publish")
+    remote_p.add_argument("--resume", action="store_true",
+        help="for `remote coverage --enable`: resume an interrupted or expired-lease operation")
     remote_p.add_argument("--control", choices=["https", "tailscale"], default=None,
         help="control-plane transport for 'provision'/'up' (default: ask in "
              "interactive use, HTTPS in --json/non-interactive mode)")

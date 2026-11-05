@@ -263,6 +263,7 @@ def cmd_remote(cfg, args) -> None:
         "pin": _cmd_pin,
         "network-range": _cmd_network_range,
         "readiness": _cmd_readiness,
+        "coverage": _cmd_coverage,
     }
     try:
         dispatch[action](args, as_json)
@@ -1514,6 +1515,8 @@ def _cmd_edge(args, as_json: bool) -> None:
         print(json.dumps(data, sort_keys=True) if as_json else f"{name}: front door {mode}")
         return
     if route:
+        if route.startswith("coverage-") or nginx_edge.is_coverage_fallback_file(nginx_edge.route_file(route)):
+            die("refusing to remove coverage fallback route via --remove-route; use `sb remote coverage --remove-fallback`")
         if not _arg_true(args, "confirm"):
             die("removing a Sandbox nginx route is protected; re-run with --confirm")
         try:
@@ -1524,6 +1527,81 @@ def _cmd_edge(args, as_json: bool) -> None:
         print(json.dumps(data, sort_keys=True) if as_json else
               f"removed {data['file']} from '{name}'")
         return
+
+
+def _cmd_coverage(args, as_json: bool) -> None:
+    """`./sb remote coverage <name> --zone <zone> [--plan | --confirm --plan-digest D | --json]`
+    -- inspect, plan, or enable wildcard zone coverage on a remote front door (spec 070)."""
+    name = _require_name(args)
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    zone = getattr(args, "zone", None)
+    if not zone:
+        die("usage: ./sb remote coverage <name> --zone <zone> [options]")
+
+    # Refuse Stage 3 operations in Stage 1
+    for flag, name_str in [
+        ("disable", "disable"),
+        ("repair", "repair"),
+        ("renew_certificate", "renew-certificate"),
+        ("remove_fallback", "remove-fallback"),
+        ("release_dependent", "release-dependent"),
+    ]:
+        if getattr(args, flag, None):
+            die(f"{name_str} is not available yet (Stage 3)")
+
+    is_enable = bool(getattr(args, "enable", False))
+    is_confirm = bool(getattr(args, "confirm", False))
+    stop_before_publish = bool(getattr(args, "stop_before_publish", False))
+    resume = bool(getattr(args, "resume", False))
+    plan_digest = getattr(args, "plan_digest", None)
+
+    from sandbox.hosting.zone_coverage.service import plan_enable, enable, status, compute_plan_digest
+    from sandbox.hosting.zone_coverage import CoverageError
+    from sandbox.hosting.front_door import FrontDoorError
+
+    try:
+        if is_enable:
+            if is_confirm:
+                if not plan_digest:
+                    die("--enable --confirm requires --plan-digest <digest>")
+                plan = plan_enable(entry, zone)
+                expected_digest = compute_plan_digest(plan)
+                if expected_digest != plan_digest:
+                    raise CoverageError("coverage_plan_stale", "plan digest does not match current state; re-run plan")
+                res = enable(entry, zone, plan, stop_before_publish=stop_before_publish, resume=resume)
+                if as_json:
+                    print(json.dumps({"ok": True, **res}, sort_keys=True))
+                else:
+                    print(f"Coverage enabled for {zone}: state={res['state']}")
+                return
+            else:
+                plan = plan_enable(entry, zone)
+                digest = compute_plan_digest(plan)
+                plan["plan_digest"] = digest
+                plan["note"] = "Older sandbox checkouts will not recognize shared wildcard coverage for this zone"
+                if as_json:
+                    print(json.dumps({"ok": True, **plan}, sort_keys=True))
+                else:
+                    print(f"Plan to enable coverage for {zone} (digest: {digest}):")
+                    print(f"  Current state: {plan['current_state']}")
+                    print(f"  Records to create: {len(plan['records_to_create'])}")
+                    print(f"  Exceptions: {len(plan['exceptions'])}")
+                return
+        else:
+            res = status(entry, zone)
+            if as_json:
+                print(json.dumps({"ok": True, **res}, sort_keys=True))
+            else:
+                print(f"Coverage status for {zone}: state={res.get('state')}")
+    except (CoverageError, FrontDoorError) as exc:
+        code = getattr(exc, "code", "coverage_error")
+        msg = str(exc)
+        if as_json:
+            print(json.dumps({"ok": False, "error": {"code": code, "message": msg}}, sort_keys=True))
+            raise SystemExit(1)
+        die(f"{code}: {msg}")
     try:
         report = nginx_edge.status(entry)
     except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:

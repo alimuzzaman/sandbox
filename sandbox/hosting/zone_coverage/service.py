@@ -23,6 +23,12 @@ from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
 from sandbox.hosting.zone_coverage.models import normalize_zone
 
 
+def _is_ours(record: dict[str, Any], marker: str | None) -> bool:
+    if not marker or not isinstance(record, dict):
+        return False
+    return record.get("comment") == marker
+
+
 def _check_store_res(res: dict[str, Any]) -> None:
     if not isinstance(res, dict):
         raise CoverageError(COVERAGE_STORE_UNAVAILABLE, "zone coverage store returned non-dict response")
@@ -115,7 +121,6 @@ def plan_enable(
     entry: dict[str, Any],
     zone: str,
     *,
-    resume: bool = False,
     cf_client: Any = None,
     store_client: Any = None,
 ) -> dict[str, Any]:
@@ -250,8 +255,8 @@ def plan_enable(
     except Exception:
         raise CoverageError(COVERAGE_STORE_UNAVAILABLE, "failed to read DNS records from Cloudflare") from None
 
-    stored_intent = (doc.get("publish_intent") if doc else None) or []
-    is_resume_context = resume or (doc is not None and doc.get("state") == "incomplete" and bool(stored_intent))
+    stored_intent = doc.get("publish_intent") if isinstance(doc, dict) else None
+    stored_marker = stored_intent.get("marker") if isinstance(stored_intent, dict) else None
 
     records_to_create = []
     records_to_adopt = []
@@ -278,21 +283,6 @@ def plan_enable(
         cand_content = cand["content"]
         cand_proxied = cand["proxied"]
 
-        stored_marker = stored_intent.get("marker") if isinstance(stored_intent, dict) else None
-        stored_records = stored_intent.get("records", []) if isinstance(stored_intent, dict) else []
-
-        in_intent = False
-        if is_resume_context and stored_marker and stored_records:
-            for pi in stored_records:
-                if (
-                    pi.get("name") == cand["name"]
-                    and pi.get("type", "A") == rtype
-                    and pi.get("content") == cand_content
-                    and bool(pi.get("proxied", True)) == cand_proxied
-                ):
-                    in_intent = True
-                    break
-
         recs_of_type = existing_by_type.get(rtype, [])
         if recs_of_type:
             exact_match = None
@@ -304,7 +294,7 @@ def plan_enable(
                 else:
                     differing = er
             if exact_match:
-                if in_intent and exact_match.get("comment") == stored_marker:
+                if _is_ours(exact_match, stored_marker):
                     records_owned_from_prior_attempt.append(exact_match)
                 else:
                     records_to_adopt.append(exact_match)
@@ -359,12 +349,23 @@ def compute_plan_digest(plan: dict[str, Any]) -> str:
     """Compute deterministic sha256 digest covering plan inputs per spec 070."""
     import hashlib
     import json
+
+    sanitized_dependents = {}
+    for dep_k, dep_v in sorted((plan.get("dependents") or {}).items()):
+        if isinstance(dep_v, dict):
+            sanitized_dependents[dep_k] = {
+                k: v for k, v in sorted(dep_v.items())
+                if k not in ("updated_at", "timestamp", "time", "created_at")
+            }
+        else:
+            sanitized_dependents[dep_k] = dep_v
+
     content = {
         "action": plan.get("action", "enable"),
         "zone": plan.get("zone"),
         "generation": plan.get("expected_generation", 0),
         "dependents_revision": plan.get("expected_dependents_revision", 0),
-        "dependents": plan.get("dependents", {}),
+        "dependents": sanitized_dependents,
         "exceptions": plan.get("exceptions", []),
         "blockers": plan.get("blockers", []),
         "records_to_create": plan.get("records_to_create", []),
@@ -490,17 +491,32 @@ def enable(
     else:
         marker = f"sandbox-zone-coverage {secrets.token_hex(8)}"
 
+    merged_intent_records = []
+    if isinstance(stored_intent, dict) and isinstance(stored_intent.get("records"), list):
+        merged_intent_records.extend(stored_intent["records"])
+
+    for r in (plan.get("records_to_create", []) + plan.get("records_owned_from_prior_attempt", [])):
+        rtype = r.get("type", "A")
+        rcontent = r.get("content")
+        rproxied = bool(r.get("proxied", True))
+        exists = any(
+            ir.get("name") == r["name"]
+            and ir.get("type", "A") == rtype
+            and ir.get("content") == rcontent
+            and bool(ir.get("proxied", True)) == rproxied
+            for ir in merged_intent_records
+        )
+        if not exists:
+            merged_intent_records.append({
+                "name": r["name"],
+                "type": rtype,
+                "content": rcontent,
+                "proxied": rproxied,
+            })
+
     publish_intent = {
         "marker": marker,
-        "records": [
-            {
-                "name": r["name"],
-                "type": r.get("type", "A"),
-                "content": r["content"],
-                "proxied": bool(r.get("proxied", True)),
-            }
-            for r in (plan.get("records_to_create", []) + plan.get("records_owned_from_prior_attempt", []))
-        ],
+        "records": merged_intent_records,
     }
     phase_res = store_client.phase(
         clean_zone,
@@ -847,3 +863,6 @@ def status(
         "drift": drift,
         "history": doc.get("history", []),
     }
+
+
+

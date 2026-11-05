@@ -243,10 +243,12 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                 # Expire the lease
                 self._expire_lease("asb.bd")
 
-                # Re-plan with resume=True
-                plan2 = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf, resume=True)
+                # Re-plan independently twice
+                plan2 = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+                plan2_indep = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
                 self.assertTrue(plan2["resumable"])
-                # Assert plan digest matches recomputed
+                # Assert plan digest matches between two independently generated plans
+                self.assertEqual(plan2["plan_digest"], plan2_indep["plan_digest"])
                 self.assertEqual(compute_plan_digest(plan2), plan2["plan_digest"])
 
                 # Count create_address calls during resume
@@ -295,7 +297,7 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                 self._expire_lease("asb.bd")
 
                 # Re-plan and resume, with probe failing
-                plan_resume = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf, resume=True)
+                plan_resume = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
                 with patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
                     with self.assertRaises(CoverageError) as ctx:
                         enable(self.entry, "asb.bd", plan_resume, store_client=store, cf_client=cf, resume=True)
@@ -406,9 +408,9 @@ class TestZoneCoverageMatrix(unittest.TestCase):
         self.assertIn("*.asb.bd", effect_names)
 
         self._expire_lease("asb.bd")
-        plan_retry = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf, resume=True)
+        plan_retry = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
         creates_before = len([c for c in cf.calls if c[0] == "create_address"])
-        res = enable(self.entry, "asb.bd", plan_retry, store_client=store, cf_client=cf, resume=True)
+        res = enable(self.entry, "asb.bd", plan_retry, store_client=store, cf_client=cf)
         self.assertEqual(res["state"], "active")
         creates_after = len([c for c in cf.calls if c[0] == "create_address"])
         self.assertEqual(creates_before, creates_after, "Retry must not call create_address when records are present")

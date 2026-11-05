@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
+import time
 import http.server
 import json
 import os
@@ -422,6 +425,115 @@ http {{
 
         self.assertEqual(violations, [], f"Architecture boundary violations detected in zone_coverage: {violations}")
 
+
+
+    # 27. CLI expired enable resume then failed probe rolls back owned records
+    def test_cli_expired_enable_resume_then_failed_probe_rolls_back_owned_records(self):
+        from sandbox import cli
+        from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
+        from sandbox.hosting.zone_coverage import program
+        from tests.test_zone_coverage_matrix import StatefulFakeProvider
+
+        entry = {
+            "name": "test-remote",
+            "front_door": "nginx",
+            "origin_ipv4": "198.51.100.1",
+        }
+
+        # Real temporary store execution via local subprocess
+        def real_ssh_run(ent, command, timeout=15):
+            env = dict(os.environ, SANDBOX_HOME=self.td, HOME=self.td)
+            return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
+
+        # 1. Seed store with an expired enabling operation holding publish_intent
+        store_client = ZoneCoverageClient(entry, ssh_run=real_ssh_run)
+        begin_res = store_client.begin("asb.bd", "enable", "controller-prior", zone_id="z-test")
+        self.assertTrue(begin_res.get("ok"))
+        op_id = begin_res["document"]["operation"]["id"]
+
+        prior_intent = {
+            "marker": "prior-marker-1234",
+            "records": [
+                {"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True},
+            ],
+        }
+        phase_res = store_client.phase("asb.bd", op_id, "publish_intent", updates={"publish_intent": prior_intent})
+        self.assertTrue(phase_res.get("ok"))
+
+        # Expire lease on disk
+        doc_path = os.path.join(self.td, "runtime", "zone-coverage", "zones", "asb.bd.json")
+        with open(doc_path, "r") as f:
+            doc_data = json.load(f)
+        doc_data["operation"]["lease_expires_at"] = time.time() - 50
+        with open(doc_path, "w") as f:
+            json.dump(doc_data, f)
+
+        # 2. Stateful fake provider holding our prior record plus a third party record
+        cf = StatefulFakeProvider(
+            zone_id="z-test",
+            records=[
+                {"id": "rec-ours", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": "prior-marker-1234"},
+                {"id": "rec-third", "name": "third.asb.bd", "type": "A", "content": "9.9.9.9", "proxied": False, "comment": "third-party"},
+            ],
+        )
+
+        facts = {"config_valid": True, "version": [1, 26, 0], "routes": []}
+
+        # 3. CLI Plan via actual argv parsing
+        plan_out = io.StringIO()
+        plan_argv = ["remote", "coverage", "test-remote", "--zone", "asb.bd", "--enable", "--plan", "--json"]
+        with patch("sandbox.core._remote.get_remote", return_value=entry), \
+             patch("sandbox.core._remote.ssh_run", side_effect=real_ssh_run), \
+             patch("sandbox.core._cloudflare.Client", return_value=cf), \
+             patch("sandbox.hosting.front_door.nginx.probe", return_value=facts), \
+             contextlib.redirect_stdout(plan_out):
+            with patch.object(sys, "argv", ["sb"] + plan_argv): cli.main()
+
+        plan_data = json.loads(plan_out.getvalue())
+        self.assertTrue(plan_data.get("ok"))
+        self.assertTrue(plan_data.get("resumable"))
+        self.assertEqual(len(plan_data.get("records_owned_from_prior_attempt")), 1)
+        self.assertEqual(plan_data["records_owned_from_prior_attempt"][0]["id"], "rec-ours")
+        plan_digest = plan_data["plan_digest"]
+
+        # 4. CLI Confirm without --resume refuses with non-zero exit
+        confirm_no_resume_argv = [
+            "remote", "coverage", "test-remote", "--zone", "asb.bd", "--enable", "--confirm",
+            "--plan-digest", plan_digest, "--json",
+        ]
+        with patch("sandbox.core._remote.get_remote", return_value=entry), \
+             patch("sandbox.core._remote.ssh_run", side_effect=real_ssh_run), \
+             patch("sandbox.core._cloudflare.Client", return_value=cf), \
+             patch("sandbox.hosting.front_door.nginx.probe", return_value=facts):
+            with self.assertRaises(SystemExit) as raised:
+                with patch.object(sys, "argv", ["sb"] + confirm_no_resume_argv): cli.main()
+            self.assertEqual(raised.exception.code, 1)
+
+        # 5. CLI Confirm with --resume and failed probe rolls back owned records
+        confirm_resume_argv = [
+            "remote", "coverage", "test-remote", "--zone", "asb.bd", "--enable", "--confirm",
+            "--plan-digest", plan_digest, "--resume", "--json",
+        ]
+        with patch("sandbox.core._remote.get_remote", return_value=entry), \
+             patch("sandbox.core._remote.ssh_run", side_effect=real_ssh_run), \
+             patch("sandbox.core._cloudflare.Client", return_value=cf), \
+             patch("sandbox.hosting.front_door.nginx.probe", return_value=facts), \
+             patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}), \
+             patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(SystemExit) as raised:
+                with patch.object(sys, "argv", ["sb"] + confirm_resume_argv): cli.main()
+            self.assertEqual(raised.exception.code, 1)
+
+        # Assert: owned record was deleted during rollback
+        deleted_ids = [c[2] for c in cf.calls if c[0] == "delete_record"]
+        self.assertIn("rec-ours", deleted_ids)
+        # Assert: third party record was NOT deleted
+        self.assertNotIn("rec-third", deleted_ids)
+
+        # Assert: store state ended as incomplete
+        with open(doc_path, "r") as f:
+            final_doc = json.load(f)
+        self.assertEqual(final_doc.get("state"), "fallback_only")
 
 if __name__ == "__main__":
     unittest.main()

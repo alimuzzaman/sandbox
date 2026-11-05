@@ -820,7 +820,7 @@ class TestZoneCoverageService(unittest.TestCase):
         self.assertEqual(len(cf.created_records), 1)
 
         # Resume plan: first record is recognized as owned from prior attempt, NOT re-created
-        plan2 = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf, resume=True)
+        plan2 = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf)
         self.assertEqual(len(plan2.get("records_owned_from_prior_attempt", [])), 1)
         self.assertEqual(len(plan2["records_to_create"]), 1)
         self.assertEqual(len(plan2["records_to_adopt"]), 0)
@@ -828,7 +828,7 @@ class TestZoneCoverageService(unittest.TestCase):
         # Resume enable completes without duplicate
         cf.created_records.clear()
         with patch("sandbox.hosting.zone_coverage.fallback.install_fallback"),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
-            res = enable(entry, "asb.bd", plan2, store_client=store, cf_client=cf, resume=True)
+            res = enable(entry, "asb.bd", plan2, store_client=store, cf_client=cf)
             self.assertEqual(res["state"], "active")
             # Exactly 1 new record was written (the 2nd one), no duplicate of the 1st
             self.assertEqual(len(cf.created_records), 1)
@@ -859,14 +859,14 @@ class TestZoneCoverageService(unittest.TestCase):
             "history": [],
         })
 
-        plan = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf, resume=True)
+        plan = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf)
         self.assertEqual(len(plan["records_owned_from_prior_attempt"]), 1)
         self.assertEqual(len(plan["records_to_create"]), 1)
 
         # Probe fails: rollback must remove BOTH records (the owned one and the newly created one)
         with patch("sandbox.hosting.zone_coverage.fallback.install_fallback"),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
             with self.assertRaises(CoverageError) as ctx:
-                enable(entry, "asb.bd", plan, store_client=store, cf_client=cf, resume=True)
+                enable(entry, "asb.bd", plan, store_client=store, cf_client=cf)
             self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
 
         # Both records deleted from CF
@@ -985,24 +985,31 @@ class TestZoneCoverageService(unittest.TestCase):
 
     def test_digest_stable_across_resume(self):
         from sandbox.hosting.zone_coverage.service import compute_plan_digest
-        p1 = {
-            "action": "enable",
-            "zone": "asb.bd",
-            "expected_generation": 0,
-            "expected_dependents_revision": 0,
-            "dependents": {},
-            "exceptions": [],
-            "blockers": [],
-            "records_to_create": [{"name": "b.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
-            "records_to_adopt": [],
-            "records_owned_from_prior_attempt": [{"id": "r1", "name": "a.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
+        # J3: Two independently generated plans with advanced clock under a state
+        # with an adopted wildcard plus a Sandbox route must have equal digests.
+        store = FakeStoreClient()
+        cf = FakeCfClient(records=[
+            {"id": "rec-wild", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": ""},
+        ])
+        facts = {
+            "config_valid": True,
+            "version": [1, 26, 0],
+            "routes": [{"file": "/etc/nginx/conf.d/sandbox-app.asb.bd.conf", "hostnames": ["app.asb.bd"]}],
         }
-        p2 = dict(p1)
-        # Identical plan reproduces exact same digest
+
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value=facts), \
+             patch("time.time", return_value=1700000000.0):
+            p1 = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value=facts), \
+             patch("time.time", return_value=1700005000.0):
+            p2 = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+
+        self.assertEqual(p1["plan_digest"], p2["plan_digest"])
         self.assertEqual(compute_plan_digest(p1), compute_plan_digest(p2))
 
-        # Changing records_owned_from_prior_attempt alters the digest
-        p3 = dict(p1, records_owned_from_prior_attempt=[])
+        # Altering owned records still changes digest
+        p3 = dict(p1, records_owned_from_prior_attempt=[{"id": "x"}])
         self.assertNotEqual(compute_plan_digest(p1), compute_plan_digest(p3))
 
 
@@ -1154,6 +1161,27 @@ class TestZoneCoverageService(unittest.TestCase):
             with self.assertRaises(CoverageError):
                 enable(self.entry, "asb.bd", plan2, store_client=store2, cf_client=cf2)
             self.assertEqual(len(cf2.deleted_records), 0)
+
+
+    def test_j13_m07_third_party_record_adopted_never_in_intent_written_and_not_deleted_on_rollback(self):
+        store = FakeStoreClient()
+        # Third-party record with same content but NO marker
+        cf = FakeCfClient(records=[
+            {"id": "r-third", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": "not-our-marker"},
+        ])
+        plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+        # Outcome 1: third party equal record appears in adopted list, not owned/create
+        self.assertEqual(len(plan["records_to_adopt"]), 1)
+        self.assertEqual(plan["records_to_adopt"][0]["id"], "r-third")
+        self.assertEqual(len(plan["records_to_create"]), 0)
+        self.assertEqual(len(plan["records_owned_from_prior_attempt"]), 0)
+
+        # Outcome 2: enable with failed probe never deletes adopted third-party record
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}), \
+             patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+        self.assertEqual(len(cf.deleted_records), 0)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,6 @@
+from sandbox.core import _hosting as hosting
+from sandbox.hosting.recovery.repository import RecoveryRepository
+import json
 import contextlib
 import subprocess
 import tempfile
@@ -200,6 +203,8 @@ class FakeClient:
         if "cert" in self.missing:
             raise cloudflare.CloudflareError("Cloudflare request failed: HTTP 404: not found")
 
+
+orig_load_host_state = hosting.load_host_state
 
 @mock.patch.object(destroy.remote, "resolve_sandbox_home", lambda entry: "/home/u/sandbox")
 class Execution(unittest.TestCase):
@@ -778,29 +783,202 @@ class Execution(unittest.TestCase):
         kept_idx = next(i for i, line in enumerate(lines) if "kept 1 labelled images not proven ours" in line)
         self.assertLess(removed_idx, kept_idx)
 
-    def test_shared_coverage_retained_in_plan_and_destroy_skips_cloudflare(self):
+    def test_shared_destroy_releases_after_state_removal_real_store(self):
+        with tempfile.TemporaryDirectory() as td:
+            zones_dir = Path(td) / "runtime" / "zone-coverage" / "zones"
+            zones_dir.mkdir(parents=True, exist_ok=True)
+            doc = {
+                "schema_version": 1, "zone": "example.com", "state": "active",
+                "generation": 1, "dependents_revision": 1,
+                "record": {"id": "rec-w", "name": "*.example.com", "type": "A", "content": "1.1.1.1", "proxied": True},
+                "shared_records": [{"id": "rec-w", "name": "*.example.com", "type": "A", "content": "1.1.1.1", "proxied": True}],
+                "dependents": {KEY: {"hostname": "site-sandbox.example.com", "binding": "bound", "generation": 1}},
+                "history": [],
+            }
+            (zones_dir / "example.com.json").write_text(json.dumps(doc))
+
+            client = FakeClient()
+            cov_record = _record(
+                records=[],
+                dns_coverage={"mode": "shared", "zone": "example.com", "hostname": "site-sandbox.example.com"},
+            )
+            events = []
+            replies = iter([self.PROBE, "", "removed\n"])
+
+            def tracking_ssh(entry, command, timeout=30):
+                if "zone-coverage" in command or "PROGRAM" in command or "python3 -c" in command:
+                    events.append("store_release")
+                    from tests.subprocess_support import synthetic_environment
+                    env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
+                    r = subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
+                    return subprocess.CompletedProcess([], r.returncode, r.stdout, r.stderr)
+                reply = next(replies)
+                code, out = reply if isinstance(reply, tuple) else (0, reply)
+                return subprocess.CompletedProcess([], code, out, "")
+
+            def tracking_write(target_state):
+                if KEY not in target_state.get("hosts", {}):
+                    events.append("state_removal")
+                return orig_write(target_state)
+
+            planned = destroy.plan({"hosts": {KEY: cov_record}}, ENTRY, "r1", "site", "sandbox", probe=dict(EMPTY_PROBE))
+            self.assertIs(planned.get("shared_coverage_retained"), True)
+
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            repository._write({"version": 1, "hosts": {KEY: cov_record, "r1/keep/sandbox": {"x": 1}}})
+            orig_write = repository._write
+            repository._write = tracking_write
+
+            with mock.patch.object(destroy.remote, "ssh_run", tracking_ssh),                  mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository", lambda: repository),                  mock.patch.object(destroy.hosting, "load_host_state", lambda *a, **k: destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")):
+                result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+
+            self.assertEqual(result["state"], "destroyed")
+            self.assertIs(result.get("shared_coverage_retained"), True)
+            self.assertEqual(result.get("coverage_release"), "released")
+            self.assertIn("state_removal", events)
+            self.assertIn("store_release", events)
+            self.assertLess(events.index("state_removal"), events.index("store_release"))
+            end_doc = json.loads((zones_dir / "example.com.json").read_text())
+            self.assertNotIn(KEY, end_doc["dependents"])
+
+    def test_shared_destroy_release_failure_is_reported(self):
+        with tempfile.TemporaryDirectory() as td:
+            zones_dir = Path(td) / "runtime" / "zone-coverage" / "zones"
+            zones_dir.mkdir(parents=True, exist_ok=True)
+            doc = {
+                "schema_version": 1, "zone": "example.com", "state": "active",
+                "generation": 1, "dependents_revision": 1,
+                "record": {"id": "rec-w", "name": "*.example.com", "type": "A", "content": "1.1.1.1", "proxied": True},
+                "shared_records": [{"id": "rec-w", "name": "*.example.com", "type": "A", "content": "1.1.1.1", "proxied": True}],
+                "dependents": {KEY: {"hostname": "site-sandbox.example.com", "binding": "bound", "generation": 1}},
+                "history": [],
+            }
+            (zones_dir / "example.com.json").write_text(json.dumps(doc))
+
+            client = FakeClient()
+            cov_record = _record(
+                records=[],
+                dns_coverage={"mode": "shared", "zone": "example.com", "hostname": "site-sandbox.example.com"},
+            )
+            replies = iter([self.PROBE, "", "removed\n"])
+
+            def failing_ssh(entry, command, timeout=30):
+                if "zone-coverage" in command or "PROGRAM" in command or "python3 -c" in command:
+                    return subprocess.CompletedProcess([], 1, "", "store locked")
+                reply = next(replies)
+                code, out = reply if isinstance(reply, tuple) else (0, reply)
+                return subprocess.CompletedProcess([], code, out, "")
+
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            repository._write({"version": 1, "hosts": {KEY: cov_record, "r1/keep/sandbox": {"x": 1}}})
+
+            with mock.patch.object(destroy.remote, "ssh_run", failing_ssh),                  mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository", lambda: repository),                  mock.patch.object(destroy.hosting, "load_host_state", lambda *a, **k: destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")):
+                result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+
+            self.assertEqual(result["state"], "destroyed")
+            self.assertIs(result.get("shared_coverage_retained"), True)
+            self.assertEqual(result.get("coverage_release"), "unknown")
+            end_state = destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")
+            self.assertNotIn(KEY, end_state["hosts"])
+
+    def test_fenced_or_failed_destroy_keeps_dependent(self):
+        with tempfile.TemporaryDirectory() as td:
+            zones_dir = Path(td) / "runtime" / "zone-coverage" / "zones"
+            zones_dir.mkdir(parents=True, exist_ok=True)
+            doc = {
+                "schema_version": 1, "zone": "example.com", "state": "active",
+                "generation": 1, "dependents_revision": 1,
+                "record": {"id": "rec-w", "name": "*.example.com", "type": "A", "content": "1.1.1.1", "proxied": True},
+                "shared_records": [{"id": "rec-w", "name": "*.example.com", "type": "A", "content": "1.1.1.1", "proxied": True}],
+                "dependents": {KEY: {"hostname": "site-sandbox.example.com", "binding": "bound", "generation": 1}},
+                "history": [],
+            }
+            (zones_dir / "example.com.json").write_text(json.dumps(doc))
+
+            client = FakeClient()
+            cov_record = _record(
+                records=[],
+                dns_coverage={"mode": "shared", "zone": "example.com", "hostname": "site-sandbox.example.com"},
+                active_operation={"action": "apply", "started_at": 1},
+            )
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name)
+            repository = RecoveryRepository(root / "hosts.json", root / "locks")
+            repository._write({"version": 1, "hosts": {KEY: cov_record}})
+
+            def dummy_ssh(entry, command, timeout=30):
+                if "zone-coverage" in command or "PROGRAM" in command or "python3 -c" in command:
+                    from tests.subprocess_support import synthetic_environment
+                    env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
+                    r = subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
+                    return subprocess.CompletedProcess([], r.returncode, r.stdout, r.stderr)
+                return subprocess.CompletedProcess([], 0, self.PROBE, "")
+
+            with mock.patch.object(destroy.remote, "ssh_run", dummy_ssh),                  mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository", lambda: repository),                  mock.patch.object(destroy.hosting, "load_host_state", lambda *a, **k: destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")):
+                with self.assertRaises(destroy.DestroyError) as ctx:
+                    destroy.execute(dict(ENTRY, ssh="u@h"), "r1", "site", "sandbox", clear_fenced=False, client_factory=lambda: client)
+                self.assertEqual(ctx.exception.code, "target_fenced")
+
+            end_doc = json.loads((zones_dir / "example.com.json").read_text())
+            self.assertIn(KEY, end_doc["dependents"])
+
+    def test_coverage_name_collision_never_removes_fallback_or_certificate(self):
+        client = FakeClient()
+        target_key = "r1/coverage/asb.bd"
+        cov_record = _record(
+            compose_project="sandbox-host-coverage-asb.bd",
+            project="coverage",
+            environment="asb.bd",
+            records=[],
+            dns_coverage={"mode": "shared", "zone": "asb.bd", "hostname": "app.asb.bd"},
+        )
+        commands = []
+        def capturing_ssh(entry, command, timeout=30):
+            commands.append(command)
+            if 'rm -rf' in command or 'xargs -r docker rmi' in command:
+                return subprocess.CompletedProcess([], 0, 'removed\n', '')
+            return subprocess.CompletedProcess([], 0, self.PROBE, '')
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        repository = RecoveryRepository(root / "hosts.json", root / "locks")
+        repository._write({"version": 1, "hosts": {target_key: cov_record}})
+
+        with mock.patch.object(destroy.remote, "ssh_run", capturing_ssh),              mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository", lambda: repository),              mock.patch.object(destroy.hosting, "load_host_state", lambda *a, **k: destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")):
+            destroy.execute(dict(ENTRY, ssh="u@h"), "r1", "coverage", "asb.bd", client_factory=lambda: client)
+
+        for cmd in commands:
+            self.assertNotIn("sandbox-coverage-asb.bd.conf", cmd)
+            self.assertNotIn("/certs/coverage-asb.bd", cmd)
+
+    def test_shared_destroy_with_leftover_owned_records(self):
         client = FakeClient()
         cov_record = _record(
-            records=[{"zone_id": "z1", "created_id": "rec1"}],
-            dns_coverage={"mode": "shared", "zone": "example.com", "hostname": "site-sandbox.example.com"},
+            records=[{"zone_id": "z1", "created_id": "rec-leftover",
+                      "applied": {"type": "A", "name": "site.example.com", "content": "1.2.3.4"}}],
+            dns_coverage={"mode": "shared", "zone": "example.com", "hostname": "site.example.com"},
         )
         state = {"hosts": {KEY: cov_record}}
         planned = destroy.plan(state, ENTRY, "r1", "site", "sandbox", probe=dict(EMPTY_PROBE))
-        self.assertEqual(planned["dns_records"], [])
-        self.assertEqual(planned.get("shared_coverage_retained"), [
-            {"hostname": "site-sandbox.example.com", "zone": "example.com"}
-        ])
+        self.assertIs(planned.get("shared_coverage_retained"), True)
+        self.assertEqual(len(planned["dns_records"]), 1)
+        self.assertEqual(planned["dns_records"][0]["created_id"], "rec-leftover")
         rendered = destroy.render(planned, confirmed=False)
-        self.assertIn("shared zone coverage retained for site-sandbox.example.com in example.com", rendered)
+        self.assertIn("shared zone coverage retained for site.example.com in example.com", rendered)
 
-        with mock.patch("sandbox.hosting.zone_coverage.targets.release") as mock_release:
+        with mock.patch("sandbox.hosting.zone_coverage.targets.release"):
             result, _, end_state = self._run(cov_record, [self.PROBE, "", "removed\n"], client)
             self.assertEqual(result["state"], "destroyed")
-            self.assertEqual([call for call in client.calls if call[0] == "dns"], [])
-            mock_release.assert_called_once()
+            self.assertEqual(client.calls, [("dns", "z1", "rec-leftover"), ("cert", "cert1")])
             self.assertNotIn(KEY, end_state["hosts"])
-
-
     def test_absent_target_reports_retained_images(self):
         from sandbox.hosting.recovery.repository import RecoveryRepository
         directory = tempfile.TemporaryDirectory()

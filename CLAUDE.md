@@ -65,7 +65,7 @@ unsupported. Default show/list/error channels never emit raw fragment content; e
 emitted only upon explicit `--content` or `--output`. Server config has no unconstrained MCP
 tool to protect against unauthorized web-tier routing mutation.
 
-**Wildcard subdomain coverage (Spec 070).** Use `./sb remote coverage <name> --zone <zone> [--plan | --confirm --plan-digest <digest>]`. Requires an `nginx` front door, Cloudflare SSL mode `strict`, and remote `origin_ipv4`. Fallback routes (`sandbox-coverage-<zone>.conf`) are protected: `sb remote edge --remove-route` refuses them; manage fallback routes through `sb remote coverage`.
+**Shared zone coverage (partly built).** `sb remote coverage` can plan, enable and show one zone on an nginx remote. Fallback route (`sandbox-coverage-<zone>.conf`) is protected from `--remove-route`. Hosted targets do not use coverage yet (each still creates its own DNS record). Do not enable on real zones until disable, repair, cert renewal, and release are built.
 
 ---
 

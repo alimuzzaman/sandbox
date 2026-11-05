@@ -119,11 +119,13 @@ def can_transition(
         return False
 
     if from_state == CoverageState.INCOMPLETE.value:
-        # Incomplete retries only its interrupted_kind
+        # Incomplete retries only its interrupted_kind (or repair for enable per data-model.md)
         if interrupted_kind == "enable":
             if to_state == CoverageState.ENABLING.value and kind == "enable":
                 return True
             if to_state == CoverageState.FALLBACK_ONLY.value:  # rollback ok
+                return True
+            if to_state in (CoverageState.ACTIVE.value, CoverageState.INCOMPLETE.value) and kind == "repair":
                 return True
         elif interrupted_kind == "disable":
             if to_state == CoverageState.DISABLING.value and kind == "disable":

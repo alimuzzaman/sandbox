@@ -108,5 +108,109 @@ class TestCloudflareZoneRecords(unittest.TestCase):
                 }
             )
 
+
+    def test_j12_fixture_response_envelopes(self):
+        # Cloudflare documented response envelope:
+        # comment present and absent, *.zone as exact name, multiple pages,
+        # two same-type records with one equal and one different.
+        client = Client(token="fake-token")
+
+        envelope_page1 = {
+            "success": True,
+            "errors": [],
+            "messages": [],
+            "result": [
+                {
+                    "id": "rec-1",
+                    "zone_id": "zone123",
+                    "zone_name": "asb.bd",
+                    "name": "*.asb.bd",
+                    "type": "A",
+                    "content": "1.2.3.4",
+                    "proxiable": True,
+                    "proxied": True,
+                    "ttl": 1,
+                    "comment": "sandbox-zone-coverage test-marker",
+                    "created_on": "2026-11-01T00:00:00Z",
+                    "modified_on": "2026-11-01T00:00:00Z",
+                },
+                {
+                    "id": "rec-2",
+                    "zone_id": "zone123",
+                    "zone_name": "asb.bd",
+                    "name": "*.asb.bd",
+                    "type": "A",
+                    "content": "5.6.7.8",
+                    "proxiable": True,
+                    "proxied": True,
+                    "ttl": 1,
+                    # comment absent
+                    "created_on": "2026-11-01T00:00:00Z",
+                    "modified_on": "2026-11-01T00:00:00Z",
+                },
+            ],
+            "result_info": {
+                "page": 1,
+                "per_page": 2,
+                "count": 2,
+                "total_count": 3,
+                "total_pages": 2,
+            },
+        }
+
+        envelope_page2 = {
+            "success": True,
+            "errors": [],
+            "messages": [],
+            "result": [
+                {
+                    "id": "rec-3",
+                    "zone_id": "zone123",
+                    "zone_name": "asb.bd",
+                    "name": "api.asb.bd",
+                    "type": "AAAA",
+                    "content": "2001:db8::1",
+                    "proxiable": True,
+                    "proxied": False,
+                    "ttl": 60,
+                    "comment": None,  # comment null
+                }
+            ],
+            "result_info": {
+                "page": 2,
+                "per_page": 2,
+                "count": 1,
+                "total_count": 3,
+                "total_pages": 2,
+            },
+        }
+
+        def fake_request(method, path):
+            if "page=1" in path:
+                return envelope_page1
+            elif "page=2" in path:
+                return envelope_page2
+            return {"success": True, "result": []}
+
+        with patch.object(client, "_request", side_effect=fake_request):
+            records = client.zone_records("zone123", per_page=2)
+            self.assertEqual(len(records), 3)
+
+            # Record 1: comment present, name is *.asb.bd
+            self.assertEqual(records[0]["id"], "rec-1")
+            self.assertEqual(records[0]["name"], "*.asb.bd")
+            self.assertEqual(records[0]["comment"], "sandbox-zone-coverage test-marker")
+
+            # Record 2: comment absent, same type (A) as rec-1, name *.asb.bd, different content
+            self.assertEqual(records[1]["id"], "rec-2")
+            self.assertEqual(records[1]["name"], "*.asb.bd")
+            self.assertNotIn("comment", records[1])
+            self.assertEqual(records[1]["type"], records[0]["type"])
+            self.assertNotEqual(records[1]["content"], records[0]["content"])
+
+            # Record 3: page 2 record
+            self.assertEqual(records[2]["id"], "rec-3")
+            self.assertEqual(records[2]["name"], "api.asb.bd")
+
 if __name__ == "__main__":
     unittest.main()

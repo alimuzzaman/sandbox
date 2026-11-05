@@ -523,6 +523,19 @@ class TestZoneCoverageMatrix(unittest.TestCase):
         all_states = ["absent", "retired", "fallback_only", "disabled", "active", "incomplete_enable", "incomplete_disable"]
         all_kinds = ["enable", "disable", "repair", "remove-fallback"]
 
+        valid_finishes = {
+            "enable": {"active", "fallback_only", "incomplete"},
+            "disable": {"disabled", "incomplete"},
+            "repair": {"active", "incomplete"},
+            "remove-fallback": {"retired", "incomplete"},
+        }
+        invalid_finishes = {
+            "enable": "disabled",
+            "disable": "active",
+            "repair": "disabled",
+            "remove-fallback": "active",
+        }
+
         for state in all_states:
             for kind in all_kinds:
                 with self.subTest(state=state, kind=kind):
@@ -548,36 +561,40 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                     res = store.begin("matrix.bd", kind, "tester")
                     refused = res.get("refused")
 
+                    should_allow = False
                     if state == "absent":
-                        if kind == "enable":
-                            self.assertIsNone(refused)
-                        else:
-                            self.assertEqual(refused, "coverage_kind_mismatch")
+                        should_allow = (kind == "enable")
                     elif state == "retired":
-                        if kind == "enable":
-                            self.assertIsNone(refused)
-                        else:
-                            self.assertEqual(refused, "coverage_kind_mismatch")
+                        should_allow = (kind == "enable")
                     elif state in ("fallback_only", "disabled"):
-                        if kind in ("enable", "remove-fallback"):
-                            self.assertIsNone(refused)
-                        else:
-                            self.assertEqual(refused, "coverage_kind_mismatch")
+                        should_allow = (kind in ("enable", "remove-fallback"))
                     elif state == "active":
-                        if kind in ("repair", "disable"):
-                            self.assertIsNone(refused)
-                        else:
-                            self.assertEqual(refused, "coverage_kind_mismatch")
+                        should_allow = (kind in ("repair", "disable"))
                     elif state == "incomplete_enable":
-                        if kind in ("enable", "repair"):
-                            self.assertIsNone(refused)
-                        else:
-                            self.assertEqual(refused, "coverage_kind_mismatch")
+                        should_allow = (kind in ("enable", "repair"))
                     elif state == "incomplete_disable":
-                        if kind == "disable":
-                            self.assertIsNone(refused)
-                        else:
-                            self.assertEqual(refused, "coverage_kind_mismatch")
+                        should_allow = (kind == "disable")
+
+                    if not should_allow:
+                        self.assertEqual(refused, "coverage_kind_mismatch")
+                    else:
+                        self.assertIsNone(refused)
+                        op_id = res["operation_id"]
+
+                        # Phase advance
+                        ph_res = store.phase("matrix.bd", op_id, "preflight")
+                        self.assertTrue(ph_res.get("ok"))
+
+                        # Finish transition validation: invalid finish target refused
+                        bad_target = invalid_finishes[kind]
+                        f_bad = store.finish("matrix.bd", op_id, bad_target)
+                        self.assertEqual(f_bad.get("refused"), "coverage_kind_mismatch")
+
+                        # Finish transition validation: valid finish target succeeds
+                        good_target = next(iter(valid_finishes[kind]))
+                        f_good = store.finish("matrix.bd", op_id, good_target)
+                        self.assertTrue(f_good.get("ok"))
+                        self.assertEqual(f_good["document"]["state"], good_target)
 
     # 11. Store reads own document in every state after finish
     def test_11_store_reads_own_doc_after_each_finish(self):
@@ -586,19 +603,29 @@ class TestZoneCoverageMatrix(unittest.TestCase):
         os.makedirs(zones_dir, exist_ok=True)
         doc_path = os.path.join(zones_dir, "asb.bd.json")
 
-        for finish_state in ("fallback_only", "active", "disabled", "retired"):
-            with self.subTest(finish_state=finish_state):
+        cases = [
+            ("enable", "fallback_only"),
+            ("enable", "active"),
+            ("enable", "incomplete"),
+            ("disable", "disabled"),
+            ("disable", "incomplete"),
+            ("remove-fallback", "retired"),
+        ]
+
+        for kind, finish_state in cases:
+            with self.subTest(kind=kind, finish_state=finish_state):
+                op_state = "enabling" if kind == "enable" else ("disabling" if kind == "disable" else "disabled")
                 doc = {
                     "schema_version": 1,
                     "zone": "asb.bd",
-                    "state": "enabling",
+                    "state": op_state,
                     "generation": 1,
                     "dependents_revision": 0,
                     "dependents": {},
                     "history": [],
                     "operation": {
-                        "id": "op-test-finish",
-                        "kind": "enable",
+                        "id": f"op-test-{kind}-{finish_state}",
+                        "kind": kind,
                         "phase": "begin",
                         "controller": "tester",
                         "started_at": int(time.time()),
@@ -609,7 +636,7 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                 with open(doc_path, "w") as f:
                     json.dump(doc, f)
 
-                f = store.finish("asb.bd", "op-test-finish", finish_state, raise_generation=True)
+                f = store.finish("asb.bd", f"op-test-{kind}-{finish_state}", finish_state, raise_generation=True)
                 self.assertTrue(f.get("ok"))
 
                 r = store.read("asb.bd")
@@ -617,7 +644,10 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                 read_doc = r["document"]
                 self.assertEqual(read_doc["state"], finish_state)
                 self.assertIsNone(read_doc.get("operation"))
-                self.assertIsNone(read_doc.get("publish_intent"))
+                if finish_state != "incomplete":
+                    self.assertIsNone(read_doc.get("publish_intent"))
+                self.assertEqual(read_doc["history"][-1]["result"], finish_state)
+                self.assertEqual(read_doc["history"][-1]["kind"], kind)
 
     # 12. Corrupt, schema 999 and wrong-zone documents stay byte-identical
     def test_12_corrupt_schema999_wrong_zone_byte_identical(self):

@@ -390,6 +390,17 @@ elif action == "finish":
     if not cur_op or cur_op.get("id") != op_id:
         out({"ok": True, "refused": "coverage_operation_active", "reason": "not_holder"})
 
+    valid_finish = {
+        "enable": {"active", "fallback_only", "incomplete"},
+        "disable": {"disabled", "incomplete"},
+        "repair": {"active", "incomplete"},
+        "remove-fallback": {"retired", "incomplete"},
+        "remove_fallback": {"retired", "incomplete"},
+    }
+    cur_kind = cur_op.get("kind")
+    if final_state not in valid_finish.get(cur_kind, set()):
+        out({"ok": True, "refused": "coverage_kind_mismatch", "current_kind": cur_kind, "target_state": final_state})
+
     doc["state"] = final_state
     if final_state == "incomplete":
         doc["interrupted_kind"] = interrupted_kind or cur_op.get("kind")

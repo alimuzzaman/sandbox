@@ -256,7 +256,11 @@ def plan_enable(
         })
 
     try:
-        existing_records = cf_client.records(zone_id, wanted_name)
+        all_zone_records = _list_records(cf_client, zone_id)
+        existing_records = [
+            r for r in all_zone_records
+            if str(r.get("name", "")).strip().rstrip(".").lower() == wanted_name
+        ]
     except Exception:
         raise CoverageError(COVERAGE_STORE_UNAVAILABLE, "failed to read DNS records from Cloudflare") from None
 
@@ -313,20 +317,19 @@ def plan_enable(
             records_to_create.append(cand)
 
     dependents: dict[str, Any] = dict(doc.get("dependents", {})) if doc else {}
-    if records_to_adopt:
-        existing_names = {r.get("name") for r in existing_records}
-        for exc in exceptions:
-            if exc.get("owner") == "sandbox":
-                h = exc.get("hostname")
-                if h and h not in existing_names:
-                    clean_key = f"recovered/routes/{h}"
-                    if clean_key not in dependents:
-                        dependents[clean_key] = {
-                            "hostname": h,
-                            "state": "recovered",
-                            "generation": cur_gen,
-                            "updated_at": time.time(),
-                        }
+    from sandbox.hosting.zone_coverage.models import eligible
+    for exc in exceptions:
+        if exc.get("owner") == "sandbox":
+            h = exc.get("hostname")
+            if h and eligible(h, clean_zone, all_zone_records):
+                clean_key = f"recovered/routes/{h}"
+                if clean_key not in dependents:
+                    dependents[clean_key] = {
+                        "hostname": h,
+                        "state": "recovered",
+                        "generation": cur_gen,
+                        "updated_at": time.time(),
+                    }
 
     plan_out = {
         "action": "enable",
@@ -554,7 +557,7 @@ def enable(
     try:
         for r in plan.get("records_to_create", []):
             in_flight = r
-            exact_records = cf_client.records(plan["zone_id"], hostname=r["name"])
+            exact_records = _list_records(cf_client, plan["zone_id"], r["name"])
             rtype = r.get("type", "A")
             matching_type = [er for er in exact_records if er.get("type", "A") == rtype]
             ours = None
@@ -693,7 +696,7 @@ def enable(
         provider_records = []
         for n in intent_names:
             try:
-                provider_records.extend(cf_client.records(plan["zone_id"], hostname=n))
+                provider_records.extend(_list_records(cf_client, plan["zone_id"], n))
             except Exception as re:
                 unknown_effects.append({"name": n, "reason": f"record_list_failed: {type(re).__name__}"})
 

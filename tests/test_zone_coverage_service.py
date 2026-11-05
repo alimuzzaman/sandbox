@@ -111,6 +111,9 @@ class FakeCfClient:
             return [r for r in self._records if r.get("name") == target]
         return list(self._records)
 
+    def zone_records(self, zone_id: str):
+        return list(self._records)
+
     def create_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True, comment: str = ""):
         rec_type = "AAAA" if ":" in address else "A"
         rec = {"id": f"rec-{len(self._records)+1}", "name": hostname, "type": rec_type, "content": address, "proxied": proxied, "comment": comment}
@@ -794,6 +797,32 @@ class TestZoneCoverageService(unittest.TestCase):
             mock_install.assert_not_called()
             self.assertEqual(store.doc.get("state"), "incomplete")
             self.assertEqual(store.doc.get("interrupted_kind"), "enable")
+
+
+    def test_j12_recovered_dependents_respect_dns_nodes(self):
+        store = FakeStoreClient()
+        # CF has a DNS record for app1.asb.bd and sub.app2.asb.bd, but none for app3.asb.bd
+        cf = FakeCfClient(records=[
+            {"id": "r1", "name": "app1.asb.bd", "type": "A", "content": "1.2.3.4"},
+            {"id": "r2", "name": "sub.app2.asb.bd", "type": "A", "content": "1.2.3.4"},
+        ])
+
+        # Routes on front door: app1.asb.bd, app2.asb.bd, app3.asb.bd
+        routes = [
+            {"file": "/etc/nginx/conf.d/sandbox-app1.asb.bd.conf", "hostnames": ["app1.asb.bd"]},
+            {"file": "/etc/nginx/conf.d/sandbox-app2.asb.bd.conf", "hostnames": ["app2.asb.bd"]},
+            {"file": "/etc/nginx/conf.d/sandbox-app3.asb.bd.conf", "hostnames": ["app3.asb.bd"]},
+        ]
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={"config_valid": True, "routes": routes}):
+            plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+
+        dependents = plan["dependents"]
+        # app1.asb.bd has direct DNS record -> not dependent
+        self.assertNotIn("recovered/routes/app1.asb.bd", dependents)
+        # app2.asb.bd has child DNS record sub.app2.asb.bd -> not dependent
+        self.assertNotIn("recovered/routes/app2.asb.bd", dependents)
+        # app3.asb.bd has no DNS record at or below it -> dependent!
+        self.assertIn("recovered/routes/app3.asb.bd", dependents)
 
     def test_g8_nginx_probe_failure_stops_before_effect_and_no_guessing(self):
         store = FakeStoreClient()

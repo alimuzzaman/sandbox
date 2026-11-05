@@ -875,9 +875,9 @@ http {{
 
 
 
-    # J14. Generic error, executed: all paths and methods return generic error via real local nginx
+    # J14 / K7. Generic error, executed: all paths and methods return generic error via real local nginx
     def test_fallback_all_paths_and_methods_return_generic_error(self):
-        import http.client, shutil, socket, tempfile, time
+        import http.client, shutil, socket, ssl, tempfile, time
         from sandbox.hosting.zone_coverage.fallback import render_fallback_conf, FALLBACK_BODY
         from tests.subprocess_support import synthetic_environment
 
@@ -940,34 +940,62 @@ http {{
             self.assertEqual(t_res.returncode, 0, f"nginx -t failed:\n{t_res.stderr}")
 
             proc = subprocess.Popen([nginx_bin, "-c", main_conf, "-p", td], env=synthetic_environment({"HOME": td}))
-            time.sleep(0.5)
-            try:
-                methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
-                paths = ["/", "/test", "/path/to/resource.json", "/another/long/path?param=1"]
-                for m in methods:
+
+            def _cleanup_proc():
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            self.addCleanup(_cleanup_proc)
+
+            # Poll readiness up to 10s before issuing requests
+            deadline = time.time() + 10
+            ready = False
+            while time.time() < deadline:
+                try:
+                    with socket.create_connection(("127.0.0.1", h_port), timeout=0.2):
+                        with socket.create_connection(("127.0.0.1", s_port), timeout=0.2):
+                            ready = True
+                            break
+                except (ConnectionRefusedError, socket.timeout, OSError):
+                    time.sleep(0.05)
+            self.assertTrue(ready, "nginx did not become ready within 10s")
+
+            methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+            paths = ["/", "/test", "/path/to/resource.json", "/another/long/path?param=1"]
+            hosts = ["asb.bd", "sub.asb.bd"]
+            schemes = ["http", "https"]
+
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
+            for scheme in schemes:
+                for host in hosts:
                     for path in paths:
-                        conn = http.client.HTTPConnection("127.0.0.1", h_port, timeout=5)
-                        conn.request(m, path, body=b"test-payload" if m in ("POST", "PUT", "PATCH") else None, headers={"Host": "sub.asb.bd"})
-                        resp = conn.getresponse()
-                        self.assertEqual(resp.status, 404, f"{m} {path} returned status {resp.status}")
-                        self.assertEqual(resp.getheader("X-Sandbox-Fallback"), "1")
-                        self.assertEqual(resp.getheader("X-Robots-Tag"), "noindex, nofollow")
-                        body = resp.read().decode("utf-8")
-                        self.assertEqual(body, FALLBACK_BODY)
-                        conn.close()
-
-                # HEAD method
-                conn = http.client.HTTPConnection("127.0.0.1", h_port, timeout=5)
-                conn.request("HEAD", "/", headers={"Host": "head.asb.bd"})
-                resp = conn.getresponse()
-                self.assertEqual(resp.status, 404)
-                self.assertEqual(resp.getheader("X-Sandbox-Fallback"), "1")
-                self.assertEqual(resp.read(), b"")
-                conn.close()
-            finally:
-                proc.terminate()
-                proc.wait(timeout=5)
-
+                        for m in methods:
+                            if scheme == "http":
+                                conn = http.client.HTTPConnection("127.0.0.1", h_port, timeout=5)
+                            else:
+                                conn = http.client.HTTPSConnection("127.0.0.1", s_port, context=ssl_ctx, timeout=5)
+                            try:
+                                body_in = b"payload" if m in ("POST", "PUT", "PATCH") else None
+                                conn.request(m, path, body=body_in, headers={"Host": host})
+                                resp = conn.getresponse()
+                                self.assertEqual(resp.status, 404, f"{scheme} {host} {m} {path} returned status {resp.status}")
+                                self.assertEqual(resp.getheader("X-Sandbox-Fallback"), "1")
+                                self.assertEqual(resp.getheader("X-Robots-Tag"), "noindex, nofollow")
+                                body_out = resp.read()
+                                if m == "HEAD":
+                                    self.assertEqual(body_out, b"", f"HEAD body not empty on {scheme} {host} {path}")
+                                else:
+                                    self.assertEqual(body_out.decode("utf-8"), FALLBACK_BODY)
+                            finally:
+                                conn.close()
 
     def test_subprocess_calls_supply_explicit_env(self):
         import ast

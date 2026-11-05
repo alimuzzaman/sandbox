@@ -807,6 +807,20 @@ def enable(
     }
 
 
+def _list_records(cf_client: Any, zone_id: str, name: str | None = None) -> list[dict[str, Any]]:
+    if hasattr(cf_client, "zone_records"):
+        all_recs = cf_client.zone_records(zone_id)
+    else:
+        all_recs = cf_client.records(zone_id, name or "")
+    if name is not None:
+        clean_name = name.strip().rstrip(".").lower()
+        return [
+            r for r in all_recs
+            if str(r.get("name", "")).strip().rstrip(".").lower() == clean_name
+        ]
+    return list(all_recs)
+
+
 def status(
     entry: dict[str, Any],
     zone: str,
@@ -814,7 +828,10 @@ def status(
     cf_client: Any = None,
     store_client: Any = None,
 ) -> dict[str, Any]:
-    """Read coverage state and inspect drift against Cloudflare."""
+    """Read coverage state and inspect drift against Cloudflare and local front door."""
+    from sandbox.hosting.front_door import require_capability, ZONE_COVERAGE
+    require_capability(entry, ZONE_COVERAGE)
+
     clean_zone = normalize_zone(zone)
     if store_client is None:
         store_client = ZoneCoverageClient(entry)
@@ -837,38 +854,88 @@ def status(
             "dependents_count": 0,
             "dependents": {},
             "drift": None,
+            "observed": {
+                "fallback": "missing",
+                "shared_dns": "absent",
+            },
+            "safe": False,
             "history": [],
         }
 
+    # 1. Observe shared DNS
+    obs_shared_dns = "unavailable"
     drift = None
-    if doc.get("state") == "active":
-        if cf_client is None:
-            from sandbox.core import _cloudflare as cloudflare
-            cf_client = cloudflare.Client()
-        try:
-            zone_id = doc.get("zone_id") or cf_client.zone(clean_zone)["id"]
-            records = cf_client.records(zone_id, f"*.{clean_zone}")
-            expected_ids = {r.get("id") for r in doc.get("shared_records", []) if r.get("id")}
-            actual_ids = {r.get("id") for r in records if r.get("id")}
-            if expected_ids != actual_ids:
+    if cf_client is None:
+        from sandbox.core import _cloudflare as cloudflare
+        cf_client = cloudflare.Client()
+    try:
+        zone_id = doc.get("zone_id") or cf_client.zone(clean_zone)["id"]
+        records = _list_records(cf_client, zone_id, f"*.{clean_zone}")
+        expected_records = doc.get("shared_records") or []
+        expected_ids = {r.get("id") for r in expected_records if r.get("id")}
+        actual_ids = {r.get("id") for r in records if r.get("id")}
+
+        if not records:
+            if not expected_records:
+                obs_shared_dns = "match"
+            else:
+                obs_shared_dns = "absent"
+        else:
+            if not expected_records:
+                obs_shared_dns = "changed"
+            elif expected_ids != actual_ids:
+                obs_shared_dns = "changed"
                 drift = {
                     "reason": "dns_records_mismatch",
-                    "expected": doc.get("shared_records"),
+                    "expected": expected_records,
                     "actual": records,
                 }
             else:
+                is_modified = False
                 for r in records:
-                    exp = next((x for x in doc.get("shared_records", []) if x.get("id") == r.get("id")), None)
+                    exp = next((x for x in expected_records if x.get("id") == r.get("id")), None)
                     if exp and (exp.get("content") != r.get("content") or exp.get("proxied") != r.get("proxied")):
+                        obs_shared_dns = "changed"
                         drift = {
                             "reason": "dns_record_modified",
                             "record_id": r.get("id"),
                             "expected": exp,
                             "actual": r,
                         }
+                        is_modified = True
                         break
-        except Exception:
-            drift = {"reason": "provider_error", "error": "unavailable"}
+                if not is_modified:
+                    obs_shared_dns = "match"
+    except Exception:
+        obs_shared_dns = "unavailable"
+        drift = {"reason": "provider_error", "error": "unavailable"}
+
+    # 2. Observe fallback route
+    obs_fallback = "unavailable"
+    stored_fallback = doc.get("fallback")
+    route_name = f"coverage-{clean_zone}"
+    try:
+        route_content = nginx.read_route(entry, route_name)
+        if route_content is None:
+            if stored_fallback is None:
+                obs_fallback = "match"
+            else:
+                obs_fallback = "missing"
+        else:
+            if stored_fallback is None:
+                obs_fallback = "changed"
+            else:
+                import hashlib
+                actual_digest = hashlib.sha256(route_content.encode()).hexdigest()
+                expected_digest = stored_fallback.get("digest")
+                if expected_digest and actual_digest == expected_digest:
+                    obs_fallback = "match"
+                else:
+                    obs_fallback = "changed"
+    except Exception:
+        obs_fallback = "unavailable"
+
+    safe = (obs_fallback == "match" and obs_shared_dns == "match")
 
     return {
         "zone": clean_zone,
@@ -884,6 +951,11 @@ def status(
         "dependents_count": len(doc.get("dependents", {})),
         "dependents": doc.get("dependents", {}),
         "drift": drift,
+        "observed": {
+            "fallback": obs_fallback,
+            "shared_dns": obs_shared_dns,
+        },
+        "safe": safe,
         "history": doc.get("history", []),
     }
 

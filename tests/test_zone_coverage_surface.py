@@ -545,5 +545,145 @@ http {{
             final_doc = json.load(f)
         self.assertEqual(final_doc.get("state"), "fallback_only")
 
+
+    # J10. Caddy status capability guard test via real argv
+    def test_j10_caddy_status_fails_first_with_zero_calls(self):
+        from sandbox import cli
+        from sandbox.hosting.front_door import FrontDoorError
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+
+        caddy_remote = {
+            "name": "caddy-remote",
+            "front_door": "caddy",
+        }
+
+        # Real argv dispatching through cli.main
+        argv = ["sb", "remote", "coverage", "caddy-remote", "--zone", "asb.bd", "--json"]
+        with patch("sys.argv", argv), \
+             patch("sandbox.core._remote.get_remote", return_value=caddy_remote), \
+             patch("sandbox.hosting.zone_coverage.client.ZoneCoverageClient") as mock_client, \
+             patch("sandbox.core._cloudflare.Client") as mock_cf, \
+             patch("sandbox.core._remote.ssh_run") as mock_ssh:
+            out_buf = io.StringIO()
+            err_buf = io.StringIO()
+            with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli.main()
+                self.assertEqual(ctx.exception.code, 1)
+
+            # Zero store, provider or SSH calls
+            mock_client.assert_not_called()
+            mock_cf.assert_not_called()
+            mock_ssh.assert_not_called()
+
+            # Output contains front_door_capability_unavailable
+            payload = json.loads(out_buf.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["code"], "front_door_capability_unavailable")
+
+    # J6. Fallback and shared DNS observation in status with safe calculation
+    def test_j6_status_fallback_and_dns_observation_combinations(self):
+        from sandbox.hosting.zone_coverage.service import status
+        entry = {"name": "test-remote", "front_door": "nginx"}
+
+        class MemoryStore:
+            def __init__(self, doc):
+                self.doc = doc
+            def read(self, zone):
+                return {"ok": True, "document": self.doc}
+
+        class MockCf:
+            def __init__(self, records=None, exc=None):
+                self._records = records or []
+                self._exc = exc
+            def zone(self, zone):
+                return {"id": "z1"}
+            def records(self, zone_id, name):
+                if self._exc:
+                    raise self._exc
+                return self._records
+            def zone_records(self, zone_id):
+                if self._exc:
+                    raise self._exc
+                return self._records
+
+        stored_doc = {
+            "schema_version": 1,
+            "zone": "asb.bd",
+            "zone_id": "z1",
+            "state": "active",
+            "generation": 1,
+            "dependents_revision": 0,
+            "shared_records": [{"id": "r1", "name": "*.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
+            "fallback": {"file": "/r.conf", "digest": "sha256-correct"},
+            "dependents": {},
+            "history": [],
+        }
+
+        # 1. match / match -> safe True
+        cf_match = MockCf([{"id": "r1", "name": "*.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}])
+        with patch("sandbox.hosting.front_door.nginx.read_route", return_value="dummy-content"), \
+             patch("hashlib.sha256") as mock_hash:
+            mock_hash.return_value.hexdigest.return_value = "sha256-correct"
+            res = status(entry, "asb.bd", cf_client=cf_match, store_client=MemoryStore(stored_doc))
+            self.assertEqual(res["observed"]["fallback"], "match")
+            self.assertEqual(res["observed"]["shared_dns"], "match")
+            self.assertTrue(res["safe"])
+
+        # 2. missing fallback / match dns -> safe False
+        with patch("sandbox.hosting.front_door.nginx.read_route", return_value=None):
+            res = status(entry, "asb.bd", cf_client=cf_match, store_client=MemoryStore(stored_doc))
+            self.assertEqual(res["observed"]["fallback"], "missing")
+            self.assertEqual(res["observed"]["shared_dns"], "match")
+            self.assertFalse(res["safe"])
+
+        # 3. changed fallback / match dns -> safe False
+        with patch("sandbox.hosting.front_door.nginx.read_route", return_value="dummy-content"), \
+             patch("hashlib.sha256") as mock_hash:
+            mock_hash.return_value.hexdigest.return_value = "sha256-different"
+            res = status(entry, "asb.bd", cf_client=cf_match, store_client=MemoryStore(stored_doc))
+            self.assertEqual(res["observed"]["fallback"], "changed")
+            self.assertEqual(res["observed"]["shared_dns"], "match")
+            self.assertFalse(res["safe"])
+
+        # 4. unavailable fallback / match dns -> safe False
+        with patch("sandbox.hosting.front_door.nginx.read_route", side_effect=RuntimeError("ssh fail")):
+            res = status(entry, "asb.bd", cf_client=cf_match, store_client=MemoryStore(stored_doc))
+            self.assertEqual(res["observed"]["fallback"], "unavailable")
+            self.assertEqual(res["observed"]["shared_dns"], "match")
+            self.assertFalse(res["safe"])
+
+        # 5. match fallback / absent dns -> safe False
+        cf_absent = MockCf([])
+        with patch("sandbox.hosting.front_door.nginx.read_route", return_value="dummy-content"), \
+             patch("hashlib.sha256") as mock_hash:
+            mock_hash.return_value.hexdigest.return_value = "sha256-correct"
+            res = status(entry, "asb.bd", cf_client=cf_absent, store_client=MemoryStore(stored_doc))
+            self.assertEqual(res["observed"]["fallback"], "match")
+            self.assertEqual(res["observed"]["shared_dns"], "absent")
+            self.assertFalse(res["safe"])
+
+        # 6. match fallback / changed dns -> safe False
+        cf_changed = MockCf([{"id": "r1", "name": "*.asb.bd", "type": "A", "content": "9.9.9.9", "proxied": True}])
+        with patch("sandbox.hosting.front_door.nginx.read_route", return_value="dummy-content"), \
+             patch("hashlib.sha256") as mock_hash:
+            mock_hash.return_value.hexdigest.return_value = "sha256-correct"
+            res = status(entry, "asb.bd", cf_client=cf_changed, store_client=MemoryStore(stored_doc))
+            self.assertEqual(res["observed"]["fallback"], "match")
+            self.assertEqual(res["observed"]["shared_dns"], "changed")
+            self.assertFalse(res["safe"])
+
+        # 7. match fallback / unavailable dns -> safe False
+        cf_unavail = MockCf(exc=RuntimeError("cf down"))
+        with patch("sandbox.hosting.front_door.nginx.read_route", return_value="dummy-content"), \
+             patch("hashlib.sha256") as mock_hash:
+            mock_hash.return_value.hexdigest.return_value = "sha256-correct"
+            res = status(entry, "asb.bd", cf_client=cf_unavail, store_client=MemoryStore(stored_doc))
+            self.assertEqual(res["observed"]["fallback"], "match")
+            self.assertEqual(res["observed"]["shared_dns"], "unavailable")
+            self.assertFalse(res["safe"])
+
+
 if __name__ == "__main__":
     unittest.main()

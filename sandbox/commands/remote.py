@@ -1582,9 +1582,10 @@ def _cmd_coverage(args, as_json: bool) -> None:
 
     from sandbox.hosting.zone_coverage.service import plan_enable, enable, status, compute_plan_digest
     from sandbox.hosting.zone_coverage import CoverageError
-    from sandbox.hosting.front_door import FrontDoorError
+    from sandbox.hosting.front_door import FrontDoorError, require_capability, ZONE_COVERAGE
 
     try:
+        require_capability(entry, ZONE_COVERAGE)
         if is_enable:
             if is_confirm:
                 if not plan_digest:
@@ -1621,7 +1622,7 @@ def _cmd_coverage(args, as_json: bool) -> None:
             if as_json:
                 print(json.dumps({"ok": True, **res}, sort_keys=True))
             else:
-                print(f"Coverage status for {zone}: state={res.get('state')}")
+                print(f"Coverage status for {zone}: state={res.get('state')} safe={res.get('safe')}")
     except Exception as exc:
         from sandbox.core._cloudflare import CloudflareError
         if isinstance(exc, CloudflareError):

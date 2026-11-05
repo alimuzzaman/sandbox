@@ -1,3 +1,4 @@
+from tests.subprocess_support import synthetic_environment
 """Remote front-door contract and the nginx adapter (PRD 056)."""
 import json
 import subprocess
@@ -317,7 +318,7 @@ res = {{
 }}
 print(json.dumps(res))
 """
-        proc = subprocess.run([sys.executable, "-c", embedded_script], capture_output=True, text=True)
+        proc = subprocess.run([sys.executable, "-c", embedded_script], capture_output=True, text=True, env=synthetic_environment())
         self.assertEqual(proc.returncode, 0, f"Embedded script failed: {proc.stderr}")
         embedded_res = json.loads(proc.stdout)
         self.assertEqual(embedded_res["nested"], 1)
@@ -387,7 +388,7 @@ print(json.dumps(res))
 class NginxTransactionTests(unittest.TestCase):
     def test_transaction_script_is_valid_shell(self):
         result = subprocess.run(["sh", "-n"], input=nginx.transaction_script(),
-                                text=True, capture_output=True, check=False)
+                                text=True, capture_output=True, check=False, env=synthetic_environment())
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_transaction_is_serialized_validated_and_never_touches_nginx_conf(self):

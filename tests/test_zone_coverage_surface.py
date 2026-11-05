@@ -368,7 +368,7 @@ class TestZoneCoverageSurface(unittest.TestCase):
         cert_path = os.path.join(self.td, "cert.pem")
         key_path = os.path.join(self.td, "key.pem")
         cmd = f'openssl req -x509 -newkey rsa:2048 -keyout {key_path} -out {cert_path} -days 1 -nodes -subj "/CN=*.asb.bd"'
-        subprocess.run(cmd, shell=True, check=True, capture_output=True)
+        subprocess.run(cmd, shell=True, check=True, capture_output=True, env=synthetic_environment({"HOME": self.td}))
 
         fallback_conf = render_fallback_conf("asb.bd", cert_path=cert_path, key_path=key_path, http2_directive=True)
         vhost_path = os.path.join(self.td, "fallback.conf")
@@ -385,7 +385,7 @@ http {{
 }}
 """)
 
-        r = subprocess.run([nginx_bin, "-t", "-c", nginx_conf], capture_output=True, text=True)
+        r = subprocess.run([nginx_bin, "-t", "-c", nginx_conf], capture_output=True, text=True, env=synthetic_environment({"HOME": self.td}))
         self.assertEqual(r.returncode, 0, f"nginx -t failed:\nstdout: {r.stdout}\nstderr: {r.stderr}")
         self.assertIn("syntax is ok", r.stderr)
         self.assertIn("test is successful", r.stderr)
@@ -395,7 +395,7 @@ http {{
         cert_path = os.path.join(self.td, "cert.pem")
         key_path = os.path.join(self.td, "key.pem")
         cmd = f'openssl req -x509 -newkey rsa:2048 -keyout {key_path} -out {cert_path} -days 1 -nodes -subj "/CN=*.asb.bd"'
-        subprocess.run(cmd, shell=True, check=True, capture_output=True)
+        subprocess.run(cmd, shell=True, check=True, capture_output=True, env=synthetic_environment({"HOME": self.td}))
 
         seen_sni = []
 
@@ -433,7 +433,7 @@ http {{
         entry = {"name": "local-test"}
 
         def local_ssh(entry, cmd, timeout=10):
-            return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            return subprocess.run(cmd, shell=True, capture_output=True, text=True, env=synthetic_environment())
 
         # 1. Happy path: 404 with fallback header and body
         res = run_origin_probe(entry, "asb.bd", port=port, probe_host="probe-label.asb.bd", ssh_run=local_ssh)
@@ -865,7 +865,7 @@ http {{
             subprocess.run([
                 "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
                 "-out", cert_path, "-days", "1", "-nodes", "-subj", "/CN=*.asb.bd"
-            ], check=True, capture_output=True)
+            ], check=True, capture_output=True, env=synthetic_environment({"HOME": td}))
 
             fb_conf = render_fallback_conf(
                 "asb.bd",
@@ -901,10 +901,10 @@ http {{
                 f.write(nginx_conf)
 
             # Test config
-            t_res = subprocess.run([nginx_bin, "-t", "-c", main_conf, "-p", td], capture_output=True, text=True)
+            t_res = subprocess.run([nginx_bin, "-t", "-c", main_conf, "-p", td], capture_output=True, text=True, env=synthetic_environment({"HOME": td}))
             self.assertEqual(t_res.returncode, 0, f"nginx -t failed:\n{t_res.stderr}")
 
-            proc = subprocess.Popen([nginx_bin, "-c", main_conf, "-p", td])
+            proc = subprocess.Popen([nginx_bin, "-c", main_conf, "-p", td], env=synthetic_environment({"HOME": td}))
             time.sleep(0.5)
             try:
                 methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
@@ -932,6 +932,38 @@ http {{
             finally:
                 proc.terminate()
                 proc.wait(timeout=5)
+
+
+    def test_subprocess_calls_supply_explicit_env(self):
+        import ast
+        import os
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        test_files = [
+            os.path.join(repo_root, 'tests', 'test_zone_coverage_surface.py'),
+            os.path.join(repo_root, 'tests', 'test_zone_coverage_matrix.py'),
+            os.path.join(repo_root, 'tests', 'test_front_door_nginx.py'),
+        ]
+
+        target_funcs = {'run', 'Popen', 'check_output'}
+        violations = []
+
+        for tf in test_files:
+            with open(tf, 'r') as f:
+                tree = ast.parse(f.read(), filename=tf)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    is_subproc = False
+                    if isinstance(node.func, ast.Attribute) and node.func.attr in target_funcs:
+                        if isinstance(node.func.value, ast.Name) and node.func.value.id == 'subprocess':
+                            is_subproc = True
+                    if is_subproc:
+                        has_env = any(kw.arg == 'env' for kw in node.keywords)
+                        if not has_env:
+                            violations.append(f"{os.path.basename(tf)}:{node.lineno}")
+
+        self.assertEqual(violations, [], f"Subprocess calls without env=: {violations}")
 
 
 if __name__ == "__main__":

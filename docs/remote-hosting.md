@@ -1119,6 +1119,27 @@ DNS record; the fallback does not follow redirects.
 
 Moving every site from one remote to another: [server-migration.md](server-migration.md).
 
+**Wildcard Subdomain Hosting (Spec 070).** An nginx front door can host single-level
+wildcard coverage (`*.zone`, FR-021) so newly provisioned sites under the zone resolve
+immediately without per-target Cloudflare DNS modifications.
+
+```sh
+./sb remote coverage xcloud-london --zone asb.bd                        # status (read-only)
+./sb remote coverage xcloud-london --zone asb.bd --enable --plan         # preview plan and digest
+./sb remote coverage xcloud-london --zone asb.bd --enable --confirm --plan-digest <digest>
+```
+
+- **Requirements**: remote front door must be `nginx`, Cloudflare SSL mode must be `strict`,
+  and an `origin_ipv4` address must be configured.
+- **Protected Fallback Route**: Sandbox installs `/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`
+  with a wildcard server block returning 404. It is protected against accidental removal:
+  `sb remote edge --remove-route` refuses it.
+- **Anonymity (FR-044)**: Unallocated subdomains return HTTP 404 with a fixed, generic body
+  (`<!doctype html><title>Not found</title><h1>Not found</h1>`) and `X-Robots-Tag: noindex, nofollow`,
+  never leaking tenant identities, origin IP, or zone details.
+- **Older checkouts (R1)**: Older Sandbox checkouts will not recognize shared wildcard coverage
+  for the zone and will attempt to manage per-site DNS records independently.
+
 **Limitations.** The nginx front door serves `sb host` routes and the HTTPS MCP control
 route only. `sb deploy --expose`, instance aliases and `sb preview` refuse before any side
 effect with `front_door_capability_unavailable`. Use a Caddy remote for those.

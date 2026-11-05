@@ -479,6 +479,25 @@ Only a current-contract terminal failed apply with a pre-effect receipt can reco
 Legacy, dirty, changed, partial, stale, torn, or mutation-requiring evidence refuses
 before protected effects.
 
+## Wildcard subdomain hosting (Spec 070)
+
+Use `sb remote coverage` to inspect, plan, and enable single-level wildcard coverage (`*.zone`) on nginx remotes:
+
+```sh
+# Status / observation (read-only)
+sb remote coverage <remote> --zone <zone> [--json]
+
+# Plan enabling coverage
+sb remote coverage <remote> --zone <zone> --enable --plan [--json]
+
+# Execute enable with verified plan digest
+sb remote coverage <remote> --zone <zone> --enable --confirm --plan-digest <digest> [--stop-before-publish] [--resume] [--json]
+```
+
+- Requires an `nginx` front door and Cloudflare SSL mode `strict`.
+- Fallback route (`/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`) returns HTTP 404 with a generic body and is protected: `sb remote edge --remove-route` refuses it.
+- Never edit fallback files directly; use `sb remote coverage`.
+
 When the owner exited before recording anything, recovery cannot observe its way out:
 it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.
 Close that attempt explicitly, then apply again.

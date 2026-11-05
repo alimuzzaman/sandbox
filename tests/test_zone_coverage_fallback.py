@@ -14,6 +14,71 @@ from sandbox.hosting.zone_coverage.fallback import (
 
 
 class TestZoneCoverageFallback(unittest.TestCase):
+    def test_f9_origin_probe_sni_and_port_argument(self):
+        import os
+        import socket
+        import ssl
+        import subprocess
+        import sys
+        import tempfile
+        import threading
+        from sandbox.hosting.zone_coverage.fallback import _PROBE_SCRIPT, FALLBACK_BODY
+
+        with tempfile.TemporaryDirectory() as td:
+            key_path = os.path.join(td, "key.pem")
+            cert_path = os.path.join(td, "cert.pem")
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
+                 "-out", cert_path, "-days", "1", "-nodes", "-subj", "/CN=probe-sub.asb.bd"],
+                check=True, capture_output=True,
+            )
+
+            received_sni = []
+            def sni_cb(sock, req_hostname, ctx):
+                received_sni.append(req_hostname)
+                return None
+
+            server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            server_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            server_ctx.sni_callback = sni_cb
+
+            server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_sock.bind(("127.0.0.1", 0))
+            server_sock.listen(1)
+            port = server_sock.getsockname()[1]
+
+            def run_server():
+                try:
+                    conn, _ = server_sock.accept()
+                    with server_ctx.wrap_socket(conn, server_side=True) as tls_conn:
+                        _ = tls_conn.recv(1024)
+                        resp = (
+                            b"HTTP/1.1 404 Not Found\r\n"
+                            b"Content-Type: text/html\r\n"
+                            b"X-Sandbox-Fallback: 1\r\n"
+                            b"Content-Length: " + str(len(FALLBACK_BODY)).encode() + b"\r\n"
+                            b"Connection: close\r\n\r\n" + FALLBACK_BODY.encode()
+                        )
+                        tls_conn.sendall(resp)
+                except Exception:
+                    pass
+                finally:
+                    server_sock.close()
+
+            th = threading.Thread(target=run_server, daemon=True)
+            th.start()
+
+            # Execute _PROBE_SCRIPT via subprocess passing target host and port
+            proc = subprocess.run(
+                [sys.executable, "-c", _PROBE_SCRIPT, "probe-sub.asb.bd", str(port)],
+                capture_output=True,
+                text=True,
+            )
+            th.join(timeout=3)
+
+            self.assertEqual(proc.returncode, 0, "Probe script failed: " + str(proc.stderr))
+            self.assertEqual(received_sni, ["probe-sub.asb.bd"], f"Expected SNI probe-sub.asb.bd, got {received_sni}")
+
     def test_render_fallback_conf_exact_contents(self):
         conf = render_fallback_conf(
             "asb.bd",

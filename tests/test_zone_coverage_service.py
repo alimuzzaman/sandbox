@@ -101,6 +101,97 @@ class TestZoneCoverageService(unittest.TestCase):
             "origin_ipv4": "198.51.100.1",
         }
 
+    def test_f10_digest_nine_keys_and_infer_recovered_dependents(self):
+        from sandbox.hosting.zone_coverage.service import compute_plan_digest
+        p1 = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "dependents": {},
+            "exceptions": [],
+            "blockers": [],
+            "records_to_create": [],
+            "records_to_adopt": [],
+        }
+        p2 = dict(p1)
+        p2["dependents"] = {"recovered/routes/site.asb.bd": {"hostname": "site.asb.bd", "state": "recovered"}}
+        # Two plans differing ONLY in dependents MUST produce different digests
+        self.assertNotEqual(compute_plan_digest(p1), compute_plan_digest(p2))
+
+        # Infer recovered dependents when adopted record exists
+        cf = FakeCfClient()
+        cf.records = [{"id": "r-wild", "type": "A", "name": "*.asb.bd", "content": "1.2.3.4", "proxied": True}]
+        # Mock nginx route for site.asb.bd (sandbox owned)
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={
+            "config_valid": True,
+            "features": {"http2_directive": "http2 on;", "ipv6": True},
+            "routes": [{"file": "/etc/nginx/conf.d/sandbox-site.conf", "hostnames": ["site.asb.bd"]}],
+        }):
+            plan = plan_enable(self.entry, "asb.bd", store_client=FakeStoreClient(doc=None), cf_client=cf)
+            self.assertEqual(len(plan["records_to_adopt"]), 1)
+            self.assertIn("recovered/routes/site.asb.bd", plan["dependents"])
+            self.assertEqual(plan["dependents"]["recovered/routes/site.asb.bd"]["state"], "recovered")
+
+    def test_f8_expired_lease_resumable_and_resume_reaches_begin(self):
+        import time
+        now = time.time()
+        # 1. Expired lease in plan_enable
+        expired_doc = {
+            "schema_version": 1,
+            "zone": "asb.bd",
+            "state": "incomplete",
+            "generation": 0,
+            "operation": {
+                "id": "op-old",
+                "kind": "enable",
+                "controller": "worker-1",
+                "phase": "fallback_route_rendered",
+                "lease_expires_at": now - 100,
+            },
+            "dependents": {},
+            "dependents_revision": 0,
+        }
+        store = FakeStoreClient(doc=expired_doc)
+        cf = FakeCfClient()
+        plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+        self.assertTrue(plan.get("resumable"))
+        self.assertEqual(plan.get("holder"), "worker-1")
+        self.assertEqual(plan.get("phase"), "fallback_route_rendered")
+
+        # 2. Active (unexpired) lease raises COVERAGE_OPERATION_ACTIVE
+        active_doc = {
+            "schema_version": 1,
+            "zone": "asb.bd",
+            "state": "incomplete",
+            "generation": 0,
+            "operation": {
+                "id": "op-act",
+                "kind": "enable",
+                "controller": "worker-1",
+                "phase": "fallback_route_rendered",
+                "lease_expires_at": now + 100,
+            },
+            "dependents": {},
+            "dependents_revision": 0,
+        }
+        store_active = FakeStoreClient(doc=active_doc)
+        with self.assertRaises(CoverageError) as ctx:
+            plan_enable(self.entry, "asb.bd", store_client=store_active, cf_client=cf)
+        self.assertEqual(ctx.exception.code, COVERAGE_OPERATION_ACTIVE)
+
+        # 3. enable(resume=True) reaches store_client.begin(resume=True)
+        begin_calls = []
+        orig_begin = store.begin
+        def spy_begin(*args, **kwargs):
+            begin_calls.append((args, kwargs))
+            return orig_begin(*args, **kwargs)
+        store.begin = spy_begin
+
+        enable(self.entry, "asb.bd", plan, resume=True, store_client=store, cf_client=cf)
+        self.assertTrue(any(kwargs.get("resume") is True for args, kwargs in begin_calls),
+                        f"Expected store_client.begin to be called with resume=True, calls: {begin_calls}")
+
     def test_plan_enable_happy_path(self):
         store = FakeStoreClient()
         cf = FakeCfClient()

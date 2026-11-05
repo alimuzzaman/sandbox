@@ -15,15 +15,20 @@ from sandbox.hosting.zone_coverage import (
 FALLBACK_BODY = "<!doctype html><title>Not found</title><h1>Not found</h1>"
 
 _PROBE_SCRIPT = r'''
-import http.client, json, ssl, sys
+import http.client, json, socket, ssl, sys
 
 host = sys.argv[1]
+port = int(sys.argv[2]) if len(sys.argv) > 2 else 443
+
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 
 try:
-    conn = http.client.HTTPSConnection("127.0.0.1", 443, context=ctx, timeout=10)
+    raw_sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    tls_sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.sock = tls_sock
     conn.request("GET", "/", headers={"Host": host})
     resp = conn.getresponse()
     body = resp.read().decode("utf-8", "replace")
@@ -114,6 +119,7 @@ def run_origin_probe(
     entry: dict[str, Any],
     zone: str,
     *,
+    port: int = 443,
     probe_host: str | None = None,
     probe_func: Callable[[str], dict[str, Any]] | None = None,
     ssh_run: Callable[..., Any] | None = None,
@@ -130,7 +136,7 @@ def run_origin_probe(
         if ssh_run is None:
             from sandbox.core._remote import ssh_run as default_ssh_run
             ssh_run = default_ssh_run
-        cmd = f"python3 -c {shlex.quote(_PROBE_SCRIPT)} {shlex.quote(probe_host)}"
+        cmd = f"python3 -c {shlex.quote(_PROBE_SCRIPT)} {shlex.quote(probe_host)} {port}"
         res = ssh_run(entry, cmd, timeout=15)
         stdout = getattr(res, "stdout", "")
         if isinstance(stdout, bytes):

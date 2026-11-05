@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.subprocess_support import synthetic_environment
+
 import ast
 import contextlib
 import io
@@ -269,40 +271,56 @@ class TestZoneCoverageSurface(unittest.TestCase):
 
     # 22. Fallback route in probe and summarize
     def test_22_fallback_route_in_probe_and_summarize(self):
-        # J9: Real probe test executing _PROBE_PROGRAM route construction
-        import subprocess, tempfile
-        from tests.subprocess_support import synthetic_environment
-
+        # J9 / K6: Real probe test with nginx -T dump containing fallback, 2 exact routes, and 1 independent conflict
         with tempfile.TemporaryDirectory() as td:
             bin_dir = os.path.join(td, "bin")
             os.makedirs(bin_dir, exist_ok=True)
-            fake_nginx = os.path.join(bin_dir, "nginx")
-            with open(fake_nginx, "w") as f:
-                f.write("#!/bin/sh\n"
-                        "if [ \"$1\" = \"-v\" ]; then\n"
-                        "    echo \"nginx version: nginx/1.24.0\"\n"
-                        "elif [ \"$1\" = \"-V\" ]; then\n"
-                        "    echo \"nginx version: nginx/1.24.0 --with-http_realip_module\"\n"
-                        "elif [ \"$1\" = \"-t\" ]; then\n"
-                        "    exit 0\n"
-                        "elif [ \"$1\" = \"-T\" ]; then\n"
-                        "    exit 0\n"
-                        "fi\n"
-                        "exit 0\n")
-            os.chmod(fake_nginx, 0o755)
-
             conf_dir = os.path.join(td, "conf.d")
             os.makedirs(conf_dir, exist_ok=True)
 
             fallback_file = os.path.join(conf_dir, "sandbox-coverage-asb.bd.conf")
-            with open(fallback_file, "w") as f:
-                f.write("server {\n    server_name *.asb.bd;\n    listen 80;\n}\n")
-            os.chmod(fallback_file, 0o600)
+            app1_file = os.path.join(conf_dir, "sandbox-app1.asb.bd.conf")
+            app2_file = os.path.join(conf_dir, "sandbox-app2.asb.bd.conf")
+            dup1_file = os.path.join(conf_dir, "sandbox-dup1.other.net.conf")
+            dup2_file = os.path.join(conf_dir, "sandbox-dup2.other.net.conf")
 
-            app_file = os.path.join(conf_dir, "sandbox-app.asb.bd.conf")
-            with open(app_file, "w") as f:
-                f.write("server {\n    server_name app.asb.bd;\n    listen 80;\n}\n")
-            os.chmod(app_file, 0o600)
+            files = [
+                (fallback_file, "*.asb.bd"),
+                (app1_file, "app1.asb.bd"),
+                (app2_file, "app2.asb.bd"),
+                (dup1_file, "dup.other.net"),
+                (dup2_file, "dup.other.net"),
+            ]
+
+            dump_parts = []
+            for p, h in files:
+                with open(p, "w") as f:
+                    f.write(f"server {{\n    server_name {h};\n    listen 80;\n}}\n")
+                os.chmod(p, 0o600)
+                dump_parts.append(f"# configuration file {p}:\nserver {{\n    listen 80;\n    server_name {h};\n}}\n")
+
+            dump_file = os.path.join(td, "dump.txt")
+            with open(dump_file, "w") as f:
+                f.write("".join(dump_parts))
+
+            fake_nginx = os.path.join(bin_dir, "nginx")
+            with open(fake_nginx, "w") as f:
+                f.write(f"""#!{sys.executable}
+import sys
+arg = sys.argv[1] if len(sys.argv) > 1 else ""
+if arg == "-v":
+    print("nginx version: nginx/1.24.0")
+elif arg == "-V":
+    print("nginx version: nginx/1.24.0 --with-http_realip_module")
+elif arg == "-t":
+    exit(0)
+elif arg == "-T":
+    with open({repr(dump_file)}) as f:
+        sys.stdout.write(f.read())
+    exit(0)
+exit(0)
+""")
+            os.chmod(fake_nginx, 0o755)
 
             # Execute real _PROBE_PROGRAM
             program = current_nginx._PROBE_PROGRAM % {
@@ -313,10 +331,11 @@ class TestZoneCoverageSurface(unittest.TestCase):
                 "overdue": current_nginx.RENEWAL_OVERDUE_DAYS,
             }
             env = synthetic_environment()
-            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            old_path = env.get("PATH", "")
+            env["PATH"] = f"{bin_dir}:{old_path}"
             res = subprocess.run(
                 [sys.executable, "-c", program],
-                input=json.dumps({"declared": ["app.asb.bd"], "own_file": None}),
+                input=json.dumps({"declared": ["app1.asb.bd", "app2.asb.bd", "dup.other.net"], "own_file": None}),
                 capture_output=True,
                 text=True,
                 env=env,
@@ -325,19 +344,35 @@ class TestZoneCoverageSurface(unittest.TestCase):
             probe_facts = json.loads(res.stdout)
 
             routes = probe_facts.get("routes", [])
-            self.assertEqual(len(routes), 2)
-            route_files = {r["file"] for r in routes}
-            self.assertIn(fallback_file, route_files)
-            self.assertIn(app_file, route_files)
+            self.assertEqual(len(routes), 5)
 
             # Find fallback route
             fallback_route = next(r for r in routes if r["file"] == fallback_file)
             self.assertIn("*.asb.bd", fallback_route["hostnames"])
             self.assertEqual(fallback_route.get("coverage_zone"), "asb.bd")
 
-            # Verify conflicts: app route does NOT conflict with fallback route
-            app_route = next(r for r in routes if r["file"] == app_file)
-            self.assertEqual(app_route["conflicts"], [])
+            # Fallback route conflicts: must NOT report exact app1 or app2 as conflicts
+            fallback_conflicts = fallback_route.get("conflicts", [])
+            self.assertEqual(fallback_conflicts, [], f"Expected 0 conflicts in fallback route, got: {fallback_conflicts}")
+
+            # Exact routes must have no conflicts
+            app1_route = next(r for r in routes if r["file"] == app1_file)
+            self.assertEqual(app1_route["conflicts"], [])
+            app2_route = next(r for r in routes if r["file"] == app2_file)
+            self.assertEqual(app2_route["conflicts"], [])
+
+            # Independent overlapping conflict MUST be reported
+            dup1_route = next(r for r in routes if r["file"] == dup1_file)
+            dup1_conflicts = dup1_route.get("conflicts", [])
+            self.assertEqual(len(dup1_conflicts), 1)
+            self.assertEqual(dup1_conflicts[0]["server_name"], "dup.other.net")
+            self.assertEqual(dup1_conflicts[0]["file"], dup2_file)
+
+            dup2_route = next(r for r in routes if r["file"] == dup2_file)
+            dup2_conflicts = dup2_route.get("conflicts", [])
+            self.assertEqual(len(dup2_conflicts), 1)
+            self.assertEqual(dup2_conflicts[0]["server_name"], "dup.other.net")
+            self.assertEqual(dup2_conflicts[0]["file"], dup1_file)
 
             # Summarize reports no certificate problems
             summary = current_nginx.summarize(probe_facts)

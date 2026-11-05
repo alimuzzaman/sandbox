@@ -1,4 +1,5 @@
 """Remote front-door contract and the nginx adapter (PRD 056)."""
+import json
 import subprocess
 import sys
 import unittest
@@ -264,6 +265,57 @@ class NginxConflictTests(unittest.TestCase):
         self.assertTrue(nginx.is_coverage_fallback_file("/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"))
         self.assertFalse(nginx.is_coverage_fallback_file("/etc/nginx/conf.d/sandbox-host-prod.conf"))
         self.assertFalse(nginx.is_coverage_fallback_file("/etc/nginx/sites-enabled/panel.conf"))
+
+    def test_f4_coverage_fallback_exemption_exact_and_embedded_program(self):
+        # 1. coverage_zone_of and is_coverage_fallback_file checks
+        self.assertEqual(nginx.coverage_zone_of("/etc/nginx/conf.d/sandbox-coverage-a.example.conf"), "a.example")
+        self.assertTrue(nginx.is_coverage_fallback_file("/etc/nginx/conf.d/sandbox-coverage-a.example.conf"))
+
+        # Nested look-alike path has extra / so not coverage fallback
+        self.assertIsNone(nginx.coverage_zone_of("/etc/nginx/conf.d/sub/sandbox-coverage-a.example.conf"))
+        self.assertFalse(nginx.is_coverage_fallback_file("/etc/nginx/conf.d/sub/sandbox-coverage-a.example.conf"))
+
+        # 2. find_conflicts in module function
+        nested_pairs = [("/etc/nginx/conf.d/sub/sandbox-coverage-a.example.conf", "*.a.example")]
+        mismatched_pairs = [("/etc/nginx/conf.d/sandbox-coverage-a.example.conf", "*.b.example")]
+        own_pairs = [("/etc/nginx/conf.d/sandbox-coverage-a.example.conf", "*.a.example")]
+
+        # Nested look-alike path conflicts
+        self.assertEqual(len(nginx.find_conflicts(["x.a.example"], nested_pairs)), 1)
+        # File for a.example holding *.b.example conflicts for x.b.example
+        self.assertEqual(len(nginx.find_conflicts(["x.b.example"], mismatched_pairs)), 1)
+        # File for a.example holding *.a.example does not conflict for x.a.example
+        self.assertEqual(nginx.find_conflicts(["x.a.example"], own_pairs), [])
+        # Declared wildcard still conflicts
+        self.assertEqual(len(nginx.find_conflicts(["*.a.example"], own_pairs)), 1)
+
+        # 3. Test embedded program copy directly by executing it in a subprocess
+        embedded_script = f"""
+from typing import Iterable
+import json, os, re, shutil, subprocess, sys
+CONF_DIR = {nginx.CONF_DIR!r}
+FILE_PREFIX = {nginx.FILE_PREFIX!r}
+{nginx._SHARED_SOURCE}
+
+nested_pairs = [('/etc/nginx/conf.d/sub/sandbox-coverage-a.example.conf', '*.a.example')]
+mismatched_pairs = [('/etc/nginx/conf.d/sandbox-coverage-a.example.conf', '*.b.example')]
+own_pairs = [('/etc/nginx/conf.d/sandbox-coverage-a.example.conf', '*.a.example')]
+
+res = {{
+    'nested': len(find_conflicts(['x.a.example'], nested_pairs)),
+    'mismatched': len(find_conflicts(['x.b.example'], mismatched_pairs)),
+    'own': find_conflicts(['x.a.example'], own_pairs),
+    'wildcard': len(find_conflicts(['*.a.example'], own_pairs)),
+}}
+print(json.dumps(res))
+"""
+        proc = subprocess.run([sys.executable, "-c", embedded_script], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, f"Embedded script failed: {proc.stderr}")
+        embedded_res = json.loads(proc.stdout)
+        self.assertEqual(embedded_res["nested"], 1)
+        self.assertEqual(embedded_res["mismatched"], 1)
+        self.assertEqual(embedded_res["own"], [])
+        self.assertEqual(embedded_res["wildcard"], 1)
 
     def test_find_conflicts_fallback_coexistence(self):
         pairs = [

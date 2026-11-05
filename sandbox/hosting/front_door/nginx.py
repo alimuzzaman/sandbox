@@ -79,13 +79,30 @@ def is_sandbox_file(path: str) -> bool:
     return path.startswith(CONF_DIR + "/") and base.startswith(FILE_PREFIX) and base.endswith(".conf")
 
 
+def coverage_zone_of(path: str) -> str | None:
+    prefix = CONF_DIR + "/" + FILE_PREFIX + "coverage-"
+    suffix = ".conf"
+    if not (path.startswith(prefix) and path.endswith(suffix)):
+        return None
+    z = path[len(prefix):-len(suffix)]
+    if "/" in z or not z or z != z.lower():
+        return None
+    labels = z.split(".")
+    if len(labels) < 2:
+        return None
+    pattern = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+    if not all(re.match(pattern, lbl) for lbl in labels):
+        return None
+    try:
+        if z.encode("idna").decode("ascii") != z:
+            return None
+    except Exception:
+        return None
+    return z
+
+
 def is_coverage_fallback_file(path: str) -> bool:
-    base = path.rsplit("/", 1)[-1]
-    return (
-        path.startswith(CONF_DIR + "/")
-        and base.startswith(FILE_PREFIX + "coverage-")
-        and base.endswith(".conf")
-    )
+    return coverage_zone_of(path) is not None
 
 
 def _var(name: str) -> str:
@@ -391,8 +408,11 @@ def find_conflicts(declared: Iterable[str], pairs: Iterable[tuple[str, str]],
         for path, name in pairs:
             if own_file is not None and path == own_file:
                 continue
-            if is_coverage_fallback_file(path) and not host.startswith(("*", ".", "~")) and name.startswith(("*.", ".")):
-                continue
+            zone = coverage_zone_of(path)
+            if zone is not None:
+                if not host.startswith(("*", ".", "~")) and name == "*." + zone:
+                    if host == zone or host.endswith("." + zone):
+                        continue
             if names_overlap(host, name):
                 rows.append({"hostname": host, "server_name": name, "file": path,
                              "owner": "sandbox" if is_sandbox_file(path) else "panel"})
@@ -466,7 +486,7 @@ def _python_program(entry: dict, program: str, payload: dict, *, timeout: int = 
 
 
 _SHARED_SOURCE = "\n\n".join(inspect.getsource(fn) for fn in (
-    is_sandbox_file, is_coverage_fallback_file, parse_server_names, _name_covers, names_overlap, find_conflicts))
+    is_sandbox_file, coverage_zone_of, is_coverage_fallback_file, parse_server_names, _name_covers, names_overlap, find_conflicts))
 
 _PROBE_PROGRAM = '''from __future__ import annotations
 from typing import Iterable

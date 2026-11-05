@@ -1281,5 +1281,91 @@ class TestZoneCoverageService(unittest.TestCase):
                 enable(self.entry, "asb.bd", plan3, store_client=store3, cf_client=cf3)
         self.assertEqual(len(cf3.deleted_records), 0)
 
+    # K1: Takeover during certificate stops route effect; before_effect wiring
+    def test_real_takeover_during_certificate_stops_route_effect(self):
+        import json, os, subprocess, tempfile
+        from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
+        from tests.subprocess_support import synthetic_environment
+
+        with tempfile.TemporaryDirectory() as td:
+            def real_ssh_run(entry, command, timeout=15):
+                env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
+                return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
+
+            store = ZoneCoverageClient(self.entry, ssh_run=real_ssh_run)
+            cf = FakeCfClient()
+            plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+
+            doc_path = os.path.join(td, "runtime", "zone-coverage", "zones", "asb.bd.json")
+            route_applied = False
+
+            def fake_ensure_origin_cert(*args, **kwargs):
+                # A certificate step triggers takeover by B
+                with open(doc_path, "r") as f:
+                    doc = json.load(f)
+                doc["operation"]["lease_expires_at"] = 0
+                with open(doc_path, "w") as f:
+                    json.dump(doc, f)
+
+                # B resumes and finishes active
+                b_res = store.begin("asb.bd", "enable", "controller-B", resume=True)
+                b_op = b_res["operation_id"]
+                store.phase("asb.bd", b_op, "fallback_install")
+                store.finish("asb.bd", b_op, "active", raise_generation=True)
+                return ("/c.pem", "/k.pem", {"id": "cert-1"})
+
+            def fake_apply_route(*args, **kwargs):
+                nonlocal route_applied
+                route_applied = True
+                return {"file": "/r.conf"}
+
+            with patch("sandbox.hosting.front_door.nginx.ensure_origin_certificate", side_effect=fake_ensure_origin_cert),                  patch("sandbox.hosting.front_door.nginx.apply_route", side_effect=fake_apply_route),                  patch("sandbox.hosting.zone_coverage.fallback.run_origin_probe", return_value={"status": 404, "fallback_header": "1", "body": "SANDBOX_WILDCARD_FALLBACK"}),                  patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+                with self.assertRaises(CoverageError):
+                    enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+
+            # Assert A makes no route call
+            self.assertFalse(route_applied, "Controller A must not apply route after being taken over")
+
+            # Assert B doc is intact
+            with open(doc_path, "r") as f:
+                final_doc = json.load(f)
+            self.assertEqual(final_doc.get("state"), "active")
+            self.assertEqual(final_doc.get("generation"), 1)
+
+    def test_install_fallback_before_effect_wiring_and_omission_fails(self):
+        from sandbox.hosting.zone_coverage import fallback
+        called_effects = []
+        orig_install = fallback.install_fallback
+
+        def tracking_install(*args, **kwargs):
+            be = kwargs.get("before_effect")
+            if be is None:
+                raise AssertionError("before_effect was omitted at install_fallback call-site")
+            called_effects.append("present")
+            be("certificate")
+            called_effects.append("certificate")
+            be("route")
+            called_effects.append("route")
+            return {"file": "/f", "digest": "d"}
+
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", side_effect=tracking_install),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+
+        self.assertIn("certificate", called_effects)
+        self.assertIn("route", called_effects)
+
+        def omitting_install(*args, **kwargs):
+            if kwargs.get("before_effect") is None:
+                raise AssertionError("before_effect omitted")
+            return orig_install(*args, **kwargs)
+
+        with self.assertRaises(AssertionError):
+            omitting_install(self.entry, "asb.bd")
+
+
 if __name__ == "__main__":
     unittest.main()

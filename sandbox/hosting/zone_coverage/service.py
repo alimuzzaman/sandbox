@@ -473,6 +473,10 @@ def enable(
     phase_res = store_client.phase(clean_zone, op_id, "fallback_install")
     _check_store_res(phase_res)
     try:
+        def _before_fallback_effect(effect_name: str) -> None:
+            pres = store_client.phase(clean_zone, op_id, effect_name)
+            _check_store_res(pres)
+
         fallback_meta = fallback.install_fallback(
             entry,
             clean_zone,
@@ -480,6 +484,7 @@ def enable(
             ipv6=ipv6,
             http2_directive=http2_directive,
             ssh_run=ssh_run,
+            before_effect=_before_fallback_effect,
         )
         phase_res = store_client.phase(
             clean_zone,

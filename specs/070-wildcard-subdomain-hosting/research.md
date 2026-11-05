@@ -64,19 +64,34 @@ Evidence is from `latest` at 99e7c12 unless stated. Claims about Cloudflare and 
 | store read fails | any | refuse `coverage_store_unavailable` before effects; SSH is required for apply anyway |
 | name in no listed zone, or `retired` | any | `exact`, as today |
 | fallback file present for the zone, no record | any | refuse `coverage_record_missing` |
+| image activation path (`sb host image`) | would be shared | refuse `coverage_image_unsupported`, naming `cloudflare.dns: exact`. Not bound in that path otherwise; `validated` there is compared with a fresh manifest at `hosting.py:5424` |
 | any other | `dns: exact` | `exact`, with the drift rule |
 | any other | owned exact record in state, or a record equal to desired | `exact`, with the drift rule (FR-012, FR-013) |
-| `fallback_only` | `auto` | `exact`, with the drift rule; no shared DNS exists yet |
+| `fallback_only`, known dependent | `auto` | refuse `coverage_disabled_dependent`, same as `disabled` |
+| `fallback_only`, other target | `auto` | `exact`, with the drift rule; no shared DNS exists yet |
 | active, observed matching | `auto`, single route, proxied strict, eligible | `shared` |
 | active | `auto`, otherwise | refuse `coverage_name_ineligible` |
-| active, drift or evidence unavailable | `auto`, would be shared | refuse `coverage_drift` |
-| enabling, incomplete, disabling | `auto`, would be shared | refuse `coverage_not_active` |
+| active, drift, evidence unavailable, or zone TLS mode not strict | `auto`, would be shared | refuse `coverage_drift` |
+| enabling, incomplete, disabling | `auto`, without an owned or equal record | refuse `coverage_not_active` |
 | disabled | known dependent | refuse `coverage_disabled_dependent`; a per-site record needs explicit `dns: exact` |
 | disabled | other | `exact`, with the drift rule |
 
 Terms: `auto` is the manifest value, `shared` is the decision, and "covered" means a target whose decision is `shared`.
 
-**Drift rule for exact records (FR-025)**, only in zones with a coverage document: if a record exists at the name and differs from desired, and it does not equal the recorded `applied` snapshot, apply refuses `managed_record_drift` unless `--allow-record-overwrite` is passed. Without a document, today's overwrite stays (FR-018).
+**Drift rule for exact records (FR-025)**, only in zones with a coverage document, and comparing only A, AAAA and CNAME at the name:
+- no such record: write as today;
+- equal to desired: no write, adopt;
+- different, and a recorded `applied` snapshot exists and equals it: ours, write as today;
+- different, snapshot exists and does not equal it: refuse `managed_record_drift` unless `--allow-record-overwrite`;
+- different, no snapshot: refuse `record_not_owned`, with no flag to override.
+
+Without a document, today's overwrite stays (FR-018). Dependents: binding a target as `exact` releases any dependent entry for it.
+
+**Inputs**: `decide` receives the store list and document, the routes `preflight` already read, target state, and for a would-be-shared target one provider listing and one zone SSL read. So the `coverage_record_missing` row costs nothing extra. A wildcard record with no fallback file and no document is not detected by apply, and behaves as today; status reports it.
+
+**Read-only callers**: `sb host plan` calls `decide` in report mode, showing `{mode: "refused", code, reason}` and exiting successfully, so drift and provider failure are visible (FR-027). Apply refuses.
+
+**Recovery**: recovery and `_continue_host_edge_only` use the decision recorded in the edge intent, and never a fresh `decide`. The intent holds only `{mode, zone}`, so a later generation does not mismatch. `_verify_edge` at `hosting.py:3735` uses the edge probe for a shared intent.
 
 **Single-route rule**: a target with more than one route is `exact` if it already has an owned or equal record, and otherwise refuses `coverage_name_ineligible` under `auto`, naming `cloudflare.dns: exact`. Aliases can sit at the apex, in other zones or use wildcards, and a per-route split is not needed for the request.
 

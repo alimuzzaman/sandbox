@@ -22,7 +22,7 @@ Add shared DNS coverage for one zone on one nginx-fronted remote. A new package 
 
 **Project Type**: CLI
 
-**Performance Goals**: every store call within the 15 s bound coordination uses. A covered apply adds at most one provider listing and three store calls (read, pending, bound). A target in a zone with no coverage record adds one store read and no provider call
+**Performance Goals**: every store call within the 15 s bound coordination uses. A covered apply adds at most one provider listing, one zone SSL read and four store calls (list, read, pending, bound). A target in a zone with no coverage record adds one store read and no provider call
 
 **Constraints**: no `default_server`, no `nginx.conf` edit, no foreign file edit, no secret values in any output, no change for a zone without a coverage document
 

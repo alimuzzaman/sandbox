@@ -25,7 +25,7 @@ Real run, on `xcloud-london`. Save evidence under `/Users/alim/Sites/git/.scratc
 
 ## Stage D: a covered target
 
-7. Apply a throwaway static target at an unused name, with no record. Expect: zone identical before and after; HTTPS works; evidence reports origin, public edge and resolver separately. First query the name once from the controller's resolver before coverage exists if possible, to prove SC-002.
+7. Apply a throwaway static target at an unused name, with no record. Expect: zone identical before and after; HTTPS works; evidence reports origin, public edge and resolver separately. For SC-002: query that name once from the controller's resolver immediately before step 5, and run this step within 1800 seconds, so the cached "does not exist" answer is still held. If the gap is longer, record SC-002 as not proven live.
 8. Add a TXT record at another unused name: plan says ineligible. Add an A record at a third name to another address: it resolves there. Remove both.
 9. Destroy the target: zero record changes, and the name returns the fallback 404.
 

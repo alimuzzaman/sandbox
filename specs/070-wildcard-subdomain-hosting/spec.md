@@ -202,7 +202,7 @@ An operator inspects and renews the fallback's origin certificate without deploy
 
 - A name cached as missing at outside resolvers from before enabling keeps failing for those clients until the cache expires. This is reported as a limit, not a delivery failure. The observed SOA minimum of 1800 seconds is not a universal maximum.
 - An application wildcard declared by a target is not the fallback, and stays a conflict with the fallback.
-- A target at the zone apex, or at a multi-level name, is outside coverage and uses the exact-record path.
+- A target at the zone apex, or at a multi-level name, is outside coverage, and needs an explicit managed exact record unless it already has one.
 - An operator enables while a target's exact record exists at the same name. The exact record stays and that target stays on it.
 - Re-enabling after out-of-band wildcard deletion. The plan shows what would be recreated, and confirmation is required.
 - Provider acceptance is lost after a write. The operation reports unknown effects, and a retry observes before writing.
@@ -210,8 +210,10 @@ An operator inspects and renews the fallback's origin certificate without deploy
 - The safe error is requested with a TLS name the certificate does not cover. TLS may fail. No site's content is served.
 - Search engines reach an unknown name. The 404 and its non-indexable mark apply.
 - A failed first apply leaves a pending dependent with no target to destroy, or an older destroy leaves a stale one. The operator can release it with an explicit confirmed action.
-- The coverage record is lost while the shared DNS or fallback remains. Apply refuses for that zone, status reports it, and enable can rebuild the record, adopting a wildcard record only if it equals what would be written.
+- The coverage record is lost while the fallback remains. Apply refuses for that zone, status reports it, and enable can rebuild the record, adopting a wildcard record only if it equals what would be written, and counting each Sandbox route under the zone with no DNS node of its own as a recovered dependent, so a later disable still names them.
 - A target with aliases under a covered zone is not eligible in this release, and needs an explicit managed exact record, unless it already has one.
+- A target delivered through image activation is not eligible in this release, and needs an explicit managed exact record.
+- A dependent target moved to a managed exact record stops being a dependent when that apply completes.
 
 ## Requirements *(mandatory)*
 
@@ -238,12 +240,12 @@ An operator inspects and renews the fallback's origin certificate without deploy
 - **FR-014**: Applying a covered target MUST make no DNS write and MUST NOT wait on DNS propagation for that name.
 - **FR-015**: Stale answers from the controller's resolver alone MUST NOT fail or roll back delivery of a covered target.
 - **FR-016**: Delivery evidence MUST report target and origin health, public edge routing and TLS, and resolver propagation as separate results. Evidence that was skipped or unavailable MUST NOT be reported as verified.
-- **FR-017**: Plan, status, recovery and destroy MUST distinguish shared coverage from owned exact DNS, and MUST NOT read the absence of an owned record on a covered target as an unknown or failed effect.
+- **FR-017**: Plan, status, recovery and destroy MUST distinguish shared coverage from owned exact DNS, and MUST NOT read the absence of an owned record on a covered target as an unknown or failed effect. Recovery of a covered target MUST use its recorded coverage decision, and MUST NOT fail on a cached "does not exist" answer.
 - **FR-018**: Coverage is inactive for a zone that has no coverage record or whose coverage is retired. There, and on a remote without this capability, target behaviour MUST remain as it is today. Once a zone has a coverage record in any other state, the drift rules in FR-025 and the state rules for dependent targets apply.
 
 **Error response**
 
-- **FR-019**: A covered name with no target MUST return one generic HTTP 404, on HTTP and HTTPS, for any path, including route-marker, robots and ACME paths, and for GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. HEAD returns no body. Methods the web server itself refuses earlier, such as TRACE, get that refusal, with no site content.
+- **FR-019**: A covered name with no target MUST return one generic HTTP 404, on HTTP and HTTPS, for any path, including route-marker, robots and ACME paths, and for GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. HEAD returns no body. Methods the web server itself refuses earlier, such as TRACE, get that refusal, with no site content. Where the zone redirects HTTP to HTTPS at the edge, the HTTP case is proven at the origin.
 - **FR-020**: The error MUST mark itself as not indexable and MUST name no site, host or panel, and MUST be the same for every unknown name.
 - **FR-021**: A name under the zone with no target, including a multi-level name, whatever its TLS name, MUST NOT receive another site's content. TLS success is not promised for names the certificate does not cover. A request whose HTTP host is outside every covered zone is out of scope and behaves as it does today; docs state this limit.
 - **FR-022**: The product MUST NOT claim HTTP enumeration resistance. Existing sites still differ from unknown names at HTTP.
@@ -252,9 +254,9 @@ An operator inspects and renews the fallback's origin certificate without deploy
 
 - **FR-023**: Operators MUST be able to explicitly select a managed exact record for a target, including a DNS-only target.
 - **FR-024**: Sandbox MUST NOT modify a DNS record it does not own in order to make coverage work.
-- **FR-025**: When a managed exact record was changed out of band, apply MUST refuse, name the record and leave it in place until an operator explicitly authorizes overwriting it.
+- **FR-025**: When a managed exact record was changed out of band, apply MUST refuse, name the record and leave it in place until an operator explicitly authorizes overwriting it. That authorization applies only to a record Sandbox has a recorded snapshot of. A record Sandbox never owned MUST NOT be overwritten by any flag; the operator removes it by hand.
 - **FR-026**: Destroy MUST preserve and report a managed record changed out of band, and otherwise follow existing owned-record cleanup.
-- **FR-027**: Plan and status MUST show deletion or repointing of the shared record, a new exact or TXT record at a covered target's name, and provider read failures, as drift or unavailable evidence.
+- **FR-027**: Read-only plan and status MUST report, rather than refuse, and MUST show deletion or repointing of the shared record, a new exact or TXT record at a covered target's name, and provider read failures, as drift or unavailable evidence.
 - **FR-028**: Apply MUST NOT recreate shared DNS or create a per-site record in response to drift without explicit authorization.
 
 **Conflicts between routes**

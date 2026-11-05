@@ -13,7 +13,7 @@ sb remote coverage <remote> --zone <zone> --remove-fallback --confirm
 sb remote coverage <remote> --zone <zone> --release-dependent <state-key> --confirm
 ```
 
-The digest covers the action, zone, generation, dependents, exceptions and planned record writes. A changed value refuses `coverage_plan_stale`. `--disable --confirm` with dependents succeeds only through a digest from a plan that named them, and that plan's output states that they stop resolving.
+The digest covers the action, zone, generation, dependents revision, dependents, exceptions and planned record writes. A changed value refuses `coverage_plan_stale`. `--disable --confirm` with dependents succeeds only through a digest from a plan that named them, and that plan's output states that they stop resolving.
 
 ## Status output
 
@@ -32,7 +32,7 @@ The digest covers the action, zone, generation, dependents, exceptions and plann
 
 A Caddy remote refuses with the existing `front_door_capability_unavailable`.
 
-`coverage_operation_active`, `coverage_record_missing`, `coverage_plan_stale`, `coverage_conflict`, `coverage_zone_unavailable`, `coverage_ssl_not_strict`, `coverage_record_exists` (a `*.zone` record that differs from what would be written; an equal one is adopted and shown in the plan), `coverage_dependents_unknown`, `coverage_fallback_unverified`, `coverage_schema_unsupported`, `coverage_not_active`, `coverage_drift`, `coverage_name_ineligible`, `coverage_disabled_dependent`, `managed_record_drift`, `coverage_store_unavailable`.
+`coverage_operation_active`, `coverage_record_missing`, `coverage_plan_stale`, `coverage_conflict`, `coverage_zone_unavailable`, `coverage_ssl_not_strict`, `coverage_record_exists` (a `*.zone` record that differs from what would be written; an equal one is adopted and shown in the plan), `coverage_dependents_unknown`, `coverage_fallback_unverified`, `coverage_schema_unsupported`, `coverage_not_active`, `coverage_drift`, `coverage_name_ineligible`, `coverage_disabled_dependent`, `coverage_image_unsupported`, `managed_record_drift`, `record_not_owned`, `coverage_store_unavailable`.
 
 ## Changes to existing commands
 

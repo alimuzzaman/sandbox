@@ -15,6 +15,7 @@ One per zone, `schema_version: 1`. A reader that sees a higher version refuses (
 | `fallback` | `{file, digest, marker, certificate: {path, not_after, id}}` |
 | `exceptions` | Exact routes reported at enable: `{hostname, file, owner}` |
 | `dependents` | Map of state key to Dependent |
+| `dependents_revision` | Integer, raised on every dependent change, so a plan cannot go stale unnoticed |
 | `history` | Last 64 `{at, kind, result, operation_id}` |
 
 No secret values, no credentials and no route bodies.
@@ -26,6 +27,10 @@ absent, retired ──enable──> enabling
 enabling ──stop-before-publish──> fallback_only
 enabling ──done──> active
 enabling ──failure──> incomplete(enable)
+enabling ──resume──> enabling
+disabling ──resume──> disabling
+incomplete(enable) ──retry──> enabling
+incomplete(disable) ──retry──> disabling
 incomplete(enable) ──rollback ok──> fallback_only
 fallback_only ──enable──> enabling
 active ──disable──> disabling ──done──> disabled
@@ -46,7 +51,7 @@ One `operation` at a time. Starting another refuses `coverage_operation_active`,
 | Field | Meaning |
 |---|---|
 | `hostname` | The covered name |
-| `state` | `pending` before effects, `bound` after verified delivery |
+| `state` | `pending` before effects, `bound` after verified delivery, `recovered` when a rebuilt record inferred it |
 | `operation_id`, `generation`, `updated_at` | The last writer |
 
 Bound with `pending` before the first target effect. A failed apply leaves `pending`, and a pending dependent counts as dependent. Removed by destroy, or by the confirmed `--release-dependent` for one named stale entry.

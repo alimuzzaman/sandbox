@@ -609,7 +609,7 @@ def enable(
         unknown_effects = [
             {"action": "create_record", "name": name} for name in unknown_names
         ]
-        store_failed = False
+        p_res = None
         try:
             p_res = store_client.phase(
                 clean_zone,
@@ -617,11 +617,10 @@ def enable(
                 "dns_publish_failed",
                 updates={"unknown_effects": unknown_effects},
             )
-            if not p_res or p_res.get("refused") or not p_res.get("ok"):
-                store_failed = True
-        except Exception:
-            store_failed = True
+        except Exception as pe:
+            p_res = pe
 
+        f_res = None
         try:
             f_res = store_client.finish(
                 clean_zone,
@@ -630,14 +629,11 @@ def enable(
                 interrupted_kind="enable",
                 unknown_effects=unknown_effects,
             )
-            if not f_res or f_res.get("refused") or not f_res.get("ok"):
-                store_failed = True
-        except Exception:
-            store_failed = True
+        except Exception as fe:
+            f_res = fe
 
-        msg = f"failed during DNS record write loop: {type(exc).__name__}"
-        if store_failed:
-            msg += "; store was not updated with unknown effects"
+        err_suffix = _inspect_error_path_call(p_res, "phase") or _inspect_error_path_call(f_res, "finish")
+        msg = f"failed during DNS record write loop: {type(exc).__name__}{err_suffix}"
         raise CoverageError(COVERAGE_STORE_UNAVAILABLE, msg) from None
 
     # Public probe check

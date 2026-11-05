@@ -17,6 +17,12 @@ import base64
 import json
 import shlex
 
+LEASE_SECONDS = 900
+LOCK_WAIT_SECONDS = 10
+MAX_DOC_BYTES = 256 * 1024
+MAX_DEPENDENTS = 512
+MAX_HISTORY = 64
+
 ACTIONS = (
     "read",
     "list",

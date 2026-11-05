@@ -120,6 +120,8 @@ while time.time() < deadline:
 if not acquired:
     out({"ok": True, "refused": "coverage_store_unavailable", "reason": "lock_wait_timeout"})
 
+VALID_STATES = ("absent", "retired", "enabling", "fallback_only", "active", "disabling", "disabled", "incomplete")
+
 def doc_path_for(zone):
     return os.path.join(zones_dir, f"{zone}.json")
 
@@ -131,11 +133,40 @@ def load_doc(zone):
         with open(p, "rb") as f:
             content = f.read()
         val = json.loads(content.decode("utf-8"))
-        if not isinstance(val, dict) or val.get("schema_version") is None:
-            raise ValueError("corrupt document structure")
-        return val
     except Exception as exc:
-        out({"ok": True, "refused": "coverage_document_corrupt", "reason": str(exc)})
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "json_decode_failed"})
+
+    if not isinstance(val, dict):
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "not_a_dict"})
+
+    if "schema_version" not in val or not isinstance(val.get("schema_version"), int) or isinstance(val.get("schema_version"), bool):
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "missing_or_invalid_schema_version"})
+
+    schema_ver = val.get("schema_version")
+    if schema_ver != 1:
+        out({"ok": True, "refused": "coverage_schema_unsupported", "schema_version": schema_ver})
+
+    if val.get("zone") != zone:
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "zone_mismatch"})
+
+    if val.get("state") not in VALID_STATES:
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_state"})
+
+    gen = val.get("generation")
+    if not isinstance(gen, int) or isinstance(gen, bool):
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_generation"})
+
+    dep_rev = val.get("dependents_revision")
+    if not isinstance(dep_rev, int) or isinstance(dep_rev, bool):
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_dependents_revision"})
+
+    if not isinstance(val.get("dependents"), dict):
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_dependents"})
+
+    if not isinstance(val.get("history"), list):
+        out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_history"})
+
+    return val
 
 def save_doc(zone, doc):
     p = doc_path_for(zone)

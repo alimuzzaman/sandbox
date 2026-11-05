@@ -69,6 +69,74 @@ class TestZoneCoverageProgram(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout.strip(), "/tmp/fake-home-test/sandbox")
 
+    def test_f5_schema_and_structure_validation_and_byte_identical(self):
+        zones_dir = os.path.join(self.home, "runtime", "zone-coverage", "zones")
+        os.makedirs(zones_dir, exist_ok=True)
+        doc_path = os.path.join(zones_dir, "asb.bd.json")
+
+        # 1. Unsupported schema
+        doc = {
+            "schema_version": 2,
+            "zone": "asb.bd",
+            "state": "active",
+            "generation": 0,
+            "dependents_revision": 0,
+            "dependents": {},
+            "history": [],
+        }
+        raw_bytes = json.dumps(doc).encode("utf-8")
+        with open(doc_path, "wb") as f:
+            f.write(raw_bytes)
+
+        rc, out = _run_program(self.home, {"action": "read", "zone": "asb.bd"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.get("refused"), "coverage_schema_unsupported")
+        with open(doc_path, "rb") as f:
+            self.assertEqual(f.read(), raw_bytes)
+
+        # 2. Corrupt document: missing / wrong fields
+        corrupt_cases = [
+            {"schema_version": 1, "zone": "other.zone", "state": "active", "generation": 0, "dependents_revision": 0, "dependents": {}, "history": []},
+            {"schema_version": 1, "zone": "asb.bd", "state": "bogus_state", "generation": 0, "dependents_revision": 0, "dependents": {}, "history": []},
+            {"schema_version": 1, "zone": "asb.bd", "state": "active", "generation": "zero", "dependents_revision": 0, "dependents": {}, "history": []},
+            {"schema_version": 1, "zone": "asb.bd", "state": "active", "generation": True, "dependents_revision": 0, "dependents": {}, "history": []},
+            {"schema_version": 1, "zone": "asb.bd", "state": "active", "generation": 0, "dependents_revision": "zero", "dependents": {}, "history": []},
+            {"schema_version": 1, "zone": "asb.bd", "state": "active", "generation": 0, "dependents_revision": 0, "dependents": "not-a-dict", "history": []},
+            {"schema_version": 1, "zone": "asb.bd", "state": "active", "generation": 0, "dependents_revision": 0, "dependents": {}, "history": "not-a-list"},
+            {"not_even_schema": 123},
+        ]
+
+        mutating_actions = [
+            {"action": "begin", "zone": "asb.bd", "kind": "enable", "controller": "ctrl"},
+            {"action": "phase", "zone": "asb.bd", "operation_id": "op-1", "phase": "step"},
+            {"action": "finish", "zone": "asb.bd", "operation_id": "op-1", "state": "active"},
+            {"action": "dependent-bind", "zone": "asb.bd", "state_key": "a/b/c", "hostname": "x.asb.bd", "state": "bound"},
+            {"action": "dependent-release", "zone": "asb.bd", "state_key": "a/b/c"},
+        ]
+
+        for bad_doc in corrupt_cases:
+            bad_bytes = json.dumps(bad_doc).encode("utf-8")
+            with open(doc_path, "wb") as f:
+                f.write(bad_bytes)
+
+            # read refuses coverage_document_corrupt
+            rc, out = _run_program(self.home, {"action": "read", "zone": "asb.bd"})
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.get("refused"), "coverage_document_corrupt")
+            with open(doc_path, "rb") as f:
+                self.assertEqual(f.read(), bad_bytes)
+
+        # Test each mutating action leaves corrupt document byte-identical and refuses
+        corrupt_bytes = b"{\"schema_version\": 1, \"zone\": \"wrong.zone\"}"
+        for act in mutating_actions:
+            with open(doc_path, "wb") as f:
+                f.write(corrupt_bytes)
+            rc, out = _run_program(self.home, act)
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.get("refused"), "coverage_document_corrupt")
+            with open(doc_path, "rb") as f:
+                self.assertEqual(f.read(), corrupt_bytes)
+
     def test_read_absent_and_list(self):
         rc, out = _run_program(self.home, {"action": "read", "zone": "asb.bd"})
         self.assertEqual(rc, 0)

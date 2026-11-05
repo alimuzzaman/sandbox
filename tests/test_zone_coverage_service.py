@@ -56,6 +56,7 @@ class FakeStoreClient:
             "exceptions": [],
             "dependents": dependents or (self.doc.get("dependents", {}) if self.doc else {}),
             "dependents_revision": 0,
+            "publish_intent": self.doc.get("publish_intent") if self.doc else None,
             "history": [],
         }
         return {"ok": True, "action": "begin", "operation_id": op_id, "document": self.doc}
@@ -1365,6 +1366,118 @@ class TestZoneCoverageService(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             omitting_install(self.entry, "asb.bd")
+
+
+    # K2: Stale intent does not own changed record
+    def test_stale_intent_does_not_own_changed_record(self):
+        # Stored intent had 1.1.1.1
+        stored_doc = {
+            "state": "incomplete",
+            "interrupted_kind": "enable",
+            "publish_intent": {
+                "marker": "test-marker-123",
+                "records": [
+                    {"name": "*.asb.bd", "type": "A", "content": "1.1.1.1", "proxied": True},
+                ],
+            },
+        }
+        store = FakeStoreClient(doc=stored_doc)
+        # CF record has operator-changed content 2.2.2.2 but retains comment
+        cf = FakeCfClient(records=[
+            {"id": "rec-1", "name": "*.asb.bd", "type": "A", "content": "2.2.2.2", "proxied": True, "comment": "test-marker-123"},
+        ])
+        entry = dict(self.entry, origin_ipv4="2.2.2.2")
+        plan = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf)
+
+        # Must not be owned from prior attempt because tuple differed
+        self.assertEqual(len(plan["records_owned_from_prior_attempt"]), 0)
+        self.assertEqual(len(plan["records_to_adopt"]), 1)
+        self.assertEqual(plan["records_to_adopt"][0]["id"], "rec-1")
+
+        # On failed probe, must NOT be deleted
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError):
+                enable(entry, "asb.bd", plan, store_client=store, cf_client=cf)
+        self.assertEqual(len(cf.deleted_records), 0)
+
+    # K2: Intent merge across changed attempts rollback matches any tuple
+    def test_intent_merge_across_changed_attempts_rollback_matches_any_tuple(self):
+        # Prior attempt recorded A tuple (content 198.51.100.1) and AAAA tuple (content 2001:db8::1)
+        stored_doc = {
+            "state": "incomplete",
+            "interrupted_kind": "enable",
+            "publish_intent": {
+                "marker": "test-marker-abc",
+                "records": [
+                    {"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True},
+                    {"name": "*.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True},
+                ],
+            },
+        }
+        store = FakeStoreClient(doc=stored_doc)
+        # CF already has the A record from the prior attempt
+        cf = FakeCfClient(records=[
+            {"id": "rec-a-1", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": "test-marker-abc"},
+        ])
+        entry = dict(self.entry, origin_ipv4="198.51.100.1", origin_ipv6="2001:db8::1")
+        plan = plan_enable(entry, "asb.bd", store_client=store, cf_client=cf)
+
+        # Plan recognizes rec-a-1 as owned from prior attempt, and plans to create AAAA
+        self.assertEqual(len(plan["records_owned_from_prior_attempt"]), 1)
+        self.assertEqual(plan["records_owned_from_prior_attempt"][0]["id"], "rec-a-1")
+        self.assertEqual(len(plan["records_to_create"]), 1)
+
+        # Enable creates AAAA, then on failed probe, rollback matches both tuples in intent and deletes both records
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with self.assertRaises(CoverageError):
+                enable(entry, "asb.bd", plan, store_client=store, cf_client=cf)
+
+        self.assertIn("rec-a-1", cf.deleted_records)
+        self.assertEqual(len(cf.deleted_records), 2)
+
+    # K2: No direct comment comparison outside _is_ours in service.py
+    def test_no_comment_equals_outside_is_ours(self):
+        import inspect, re
+        from sandbox.hosting.zone_coverage import service
+        src = inspect.getsource(service)
+        matches = [m.start() for m in re.finditer(r'\.get\(["\']comment["\']\)\s*==', src)]
+        # Must have exactly 1 occurrence in the entire module, inside _is_ours
+        self.assertEqual(len(matches), 1, f"Expected exactly 1 '.get('comment') ==' in service.py, found {len(matches)}")
+
+    # K3: Mixed equal-plus-differing records refuse in both orderings at plan time and write time
+    def test_mixed_records_refuse_both_orderings_at_plan_time_and_write_time(self):
+        eq_rec = {"id": "r-eq", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": ""}
+        diff_rec = {"id": "r-diff", "name": "*.asb.bd", "type": "A", "content": "198.51.100.99", "proxied": True, "comment": ""}
+
+        # Plan time: [equal, diff]
+        cf1 = FakeCfClient(records=[eq_rec, diff_rec])
+        with self.assertRaises(CoverageError) as ctx1:
+            plan_enable(self.entry, "asb.bd", store_client=FakeStoreClient(), cf_client=cf1)
+        self.assertEqual(ctx1.exception.code, COVERAGE_RECORD_EXISTS)
+
+        # Plan time: [diff, equal]
+        cf2 = FakeCfClient(records=[diff_rec, eq_rec])
+        with self.assertRaises(CoverageError) as ctx2:
+            plan_enable(self.entry, "asb.bd", store_client=FakeStoreClient(), cf_client=cf2)
+        self.assertEqual(ctx2.exception.code, COVERAGE_RECORD_EXISTS)
+
+        # Write time: [equal, diff]
+        cf3 = FakeCfClient(records=[])
+        plan3 = plan_enable(self.entry, "asb.bd", store_client=FakeStoreClient(), cf_client=cf3)
+        cf3._records = [eq_rec, diff_rec]
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            with self.assertRaises(CoverageError) as ctx3:
+                enable(self.entry, "asb.bd", plan3, store_client=FakeStoreClient(), cf_client=cf3)
+        self.assertEqual(ctx3.exception.code, COVERAGE_RECORD_EXISTS)
+
+        # Write time: [diff, equal]
+        cf4 = FakeCfClient(records=[])
+        plan4 = plan_enable(self.entry, "asb.bd", store_client=FakeStoreClient(), cf_client=cf4)
+        cf4._records = [diff_rec, eq_rec]
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}),              patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+            with self.assertRaises(CoverageError) as ctx4:
+                enable(self.entry, "asb.bd", plan4, store_client=FakeStoreClient(), cf_client=cf4)
+        self.assertEqual(ctx4.exception.code, COVERAGE_RECORD_EXISTS)
 
 
 if __name__ == "__main__":

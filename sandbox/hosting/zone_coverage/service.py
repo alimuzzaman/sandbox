@@ -23,10 +23,28 @@ from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
 from sandbox.hosting.zone_coverage.models import normalize_zone
 
 
-def _is_ours(record: dict[str, Any], marker: str | None) -> bool:
-    if not marker or not isinstance(record, dict):
+def _is_ours(record: dict[str, Any] | None, intent: dict[str, Any] | None) -> bool:
+    """Return True only if record comment equals intent['marker'] and matches a tuple in intent['records']."""
+    if not isinstance(record, dict) or not isinstance(intent, dict):
         return False
-    return record.get("comment") == marker
+    marker = intent.get("marker")
+    if not marker or not (record.get("comment") == marker):
+        return False
+    r_name = record.get("name")
+    r_type = record.get("type", "A")
+    r_content = record.get("content")
+    r_proxied = bool(record.get("proxied", True))
+    for item in intent.get("records") or []:
+        if not isinstance(item, dict):
+            continue
+        if (
+            item.get("name") == r_name
+            and item.get("type", "A") == r_type
+            and item.get("content") == r_content
+            and bool(item.get("proxied", True)) == r_proxied
+        ):
+            return True
+    return False
 
 
 def _check_store_res(res: dict[str, Any]) -> None:
@@ -295,24 +313,21 @@ def plan_enable(
         recs_of_type = existing_by_type.get(rtype, [])
         if recs_of_type:
             exact_match = None
-            differing = None
             for er in recs_of_type:
-                if er.get("content") == cand_content and bool(er.get("proxied", True)) == cand_proxied:
-                    exact_match = er
-                    break
-                else:
-                    differing = er
+                same_content = er.get("content") == cand_content
+                same_proxied = bool(er.get("proxied", True)) == cand_proxied
+                if not same_content or not same_proxied:
+                    raise CoverageError(
+                        COVERAGE_RECORD_EXISTS,
+                        f"existing {wanted_name} record differs: content={er.get('content')}, proxied={er.get('proxied')}",
+                    )
+                exact_match = er
+
             if exact_match:
-                if _is_ours(exact_match, stored_marker):
+                if _is_ours(exact_match, stored_intent):
                     records_owned_from_prior_attempt.append(exact_match)
                 else:
                     records_to_adopt.append(exact_match)
-            else:
-                diff_rec = differing or recs_of_type[0]
-                raise CoverageError(
-                    COVERAGE_RECORD_EXISTS,
-                    f"existing {wanted_name} record differs: content={diff_rec.get('content')}, proxied={diff_rec.get('proxied')}",
-                )
         else:
             records_to_create.append(cand)
 
@@ -526,7 +541,7 @@ def enable(
     if isinstance(stored_intent, dict) and isinstance(stored_intent.get("records"), list):
         merged_intent_records.extend(stored_intent["records"])
 
-    for r in (plan.get("records_to_create", []) + plan.get("records_owned_from_prior_attempt", [])):
+    for r in plan.get("records_to_create", []):
         rtype = r.get("type", "A")
         rcontent = r.get("content")
         rproxied = bool(r.get("proxied", True))
@@ -572,22 +587,15 @@ def enable(
             for er in matching_type:
                 same_content = er.get("content") == r["content"]
                 same_proxied = bool(er.get("proxied", True)) == bool(r.get("proxied", True))
-                is_marker_match = er.get("comment") == marker
-                if same_content and same_proxied:
-                    if is_marker_match:
-                        ours = er
-                        break
-                    else:
-                        adopted = er
-                        break
+                if not same_content or not same_proxied:
+                    raise CoverageError(
+                        COVERAGE_RECORD_EXISTS,
+                        f"record {r['name']} already exists in Cloudflare with differing value",
+                    )
+                if _is_ours(er, publish_intent):
+                    ours = er
                 else:
-                    differing = er
-
-            if differing and not ours and not adopted:
-                raise CoverageError(
-                    COVERAGE_RECORD_EXISTS,
-                    f"record {r['name']} already exists in Cloudflare with differing value",
-                )
+                    adopted = er
 
             if ours:
                 if ours not in records_written:
@@ -739,39 +747,15 @@ def enable(
                     })
                 return True
 
-            if pr_id in written_by_id:
-                orig = written_by_id[pr_id]
-                same_content = pr.get("content") == orig["content"]
-                same_proxied = bool(pr.get("proxied", True)) == bool(orig.get("proxied", True))
-                same_comment = pr.get("comment") == marker
-                if same_content and same_proxied and same_comment:
-                    if not _do_fenced_delete(pr_id, pr.get("name", "")):
-                        break
-                else:
-                    unknown_effects.append({
-                        "id": pr_id,
-                        "name": pr.get("name"),
-                        "reason": "record_modified_out_of_band",
-                    })
-            elif pr.get("comment") == marker:
-                matching_intent = next(
-                    (
-                        pi for pi in publish_intent["records"]
-                        if pi["name"] == pr.get("name") and pi.get("type", "A") == pr.get("type", "A")
-                    ),
-                    None,
-                )
-                same_content = matching_intent and pr.get("content") == matching_intent.get("content")
-                same_proxied = matching_intent and bool(pr.get("proxied", True)) == bool(matching_intent.get("proxied", True))
-                if same_content and same_proxied:
-                    if not _do_fenced_delete(pr_id, pr.get("name", "")):
-                        break
-                else:
-                    unknown_effects.append({
-                        "id": pr_id,
-                        "name": pr.get("name"),
-                        "reason": "record_modified_out_of_band",
-                    })
+            if _is_ours(pr, publish_intent):
+                if not _do_fenced_delete(pr_id, pr.get("name", "")):
+                    break
+            elif pr_id in written_by_id:
+                unknown_effects.append({
+                    "id": pr_id,
+                    "name": pr.get("name"),
+                    "reason": "record_modified_out_of_band",
+                })
             else:
                 # Third-party record without our marker: never delete!
                 pass

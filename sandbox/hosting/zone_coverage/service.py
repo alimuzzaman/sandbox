@@ -43,19 +43,19 @@ def _is_valid_fallback_probe_response(status: int, headers: Any, body: str) -> b
 
 
 def _inspect_error_path_call(res: Any, call_name: str) -> str:
-    """Inspect phase or finish call in error path per spec 070 G4/G9."""
+    """Inspect phase or finish call in error path per spec 070 G4/G9/H2."""
     if isinstance(res, dict):
         if res.get("refused"):
             reason = res.get("reason", res["refused"])
-            return f"; store refused {call_name}: {reason}"
+            return f"; store was not updated: refused {call_name} ({reason})"
         if res.get("error"):
-            return f"; store {call_name} error: {res['error']}"
+            return f"; store was not updated: {call_name} error ({res['error']})"
         if res.get("ok") is not True:
-            return f"; store {call_name} failed"
+            return f"; store was not updated: {call_name} failed"
     elif isinstance(res, Exception):
-        return f"; store {call_name} failed: {type(res).__name__}"
+        return f"; store was not updated: {call_name} raised {type(res).__name__}"
     elif res is None:
-        return f"; store {call_name} failed"
+        return f"; store was not updated: {call_name} failed"
     return ""
 
 
@@ -278,9 +278,12 @@ def plan_enable(
         cand_content = cand["content"]
         cand_proxied = cand["proxied"]
 
+        stored_marker = stored_intent.get("marker") if isinstance(stored_intent, dict) else None
+        stored_records = stored_intent.get("records", []) if isinstance(stored_intent, dict) else []
+
         in_intent = False
-        if is_resume_context and stored_intent:
-            for pi in stored_intent:
+        if is_resume_context and stored_marker and stored_records:
+            for pi in stored_records:
                 if (
                     pi.get("name") == cand["name"]
                     and pi.get("type", "A") == rtype
@@ -301,7 +304,7 @@ def plan_enable(
                 else:
                     differing = er
             if exact_match:
-                if in_intent:
+                if in_intent and exact_match.get("comment") == stored_marker:
                     records_owned_from_prior_attempt.append(exact_match)
                 else:
                     records_to_adopt.append(exact_match)
@@ -458,8 +461,17 @@ def enable(
             updates={"fallback": fallback_meta, "exceptions": plan.get("exceptions", [])},
         )
         _check_store_res(phase_res)
-    except Exception:
-        store_client.finish(clean_zone, op_id, "incomplete", interrupted_kind="enable")
+    except Exception as exc:
+        finish_res = None
+        try:
+            finish_res = store_client.finish(clean_zone, op_id, "incomplete", interrupted_kind="enable")
+        except Exception as fe:
+            finish_res = fe
+        err_suffix = _inspect_error_path_call(finish_res, "finish")
+        if isinstance(exc, CoverageError):
+            raise CoverageError(exc.code, f"{exc.message}{err_suffix}") from None
+        if err_suffix:
+            raise type(exc)(f"{exc}{err_suffix}") from exc
         raise
 
     if stop_before_publish:
@@ -471,16 +483,25 @@ def enable(
     phase_res = store_client.phase(clean_zone, op_id, "dns_publish")
     _check_store_res(phase_res)
 
-    # Durable publish intent before any provider write per G1
-    publish_intent = [
-        {
-            "name": r["name"],
-            "type": r.get("type", "A"),
-            "content": r["content"],
-            "proxied": bool(r.get("proxied", True)),
-        }
-        for r in (plan.get("records_to_create", []) + plan.get("records_owned_from_prior_attempt", []))
-    ]
+    # Durable publish intent before any provider write per G1 / H1
+    stored_intent = (doc.get("publish_intent") if doc else None)
+    if isinstance(stored_intent, dict) and stored_intent.get("marker"):
+        marker = stored_intent["marker"]
+    else:
+        marker = f"sandbox-zone-coverage {secrets.token_hex(8)}"
+
+    publish_intent = {
+        "marker": marker,
+        "records": [
+            {
+                "name": r["name"],
+                "type": r.get("type", "A"),
+                "content": r["content"],
+                "proxied": bool(r.get("proxied", True)),
+            }
+            for r in (plan.get("records_to_create", []) + plan.get("records_owned_from_prior_attempt", []))
+        ],
+    }
     phase_res = store_client.phase(
         clean_zone,
         op_id,
@@ -495,47 +516,67 @@ def enable(
         for r in plan.get("records_to_create", []):
             in_flight = r
             exact_records = cf_client.records(plan["zone_id"], hostname=r["name"])
-            already_equal = None
-            for existing in exact_records:
-                if (
-                    existing.get("type") == r.get("type", "A")
-                    and existing.get("content") == r["content"]
-                    and bool(existing.get("proxied", True)) == bool(r.get("proxied", True))
-                ):
-                    already_equal = existing
-                    break
-                elif existing.get("type") == r.get("type", "A"):
-                    raise CoverageError(
-                        COVERAGE_RECORD_EXISTS,
-                        f"record {r['name']} already exists in Cloudflare with differing value",
-                    )
-            if already_equal:
-                if already_equal not in records_written:
-                    records_written.append(already_equal)
+            rtype = r.get("type", "A")
+            matching_type = [er for er in exact_records if er.get("type", "A") == rtype]
+            ours = None
+            adopted = None
+            differing = None
+            for er in matching_type:
+                same_content = er.get("content") == r["content"]
+                same_proxied = bool(er.get("proxied", True)) == bool(r.get("proxied", True))
+                is_marker_match = er.get("comment") == marker
+                if same_content and same_proxied:
+                    if is_marker_match:
+                        ours = er
+                        break
+                    else:
+                        adopted = er
+                        break
+                else:
+                    differing = er
+
+            if differing and not ours and not adopted:
+                raise CoverageError(
+                    COVERAGE_RECORD_EXISTS,
+                    f"record {r['name']} already exists in Cloudflare with differing value",
+                )
+
+            if ours:
+                if ours not in records_written:
+                    records_written.append(ours)
                 shared_records.append({
-                    "id": already_equal["id"],
-                    "type": already_equal.get("type", "A"),
-                    "content": already_equal.get("content", r["content"]),
-                    "proxied": bool(already_equal.get("proxied", True)),
+                    "id": ours["id"],
+                    "type": ours.get("type", rtype),
+                    "content": ours.get("content", r["content"]),
+                    "proxied": bool(ours.get("proxied", True)),
+                })
+            elif adopted:
+                shared_records.append({
+                    "id": adopted["id"],
+                    "type": adopted.get("type", rtype),
+                    "content": adopted.get("content", r["content"]),
+                    "proxied": bool(adopted.get("proxied", True)),
                 })
             else:
-                created = cf_client.upsert_address(
+                created = cf_client.create_address(
                     plan["zone_id"],
                     r["name"],
                     r["content"],
                     proxied=r.get("proxied", True),
+                    comment=marker,
                 )
                 rec_entry = {
                     "id": created["id"],
                     "name": r["name"],
                     "content": r["content"],
-                    "type": created.get("type", r.get("type", "A")),
+                    "type": created.get("type", rtype),
                     "proxied": r.get("proxied", True),
+                    "comment": marker,
                 }
                 records_written.append(rec_entry)
                 shared_records.append({
                     "id": created["id"],
-                    "type": created.get("type", r.get("type", "A")),
+                    "type": created.get("type", rtype),
                     "content": created.get("content", r["content"]),
                     "proxied": created.get("proxied", True),
                 })
@@ -607,7 +648,7 @@ def enable(
 
     if not probe_ok:
         unknown_effects = []
-        intent_names = {pi["name"] for pi in publish_intent}
+        intent_names = {pi["name"] for pi in publish_intent["records"]}
         adopted_ids = {r["id"] for r in plan.get("records_to_adopt", []) if "id" in r}
 
         provider_records = []
@@ -617,21 +658,44 @@ def enable(
             except Exception as re:
                 unknown_effects.append({"name": n, "reason": f"record_list_failed: {type(re).__name__}"})
 
+        written_by_id = {wr["id"]: wr for wr in records_written if "id" in wr}
+
         for pr in provider_records:
             pr_id = pr.get("id")
             if pr_id in adopted_ids:
+                # Never delete adopted records
                 continue
 
-            matching_intent = next(
-                (
-                    pi for pi in publish_intent
-                    if pi["name"] == pr.get("name") and pi.get("type", "A") == pr.get("type", "A")
-                ),
-                None,
-            )
-            if matching_intent:
-                same_content = pr.get("content") == matching_intent.get("content")
-                same_proxied = bool(pr.get("proxied", True)) == bool(matching_intent.get("proxied", True))
+            if pr_id in written_by_id:
+                orig = written_by_id[pr_id]
+                same_content = pr.get("content") == orig["content"]
+                same_proxied = bool(pr.get("proxied", True)) == bool(orig.get("proxied", True))
+                same_comment = pr.get("comment") == marker
+                if same_content and same_proxied and same_comment:
+                    try:
+                        cf_client.delete_record(plan["zone_id"], pr_id)
+                    except Exception as de:
+                        unknown_effects.append({
+                            "id": pr_id,
+                            "name": pr.get("name"),
+                            "reason": f"delete_failed: {type(de).__name__}",
+                        })
+                else:
+                    unknown_effects.append({
+                        "id": pr_id,
+                        "name": pr.get("name"),
+                        "reason": "record_modified_out_of_band",
+                    })
+            elif pr.get("comment") == marker:
+                matching_intent = next(
+                    (
+                        pi for pi in publish_intent["records"]
+                        if pi["name"] == pr.get("name") and pi.get("type", "A") == pr.get("type", "A")
+                    ),
+                    None,
+                )
+                same_content = matching_intent and pr.get("content") == matching_intent.get("content")
+                same_proxied = matching_intent and bool(pr.get("proxied", True)) == bool(matching_intent.get("proxied", True))
                 if same_content and same_proxied:
                     try:
                         cf_client.delete_record(plan["zone_id"], pr_id)
@@ -647,17 +711,17 @@ def enable(
                         "name": pr.get("name"),
                         "reason": "record_modified_out_of_band",
                     })
+            else:
+                # Third-party record without our marker: never delete!
+                pass
 
-        store_failed = False
         if not unknown_effects:
             finish_res = None
             try:
                 finish_res = store_client.finish(clean_zone, op_id, "fallback_only")
-                if not finish_res or finish_res.get("refused") or not finish_res.get("ok"):
-                    store_failed = True
-            except Exception:
-                store_failed = True
-            err_suffix = "; store was not updated with unknown effects" if store_failed else ""
+            except Exception as fe:
+                finish_res = fe
+            err_suffix = _inspect_error_path_call(finish_res, "finish")
             raise CoverageError(
                 COVERAGE_FALLBACK_UNVERIFIED,
                 f"public edge probe failed to reach fallback route; rolled back created DNS records to fallback_only{err_suffix}",
@@ -672,11 +736,9 @@ def enable(
                     interrupted_kind="enable",
                     unknown_effects=unknown_effects,
                 )
-                if not finish_res or finish_res.get("refused") or not finish_res.get("ok"):
-                    store_failed = True
-            except Exception:
-                store_failed = True
-            err_suffix = "; store was not updated with unknown effects" if store_failed else ""
+            except Exception as fe:
+                finish_res = fe
+            err_suffix = _inspect_error_path_call(finish_res, "finish")
             raise CoverageError(
                 COVERAGE_FALLBACK_UNVERIFIED,
                 f"public edge probe failed and rollback had unknown effects: {unknown_effects}{err_suffix}",

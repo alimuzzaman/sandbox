@@ -166,11 +166,21 @@ def load_doc(zone):
     if not isinstance(val.get("history"), list):
         out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_history"})
 
-    for field in ("publish_intent", "unknown_effects"):
-        if field in val and val[field] is not None:
-            items = val[field]
-            if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
-                out({"ok": True, "refused": "coverage_document_corrupt", "reason": f"invalid_{field}"})
+    if "publish_intent" in val and val["publish_intent"] is not None:
+        pi = val["publish_intent"]
+        if (
+            not isinstance(pi, dict)
+            or not isinstance(pi.get("marker"), str)
+            or not pi.get("marker")
+            or not isinstance(pi.get("records"), list)
+            or not all(isinstance(x, dict) for x in pi.get("records"))
+        ):
+            out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_publish_intent"})
+
+    if "unknown_effects" in val and val["unknown_effects"] is not None:
+        items = val["unknown_effects"]
+        if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
+            out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_unknown_effects"})
 
     return val
 
@@ -222,7 +232,7 @@ elif action == "list":
 elif action == "begin":
     zone = check_zone(request.get("zone"))
     kind = request.get("kind")
-    if kind not in ("enable", "disable", "repair"):
+    if kind not in ("enable", "disable", "repair", "remove-fallback"):
         bad()
     controller = request.get("controller") or "unknown"
     exp_gen = request.get("expected_generation")
@@ -231,6 +241,8 @@ elif action == "begin":
 
     doc = load_doc(zone)
     if doc is None:
+        if kind != "enable":
+            out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": "absent", "requested_kind": kind})
         if exp_gen is not None and exp_gen != 0:
             out({"ok": True, "refused": "coverage_generation_stale", "generation": 0, "expected_generation": exp_gen})
         if exp_dep_rev is not None and exp_dep_rev != 0:
@@ -287,8 +299,15 @@ elif action == "begin":
     cur_state = doc.get("state")
     if cur_state == "incomplete":
         interrupted = doc.get("interrupted_kind")
-        if kind != interrupted:
-            out({"ok": True, "refused": "coverage_kind_mismatch", "interrupted_kind": interrupted, "requested_kind": kind})
+        if interrupted == "enable":
+            if kind not in ("enable", "repair"):
+                out({"ok": True, "refused": "coverage_kind_mismatch", "interrupted_kind": interrupted, "requested_kind": kind})
+        elif interrupted == "disable":
+            if kind != "disable":
+                out({"ok": True, "refused": "coverage_kind_mismatch", "interrupted_kind": interrupted, "requested_kind": kind})
+        else:
+            if kind != interrupted:
+                out({"ok": True, "refused": "coverage_kind_mismatch", "interrupted_kind": interrupted, "requested_kind": kind})
 
     if kind == "enable":
         if cur_state not in ("absent", "retired", "fallback_only", "disabled", "enabling", "incomplete"):
@@ -305,6 +324,8 @@ elif action == "begin":
     elif kind == "repair":
         if cur_state not in ("active", "incomplete"):
             out({"ok": True, "refused": "coverage_kind_mismatch", "current_state": cur_state, "requested_kind": kind})
+        if cur_state == "incomplete" and doc.get("interrupted_kind") != "enable":
+            out({"ok": True, "refused": "coverage_kind_mismatch", "interrupted_kind": doc.get("interrupted_kind"), "requested_kind": kind})
         new_state = cur_state
     else:
         new_state = cur_state

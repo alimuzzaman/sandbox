@@ -461,9 +461,13 @@ class TestZoneCoverageProgram(unittest.TestCase):
 
         # 1. Validation in load_doc (must be null or list of dicts)
         invalid_intent_cases = [
-            {"publish_intent": "not-a-list"},
+            {"publish_intent": "not-a-dict"},
             {"publish_intent": 123},
-            {"publish_intent": ["string-item"]},
+            {"publish_intent": []},
+            {"publish_intent": {"records": []}},
+            {"publish_intent": {"marker": 123, "records": []}},
+            {"publish_intent": {"marker": "m", "records": "not-a-list"}},
+            {"publish_intent": {"marker": "m", "records": ["string-item"]}},
             {"unknown_effects": "not-a-list"},
             {"unknown_effects": [123]},
         ]
@@ -483,7 +487,10 @@ class TestZoneCoverageProgram(unittest.TestCase):
         self.assertTrue(out.get("ok"))
         op_id = out["operation_id"]
 
-        intent = [{"name": "*.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}]
+        intent = {
+            "marker": "sandbox-zone-coverage 1234567890abcdef",
+            "records": [{"name": "*.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
+        }
         effects = [{"name": "*.asb.bd", "action": "create_record"}]
 
         rc, out = _run_program(self.home, {

@@ -109,12 +109,15 @@ class FakeCfClient:
             return [r for r in self._records if r.get("name") == target]
         return list(self._records)
 
-    def upsert_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True):
+    def create_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True, comment: str = ""):
         rec_type = "AAAA" if ":" in address else "A"
-        rec = {"id": f"rec-{len(self._records)+1}", "name": hostname, "type": rec_type, "content": address, "proxied": proxied}
+        rec = {"id": f"rec-{len(self._records)+1}", "name": hostname, "type": rec_type, "content": address, "proxied": proxied, "comment": comment}
         self._records.append(rec)
         self.created_records.append(rec)
         return rec
+
+    def upsert_address(self, zone_id: str, hostname: str, address: str, proxied: bool = True):
+        return self.create_address(zone_id, hostname, address, proxied=proxied)
 
     def delete_record(self, zone_id: str, record_id: str):
         self.deleted_records.append(record_id)
@@ -795,7 +798,7 @@ class TestZoneCoverageService(unittest.TestCase):
         self.assertEqual(len(plan1["records_to_create"]), 2)
 
         # Simulate crash on second write during enable
-        orig_upsert = cf.upsert_address
+        orig_upsert = cf.create_address
         calls = 0
         def fail_second_upsert(*args, **kwargs):
             nonlocal calls
@@ -804,7 +807,7 @@ class TestZoneCoverageService(unittest.TestCase):
                 raise RuntimeError("simulated provider crash on 2nd write")
             return orig_upsert(*args, **kwargs)
 
-        with patch.object(cf, "upsert_address", side_effect=fail_second_upsert),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
+        with patch.object(cf, "create_address", side_effect=fail_second_upsert),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
             try:
                 enable(entry, "asb.bd", plan1, store_client=store, cf_client=cf)
             except Exception:
@@ -831,18 +834,23 @@ class TestZoneCoverageService(unittest.TestCase):
 
     def test_resume_then_probe_failure_removes_own_records(self):
         entry = dict(self.entry, origin_ipv6="2001:db8::1")
-        # Setup incomplete doc with publish_intent and 1 pre-existing record on CF matching intent
-        rec1 = {"id": "r1", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}
-        cf = FakeCfClient(records=[rec1])
+        marker = "sandbox-zone-coverage 1234567890abcdef"
+        rec1 = {"id": "r1", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": marker}
+        # Also include a 3rd party record without marker to verify rollback leaves it alone
+        rec_other = {"id": "r_other", "name": "other.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True, "comment": ""}
+        cf = FakeCfClient(records=[rec1, rec_other])
         store = FakeStoreClient(doc={
             "schema_version": 1,
             "zone": "asb.bd",
             "state": "incomplete",
             "generation": 0,
-            "publish_intent": [
-                {"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True},
-                {"name": "*.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True},
-            ],
+            "publish_intent": {
+                "marker": marker,
+                "records": [
+                    {"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True},
+                    {"name": "*.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True},
+                ],
+            },
             "shared_records": [],
             "dependents": {},
             "dependents_revision": 0,
@@ -942,7 +950,7 @@ class TestZoneCoverageService(unittest.TestCase):
             "dependents": {},
         }
 
-        with patch.object(cf, "upsert_address", side_effect=RuntimeError("CF write failed")),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
+        with patch.object(cf, "create_address", side_effect=RuntimeError("CF write failed")),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
             with self.assertRaises(CoverageError):
                 enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
 
@@ -968,10 +976,10 @@ class TestZoneCoverageService(unittest.TestCase):
             "dependents": {},
         }
 
-        with patch.object(cf, "upsert_address", side_effect=RuntimeError("CF network error")),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
+        with patch.object(cf, "create_address", side_effect=RuntimeError("CF network error")),              patch("sandbox.hosting.zone_coverage.fallback.install_fallback"):
             with self.assertRaises(CoverageError) as ctx:
                 enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
-            self.assertIn("store was not updated with unknown effects", str(ctx.exception))
+            self.assertIn("store was not updated", str(ctx.exception))
 
     def test_digest_stable_across_resume(self):
         from sandbox.hosting.zone_coverage.service import compute_plan_digest
@@ -1020,6 +1028,28 @@ class TestZoneCoverageService(unittest.TestCase):
             self.assertEqual(len(plan["records_to_create"]), 1)
             self.assertEqual(plan["records_to_create"][0]["type"], "A")
 
+
+    def test_h2_fallback_install_failure_reports_store_finish_refusal(self):
+        store = FakeStoreClient()
+        store.finish_refusal = "coverage_operation_active"
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", side_effect=RuntimeError("simulated install failure")):
+            with self.assertRaises(RuntimeError) as ctx:
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            err_msg = str(ctx.exception)
+            self.assertIn("store was not updated: refused finish (coverage_operation_active)", err_msg)
 
 if __name__ == "__main__":
     unittest.main()

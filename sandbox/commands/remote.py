@@ -1527,6 +1527,29 @@ def _cmd_edge(args, as_json: bool) -> None:
         print(json.dumps(data, sort_keys=True) if as_json else
               f"removed {data['file']} from '{name}'")
         return
+    try:
+        report = nginx_edge.status(entry)
+    except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        die(sr.redact_ssh_connection(str(exc), entry))
+    healthy = (report["nginx_active"] and report["config_valid"] and not report["unloaded_routes"]
+               and not report["conflicts"] and not report["certificate_problems"])
+    data = {"ok": True, "name": name, "healthy": healthy, **report}
+    if as_json:
+        print(json.dumps(data, sort_keys=True))
+        return
+    print(f"{name}: front door nginx {report['nginx_version'] or '?'} "
+          f"({'active' if report['nginx_active'] else 'INACTIVE'}, "
+          f"config {'valid' if report['config_valid'] else 'INVALID'})")
+    for row in report["routes"]:
+        loaded = {True: "loaded", False: "NOT LOADED", None: "unknown"}[row.get("loaded")]
+        fallback_tag = " (coverage fallback)" if row.get("coverage_fallback") else ""
+        print(f"  {row['file']}: {loaded}{fallback_tag}; hosts {', '.join(row.get('hostnames') or [])}")
+        for cert in row.get("certificates") or []:
+            print(f"    cert {cert.get('issuer', '?')}: expires {cert.get('not_after') or 'missing'}")
+    for item in report["conflicts"]:
+        print(f"  conflict: {item['hostname']} also served by {item['file']} ({item['owner']})")
+    for problem in report["certificate_problems"]:
+        print(f"  problem: {problem}")
 
 
 def _cmd_coverage(args, as_json: bool) -> None:
@@ -1602,28 +1625,6 @@ def _cmd_coverage(args, as_json: bool) -> None:
             print(json.dumps({"ok": False, "error": {"code": code, "message": msg}}, sort_keys=True))
             raise SystemExit(1)
         die(f"{code}: {msg}")
-    try:
-        report = nginx_edge.status(entry)
-    except (FrontDoorError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        die(sr.redact_ssh_connection(str(exc), entry))
-    healthy = (report["nginx_active"] and report["config_valid"] and not report["unloaded_routes"]
-               and not report["conflicts"] and not report["certificate_problems"])
-    data = {"ok": True, "name": name, "healthy": healthy, **report}
-    if as_json:
-        print(json.dumps(data, sort_keys=True))
-        return
-    print(f"{name}: front door nginx {report['nginx_version'] or '?'} "
-          f"({'active' if report['nginx_active'] else 'INACTIVE'}, "
-          f"config {'valid' if report['config_valid'] else 'INVALID'})")
-    for row in report["routes"]:
-        loaded = {True: "loaded", False: "NOT LOADED", None: "unknown"}[row.get("loaded")]
-        print(f"  {row['file']}: {loaded}; hosts {', '.join(row.get('hostnames') or [])}")
-        for cert in row.get("certificates") or []:
-            print(f"    cert {cert.get('issuer', '?')}: expires {cert.get('not_after') or 'missing'}")
-    for item in report["conflicts"]:
-        print(f"  conflict: {item['hostname']} also served by {item['file']} ({item['owner']})")
-    for problem in report["certificate_problems"]:
-        print(f"  problem: {problem}")
 
 
 def _cmd_provision(args, as_json: bool) -> None:

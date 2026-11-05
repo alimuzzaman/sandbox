@@ -80,6 +80,53 @@ class _patched_config_local:
             p.__exit__(*exc)
 
 
+class TestCmdEdgeRegression(unittest.TestCase):
+    def test_f7_cmd_edge_status_output_json_and_text(self):
+        fake_entry = {"name": "myvps", "ssh": "user@host", "front_door": "nginx"}
+        fake_report = {
+            "nginx_active": True,
+            "config_valid": True,
+            "nginx_version": "1.25.1",
+            "unloaded_routes": [],
+            "conflicts": [],
+            "certificate_problems": [],
+            "routes": [
+                {
+                    "file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf",
+                    "loaded": True,
+                    "hostnames": ["*.asb.bd"],
+                    "coverage_fallback": True,
+                    "certificates": [],
+                }
+            ],
+        }
+
+        args = types.SimpleNamespace(name="myvps", remove_route=None, confirm=False)
+        with patch.object(sr, "get_remote", return_value=fake_entry), \
+             patch("sandbox.hosting.front_door.front_door_mode", return_value="nginx"), \
+             patch("sandbox.hosting.front_door.nginx.status", return_value=fake_report):
+
+            # 1. JSON output
+            buf_json = StringIO()
+            with redirect_stdout(buf_json):
+                remote_cmd._cmd_edge(args, as_json=True)
+            out_json = buf_json.getvalue().strip()
+            self.assertTrue(out_json, "Expected JSON output from _cmd_edge, got empty string")
+            data = json.loads(out_json)
+            self.assertTrue(data.get("ok"))
+            self.assertEqual(data.get("name"), "myvps")
+            self.assertTrue(data["routes"][0].get("coverage_fallback"))
+
+            # 2. Text output
+            buf_text = StringIO()
+            with redirect_stdout(buf_text):
+                remote_cmd._cmd_edge(args, as_json=False)
+            out_text = buf_text.getvalue().strip()
+            self.assertTrue(out_text, "Expected text output from _cmd_edge, got empty string")
+            self.assertIn("myvps: front door nginx 1.25.1", out_text)
+            self.assertIn("(coverage fallback)", out_text)
+
+
 class TestRemoteBlockConfig(unittest.TestCase):
     def test_round_trip_preserves_unrelated_config(self):
         with tempfile.TemporaryDirectory() as d:

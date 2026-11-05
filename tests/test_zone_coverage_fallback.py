@@ -169,5 +169,26 @@ class TestZoneCoverageFallback(unittest.TestCase):
         self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
 
 
+    def test_g7_origin_probe_errors_never_leak_message_or_secret_marker(self):
+        import subprocess, sys, json
+        from sandbox.hosting.zone_coverage.fallback import _PROBE_SCRIPT, verify_origin_probe_result
+
+        # 1. Run probe script with an exception holding SECRET-MARKER
+        harness = (
+            "import socket; "
+            "socket.create_connection = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('internal SECRET-MARKER error')); "
+        ) + _PROBE_SCRIPT
+        proc = subprocess.run([sys.executable, '-c', harness, 'test.asb.bd', '443'], capture_output=True, text=True)
+        self.assertNotIn('SECRET-MARKER', proc.stdout)
+        self.assertNotIn('SECRET-MARKER', proc.stderr)
+
+        # 2. Verify origin probe result never exposes message in raised CoverageError
+        data = {'error': 'CustomError', 'message': 'sensitive SECRET-MARKER detail'}
+        with self.assertRaises(CoverageError) as ctx:
+            verify_origin_probe_result(data)
+        self.assertNotIn('SECRET-MARKER', str(ctx.exception))
+        self.assertIn('CustomError', str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

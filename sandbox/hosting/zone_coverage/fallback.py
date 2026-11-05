@@ -40,7 +40,7 @@ try:
     }
     print(json.dumps(out))
 except Exception as exc:
-    print(json.dumps({"error": type(exc).__name__, "message": str(exc)}))
+    print(json.dumps({"error": type(exc).__name__}))
     sys.exit(1)
 '''
 
@@ -90,9 +90,10 @@ def verify_origin_probe_result(data: dict[str, Any]) -> bool:
     if not isinstance(data, dict):
         raise CoverageError(COVERAGE_FALLBACK_UNVERIFIED, "origin probe returned non-dict response")
     if "error" in data:
+        err_type = data.get("error") or "probe_failed"
         raise CoverageError(
             COVERAGE_FALLBACK_UNVERIFIED,
-            f"fallback origin probe failed: {data.get('message') or data.get('error')}",
+            f"fallback origin probe failed: {err_type}",
         )
     status = data.get("status")
     if status != 404:
@@ -144,8 +145,8 @@ def run_origin_probe(
         try:
             lines = [l.strip() for l in stdout.strip().splitlines() if l.strip()]
             data = json.loads(lines[-1]) if lines else {"error": "empty_output"}
-        except Exception as exc:
-            data = {"error": "invalid_probe_output", "message": str(exc)}
+        except Exception:
+            data = {"error": "invalid_probe_output"}
 
     verify_origin_probe_result(data)
     data["probe_host"] = probe_host

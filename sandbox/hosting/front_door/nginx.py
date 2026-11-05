@@ -79,6 +79,15 @@ def is_sandbox_file(path: str) -> bool:
     return path.startswith(CONF_DIR + "/") and base.startswith(FILE_PREFIX) and base.endswith(".conf")
 
 
+def is_coverage_fallback_file(path: str) -> bool:
+    base = path.rsplit("/", 1)[-1]
+    return (
+        path.startswith(CONF_DIR + "/")
+        and base.startswith(FILE_PREFIX + "coverage-")
+        and base.endswith(".conf")
+    )
+
+
 def _var(name: str) -> str:
     return "sbx_" + hashlib.sha256(name.encode()).hexdigest()[:10]
 
@@ -382,10 +391,44 @@ def find_conflicts(declared: Iterable[str], pairs: Iterable[tuple[str, str]],
         for path, name in pairs:
             if own_file is not None and path == own_file:
                 continue
+            if is_coverage_fallback_file(path) and not host.startswith(("*", ".", "~")) and name.startswith(("*.", ".")):
+                continue
             if names_overlap(host, name):
                 rows.append({"hostname": host, "server_name": name, "file": path,
                              "owner": "sandbox" if is_sandbox_file(path) else "panel"})
     return rows
+
+
+def classify_for_fallback(
+    pairs: Iterable[tuple[str, str]],
+    zone: str,
+) -> tuple[list[dict], list[dict]]:
+    """Partition existing server_name routes into permitted exact exceptions and blockers."""
+    exceptions: list[dict] = []
+    blockers: list[dict] = []
+    clean_zone = zone.strip().rstrip(".").lower()
+    wildcard = "*." + clean_zone
+    own_fallback = route_file("coverage-" + clean_zone)
+
+    for path, name in pairs:
+        if path == own_fallback:
+            continue
+        if names_overlap(wildcard, name):
+            owner = "sandbox" if is_sandbox_file(path) else "panel"
+            if not name.startswith(("*", ".", "~")):
+                exceptions.append({
+                    "hostname": name,
+                    "file": path,
+                    "owner": owner,
+                })
+            else:
+                blockers.append({
+                    "hostname": wildcard,
+                    "server_name": name,
+                    "file": path,
+                    "owner": owner,
+                })
+    return exceptions, blockers
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +466,7 @@ def _python_program(entry: dict, program: str, payload: dict, *, timeout: int = 
 
 
 _SHARED_SOURCE = "\n\n".join(inspect.getsource(fn) for fn in (
-    is_sandbox_file, parse_server_names, _name_covers, names_overlap, find_conflicts))
+    is_sandbox_file, is_coverage_fallback_file, parse_server_names, _name_covers, names_overlap, find_conflicts))
 
 _PROBE_PROGRAM = '''from __future__ import annotations
 from typing import Iterable
@@ -510,10 +553,15 @@ for name in sorted(os.listdir(CONF_DIR)) if os.path.isdir(CONF_DIR) else []:
                 row["issuer"] = "public" if cert.startswith("/etc/letsencrypt/") else "origin-ca"
         cert_rows.append(row)
     other = [(p, n) for p, n in pairs if p != path]
+    if is_coverage_fallback_file(path):
+        route_conflicts = [c for c in find_conflicts([h for h in hosts if not h.startswith("~")], other)
+                           if c["server_name"].startswith(("*", ".", "~"))]
+    else:
+        route_conflicts = find_conflicts([h for h in hosts if not h.startswith("~")], other)
     routes.append({"file": path, "readable": True, "mode": oct(st.st_mode & 0o777),
                    "owner_uid": st.st_uid, "hostnames": hosts[:64], "loaded": loaded,
                    "certificates": cert_rows,
-                   "conflicts": find_conflicts([h for h in hosts if not h.startswith("~")], other)[:20]})
+                   "conflicts": route_conflicts[:20]})
 out["routes"] = routes[:200]
 print(json.dumps(out, sort_keys=True))
 '''
@@ -898,7 +946,11 @@ def configure_control_route(entry: dict, hostname: str, port: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def summarize(facts: dict) -> dict:
-    routes = facts.get("routes") or []
+    raw_routes = facts.get("routes") or []
+    routes = [
+        dict(row, coverage_fallback=is_coverage_fallback_file(row.get("file", "")))
+        for row in raw_routes
+    ]
     unloaded = [row["file"] for row in routes if row.get("loaded") is False]
     conflicts = [dict(item, route_file=row["file"]) for row in routes
                  for item in row.get("conflicts") or []]
@@ -915,8 +967,11 @@ def summarize(facts: dict) -> dict:
             elif cert.get("expired"):
                 problems.append(f"{row['file']}: certificate expired {cert.get('not_after')}")
             elif cert.get("renewal_overdue"):
-                action = ("renewal has not succeeded" if cert.get("issuer") == "public"
-                          else "re-apply to reissue the Origin CA certificate")
+                if is_coverage_fallback_file(row.get("file", "")):
+                    action = "run `sb remote coverage --renew-certificate` to reissue"
+                else:
+                    action = ("renewal has not succeeded" if cert.get("issuer") == "public"
+                              else "re-apply to reissue the Origin CA certificate")
                 problems.append(f"{row['file']}: certificate expires {cert.get('not_after')}; {action}")
     return {
         "mode": "nginx",
@@ -940,6 +995,12 @@ def status(entry: dict) -> dict:
 
 def remove_route_and_certificates(entry: dict, name: str) -> dict:
     """Remove one Sandbox route file, then its Sandbox-owned certificates."""
+    if is_coverage_fallback_file(route_file(name)):
+        raise FrontDoorError(
+            "front_door_remove_fallback_refused",
+            f"refusing to remove coverage fallback route '{name}' via remove-route; "
+            "use `sb remote coverage --remove-fallback`",
+        )
     result = remove_route(entry, name)
     cert_dir = f"{CERT_ROOT}/{name}"
     command = (_SUDO + f"$SUDO rm -rf {shlex.quote(cert_dir)}; "

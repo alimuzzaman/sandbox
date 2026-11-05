@@ -62,13 +62,18 @@ class FrontDoorManifestTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "front_door_unknown")
 
     def test_caddy_keeps_every_surface(self):
-        for capability in front_door.CAPABILITIES:
+        for capability in (front_door.HOST_ROUTES, front_door.CONTROL_ROUTE,
+                           front_door.INSTANCE_ROUTES, front_door.PREVIEW_ROUTES):
             self.assertEqual(front_door.require_capability({}, capability), "caddy")
+        with self.assertRaises(front_door.FrontDoorError) as ctx:
+            front_door.require_capability({}, front_door.ZONE_COVERAGE)
+        self.assertEqual(ctx.exception.code, "front_door_capability_unavailable")
 
     def test_nginx_refuses_unbuilt_surfaces_before_side_effects(self):
         entry = {"front_door": "nginx"}
         self.assertEqual(front_door.require_capability(entry, "host_routes"), "nginx")
         self.assertEqual(front_door.require_capability(entry, "control_route"), "nginx")
+        self.assertEqual(front_door.require_capability(entry, front_door.ZONE_COVERAGE), "nginx")
         for capability in ("instance_routes", "preview_routes"):
             with self.assertRaises(front_door.FrontDoorError) as ctx:
                 front_door.require_capability(entry, capability)
@@ -254,6 +259,42 @@ class NginxConflictTests(unittest.TestCase):
         self.assertEqual(self._conflicts(["example.com"], own), [])
         rows = self._conflicts(["example.com"])
         self.assertEqual(rows[0]["owner"], "sandbox")
+
+    def test_is_coverage_fallback_file(self):
+        self.assertTrue(nginx.is_coverage_fallback_file("/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"))
+        self.assertFalse(nginx.is_coverage_fallback_file("/etc/nginx/conf.d/sandbox-host-prod.conf"))
+        self.assertFalse(nginx.is_coverage_fallback_file("/etc/nginx/sites-enabled/panel.conf"))
+
+    def test_find_conflicts_fallback_coexistence(self):
+        pairs = [
+            ("/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf", "*.asb.bd"),
+            ("/etc/nginx/sites-enabled/foreign-wild.conf", "*.other.bd"),
+        ]
+        # Exact route coexists with coverage fallback without conflict
+        self.assertEqual(nginx.find_conflicts(["site.asb.bd"], pairs), [])
+        # Wildcard route against coverage fallback is a conflict
+        conflicts = nginx.find_conflicts(["*.asb.bd"], pairs)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["server_name"], "*.asb.bd")
+        # Wildcard in a foreign file conflicts with exact route
+        foreign_conflicts = nginx.find_conflicts(["site.other.bd"], pairs)
+        self.assertEqual(len(foreign_conflicts), 1)
+        self.assertEqual(foreign_conflicts[0]["owner"], "panel")
+
+    def test_classify_for_fallback(self):
+        pairs = [
+            ("/etc/nginx/conf.d/sandbox-app.conf", "site.asb.bd"),
+            ("/etc/nginx/sites-enabled/panel", "admin.asb.bd"),
+            ("/etc/nginx/sites-enabled/foreign-wild", "*.asb.bd"),
+            ("/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf", "*.asb.bd"),
+            ("/etc/nginx/conf.d/sandbox-other.conf", "other.com"),
+        ]
+        exceptions, blockers = nginx.classify_for_fallback(pairs, "asb.bd")
+        self.assertEqual(len(exceptions), 2)
+        exc_names = {e["hostname"] for e in exceptions}
+        self.assertEqual(exc_names, {"site.asb.bd", "admin.asb.bd"})
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual(blockers[0]["file"], "/etc/nginx/sites-enabled/foreign-wild")
 
     def test_preflight_refuses_conflicts_caddy_and_missing_include(self):
         base = {"nginx_installed": True, "active": True, "includes_conf_d": True,
@@ -449,6 +490,38 @@ class ProvisionPreflightTests(unittest.TestCase):
         self.assertIsNone(remote_cmd._checked_front_door("vps", {"front_door": "nginx"}, "nginx"))
         self.assertIsNone(remote_cmd._checked_front_door("vps", None, "caddy"))
         self.assertIsNone(remote_cmd._checked_front_door("vps", {}, None))
+
+    def test_remove_route_and_certificates_refuses_coverage_fallback(self):
+        with self.assertRaises(front_door.FrontDoorError) as ctx:
+            nginx.remove_route_and_certificates({}, "coverage-asb.bd")
+        self.assertEqual(ctx.exception.code, "front_door_remove_fallback_refused")
+
+    def test_summarize_marks_coverage_fallback_and_renew_hint(self):
+        facts = {
+            "routes": [
+                {
+                    "file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf",
+                    "hostnames": ["*.asb.bd"],
+                    "certificates": [{
+                        "present": True,
+                        "expired": False,
+                        "renewal_overdue": True,
+                        "not_after": "2026-12-01T00:00:00Z",
+                        "issuer": "origin",
+                    }],
+                },
+                {
+                    "file": "/etc/nginx/conf.d/sandbox-site.conf",
+                    "hostnames": ["site.asb.bd"],
+                    "certificates": [],
+                },
+            ],
+        }
+        res = nginx.summarize(facts)
+        self.assertTrue(res["routes"][0]["coverage_fallback"])
+        self.assertFalse(res["routes"][1]["coverage_fallback"])
+        self.assertEqual(len(res["certificate_problems"]), 1)
+        self.assertIn("sb remote coverage --renew-certificate", res["certificate_problems"][0])
 
 
 if __name__ == "__main__":

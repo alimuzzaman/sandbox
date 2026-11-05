@@ -38,15 +38,16 @@ HOST_ROUTES = "host_routes"            # sb host plan/apply
 CONTROL_ROUTE = "control_route"        # HTTPS MCP control endpoint (provision/up)
 INSTANCE_ROUTES = "instance_routes"    # sb deploy --expose (+ aliases)
 PREVIEW_ROUTES = "preview_routes"      # sb preview
+ZONE_COVERAGE = "zone_coverage"        # sb remote coverage / wildcard subdomain hosting
 
-CAPABILITIES = (HOST_ROUTES, CONTROL_ROUTE, INSTANCE_ROUTES, PREVIEW_ROUTES)
+CAPABILITIES = (HOST_ROUTES, CONTROL_ROUTE, INSTANCE_ROUTES, PREVIEW_ROUTES, ZONE_COVERAGE)
 
 FRONT_DOOR_MANIFEST: tuple[FrontDoorDeclaration, ...] = (
     FrontDoorDeclaration(
-        "caddy", True, frozenset(CAPABILITIES),
+        "caddy", True, frozenset({HOST_ROUTES, CONTROL_ROUTE, INSTANCE_ROUTES, PREVIEW_ROUTES}),
         "Sandbox installs Caddy and Caddy owns public 80/443"),
     FrontDoorDeclaration(
-        "nginx", False, frozenset({HOST_ROUTES, CONTROL_ROUTE}),
+        "nginx", False, frozenset({HOST_ROUTES, CONTROL_ROUTE, ZONE_COVERAGE}),
         "a host-incumbent nginx owns 80/443; Sandbox manages only its own "
         "/etc/nginx/conf.d/sandbox-*.conf files"),
 )

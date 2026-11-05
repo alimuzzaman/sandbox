@@ -69,6 +69,8 @@ class FakeStoreClient:
         return {"ok": True, "action": "phase", "document": self.doc}
 
     def finish(self, zone: str, operation_id: str, state: str, *, interrupted_kind=None, raise_generation=False, unknown_effects=None):
+        if getattr(self, "finish_exception", None):
+            raise self.finish_exception
         if self.finish_refusal:
             return {"ok": True, "action": "finish", "refused": self.finish_refusal}
         self.doc["state"] = state
@@ -1050,6 +1052,108 @@ class TestZoneCoverageService(unittest.TestCase):
                 enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
             err_msg = str(ctx.exception)
             self.assertIn("store was not updated: refused finish (coverage_operation_active)", err_msg)
+
+
+    def test_j5_coverage_error_reports_store_finish_refusal_and_exception(self):
+        store = FakeStoreClient()
+        store.finish_refusal = "coverage_operation_active"
+        cf = FakeCfClient(records=[
+            {"id": "r-diff", "name": "*.asb.bd", "type": "A", "content": "9.9.9.9", "proxied": True},
+        ])
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}):
+            with self.assertRaises(CoverageError) as ctx:
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            self.assertEqual(ctx.exception.code, COVERAGE_RECORD_EXISTS)
+            self.assertIn("store was not updated: refused finish (coverage_operation_active)", str(ctx.exception))
+
+        # Finish raising an exception with fresh store
+        store2 = FakeStoreClient()
+        store2.finish_exception = RuntimeError("store connection dropped")
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}):
+            with self.assertRaises(CoverageError) as ctx2:
+                enable(self.entry, "asb.bd", plan, store_client=store2, cf_client=cf)
+            self.assertEqual(ctx2.exception.code, COVERAGE_RECORD_EXISTS)
+            self.assertIn("store was not updated: finish error (store connection dropped)", str(ctx2.exception))
+
+    def test_j1_fencing_external_writes_prevents_orphan_writes_and_deletes(self):
+        # 1. Dual-stack pause before 2nd record creation
+        entry = dict(self.entry, origin_ipv6="2001:db8::1")
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+        plan = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [
+                {"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True},
+                {"name": "*.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True},
+            ],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+        create_calls = 0
+        def phase_fencing_create(zone, op_id, phase, updates=None):
+            if phase == "dns_create_record" and create_calls == 1:
+                return {"ok": True, "refused": "coverage_operation_active", "reason": "not_holder"}
+            return {"ok": True, "document": {}}
+
+        orig_create = cf.create_address
+        def counting_create(*args, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            return orig_create(*args, **kwargs)
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}), \
+             patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True), \
+             patch.object(store, "phase", side_effect=phase_fencing_create), \
+             patch.object(cf, "create_address", side_effect=counting_create):
+            with self.assertRaises(CoverageError):
+                enable(entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            # Only 1 create call occurred before fence blocked the 2nd
+            self.assertEqual(create_calls, 1)
+
+        # 2. Suspended old controller: probe fails, but rollback phase is refused -> 0 deletes made
+        store2 = FakeStoreClient()
+        cf2 = FakeCfClient()
+        plan2 = {
+            "action": "enable",
+            "zone": "asb.bd",
+            "zone_id": "z-test",
+            "expected_generation": 0,
+            "expected_dependents_revision": 0,
+            "records_to_create": [{"name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}],
+            "records_to_adopt": [],
+            "exceptions": [],
+            "blockers": [],
+            "dependents": {},
+        }
+        def phase_fencing_rollback(zone, op_id, phase, updates=None):
+            if phase == "dns_rollback_delete":
+                return {"ok": True, "refused": "coverage_operation_active", "reason": "not_holder"}
+            return {"ok": True, "document": {}}
+
+        with patch("sandbox.hosting.zone_coverage.fallback.install_fallback", return_value={"file": "/f", "digest": "d"}), \
+             patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False), \
+             patch.object(store2, "phase", side_effect=phase_fencing_rollback):
+            with self.assertRaises(CoverageError):
+                enable(self.entry, "asb.bd", plan2, store_client=store2, cf_client=cf2)
+            self.assertEqual(len(cf2.deleted_records), 0)
 
 if __name__ == "__main__":
     unittest.main()

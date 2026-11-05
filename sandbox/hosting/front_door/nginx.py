@@ -1019,7 +1019,7 @@ def remove_route_and_certificates(entry: dict, name: str) -> dict:
         raise FrontDoorError(
             "front_door_remove_fallback_refused",
             f"refusing to remove coverage fallback route '{name}' via remove-route; "
-            "use `sb remote coverage --remove-fallback`",
+            "removing it is not available yet",
         )
     result = remove_route(entry, name)
     cert_dir = f"{CERT_ROOT}/{name}"

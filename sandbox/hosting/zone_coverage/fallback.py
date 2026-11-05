@@ -161,10 +161,13 @@ def install_fallback(
     ipv6: bool = False,
     http2_directive: bool = True,
     ssh_run: Callable[..., Any] | None = None,
+    before_effect: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Install origin certificate, render fallback route, apply, and probe."""
     clean_zone = zone.strip().rstrip(".").lower()
     route_name = f"coverage-{clean_zone}"
+    if before_effect is not None:
+        before_effect("certificate")
     cert_path, key_path, cert_meta = nginx.ensure_origin_certificate(
         entry,
         route_name,
@@ -178,6 +181,8 @@ def install_fallback(
         ipv6=ipv6,
         http2_directive=http2_directive,
     )
+    if before_effect is not None:
+        before_effect("route")
     apply_res = nginx.apply_route(entry, route_name, conf)
     probe_res = run_origin_probe(entry, clean_zone, ssh_run=ssh_run)
     return {

@@ -558,6 +558,8 @@ def enable(
                     "proxied": bool(adopted.get("proxied", True)),
                 })
             else:
+                p_fence = store_client.phase(clean_zone, op_id, "dns_create_record")
+                _check_store_res(p_fence)
                 created = cf_client.create_address(
                     plan["zone_id"],
                     r["name"],
@@ -594,13 +596,15 @@ def enable(
             updates={"shared_records": shared_records},
         )
         _check_store_res(phase_res)
-    except CoverageError:
+    except CoverageError as exc:
         finish_res = None
         try:
             finish_res = store_client.finish(clean_zone, op_id, "incomplete", interrupted_kind="enable")
         except Exception as fe:
             finish_res = {"error": str(fe)}
         err_suffix = _inspect_error_path_call(finish_res, "finish")
+        if err_suffix:
+            raise CoverageError(exc.code, f"{exc.message}{err_suffix}") from None
         raise
     except Exception as exc:
         unknown_names = [rw["name"] for rw in records_written]
@@ -662,20 +666,37 @@ def enable(
                 # Never delete adopted records
                 continue
 
+            def _do_fenced_delete(rec_id: str, rec_name: str) -> bool:
+                del_fence = None
+                try:
+                    del_fence = store_client.phase(clean_zone, op_id, "dns_rollback_delete")
+                except Exception as de:
+                    del_fence = de
+                if (isinstance(del_fence, dict) and del_fence.get("refused")) or isinstance(del_fence, Exception):
+                    unknown_effects.append({
+                        "id": rec_id,
+                        "name": rec_name,
+                        "reason": f"delete_fenced_out: {del_fence}",
+                    })
+                    return False
+                try:
+                    cf_client.delete_record(plan["zone_id"], rec_id)
+                except Exception as de:
+                    unknown_effects.append({
+                        "id": rec_id,
+                        "name": rec_name,
+                        "reason": f"delete_failed: {type(de).__name__}",
+                    })
+                return True
+
             if pr_id in written_by_id:
                 orig = written_by_id[pr_id]
                 same_content = pr.get("content") == orig["content"]
                 same_proxied = bool(pr.get("proxied", True)) == bool(orig.get("proxied", True))
                 same_comment = pr.get("comment") == marker
                 if same_content and same_proxied and same_comment:
-                    try:
-                        cf_client.delete_record(plan["zone_id"], pr_id)
-                    except Exception as de:
-                        unknown_effects.append({
-                            "id": pr_id,
-                            "name": pr.get("name"),
-                            "reason": f"delete_failed: {type(de).__name__}",
-                        })
+                    if not _do_fenced_delete(pr_id, pr.get("name", "")):
+                        break
                 else:
                     unknown_effects.append({
                         "id": pr_id,
@@ -693,14 +714,8 @@ def enable(
                 same_content = matching_intent and pr.get("content") == matching_intent.get("content")
                 same_proxied = matching_intent and bool(pr.get("proxied", True)) == bool(matching_intent.get("proxied", True))
                 if same_content and same_proxied:
-                    try:
-                        cf_client.delete_record(plan["zone_id"], pr_id)
-                    except Exception as de:
-                        unknown_effects.append({
-                            "id": pr_id,
-                            "name": pr.get("name"),
-                            "reason": f"delete_failed: {type(de).__name__}",
-                        })
+                    if not _do_fenced_delete(pr_id, pr.get("name", "")):
+                        break
                 else:
                     unknown_effects.append({
                         "id": pr_id,

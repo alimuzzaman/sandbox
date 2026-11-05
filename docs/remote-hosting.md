@@ -1127,6 +1127,7 @@ Enabling installs one error-only nginx route, `/etc/nginx/conf.d/sandbox-coverag
 
 Limits:
 
+- A controller paused between its ownership check and a write can still make that one write after losing ownership; each write is preceded by a fresh check, which narrows this window but cannot close it.
 - From fallback install, every checkout without this feature refuses applies and control-route configuration under this zone. Those checkouts' `--remove-route` can still delete the fallback; `sb remote coverage` then reports the zone as unsafe.
 - A request whose host is outside every covered zone behaves as it does today, and may reach another site on the server.
 - A covered name is not published in DNS, but it is not secret: Cloudflare, the server and anyone with the URL can see it. A private site still needs Basic Auth.

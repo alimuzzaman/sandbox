@@ -48,6 +48,27 @@ class TestZoneCoverageProgram(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
+    def test_f3_read_and_list_create_nothing_and_home_expansion(self):
+        rc, out = _run_program(self.home, {"action": "read", "zone": "asb.bd"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["state"], "absent")
+        self.assertIsNone(out["document"])
+        self.assertEqual(os.listdir(self.home), [])
+
+        with tempfile.TemporaryDirectory() as fresh_home:
+            rc, out = _run_program(fresh_home, {"action": "list"})
+            self.assertEqual(rc, 0)
+            self.assertEqual(out["zones"], [])
+            self.assertEqual(os.listdir(fresh_home), [])
+
+        cmd = program.remote_command({"action": "list"})
+        import shlex
+        test_cmd = cmd.replace("python3 -c " + shlex.quote(program.PROGRAM), "python3 -c 'import sys; print(sys.argv[1])'")
+        env = {"HOME": "/tmp/fake-home-test", "PATH": os.environ.get("PATH", "/bin:/usr/bin")}
+        proc = subprocess.run(["sh", "-c", test_cmd], env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout.strip(), "/tmp/fake-home-test/sandbox")
+
     def test_read_absent_and_list(self):
         rc, out = _run_program(self.home, {"action": "read", "zone": "asb.bd"})
         self.assertEqual(rc, 0)

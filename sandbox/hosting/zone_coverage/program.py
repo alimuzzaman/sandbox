@@ -91,11 +91,20 @@ def check_state_key(key):
         bad()
     return key
 
-# Acquire lock
+# Directory layout
 root_dir = os.path.join(home, "runtime", "zone-coverage")
 zones_dir = os.path.join(root_dir, "zones")
-os.makedirs(zones_dir, exist_ok=True)
 lock_path = os.path.join(root_dir, "coverage.lock")
+
+if action in ("read", "list"):
+    if not os.path.isdir(zones_dir):
+        if action == "read":
+            zone = check_zone(request.get("zone"))
+            out({"document": None, "state": "absent"})
+        elif action == "list":
+            out({"zones": []})
+
+os.makedirs(zones_dir, exist_ok=True)
 lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
 
 deadline = time.time() + LOCK_WAIT_SECONDS
@@ -366,7 +375,12 @@ elif action == "dependent-release":
 '''
 
 
-def remote_command(request: dict, *, home: str = "$HOME/.sandbox") -> str:
-    """Format the shell command that invokes PROGRAM on the remote."""
-    payload = base64.b64encode(json.dumps(request, separators=(",", ":")).encode()).decode()
-    return f"python3 -c {shlex.quote(PROGRAM)} {shlex.quote(home)} {payload}"
+def remote_command(request: dict) -> str:
+    """The shell command running PROGRAM for request on the remote."""
+    payload = base64.b64encode(
+        json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+    ).decode()
+    return (
+        f"python3 -c {shlex.quote(PROGRAM)} "
+        f'\"${{SANDBOX_HOME:-$HOME/sandbox}}\" {shlex.quote(payload)}'
+    )

@@ -411,8 +411,7 @@ def find_conflicts(declared: Iterable[str], pairs: Iterable[tuple[str, str]],
             zone = coverage_zone_of(path)
             if zone is not None:
                 if not host.startswith(("*", ".", "~")) and name == "*." + zone:
-                    if host == zone or host.endswith("." + zone):
-                        continue
+                    continue
             if names_overlap(host, name):
                 rows.append({"hostname": host, "server_name": name, "file": path,
                              "owner": "sandbox" if is_sandbox_file(path) else "panel"})

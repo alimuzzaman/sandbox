@@ -752,6 +752,49 @@ class TestZoneCoverageService(unittest.TestCase):
         )
 
 
+
+    def test_j4_fail_closed_on_nginx_facts_in_plan_and_enable_conflict_recheck(self):
+        store = FakeStoreClient()
+        cf = FakeCfClient()
+
+        # 1. plan_enable fails closed when nginx.probe raises
+        with patch("sandbox.hosting.front_door.nginx.probe", side_effect=RuntimeError("probe unreachable")):
+            with self.assertRaises(CoverageError) as ctx:
+                plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+            self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
+
+        # 2. plan_enable fails closed when nginx.probe returns empty / invalid config
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={"config_valid": False}):
+            with self.assertRaises(CoverageError) as ctx:
+                plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+            self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
+
+        # 3. plan succeeds with clean routes
+        clean_probe = {"config_valid": True, "routes": []}
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value=clean_probe):
+            plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+        self.assertEqual(plan["blockers"], [])
+
+        # 4. enable catches newly introduced conflicting route before effects
+        conflicting_probe = {
+            "config_valid": True,
+            "routes": [
+                {
+                    "file": "/etc/nginx/sites-enabled/panel-wildcard.conf",
+                    "hostnames": ["*.asb.bd"],
+                }
+            ],
+        }
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value=conflicting_probe), \
+             patch("sandbox.hosting.zone_coverage.fallback.install_fallback") as mock_install:
+            with self.assertRaises(CoverageError) as ctx:
+                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            self.assertEqual(ctx.exception.code, COVERAGE_CONFLICT)
+            self.assertIn("conflicting wildcard or regex routes exist", str(ctx.exception))
+            mock_install.assert_not_called()
+            self.assertEqual(store.doc.get("state"), "incomplete")
+            self.assertEqual(store.doc.get("interrupted_kind"), "enable")
+
     def test_g8_nginx_probe_failure_stops_before_effect_and_no_guessing(self):
         store = FakeStoreClient()
         cf = FakeCfClient()

@@ -289,6 +289,11 @@ class NginxConflictTests(unittest.TestCase):
         self.assertEqual(nginx.find_conflicts(["x.a.example"], own_pairs), [])
         # Declared wildcard still conflicts
         self.assertEqual(len(nginx.find_conflicts(["*.a.example"], own_pairs)), 1)
+        # File for a.example holding *.example or regex conflicts for x.a.example
+        parent_pairs = [("/etc/nginx/conf.d/sandbox-coverage-a.example.conf", "*.example")]
+        regex_pairs = [("/etc/nginx/conf.d/sandbox-coverage-a.example.conf", r"~^.*\.a\.example$")]
+        self.assertEqual(len(nginx.find_conflicts(["x.a.example"], parent_pairs)), 1)
+        self.assertEqual(len(nginx.find_conflicts(["x.a.example"], regex_pairs)), 1)
 
         # 3. Test embedded program copy directly by executing it in a subprocess
         embedded_script = f"""
@@ -307,6 +312,8 @@ res = {{
     'mismatched': len(find_conflicts(['x.b.example'], mismatched_pairs)),
     'own': find_conflicts(['x.a.example'], own_pairs),
     'wildcard': len(find_conflicts(['*.a.example'], own_pairs)),
+    'parent_wildcard': len(find_conflicts(['x.a.example'], [('/etc/nginx/conf.d/sandbox-coverage-a.example.conf', '*.example')])),
+    'regex': len(find_conflicts(['x.a.example'], [('/etc/nginx/conf.d/sandbox-coverage-a.example.conf', r'~^.*\.a\.example$')])),
 }}
 print(json.dumps(res))
 """
@@ -317,6 +324,8 @@ print(json.dumps(res))
         self.assertEqual(embedded_res["mismatched"], 1)
         self.assertEqual(embedded_res["own"], [])
         self.assertEqual(embedded_res["wildcard"], 1)
+        self.assertEqual(embedded_res["parent_wildcard"], 1)
+        self.assertEqual(embedded_res["regex"], 1)
 
     def test_find_conflicts_fallback_coexistence(self):
         pairs = [

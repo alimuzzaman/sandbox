@@ -300,11 +300,21 @@ http {{
             run_origin_probe(entry, "asb.bd", port=port, probe_host="probe-no-hdr.asb.bd", ssh_run=local_ssh)
         self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
 
-        # 4. Extra or different body fails
+        # 4. Extra or different body fails (fixed body + extra text)
         response_headers = {"X-Sandbox-Fallback": "1", "Content-Type": "text/html"}
-        response_body = b"Extra body content"
+        response_body = FALLBACK_BODY.encode("utf-8") + b"<!-- extra trailing content -->"
         with self.assertRaises(CoverageError) as ctx:
             run_origin_probe(entry, "asb.bd", port=port, probe_host="probe-diff-body.asb.bd", ssh_run=local_ssh)
+        self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
+
+        # Direct test on verify_origin_probe_result with fixed body + extra text
+        extra_body_data = {
+            "status": 404,
+            "fallback_header": "1",
+            "body": FALLBACK_BODY + "<!-- extra trailing content -->",
+        }
+        with self.assertRaises(CoverageError) as ctx:
+            verify_origin_probe_result(extra_body_data)
         self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
 
         # 5. Connection refused / error returns unverified without message text

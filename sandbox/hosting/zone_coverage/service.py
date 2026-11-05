@@ -166,12 +166,17 @@ def plan_enable(
     # Preflight / probe nginx front door
     try:
         facts = nginx.probe(entry)
-    except Exception:
-        facts = {"config_valid": True, "routes": []}
+    except Exception as exc:
+        raise CoverageError(
+            COVERAGE_FALLBACK_UNVERIFIED,
+            f"failed to probe nginx front door: {exc}",
+        ) from None
 
-    if not facts.get("config_valid"):
-        from sandbox.hosting.front_door import FrontDoorError
-        raise FrontDoorError("front_door_nginx_invalid", "nginx configuration is invalid")
+    if not facts or not facts.get("config_valid"):
+        raise CoverageError(
+            COVERAGE_FALLBACK_UNVERIFIED,
+            "nginx configuration is invalid or probe returned empty facts",
+        )
 
     # Classify existing routes
     dump_pairs = []
@@ -423,12 +428,28 @@ def enable(
     _check_store_res(begin_res)
     op_id = begin_res["operation_id"]
 
-    # Probe nginx facts to extract host features per G8
+    # Probe nginx facts to extract host features and re-classify routes
     try:
         facts = nginx.probe(entry)
-        if not facts:
-            raise FrontDoorError("front_door_nginx_invalid", "nginx probe returned empty facts")
+        if not facts or not facts.get("config_valid"):
+            raise FrontDoorError("front_door_nginx_invalid", "nginx configuration is invalid or probe returned empty facts")
         feat = nginx.features(facts)
+
+        fresh_pairs = []
+        for r in facts.get("routes") or []:
+            path = r.get("file", "")
+            for h in r.get("hostnames") or []:
+                fresh_pairs.append((path, h))
+        if not fresh_pairs and facts.get("dump"):
+            fresh_pairs = nginx.parse_server_names(facts["dump"])
+
+        _, fresh_blockers = nginx.classify_for_fallback(fresh_pairs, clean_zone)
+        if fresh_blockers:
+            detail = ", ".join(f"{b.get('file')}: {b.get('server_name')}" for b in fresh_blockers)
+            raise CoverageError(
+                COVERAGE_CONFLICT,
+                f"conflicting wildcard or regex routes exist on front door: {detail}",
+            )
     except Exception as exc:
         finish_res = None
         try:
@@ -436,6 +457,8 @@ def enable(
         except Exception as fe:
             finish_res = {"error": str(fe)}
         err_suffix = _inspect_error_path_call(finish_res, "finish")
+        if isinstance(exc, CoverageError):
+            raise CoverageError(exc.code, f"{exc.message}{err_suffix}") from None
         raise CoverageError(
             COVERAGE_FALLBACK_UNVERIFIED,
             f"nginx probe failed: {type(exc).__name__}{err_suffix}",

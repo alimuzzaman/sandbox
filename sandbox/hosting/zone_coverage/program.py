@@ -159,11 +159,11 @@ def load_doc(zone):
         out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_state"})
 
     gen = val.get("generation")
-    if not isinstance(gen, int) or isinstance(gen, bool):
+    if not isinstance(gen, int) or isinstance(gen, bool) or gen < 0:
         out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_generation"})
 
     dep_rev = val.get("dependents_revision")
-    if not isinstance(dep_rev, int) or isinstance(dep_rev, bool):
+    if not isinstance(dep_rev, int) or isinstance(dep_rev, bool) or dep_rev < 0:
         out({"ok": True, "refused": "coverage_document_corrupt", "reason": "invalid_dependents_revision"})
 
     if not isinstance(val.get("dependents"), dict):
@@ -340,7 +340,8 @@ elif action == "begin":
     if request.get("dependents"):
         doc.setdefault("dependents", {}).update(request.get("dependents"))
     doc["state"] = new_state
-    doc["interrupted_kind"] = None
+    if not (kind == "repair" and cur_state == "incomplete"):
+        doc["interrupted_kind"] = None
     doc["operation"] = {
         "id": new_op_id,
         "kind": kind,
@@ -403,7 +404,10 @@ elif action == "finish":
 
     doc["state"] = final_state
     if final_state == "incomplete":
-        doc["interrupted_kind"] = interrupted_kind or cur_op.get("kind")
+        if cur_kind == "repair":
+            doc["interrupted_kind"] = interrupted_kind or doc.get("interrupted_kind") or "enable"
+        else:
+            doc["interrupted_kind"] = interrupted_kind or cur_op.get("kind")
         if "unknown_effects" in request:
             doc["unknown_effects"] = request["unknown_effects"]
     else:

@@ -526,7 +526,17 @@ class TestZoneCoverageMatrix(unittest.TestCase):
         os.makedirs(zones_dir, exist_ok=True)
         doc_path = os.path.join(zones_dir, "matrix.bd.json")
 
-        all_states = ["absent", "retired", "fallback_only", "disabled", "active", "incomplete_enable", "incomplete_disable"]
+        all_states = [
+            "absent",
+            "retired",
+            "fallback_only",
+            "disabled",
+            "active",
+            "enabling",
+            "disabling",
+            "incomplete_enable",
+            "incomplete_disable",
+        ]
         all_kinds = ["enable", "disable", "repair", "remove-fallback"]
 
         valid_finishes = {
@@ -576,6 +586,10 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                         should_allow = (kind in ("enable", "remove-fallback"))
                     elif state == "active":
                         should_allow = (kind in ("repair", "disable"))
+                    elif state == "enabling":
+                        should_allow = (kind == "enable")
+                    elif state == "disabling":
+                        should_allow = (kind == "disable")
                     elif state == "incomplete_enable":
                         should_allow = (kind in ("enable", "repair"))
                     elif state == "incomplete_disable":
@@ -596,11 +610,19 @@ class TestZoneCoverageMatrix(unittest.TestCase):
                         f_bad = store.finish("matrix.bd", op_id, bad_target)
                         self.assertEqual(f_bad.get("refused"), "coverage_kind_mismatch")
 
-                        # Finish transition validation: valid finish target succeeds
-                        good_target = next(iter(valid_finishes[kind]))
-                        f_good = store.finish("matrix.bd", op_id, good_target)
-                        self.assertTrue(f_good.get("ok"))
-                        self.assertEqual(f_good["document"]["state"], good_target)
+                        # Finish transition validation: valid finish targets succeed
+                        for good_target in sorted(valid_finishes[kind]):
+                            # Re-read doc and verify state before finish
+                            f_good = store.finish("matrix.bd", op_id, good_target)
+                            self.assertTrue(f_good.get("ok"))
+                            self.assertEqual(f_good["document"]["state"], good_target)
+
+                            if kind == "repair" and state == "incomplete_enable":
+                                if good_target == "incomplete":
+                                    self.assertEqual(f_good["document"]["interrupted_kind"], "enable")
+                                else:
+                                    self.assertIsNone(f_good["document"].get("interrupted_kind"))
+                            break
 
     # 11. Store reads own document in every state after finish
     def test_11_store_reads_own_doc_after_each_finish(self):
@@ -757,10 +779,14 @@ class TestZoneCoverageMatrix(unittest.TestCase):
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
-    # 15. Size bounds and hostile zone/state_key values
+    # 15. Size bounds, request limits, dependent count limits, schema, and hostile values
     def test_15_size_bounds_and_hostile_keys(self):
         store = self._make_store_client()
+        zones_dir = os.path.join(self.td, "runtime", "zone-coverage", "zones")
+        os.makedirs(zones_dir, exist_ok=True)
+        doc_path = os.path.join(zones_dir, "bounds.bd.json")
 
+        # A. Hostile zones and keys
         hostile_zones = ["../x", "a/b", "$(id)", "a b", "", "x" * 200]
         for hz in hostile_zones:
             with self.assertRaises(CoverageError):
@@ -772,6 +798,98 @@ class TestZoneCoverageMatrix(unittest.TestCase):
         for hk in hostile_keys:
             with self.assertRaises(CoverageError):
                 store.dependent_bind("asb.bd", hk, "h.asb.bd", "bound")
+
+        # B. schema_version 0
+        with open(doc_path, "w") as f:
+            json.dump({
+                "schema_version": 0,
+                "zone": "bounds.bd",
+                "state": "active",
+                "generation": 1,
+                "dependents_revision": 0,
+                "dependents": {},
+                "history": [],
+            }, f)
+        r = store.read("bounds.bd")
+        self.assertEqual(r.get("refused"), "coverage_schema_unsupported")
+        self.assertEqual(r.get("schema_version"), 0)
+
+        # C. Boolean counters
+        for field, bad_val in [("generation", True), ("dependents_revision", False)]:
+            with open(doc_path, "w") as f:
+                d = {
+                    "schema_version": 1,
+                    "zone": "bounds.bd",
+                    "state": "active",
+                    "generation": 1,
+                    "dependents_revision": 0,
+                    "dependents": {},
+                    "history": [],
+                }
+                d[field] = bad_val
+                json.dump(d, f)
+            r = store.read("bounds.bd")
+            self.assertEqual(r.get("refused"), "coverage_document_corrupt")
+            self.assertEqual(r.get("reason"), f"invalid_{field}")
+
+        # D. Negative counters
+        for field, bad_val in [("generation", -1), ("dependents_revision", -5)]:
+            with open(doc_path, "w") as f:
+                d = {
+                    "schema_version": 1,
+                    "zone": "bounds.bd",
+                    "state": "active",
+                    "generation": 1,
+                    "dependents_revision": 0,
+                    "dependents": {},
+                    "history": [],
+                }
+                d[field] = bad_val
+                json.dump(d, f)
+            r = store.read("bounds.bd")
+            self.assertEqual(r.get("refused"), "coverage_document_corrupt")
+            self.assertEqual(r.get("reason"), f"invalid_{field}")
+
+        # E. Dependents count limit (512 max)
+        deps = {f"routes/app/dep{i}": {"hostname": f"h{i}.bounds.bd", "state": "bound"} for i in range(512)}
+        with open(doc_path, "w") as f:
+            json.dump({
+                "schema_version": 1,
+                "zone": "bounds.bd",
+                "state": "active",
+                "generation": 1,
+                "dependents_revision": 0,
+                "dependents": deps,
+                "history": [],
+            }, f)
+        # 513th new dependent refused
+        r = store.dependent_bind("bounds.bd", "routes/app/dep513", "new.bounds.bd", "bound")
+        self.assertEqual(r.get("refused"), "coverage_store_unavailable")
+        self.assertEqual(r.get("reason"), "max_dependents_exceeded")
+        # Updating an existing dependent succeeds
+        r_exist = store.dependent_bind("bounds.bd", "routes/app/dep10", "updated.bounds.bd", "bound")
+        self.assertTrue(r_exist.get("ok"))
+
+        # F. Document size limit (> 256 KiB)
+        deps_large = {f"routes/app/d{i}": {"hostname": f"h{i}.bounds.bd", "note": "x" * 500} for i in range(500)}
+        with open(doc_path, "w") as f:
+            json.dump({
+                "schema_version": 1,
+                "zone": "bounds.bd",
+                "state": "active",
+                "generation": 1,
+                "dependents_revision": 0,
+                "dependents": deps_large,
+                "history": [],
+            }, f)
+        r_large = store.dependent_bind("bounds.bd", "routes/app/d0", "updated.bounds.bd", "bound")
+        self.assertEqual(r_large.get("refused"), "coverage_store_unavailable")
+        self.assertEqual(r_large.get("reason"), "document_size_exceeded")
+
+        # G. Request size limit (> 64 KiB)
+        huge_hostname = "h." + ("a" * 70000) + ".bd"
+        with self.assertRaises(CoverageError):
+            store.dependent_bind("bounds.bd", "routes/app/huge", huge_hostname, "bound")
 
     # 16. Plan writes nothing to store or provider
     def test_16_plan_writes_nothing(self):

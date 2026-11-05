@@ -36,6 +36,12 @@ class _NoRedirectHandler:
     pass
 
 
+def _is_valid_fallback_probe_response(status: int, headers: Any, body: str) -> bool:
+    """Helper rule for verifying exact 404 fallback response per spec 070 G6."""
+    hdr_val = headers.get("X-Sandbox-Fallback") if hasattr(headers, "get") else None
+    return status == 404 and hdr_val == "1" and body == fallback.FALLBACK_BODY
+
+
 def public_probe(
     zone: str,
     *,
@@ -68,7 +74,7 @@ def public_probe(
             status = getattr(resp, "status", getattr(resp, "code", 200))
             headers = resp.headers
             body = resp.read().decode("utf-8", "replace")
-            if status == 404 and headers.get("X-Sandbox-Fallback") == "1" and fallback.FALLBACK_BODY in body:
+            if _is_valid_fallback_probe_response(status, headers, body):
                 return True
         except urllib.error.HTTPError as exc:
             status = exc.code
@@ -77,7 +83,7 @@ def public_probe(
                 body = exc.read().decode("utf-8", "replace")
             except Exception:
                 body = ""
-            if status == 404 and headers.get("X-Sandbox-Fallback") == "1" and fallback.FALLBACK_BODY in body:
+            if _is_valid_fallback_probe_response(status, headers, body):
                 return True
         except Exception:
             pass

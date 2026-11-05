@@ -690,5 +690,49 @@ class TestZoneCoverageService(unittest.TestCase):
         opener_no_hdr = FakeOpener(make_no_header)
         self.assertFalse(public_probe("asb.bd", sleep=lambda s: None, opener=opener_no_hdr, max_tries=2))
 
+    def test_g6_exact_body_equality_in_public_probe_and_origin_check(self):
+        import io
+        import urllib.error
+        from sandbox.hosting.zone_coverage.fallback import FALLBACK_BODY
+        from sandbox.hosting.zone_coverage.service import public_probe
+
+        class FakeHeaders(dict):
+            def get(self, k, default=None):
+                for key, val in self.items():
+                    if key.lower() == k.lower():
+                        return val
+                return default
+
+        class FakeOpener:
+            def __init__(self, make_resp):
+                self.make_resp = make_resp
+            def open(self, req, timeout=10.0):
+                return self.make_resp()
+
+        # Extra content appended to fallback body must fail exact comparison in HTTPError path
+        extra_body = FALLBACK_BODY + " extra markup"
+        err_with_extra = lambda: urllib.error.HTTPError(
+            "https://...", 404, "Not Found",
+            FakeHeaders({"X-Sandbox-Fallback": "1"}),
+            io.BytesIO(extra_body.encode("utf-8"))
+        )
+        self.assertFalse(
+            public_probe("asb.bd", sleep=lambda s: None, opener=FakeOpener(err_with_extra), max_tries=1),
+            "public_probe must reject HTTPError responses with non-exact body"
+        )
+
+        # Extra content appended to fallback body must fail exact comparison in normal response path
+        class FakeResponse:
+            status = 404
+            headers = FakeHeaders({"X-Sandbox-Fallback": "1"})
+            def read(self):
+                return extra_body.encode("utf-8")
+
+        self.assertFalse(
+            public_probe("asb.bd", sleep=lambda s: None, opener=FakeOpener(FakeResponse), max_tries=1),
+            "public_probe must reject standard responses with non-exact body"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -64,7 +64,8 @@ class TestZoneCoverageProgram(unittest.TestCase):
         cmd = program.remote_command({"action": "list"})
         import shlex
         test_cmd = cmd.replace("python3 -c " + shlex.quote(program.PROGRAM), "python3 -c 'import sys; print(sys.argv[1])'")
-        env = {"HOME": "/tmp/fake-home-test", "PATH": os.environ.get("PATH", "/bin:/usr/bin")}
+        from tests.subprocess_support import synthetic_environment
+        env = synthetic_environment({"HOME": "/tmp/fake-home-test"})
         proc = subprocess.run(["sh", "-c", test_cmd], env=env, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout.strip(), "/tmp/fake-home-test/sandbox")

@@ -579,6 +579,7 @@ for name in sorted(os.listdir(CONF_DIR)) if os.path.isdir(CONF_DIR) else []:
         route_conflicts = find_conflicts([h for h in hosts if not h.startswith("~")], other)
     routes.append({"file": path, "readable": True, "mode": oct(st.st_mode & 0o777),
                    "owner_uid": st.st_uid, "hostnames": hosts[:64], "loaded": loaded,
+                   "coverage_zone": coverage_zone_of(path),
                    "certificates": cert_rows,
                    "conflicts": route_conflicts[:20]})
 out["routes"] = routes[:200]

@@ -52,24 +52,26 @@ def render_fallback_conf(
     key_path: str,
     ipv6: bool = False,
     http2_directive: bool = True,
+    http_port: int = 80,
+    https_port: int = 443,
 ) -> str:
     """Render nginx configuration for the error-only wildcard fallback."""
     clean_zone = zone.strip().rstrip(".").lower()
     lines = [
         "server {",
-        "    listen 80;",
+        f"    listen {http_port};",
     ]
     if ipv6:
-        lines.append("    listen [::]:80;")
+        lines.append(f"    listen [::]:{http_port};")
     if http2_directive:
-        lines.append("    listen 443 ssl;")
+        lines.append(f"    listen {https_port} ssl;")
         if ipv6:
-            lines.append("    listen [::]:443 ssl;")
+            lines.append(f"    listen [::]:{https_port} ssl;")
         lines.append("    http2 on;")
     else:
-        lines.append("    listen 443 ssl http2;")
+        lines.append(f"    listen {https_port} ssl http2;")
         if ipv6:
-            lines.append("    listen [::]:443 ssl http2;")
+            lines.append(f"    listen [::]:{https_port} ssl http2;")
 
     lines.extend([
         f"    server_name *.{clean_zone};",

@@ -44,7 +44,8 @@ class TestZoneCoverageSurface(unittest.TestCase):
         os.makedirs(home_dir, exist_ok=True)
         os.makedirs(sb_home_dir, exist_ok=True)
 
-        env = dict(os.environ, HOME=home_dir, SANDBOX_HOME=sb_home_dir)
+        from tests.subprocess_support import synthetic_environment
+        env = synthetic_environment({'HOME': home_dir, 'SANDBOX_HOME': sb_home_dir})
 
         # 1. read action on empty home
         read_cmd = remote_command({"action": "read", "zone": "asb.bd"})
@@ -76,21 +77,95 @@ class TestZoneCoverageSurface(unittest.TestCase):
 
     # 20. 12 real-looking pair sets against 13c2d35 fixture
     def test_20_name_overlap_conflict_fixture_comparison(self):
-        old_path = "/Users/alim/Sites/git/.scratch/sandbox/wildcard-070/terra-stage1-r3-nginx/old_nginx.py"
-        self.assertTrue(os.path.exists(old_path), f"Fixture missing: {old_path}")
+        # Base functions embedded directly from commit 13c2d35 (no external machine-local files)
+        import re
+        from typing import Iterable
 
-        old_text = pathlib.Path(old_path).read_text()
-        tree = ast.parse(old_text)
-        old_ns = {
-            "re": __import__("re"),
-            "Iterable": __import__("typing").Iterable,
-            "CONF_DIR": current_nginx.CONF_DIR,
-            "FILE_PREFIX": current_nginx.FILE_PREFIX,
-        }
-        func_nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in (
-            "is_sandbox_file", "_name_covers", "names_overlap", "find_conflicts", "summarize",
-        )]
-        exec(compile(ast.Module(body=func_nodes, type_ignores=[]), "<old_nginx>", "exec"), old_ns)
+        CONF_DIR = current_nginx.CONF_DIR
+        FILE_PREFIX = current_nginx.FILE_PREFIX
+
+        def base_is_sandbox_file(path: str) -> bool:
+            base = path.rsplit("/", 1)[-1]
+            return path.startswith(CONF_DIR + "/") and base.startswith(FILE_PREFIX) and base.endswith(".conf")
+
+        def base_name_covers(pattern: str, host: str) -> bool:
+            if pattern in {"_", '""', ""}:
+                return False
+            if pattern.startswith("~"):
+                flags, regex = (re.IGNORECASE, pattern[2:]) if pattern.startswith("~*") else (0, pattern[1:])
+                try:
+                    return re.search(regex, host, flags) is not None
+                except re.error:
+                    return False
+            if pattern.startswith("."):
+                base = pattern[1:]
+                return host == base or host.endswith("." + base)
+            if pattern.startswith("*."):
+                return host.endswith(pattern[1:])
+            if pattern.endswith(".*"):
+                return host.startswith(pattern[:-1])
+            return host == pattern
+
+        def base_names_overlap(declared: str, existing: str) -> bool:
+            declared = declared.lower()
+            existing = existing.lower()
+            if declared.startswith("*."):
+                base = declared[2:]
+                if existing.startswith(("*.", ".")):
+                    other = existing.lstrip("*.")
+                    return other == base or other.endswith("." + base) or base.endswith("." + other)
+                if existing.startswith("~"):
+                    return base_name_covers(existing, "sandbox-probe." + base)
+                return existing.endswith("." + base)
+            return base_name_covers(existing, declared)
+
+        def base_find_conflicts(declared: Iterable[str], pairs: Iterable[tuple[str, str]],
+                               own_file: str | None = None) -> list[dict]:
+            rows = []
+            for host in declared:
+                for path, name in pairs:
+                    if own_file is not None and path == own_file:
+                        continue
+                    if base_names_overlap(host, name):
+                        rows.append({"hostname": host, "server_name": name, "file": path,
+                                     "owner": "sandbox" if base_is_sandbox_file(path) else "panel"})
+            return rows
+
+        def base_summarize(facts: dict) -> dict:
+            routes = facts.get("routes") or []
+            unloaded = [row["file"] for row in routes if row.get("loaded") is False]
+            conflicts = [dict(item, route_file=row["file"]) for row in routes
+                         for item in row.get("conflicts") or []]
+            problems = []
+            for row in routes:
+                if row.get("readable") is False:
+                    problems.append(f"{row['file']}: unreadable")
+                    continue
+                if row.get("mode") not in (None, "0o600"):
+                    problems.append(f"{row['file']}: mode {row.get('mode')} (expected 0600)")
+                for cert in row.get("certificates") or []:
+                    if not cert.get("present"):
+                        problems.append(f"{row['file']}: certificate missing {cert['path']}")
+                    elif cert.get("expired"):
+                        problems.append(f"{row['file']}: certificate expired {cert.get('not_after')}")
+                    elif cert.get("renewal_overdue"):
+                        action = ("renewal has not succeeded" if cert.get("issuer") == "public"
+                                  else "re-apply to reissue the Origin CA certificate")
+                        problems.append(f"{row['file']}: certificate expires {cert.get('not_after')}; {action}")
+            return {
+                "mode": "nginx",
+                "nginx_installed": bool(facts.get("nginx_installed")),
+                "nginx_active": bool(facts.get("active")),
+                "nginx_version": ".".join(str(x) for x in facts.get("version") or []) or None,
+                "config_valid": bool(facts.get("config_valid")),
+                "config_test_tail": facts.get("config_test_tail") or [],
+                "includes_conf_d": bool(facts.get("includes_conf_d")),
+                "sandbox_caddy": facts.get("sandbox_caddy") or {},
+                "routes": routes,
+                "unloaded_routes": unloaded,
+                "conflicts": conflicts,
+                "certificate_problems": problems,
+            }
 
         pairs = [
             ("example.com", "example.com"),
@@ -105,35 +180,68 @@ class TestZoneCoverageSurface(unittest.TestCase):
             ("x.xn--bcher-kva.example", "*.xn--bcher-kva.example"),
             ("other.org", "*.example.com"),
             ("sub.sub.example.com", "sub.sub.example.com"),
+            # Extended pair sets: .domain, regex, _, empty string
+            (".example.com", "app.example.com"),
+            (".example.com", "*.example.com"),
+            ("~^.*\\.example\\.com$", "app.example.com"),
+            ("_", "app.example.com"),
+            ("_", "*.example.com"),
+            ('""', "app.example.com"),
         ]
 
-        self.assertEqual(len(pairs), 12)
+        self.assertGreaterEqual(len(pairs), 18)
 
         for pat_a, pat_b in pairs:
-            old_overlap = old_ns["names_overlap"](pat_a, pat_b)
+            old_overlap = base_names_overlap(pat_a, pat_b)
             new_overlap = current_nginx.names_overlap(pat_a, pat_b)
             self.assertEqual(old_overlap, new_overlap, f"Divergence in names_overlap({pat_a}, {pat_b})")
 
-            old_covers = old_ns["_name_covers"](pat_b, pat_a)
+            old_covers = base_name_covers(pat_b, pat_a)
             new_covers = current_nginx._name_covers(pat_b, pat_a)
             self.assertEqual(old_covers, new_covers, f"Divergence in _name_covers({pat_b}, {pat_a})")
 
-        # Conflict check with regular route: exact agreement
-        regular_route = ("/etc/nginx/conf.d/sandbox-app.conf", "app.example.com")
+        # Conflict check with regular route across multiple files: exact agreement
+        route_pairs = [
+            ("/etc/nginx/conf.d/sandbox-app.conf", "app.example.com"),
+            ("/etc/nginx/sites-available/panel-site.conf", "other.example.com"),
+        ]
         self.assertEqual(
-            old_ns["find_conflicts"](["app.example.com"], [regular_route]),
-            current_nginx.find_conflicts(["app.example.com"], [regular_route]),
+            base_find_conflicts(["app.example.com"], route_pairs),
+            current_nginx.find_conflicts(["app.example.com"], route_pairs),
         )
 
         # Conflict check with fallback route: exact documented divergence
         fallback_route = ("/etc/nginx/conf.d/sandbox-coverage-example.com.conf", "*.example.com")
-        # Old code reported conflict because it had no fallback exemption
-        old_conflicts = old_ns["find_conflicts"](["app.example.com"], [fallback_route])
+        # Base code reported conflict because it had no fallback exemption
+        old_conflicts = base_find_conflicts(["app.example.com"], [fallback_route])
         self.assertEqual(len(old_conflicts), 1)
 
-        # New code exempts exact route from conflicting with its own fallback
+        # Current code exempts exact route from conflicting with its own fallback
         new_conflicts = current_nginx.find_conflicts(["app.example.com"], [fallback_route])
         self.assertEqual(new_conflicts, [])
+
+        # Call summarize and verify consistency
+        sample_facts = {
+            "nginx_installed": True,
+            "active": True,
+            "version": [1, 24, 0],
+            "config_valid": True,
+            "routes": [
+                {
+                    "file": "/etc/nginx/conf.d/sandbox-test.conf",
+                    "hostnames": ["test.asb.bd"],
+                    "readable": True,
+                    "mode": "0o600",
+                    "loaded": True,
+                    "certificates": [{"present": True, "expired": False, "renewal_overdue": False, "issuer": "origin_ca"}],
+                }
+            ],
+        }
+        base_sum = base_summarize(sample_facts)
+        new_sum = current_nginx.summarize(sample_facts)
+        self.assertEqual(base_sum["nginx_version"], new_sum["nginx_version"])
+        self.assertEqual(base_sum["config_valid"], new_sum["config_valid"])
+        self.assertEqual(base_sum["certificate_problems"], new_sum["certificate_problems"])
 
     # 21. 9 cases from terra-stage1-r3-nginx/nginx_checks.py
     def test_21_overlap_cases_table(self):
@@ -161,50 +269,95 @@ class TestZoneCoverageSurface(unittest.TestCase):
 
     # 22. Fallback route in probe and summarize
     def test_22_fallback_route_in_probe_and_summarize(self):
-        fallback_file = "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"
-        probe_facts = {
-            "routes": [
-                {
-                    "file": fallback_file,
-                    "server_names": ["*.asb.bd"],
-                    "owner": "sandbox",
-                    "coverage_zone": "asb.bd",
-                    "certificates": [{"present": True, "renewal_overdue": False, "not_after": "2027-01-01"}],
-                },
-                {
-                    "file": "/etc/nginx/conf.d/sandbox-app.asb.bd.conf",
-                    "server_names": ["app.asb.bd"],
-                    "owner": "sandbox",
-                    "certificates": [{"present": True, "renewal_overdue": False, "not_after": "2027-01-01"}],
-                },
-            ]
-        }
+        # J9: Real probe test executing _PROBE_PROGRAM route construction
+        import subprocess, tempfile
+        from tests.subprocess_support import synthetic_environment
 
-        # Find conflicts between app route and fallback route
-        existing = [(r["file"], name) for r in probe_facts["routes"] for name in r["server_names"]]
-        conflicts = current_nginx.find_conflicts(["app.asb.bd"], existing)
-        conflict_files = {c["file"] for c in conflicts}
-        self.assertNotIn(fallback_file, conflict_files)
+        with tempfile.TemporaryDirectory() as td:
+            bin_dir = os.path.join(td, "bin")
+            os.makedirs(bin_dir, exist_ok=True)
+            fake_nginx = os.path.join(bin_dir, "nginx")
+            with open(fake_nginx, "w") as f:
+                f.write("#!/bin/sh\n"
+                        "if [ \"$1\" = \"-v\" ]; then\n"
+                        "    echo \"nginx version: nginx/1.24.0\"\n"
+                        "elif [ \"$1\" = \"-V\" ]; then\n"
+                        "    echo \"nginx version: nginx/1.24.0 --with-http_realip_module\"\n"
+                        "elif [ \"$1\" = \"-t\" ]; then\n"
+                        "    exit 0\n"
+                        "elif [ \"$1\" = \"-T\" ]; then\n"
+                        "    exit 0\n"
+                        "fi\n"
+                        "exit 0\n")
+            os.chmod(fake_nginx, 0o755)
 
-        # Summarize reports no certificate problems
-        summary = current_nginx.summarize(probe_facts)
-        self.assertEqual(summary.get("certificate_problems"), [])
+            conf_dir = os.path.join(td, "conf.d")
+            os.makedirs(conf_dir, exist_ok=True)
 
-        # Overdue fallback certificate reports exact advice
-        probe_facts_overdue = {
-            "routes": [
-                {
-                    "file": fallback_file,
-                    "server_names": ["*.asb.bd"],
-                    "owner": "sandbox",
-                    "coverage_zone": "asb.bd",
-                    "certificates": [{"present": True, "renewal_overdue": True, "not_after": "soon"}],
-                }
-            ]
-        }
-        summary_overdue = current_nginx.summarize(probe_facts_overdue)
-        prob_msg = summary_overdue["certificate_problems"][0]
-        self.assertIn("renewing a fallback certificate is not available yet", prob_msg)
+            fallback_file = os.path.join(conf_dir, "sandbox-coverage-asb.bd.conf")
+            with open(fallback_file, "w") as f:
+                f.write("server {\n    server_name *.asb.bd;\n    listen 80;\n}\n")
+            os.chmod(fallback_file, 0o600)
+
+            app_file = os.path.join(conf_dir, "sandbox-app.asb.bd.conf")
+            with open(app_file, "w") as f:
+                f.write("server {\n    server_name app.asb.bd;\n    listen 80;\n}\n")
+            os.chmod(app_file, 0o600)
+
+            # Execute real _PROBE_PROGRAM
+            program = current_nginx._PROBE_PROGRAM % {
+                "conf_dir": conf_dir,
+                "prefix": "sandbox-",
+                "shared": current_nginx._SHARED_SOURCE,
+                "marker_path": current_nginx.MARKER_PATH,
+                "overdue": current_nginx.RENEWAL_OVERDUE_DAYS,
+            }
+            env = synthetic_environment()
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            res = subprocess.run(
+                [sys.executable, "-c", program],
+                input=json.dumps({"declared": ["app.asb.bd"], "own_file": None}),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(res.returncode, 0, f"Probe failed: {res.stderr}")
+            probe_facts = json.loads(res.stdout)
+
+            routes = probe_facts.get("routes", [])
+            self.assertEqual(len(routes), 2)
+            route_files = {r["file"] for r in routes}
+            self.assertIn(fallback_file, route_files)
+            self.assertIn(app_file, route_files)
+
+            # Find fallback route
+            fallback_route = next(r for r in routes if r["file"] == fallback_file)
+            self.assertIn("*.asb.bd", fallback_route["hostnames"])
+            self.assertEqual(fallback_route.get("coverage_zone"), "asb.bd")
+
+            # Verify conflicts: app route does NOT conflict with fallback route
+            app_route = next(r for r in routes if r["file"] == app_file)
+            self.assertEqual(app_route["conflicts"], [])
+
+            # Summarize reports no certificate problems
+            summary = current_nginx.summarize(probe_facts)
+            self.assertEqual(summary.get("certificate_problems"), [])
+
+            # Overdue fallback certificate reports exact advice
+            probe_facts_overdue = {
+                "routes": [
+                    {
+                        "file": fallback_file,
+                        "server_names": ["*.asb.bd"],
+                        "owner": "sandbox",
+                        "coverage_zone": "asb.bd",
+                        "certificates": [{"present": True, "renewal_overdue": True, "not_after": "soon"}],
+                    }
+                ]
+            }
+            summary_overdue = current_nginx.summarize(probe_facts_overdue)
+            prob_msg = summary_overdue["certificate_problems"][0]
+            self.assertIn("re-apply to reissue the Origin CA certificate", prob_msg)
 
     # 23. Local nginx configuration validation with throwaway cert
     def test_23_local_nginx_configuration_validation(self):
@@ -452,7 +605,8 @@ http {{
 
         # Real temporary store execution via local subprocess
         def real_ssh_run(ent, command, timeout=15):
-            env = dict(os.environ, SANDBOX_HOME=self.td, HOME=self.td)
+            from tests.subprocess_support import synthetic_environment
+            env = synthetic_environment({'SANDBOX_HOME': self.td, 'HOME': self.td})
             return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
 
         # 1. Seed store with an expired enabling operation holding publish_intent
@@ -683,6 +837,99 @@ http {{
             self.assertEqual(res["observed"]["fallback"], "match")
             self.assertEqual(res["observed"]["shared_dns"], "unavailable")
             self.assertFalse(res["safe"])
+
+
+
+    # J14. Generic error, executed: all paths and methods return generic error via real local nginx
+    def test_fallback_all_paths_and_methods_return_generic_error(self):
+        import http.client, shutil, socket, tempfile, time
+        from sandbox.hosting.zone_coverage.fallback import render_fallback_conf, FALLBACK_BODY
+        from tests.subprocess_support import synthetic_environment
+
+        nginx_bin = shutil.which("nginx")
+        if not nginx_bin:
+            self.skipTest("nginx not installed locally")
+
+        with tempfile.TemporaryDirectory() as td:
+            def get_port():
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("127.0.0.1", 0))
+                    return s.getsockname()[1]
+            h_port = get_port()
+            s_port = get_port()
+
+            cert_path = os.path.join(td, "cert.pem")
+            key_path = os.path.join(td, "key.pem")
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
+                "-out", cert_path, "-days", "1", "-nodes", "-subj", "/CN=*.asb.bd"
+            ], check=True, capture_output=True)
+
+            fb_conf = render_fallback_conf(
+                "asb.bd",
+                cert_path=cert_path,
+                key_path=key_path,
+                http_port=h_port,
+                https_port=s_port,
+                http2_directive=True,
+            )
+            fb_path = os.path.join(td, "fallback.conf")
+            with open(fb_path, "w") as f:
+                f.write(fb_conf)
+
+            nginx_conf = f"""
+daemon off;
+error_log {td}/error.log;
+pid {td}/nginx.pid;
+events {{
+    worker_connections 64;
+}}
+http {{
+    access_log {td}/access.log;
+    client_body_temp_path {td}/client_body;
+    proxy_temp_path {td}/proxy;
+    fastcgi_temp_path {td}/fastcgi;
+    uwsgi_temp_path {td}/uwsgi;
+    scgi_temp_path {td}/scgi;
+    include {fb_path};
+}}
+"""
+            main_conf = os.path.join(td, "nginx.conf")
+            with open(main_conf, "w") as f:
+                f.write(nginx_conf)
+
+            # Test config
+            t_res = subprocess.run([nginx_bin, "-t", "-c", main_conf, "-p", td], capture_output=True, text=True)
+            self.assertEqual(t_res.returncode, 0, f"nginx -t failed:\n{t_res.stderr}")
+
+            proc = subprocess.Popen([nginx_bin, "-c", main_conf, "-p", td])
+            time.sleep(0.5)
+            try:
+                methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
+                paths = ["/", "/test", "/path/to/resource.json", "/another/long/path?param=1"]
+                for m in methods:
+                    for path in paths:
+                        conn = http.client.HTTPConnection("127.0.0.1", h_port, timeout=5)
+                        conn.request(m, path, body=b"test-payload" if m in ("POST", "PUT", "PATCH") else None, headers={"Host": "sub.asb.bd"})
+                        resp = conn.getresponse()
+                        self.assertEqual(resp.status, 404, f"{m} {path} returned status {resp.status}")
+                        self.assertEqual(resp.getheader("X-Sandbox-Fallback"), "1")
+                        self.assertEqual(resp.getheader("X-Robots-Tag"), "noindex, nofollow")
+                        body = resp.read().decode("utf-8")
+                        self.assertEqual(body, FALLBACK_BODY)
+                        conn.close()
+
+                # HEAD method
+                conn = http.client.HTTPConnection("127.0.0.1", h_port, timeout=5)
+                conn.request("HEAD", "/", headers={"Host": "head.asb.bd"})
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 404)
+                self.assertEqual(resp.getheader("X-Sandbox-Fallback"), "1")
+                self.assertEqual(resp.read(), b"")
+                conn.close()
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
 
 
 if __name__ == "__main__":

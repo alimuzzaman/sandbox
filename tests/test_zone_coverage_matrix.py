@@ -130,6 +130,7 @@ class TestZoneCoverageMatrix(unittest.TestCase):
 
         self._public_probe_patcher = patch(
             "sandbox.hosting.zone_coverage.service.public_probe",
+            autospec=True,
             return_value=True,
         )
         self._public_probe_patcher.start()
@@ -137,7 +138,8 @@ class TestZoneCoverageMatrix(unittest.TestCase):
 
     def _make_store_client(self) -> ZoneCoverageClient:
         def real_ssh_run(entry, command, timeout=15):
-            env = dict(os.environ, SANDBOX_HOME=self.td, HOME=self.td)
+            from tests.subprocess_support import synthetic_environment
+            env = synthetic_environment({'SANDBOX_HOME': self.td, 'HOME': self.td})
             return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
         return ZoneCoverageClient(self.entry, ssh_run=real_ssh_run)
 
@@ -789,24 +791,89 @@ class TestZoneCoverageMatrix(unittest.TestCase):
 
     # 17. Provider exception with SECRET-MARKER never leaks
     def test_17_secret_marker_never_leaks(self):
+        import contextlib, io
+        secret = "SECRET-MARKER-998877"
+
+        # Test each provider call with injected secret error:
+        # 1. cf.zones
+        store = self._make_store_client()
+        cf = StatefulFakeProvider()
+        with patch.object(cf, "zones", side_effect=RuntimeError(f"internal {secret} in zones")):
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                with self.assertRaises(CoverageError) as ctx:
+                    plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+            self.assertNotIn(secret, str(ctx.exception))
+            self.assertNotIn(secret, out_buf.getvalue())
+            self.assertNotIn(secret, err_buf.getvalue())
+
+        # 2. cf._request (ssl settings)
+        store = self._make_store_client()
+        cf = StatefulFakeProvider()
+        with patch.object(cf, "_request", side_effect=RuntimeError(f"internal {secret} in _request")):
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                with self.assertRaises(CoverageError) as ctx:
+                    plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+            self.assertNotIn(secret, str(ctx.exception))
+            self.assertNotIn(secret, out_buf.getvalue())
+            self.assertNotIn(secret, err_buf.getvalue())
+
+        # 3. cf.zone_records (listing)
+        store = self._make_store_client()
+        cf = StatefulFakeProvider()
+        with patch.object(cf, "zone_records", side_effect=RuntimeError(f"internal {secret} in zone_records")):
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                with self.assertRaises(CoverageError) as ctx:
+                    plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+            self.assertNotIn(secret, str(ctx.exception))
+            self.assertNotIn(secret, out_buf.getvalue())
+            self.assertNotIn(secret, err_buf.getvalue())
+
+        # 4. cf.create_address
         store = self._make_store_client()
         cf = StatefulFakeProvider()
         plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
-
-        secret = "SECRET-MARKER-998877"
-        with patch.object(cf, "create_address", side_effect=RuntimeError(f"internal {secret} details")):
-            with self.assertRaises(CoverageError) as ctx:
-                enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
-            err_str = str(ctx.exception)
-            self.assertNotIn(secret, err_str)
-
+        with patch.object(cf, "create_address", side_effect=RuntimeError(f"internal {secret} in create_address")):
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                with self.assertRaises(CoverageError) as ctx:
+                    enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            self.assertNotIn(secret, str(ctx.exception))
+            self.assertNotIn(secret, out_buf.getvalue())
+            self.assertNotIn(secret, err_buf.getvalue())
         doc = self._read_doc("asb.bd")
-        doc_str = json.dumps(doc)
-        self.assertNotIn(secret, doc_str)
+        if doc:
+            self.assertNotIn(secret, json.dumps(doc))
+
+        # 5. cf.delete_record during rollback
+        store = self._make_store_client()
+        cf = StatefulFakeProvider()
+        plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        with patch.object(cf, "delete_record", side_effect=RuntimeError(f"internal {secret} in delete_record")), \
+             patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=False):
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                with self.assertRaises(CoverageError) as ctx:
+                    enable(self.entry, "asb.bd", plan, store_client=store, cf_client=cf)
+            self.assertNotIn(secret, str(ctx.exception))
+            self.assertNotIn(secret, out_buf.getvalue())
+            self.assertNotIn(secret, err_buf.getvalue())
+        doc = self._read_doc("asb.bd")
+        if doc:
+            self.assertNotIn(secret, json.dumps(doc))
 
     # 18. Lease arithmetic: probe duration vs lease seconds
     def test_18_lease_arithmetic(self):
-        max_probe_seconds = 10 * 10 + 9 * 15
+        import inspect
+        from sandbox.hosting.zone_coverage.service import public_probe
+        orig_probe = getattr(self._public_probe_patcher, "temp_original", public_probe)
+        sig = inspect.signature(orig_probe)
+        max_tries = sig.parameters["max_tries"].default
+        delay = sig.parameters["delay"].default
+        timeout = sig.parameters["timeout"].default
+        max_probe_seconds = max_tries * timeout + (max_tries - 1) * delay
         self.assertLess(max_probe_seconds, LEASE_SECONDS, f"Max probe {max_probe_seconds}s must be less than LEASE_SECONDS {LEASE_SECONDS}s")
 
         store = self._make_store_client()

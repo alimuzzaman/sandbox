@@ -805,16 +805,12 @@ class Execution(unittest.TestCase):
             events = []
             replies = iter([self.PROBE, "", "removed\n"])
 
+            from tests.zone_coverage_test_support import store_transport
+            transport = store_transport(td)
             def tracking_ssh(entry, command, timeout=30):
-                if "zone-coverage" in command or "PROGRAM" in command or "python3 -c" in command:
-                    events.append("store_release")
-                    from tests.subprocess_support import synthetic_environment
-                    env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
-                    r = subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
-                    return subprocess.CompletedProcess([], r.returncode, r.stdout, r.stderr)
-                reply = next(replies)
-                code, out = reply if isinstance(reply, tuple) else (0, reply)
-                return subprocess.CompletedProcess([], code, out, "")
+                result = transport(entry, command, timeout=timeout)
+                events.append("store_release")
+                return result
 
             def tracking_write(target_state):
                 if KEY not in target_state.get("hosts", {}):
@@ -865,12 +861,10 @@ class Execution(unittest.TestCase):
             )
             replies = iter([self.PROBE, "", "removed\n"])
 
+            from tests.zone_coverage_test_support import validate_store_command
             def failing_ssh(entry, command, timeout=30):
-                if "zone-coverage" in command or "PROGRAM" in command or "python3 -c" in command:
-                    return subprocess.CompletedProcess([], 1, "", "store locked")
-                reply = next(replies)
-                code, out = reply if isinstance(reply, tuple) else (0, reply)
-                return subprocess.CompletedProcess([], code, out, "")
+                validate_store_command(command)
+                return subprocess.CompletedProcess([], 1, "", "store locked")
 
             directory = tempfile.TemporaryDirectory()
             self.addCleanup(directory.cleanup)
@@ -913,13 +907,8 @@ class Execution(unittest.TestCase):
             repository = RecoveryRepository(root / "hosts.json", root / "locks")
             repository._write({"version": 1, "hosts": {KEY: cov_record}})
 
-            def dummy_ssh(entry, command, timeout=30):
-                if "zone-coverage" in command or "PROGRAM" in command or "python3 -c" in command:
-                    from tests.subprocess_support import synthetic_environment
-                    env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
-                    r = subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
-                    return subprocess.CompletedProcess([], r.returncode, r.stdout, r.stderr)
-                return subprocess.CompletedProcess([], 0, self.PROBE, "")
+            from tests.zone_coverage_test_support import store_transport
+            dummy_ssh = store_transport(td)
 
             with mock.patch.object(destroy.remote, "ssh_run", dummy_ssh),                  mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository", lambda: repository),                  mock.patch.object(destroy.hosting, "load_host_state", lambda *a, **k: destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")):
                 with self.assertRaises(destroy.DestroyError) as ctx:

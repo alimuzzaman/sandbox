@@ -34,6 +34,7 @@ import urllib.request
 
 from sandbox.core import _cloudflare as cloudflare
 from sandbox.core import _hosting as hosting
+from sandbox.core import _remote as remote
 from sandbox.commands import hosting as hosting_cmd
 from sandbox.hosting.zone_coverage import (
     CoverageError,
@@ -57,24 +58,8 @@ from tests.test_zone_coverage_matrix import StatefulFakeProvider
 
 def make_real_store(temp_dir: str, entry: dict) -> ZoneCoverageClient:
     """Create a real ZoneCoverageClient running against temp_dir as SANDBOX_HOME."""
-    def real_ssh_run(e, command, timeout=15):
-        # Accept only the exact command emitted by the real store client. Decode
-        # its argument as data and execute the fixed program without a shell.
-        parts = shlex.split(command)
-        if (len(parts) != 5 or parts[:3] != ["python3", "-c", program.PROGRAM]
-                or parts[3] != "${SANDBOX_HOME:-$HOME/sandbox}"):
-            raise AssertionError("unexpected store transport command")
-        try:
-            request = json.loads(base64.b64decode(parts[4], validate=True))
-        except (ValueError, TypeError) as exc:
-            raise AssertionError("invalid store request") from exc
-        if not isinstance(request, dict) or program.remote_command(request) != command:
-            raise AssertionError("noncanonical store request")
-        env = synthetic_environment({"SANDBOX_HOME": temp_dir, "HOME": temp_dir})
-        return subprocess.run([sys.executable, "-I", "-B", "-c", program.PROGRAM,
-                               temp_dir, parts[4]], env=env, capture_output=True,
-                              text=True, timeout=timeout)
-    return ZoneCoverageClient(entry, ssh_run=real_ssh_run)
+    from tests.zone_coverage_test_support import store_transport
+    return ZoneCoverageClient(entry, ssh_run=store_transport(temp_dir))
 
 
 def seed_store_zone(temp_dir: str, zone: str = "asb.bd", state: str = "active", generation: int = 1,
@@ -113,10 +98,10 @@ def make_loopback_tls_server(san_hostname: str, status_code: int = 200, body: by
     td = tempfile.mkdtemp(prefix="sb-tls-")
     key_path = os.path.join(td, "key.pem")
     cert_path = os.path.join(td, "cert.pem")
-    subprocess.run(
+    run_test_process(
         ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
          "-out", cert_path, "-days", "1", "-nodes", "-subj", f"/CN={san_hostname}"],
-        check=True, capture_output=True,
+        env={"HOME": td}, timeout=30, check=True, capture_output=True,
     )
     server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     server_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
@@ -531,7 +516,7 @@ environments:
         # Real store in temp dir
         seed_store_zone(str(fixture.home), "asb.bd", "active")
         store_client = make_real_store(str(fixture.home), fixture.entry)
-        fixture.patch.object(ZoneCoverageClient, "__new__", lambda cls, *a, **k: store_client)
+        fixture.patch.object(remote, "ssh_run", store_client._ssh_run)
 
         cf = StatefulFakeProvider(
             zone_id="z-asb", zone_name="asb.bd", ssl_mode="strict",
@@ -586,7 +571,7 @@ environments:
 
         seed_store_zone(str(fixture.home), "asb.bd", "active")
         store_client = make_real_store(str(fixture.home), fixture.entry)
-        fixture.patch.object(ZoneCoverageClient, "__new__", lambda cls, *a, **k: store_client)
+        fixture.patch.object(remote, "ssh_run", store_client._ssh_run)
 
         cf = StatefulFakeProvider(
             zone_id="z-asb", zone_name="asb.bd", ssl_mode="strict",

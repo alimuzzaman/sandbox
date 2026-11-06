@@ -2,6 +2,7 @@ from sandbox.core import _hosting as hosting
 from sandbox.hosting.recovery.repository import RecoveryRepository
 import json
 import contextlib
+import base64
 import subprocess
 import tempfile
 import unittest
@@ -44,7 +45,8 @@ def guarded_destroy_case(method):
 def destroy_dispatch(project, environment, probe, store=None, events=None):
     """Match commands generated for exactly one fixture target; never execute them."""
     name = destroy.compose_name(project, environment)
-    home = "/fixture/sandbox"
+    # Execution class patches resolve_sandbox_home to this fixed synthetic path.
+    home = "/home/u/sandbox"
     paths = destroy._paths(home, project, environment)
     route = destroy._route_file(name, "nginx")
     certs = destroy._cert_dirs(name, "nginx")
@@ -57,21 +59,26 @@ def destroy_dispatch(project, environment, probe, store=None, events=None):
     with mock.patch.object(destroy.remote, "ssh_run", capture_command):
         destroy._remove_edge({}, name, "nginx", False)
     expected_edge, = capture
+    phase = "probe"
     def dispatch(entry, command, timeout=30):
-        if command == "echo ${SANDBOX_HOME:-$HOME/sandbox}":
-            return subprocess.CompletedProcess([], 0, home + "\n", "")
-        if command == expected_probe:
+        nonlocal phase
+        if command == expected_probe and phase == "probe":
+            phase = "edge"
             return subprocess.CompletedProcess([], 0, probe, "")
-        if command == expected_edge:
+        if command == expected_edge and phase == "edge":
+            phase = "teardown"
             return subprocess.CompletedProcess([], 0, "", "")
-        if command == expected_teardown:
+        if command == expected_teardown and phase == "teardown":
+            phase = "release"
             return subprocess.CompletedProcess([], 0, "removed\n", "")
         from tests.zone_coverage_test_support import validate_store_command
-        validate_store_command(command)
-        if store is None:
-            raise AssertionError("unexpected store command")
+        payload = validate_store_command(command)
+        request = json.loads(base64.b64decode(payload, validate=True))
+        if phase != "release" or store is None or request.get("action") != "dependent-release":
+            raise AssertionError("unexpected destroy command in " + phase)
+        phase = "done"
         result = store(entry, command, timeout=timeout)
-        if events is not None:
+        if events is not None and result.returncode == 0:
             events.append("store_release")
         return result
     return dispatch

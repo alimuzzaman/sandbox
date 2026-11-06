@@ -1152,6 +1152,8 @@ cloudflare:
 
 When applying host configuration (`sb host apply`), if an existing DNS record on Cloudflare differs from the target's desired IP or was created outside Sandbox, apply refuses by default (`managed_record_drift` or `record_not_owned`). Passing `--allow-record-overwrite` permits updating/overwriting the drifted record. The override applies only to a record already owned by the target. Covered exact-record recovery uses the recorded intent and refuses managed drift; it does not accept an overwrite override. Redirect CNAME updates follow the same ownership check.
 
+When a target moves from shared coverage to exact DNS, a successful apply releases its dependent claim from the previously recorded zone. If release is uncertain, the apply reports `coverage_binding: unknown` and retains the claim for a later retry. A failed apply does not release the claim.
+
 For a shared-coverage apply, JSON output includes the observed origin, public-edge and resolver evidence under `edge.evidence`; text status reports each result separately. If the fresh verification label does not resolve, apply can finish with the runtime ready while public-edge evidence is `unverified` and the delivery remains incomplete.
 
 Enabling installs one error-only nginx route, `/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`, with its own wildcard origin certificate, checks it at the origin, then publishes a proxied `*.<zone>` record and checks it through the public edge. Names under the zone with no site get a generic 404 marked `noindex`, including multi-level names that reach the server.

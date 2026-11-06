@@ -1210,80 +1210,140 @@ class TestPreservationAndEnableSafety(unittest.TestCase):
 
 
 class TestTransitionsAndReleases(unittest.TestCase):
-    """Item 11: Shared-to-exact transition and release error handling."""
+    def setup_transition(self):
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self, with_revision=True)
+        calls = []
+        previous = remote.ssh_run
+        self.fail_release = False
+        def transport(entry, command, timeout=15):
+            from tests.zone_coverage_test_support import validate_store_command
+            request = json.loads(base64.b64decode(validate_store_command(command), validate=True))
+            if request.get("action") == "dependent-release":
+                operation = fixture.delivery()["operation"]
+                self.assertIsNotNone(operation)
+                self.assertEqual(operation["execution_state"], "succeeded")
+                pending = fixture.repository.load()["hosts"][fixture.key]["coverage_release_pending"]
+                self.assertEqual(pending, {"mode": "shared", "zone": "asb.bd"})
+                calls.append(request)
+                if self.fail_release:
+                    return subprocess.CompletedProcess([], 1, "", "PRIVATE_STORE_MARKER")
+            return previous(entry, command, timeout=timeout)
+        fixture.patch.object(remote, "ssh_run", transport)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(output.getvalue())["ok"])
+        self.assertEqual(store.read("asb.bd")["document"]["dependents"][fixture.key]["state"], "bound")
+        return fixture, store, provider, shared, args, calls, fallback, certificate
+
+    def next_delivery(self, fixture, request):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        from sandbox.jobs.process import capture_process_identity
+        from sandbox.delivery import admission
+        context = fixture.context
+        submission = JobSubmission("exec", str(fixture.root), context["project_identity"], "local", "default", ("fixture",), 300,
+                                   SourceIdentity(context["source_identity"], fixture.commit), request_id=request)
+        row, _ = fixture.jobs.accept(submission)
+        fixture.jobs.transition(row["job_id"], "running")
+        process = capture_process_identity(os.getpid())
+        fixture.jobs.put_process_identity(row["job_id"], host_boot_id=process.host_boot_id,
+            supervisor_pid=process.pid, supervisor_start_identity=process.start_identity,
+            supervisor_nonce_hash=process.nonce_hash, child_pid=process.pid,
+            child_pgid=os.getpgrp(), child_start_identity=process.start_identity)
+        context.update(job_id=row["job_id"], request_id=request)
+        admission.os.environ.update({"SANDBOX_DURABLE_JOB_ID": row["job_id"], "SANDBOX_DURABLE_REQUEST_ID": request})
+
+    def exact_manifest(self, fixture, outside=False):
+        path = fixture.manifest_root / "sandbox.hosting.yml"
+        text = path.read_text().replace("      ssl_mode: strict\n", "      ssl_mode: strict\n      dns: exact\n")
+        if outside:
+            text = text.replace("app.asb.bd", "app.uncovered.test")
+        path.write_text(text)
+
+    def apply(self, args, failure=False):
+        output = io.StringIO()
+        if failure:
+            with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+                hosting_cmd.cmd_host(None, args)
+        else:
+            with contextlib.redirect_stdout(output):
+                hosting_cmd.cmd_host(None, args)
+        return json.loads(output.getvalue())
 
     def test_shared_to_exact_apply_releases_then_next_apply_manages_record(self):
-        fixture = _HostingOwnerFixture(self)
-        fixture.entry["front_door"] = "nginx"
-        fixture.entry["capabilities"] = ["zone_coverage_v1"]
-
-        seed_store_zone(str(fixture.home), "asb.bd", "active")
-        store_client = make_real_store(str(fixture.home), fixture.entry)
-        targets.bind_bound(store_client, "asb.bd", fixture.key, "app.asb.bd", 1)
-
-        fixture.state["hosts"][fixture.key] = {
-            "dns_coverage": {"mode": "shared", "zone": "asb.bd", "hostname": "app.asb.bd"},
-            "records": [],
-        }
-
-        # Apply with exact manifest
-        val_exact = copy.deepcopy(fixture.validated)
-        val_exact["cloudflare"]["dns"] = "exact"
-        val_exact["routes"] = [{"hostname": "app.asb.bd", "mode": "serve"}]
-
-        released = False
-        def fake_release(client, zone, key):
-            nonlocal released
-            released = True
-
-        with mock.patch("sandbox.hosting.zone_coverage.targets.release", fake_release):
-            with mock.patch("sandbox.hosting.zone_coverage.targets.decide", return_value={"mode": "exact", "zone": "asb.bd", "drift_rule": True}):
-                fixture.validated = val_exact
-                res = fixture.apply()
-                self.assertTrue(released)
+        fixture, store, provider, shared, args, calls, fallback, certificate = self.setup_transition()
+        self.exact_manifest(fixture)
+        self.next_delivery(fixture, "exact-one")
+        result = self.apply(args)
+        self.assertTrue(result["ok"])
+        self.assertEqual([(c["zone"], c["state_key"]) for c in calls], [("asb.bd", fixture.key)])
+        self.assertNotIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertEqual(sum(c[0] == "upsert_address" for c in provider.calls), 1)
+        self.next_delivery(fixture, "exact-two")
+        result = self.apply(args)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sum(c[0] == "upsert_address" for c in provider.calls), 1)
+        self.assertTrue(any(row.get("name") == "app.asb.bd" for row in provider._records))
+        self.assertTrue(any(row.get("applied", {}).get("name") == "app.asb.bd" for row in fixture.repository.load()["hosts"][fixture.key]["records"]))
+        self.assertEqual(fallback.read_bytes(), b"shared fallback fixture")
+        self.assertEqual(certificate.read_bytes(), b"shared certificate fixture")
+        self.assertIn(shared[0], provider._records)
 
     def test_failed_exact_apply_does_not_release(self):
-        fixture = _HostingOwnerFixture(self)
-        fixture.entry["front_door"] = "nginx"
-        fixture.entry["capabilities"] = ["zone_coverage_v1"]
-
-        fixture.state["hosts"][fixture.key] = {
-            "dns_coverage": {"mode": "shared", "zone": "asb.bd", "hostname": "app.asb.bd"},
-        }
-        val_exact = copy.deepcopy(fixture.validated)
-        val_exact["cloudflare"]["dns"] = "exact"
-
-        released = False
-        def fake_release(client, zone, key):
-            nonlocal released
-            released = True
-
-        fixture.health.side_effect = RuntimeError("failed before delivery")
-        with mock.patch("sandbox.hosting.zone_coverage.targets.release", fake_release):
-            with self.assertRaises(RuntimeError):
-                fixture.validated = val_exact
-            fixture.apply()
-        self.assertFalse(released)
+        fixture, store, provider, shared, args, calls, fallback, certificate = self.setup_transition()
+        self.exact_manifest(fixture)
+        path = fixture.manifest_root / "sandbox.hosting.yml"
+        path.write_text(path.read_text().replace("      path: /\n", "      path: /health\n"))
+        fixture.commit = "b" * 40
+        fixture.context["source_commit"] = fixture.commit
+        hosting_cmd._resolve_host_source_commit.return_value = fixture.commit
+        hosting_cmd._prepare_host_source_artifact.return_value = (
+            {"schema_version": 1, "kind": "git_commit", "root_relative": ".", "revision": fixture.commit}, fixture.checkout)
+        fixture.push.return_value = fixture.commit
+        for row in fixture.observe.return_value["revision_checks"]:
+            row["observed"] = fixture.commit
+        self.next_delivery(fixture, "exact-fail")
+        fixture.health.side_effect = RuntimeError("injected health failure")
+        result = self.apply(args, failure=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("injected health failure", result["message"])
+        self.assertGreaterEqual(fixture.health.call_count, 2)
+        self.assertEqual(calls, [])
+        self.assertEqual(store.read("asb.bd")["document"]["dependents"][fixture.key]["state"], "bound")
 
     def test_release_failure_gives_unknown(self):
-        fixture = _HostingOwnerFixture(self)
-        fixture.entry["front_door"] = "nginx"
-        fixture.entry["capabilities"] = ["zone_coverage_v1"]
+        fixture, store, provider, shared, args, calls, fallback, certificate = self.setup_transition()
+        self.exact_manifest(fixture)
+        self.next_delivery(fixture, "exact-release-fail")
+        self.fail_release = True
+        result = self.apply(args)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["coverage_binding"], "unknown")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("PRIVATE_STORE_MARKER", str(result))
+        self.assertIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        pending = fixture.repository.load()["hosts"][fixture.key]["coverage_release_pending"]
+        self.assertEqual(pending, {"mode": "shared", "zone": "asb.bd"})
+        self.fail_release = False
+        self.next_delivery(fixture, "exact-release-retry")
+        self.assertTrue(self.apply(args)["ok"])
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertNotIn("coverage_release_pending", fixture.repository.load()["hosts"][fixture.key])
 
-        fixture.state["hosts"][fixture.key] = {
-            "dns_coverage": {"mode": "shared", "zone": "asb.bd", "hostname": "app.asb.bd"},
-        }
-        val_exact = copy.deepcopy(fixture.validated)
-        val_exact["cloudflare"]["dns"] = "exact"
-
-        def failing_release(client, zone, key):
-            raise RuntimeError("store failed to release")
-
-        with mock.patch("sandbox.hosting.zone_coverage.targets.release", failing_release):
-            with mock.patch("sandbox.hosting.zone_coverage.targets.decide", return_value={"mode": "exact", "zone": "asb.bd", "drift_rule": True}):
-                fixture.validated = val_exact
-                res = fixture.apply()
-                self.assertEqual(res.get("coverage_binding"), "unknown")
+    def test_move_outside_zone_releases_previous_zone(self):
+        fixture, store, provider, shared, args, calls, fallback, certificate = self.setup_transition()
+        self.exact_manifest(fixture, outside=True)
+        self.next_delivery(fixture, "outside-exact")
+        loads = iter([{"version": 1, "hosts": {}}])
+        def stale_then_current():
+            return next(loads, None) or fixture.repository.load()
+        fixture.patch.object(hosting_cmd.hosting, "load_host_state", side_effect=stale_then_current)
+        result = self.apply(args)
+        self.assertTrue(result["ok"])
+        self.assertEqual([(c["zone"], c["state_key"]) for c in calls], [("asb.bd", fixture.key)])
+        self.assertNotIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
 
 
 class TestProviderErrorHygieneAndEvidence(unittest.TestCase):

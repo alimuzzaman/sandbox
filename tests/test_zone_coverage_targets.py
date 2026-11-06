@@ -110,6 +110,7 @@ def seed_store_zone(temp_dir: str, zone: str = "asb.bd", state: str = "active", 
         }]
     doc = {
         "schema_version": 1,
+        "zone_id": "z-asb",
         "zone": zone,
         "state": state,
         "generation": generation,
@@ -271,6 +272,61 @@ class TestZoneCoverageDecideRows(unittest.TestCase):
             targets.decide(self.validated, self.entry, None, store_client=failing_client, cf_client=self.cf_client, report=False)
         self.assertEqual(ctx.exception.code, COVERAGE_STORE_UNAVAILABLE)
 
+    def test_refused_and_malformed_store_envelopes_fail_closed(self):
+        store = mock.Mock()
+        for response in ({"ok": True, "refused": "busy"}, {"ok": True, "zones": "bad"}):
+            store.list.return_value = response
+            with self.subTest(response=response):
+                result = targets.decide(self.validated, self.entry, None, store_client=store, report=True)
+                self.assertEqual(result["code"], COVERAGE_STORE_UNAVAILABLE)
+        store.list.return_value = {"ok": True, "zones": [{"zone": "asb.bd", "state": "active"}]}
+        for response in ({"ok": True, "refused": "busy"}, {"ok": True, "document": None}):
+            store.read.return_value = response
+            with self.subTest(response=response):
+                result = targets.decide(self.validated, self.entry, None, store_client=store, report=True)
+                self.assertEqual(result["code"], COVERAGE_STORE_UNAVAILABLE)
+        self.assertEqual(store.read.call_count, 2)
+
+    def test_provider_failures_are_reported_and_reached(self):
+        store = make_real_store(self.td, self.entry)
+        seed_store_zone(self.td)
+        healthy = targets.decide(self.validated, self.entry, None, store_client=store, cf_client=self.cf_client, facts=self.facts, report=True)
+        self.assertEqual(healthy["mode"], "shared")
+        for method in ("zone_records", "current_ssl_mode"):
+            with self.subTest(method=method), mock.patch.object(self.cf_client, method, side_effect=RuntimeError("secret marker")) as failing:
+                result = targets.decide(self.validated, self.entry, None, store_client=store, cf_client=self.cf_client, facts=self.facts, report=True)
+                failing.assert_called_once()
+                self.assertEqual(result["code"], COVERAGE_DRIFT)
+                self.assertNotIn("secret marker", str(result))
+        with mock.patch.object(cloudflare, "Client", side_effect=RuntimeError("secret marker")) as constructor:
+            result = targets.decide(self.validated, self.entry, None, store_client=store, facts=self.facts, report=True)
+            constructor.assert_called_once()
+            self.assertEqual(result["code"], COVERAGE_DRIFT)
+            self.assertNotIn("secret marker", str(result))
+
+    def test_state_key_path_fallback_and_shared_record_drift(self):
+        store = make_real_store(self.td, self.entry)
+        path_facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"}]}
+        seed_store_zone(self.td, dependents={"r1/other/main": {"hostname": "app.asb.bd", "state": "bound"}}, state="disabled")
+        result = targets.decide(self.validated, self.entry, None, store_client=store, cf_client=self.cf_client, facts=path_facts, report=True)
+        self.assertEqual(result["mode"], "exact")
+        seed_store_zone(self.td)
+        self.assertEqual(targets.decide(self.validated, self.entry, None, store_client=store, cf_client=self.cf_client, facts=path_facts, report=True)["mode"], "shared")
+        # Fresh providers make each single-field mutation independent.
+        baseline = {"id": "rec-wildcard-1", "name": "*.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}
+        for field, value in (("id", "other"), ("type", "AAAA"), ("content", "192.0.2.9"), ("proxied", False)):
+            row = dict(baseline, **{field: value})
+            provider = StatefulFakeProvider("z-asb", "asb.bd", "strict", records=[row])
+            with self.subTest(field=field):
+                result = targets.decide(self.validated, self.entry, None, store_client=store, cf_client=provider, facts=path_facts, report=True)
+                self.assertEqual(result["code"], COVERAGE_DRIFT)
+        different_origin = dict(self.entry, origin_ipv4="192.0.2.10")
+        result = targets.decide(self.validated, different_origin, None, store_client=store, cf_client=self.cf_client, facts=path_facts, report=True)
+        self.assertEqual(result["code"], COVERAGE_DRIFT)
+        apex = copy.deepcopy(self.validated)
+        apex["routes"][0]["hostname"] = "asb.bd"
+        self.assertEqual(targets.decide(apex, self.entry, None, store_client=store, cf_client=self.cf_client, facts=path_facts, report=True)["code"], COVERAGE_NAME_INELIGIBLE)
+
     def test_decide_row_3_uncovered_zone(self):
         # Find covered zone: none or retired.
         # If fallback route in nginx facts holds fallback for suffix: refuse coverage_record_missing
@@ -355,7 +411,7 @@ class TestZoneCoverageDecideRows(unittest.TestCase):
         target_key = "r1/demo/main"
 
         # fallback_only with dependent
-        seed_store_zone(self.td, "asb.bd", "fallback_only", dependents={target_key: {"hostname": "app.asb.bd", "binding": "bound"}})
+        seed_store_zone(self.td, "asb.bd", "fallback_only", dependents={target_key: {"hostname": "app.asb.bd", "state": "bound"}})
         res_dep = targets.decide(self.validated, self.entry, None, store_client=store_client, cf_client=self.cf_client, facts=self.facts, report=True)
         self.assertEqual(res_dep.get("mode"), "refused")
         self.assertEqual(res_dep.get("code"), COVERAGE_DISABLED_DEPENDENT)
@@ -735,7 +791,7 @@ class TestHostPlanRefusalsAndImagePreflight(unittest.TestCase):
             "cloudflare": {"proxied": True, "tls": "origin-ca", "ssl_mode": "strict", "dns": "auto"},
         }
         val_before = copy.deepcopy(val)
-        entry = {"name": "r1", "front_door": "nginx", "capabilities": ["zone_coverage_v1"]}
+        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
         td = tempfile.mkdtemp()
         try:
             store = make_real_store(td, entry)
@@ -754,7 +810,7 @@ class TestDecideRefusesForeignNodes(unittest.TestCase):
     """Item 7: test_decide_refuses_txt_a_aaaa_cname_ns_and_descendant_nodes."""
 
     def test_decide_refuses_txt_a_aaaa_cname_ns_and_descendant_nodes(self):
-        entry = {"name": "r1", "front_door": "nginx", "capabilities": ["zone_coverage_v1"]}
+        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
         val = {
             "project": "demo", "environment": "main",
             "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],
@@ -842,6 +898,20 @@ class TestExactRecordDriftAndMatrix(unittest.TestCase):
             {"applied": {"name": "app.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True}},
         ]
 
+        for wanted, good, other in ((wanted_a, rec_a, rec_aaaa_drift),
+                                    (wanted_aaaa, dict(rec_aaaa_drift, content="2001:db8::1"), rec_a)):
+            for rows in ([good, other], [other, good]):
+                with self.subTest(wanted=wanted["address"], first=rows[0]["id"]):
+                    adopted = targets.check_exact_record(wanted, rows, recorded)
+                    self.assertEqual(adopted["existing"]["id"], good["id"])
+        other_name = dict(rec_a, name="other.asb.bd", content="192.0.2.1")
+        self.assertEqual(targets.check_exact_record(wanted_a, [other_name], recorded)["action"], "write")
+        for bad_snapshot in ([{"applied": dict(recorded[0]["applied"], name="other.asb.bd")}],
+                             [{"applied": recorded[1]["applied"]}]):
+            with self.assertRaises(CoverageError) as mismatch:
+                targets.check_exact_record(wanted_a, [dict(rec_a, content="192.0.2.1")], bad_snapshot, allow_overwrite=True)
+            self.assertEqual(mismatch.exception.code, RECORD_NOT_OWNED)
+
         # Order 1: [A, AAAA]
         res_a1 = targets.check_exact_record(wanted_a, [rec_a, rec_aaaa_drift], recorded, allow_overwrite=False)
         self.assertEqual(res_a1["action"], "adopt")
@@ -878,7 +948,7 @@ class TestPreservationAndEnableSafety(unittest.TestCase):
     """Item 9: Auto preserves exact target, multi-route, and enable safety."""
 
     def test_auto_preserves_existing_exact_target(self):
-        entry = {"name": "r1", "front_door": "nginx", "capabilities": ["zone_coverage_v1"]}
+        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
         val = {
             "project": "demo", "environment": "main",
             "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],
@@ -897,7 +967,7 @@ class TestPreservationAndEnableSafety(unittest.TestCase):
             shutil.rmtree(td, ignore_errors=True)
 
     def test_multi_route_owned_equal_refused(self):
-        entry = {"name": "r1", "front_door": "nginx", "capabilities": ["zone_coverage_v1"]}
+        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
         val = {
             "project": "demo", "environment": "main",
             "routes": [{"hostname": "a.asb.bd", "mode": "serve"}, {"hostname": "b.asb.bd", "mode": "serve"}],
@@ -925,7 +995,7 @@ class TestPreservationAndEnableSafety(unittest.TestCase):
             shutil.rmtree(td, ignore_errors=True)
 
     def test_hostname_owned_by_other_route_refuses(self):
-        entry = {"name": "r1", "front_door": "nginx", "capabilities": ["zone_coverage_v1"]}
+        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
         val = {
             "project": "demo", "environment": "main",
             "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],

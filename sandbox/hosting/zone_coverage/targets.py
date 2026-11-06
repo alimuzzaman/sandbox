@@ -43,14 +43,13 @@ from sandbox.hosting.zone_coverage import models
 def coverage_zone_of(hostname: str, candidate_zones: list[str]) -> str | None:
     """Return the longest matching candidate zone for hostname, or None.
 
-    Matches if hostname is a subdomain of zone (i.e. ends with .<zone> and != <zone>).
-    Apex names do not match wildcard coverage.
+    The apex is matched for subsequent eligibility checks; lookalike suffixes are not.
     """
     clean_host = hostname.strip().rstrip(".").lower()
     matches = []
     for z in candidate_zones:
         clean_z = z.strip().rstrip(".").lower()
-        if clean_host.endswith("." + clean_z) and clean_host != clean_z:
+        if clean_host == clean_z or clean_host.endswith("." + clean_z):
             matches.append(clean_z)
     if not matches:
         return None
@@ -129,7 +128,10 @@ def decide(
     if store_client is None:
         store_client = ZoneCoverageClient(entry)
     try:
-        listed_zones = store_client.list()
+        envelope = store_client.list()
+        if not isinstance(envelope, dict) or envelope.get("refused") or not isinstance(envelope.get("zones"), list) or not all(isinstance(item, dict) for item in envelope["zones"]):
+            raise ValueError("invalid list envelope")
+        listed_zones = envelope["zones"]
     except Exception:
         return _refusal(
             COVERAGE_STORE_UNAVAILABLE,
@@ -148,7 +150,7 @@ def decide(
         has_fallback = False
         if facts and isinstance(facts.get("routes"), list):
             for route_fact in facts["routes"]:
-                fb_zone = route_fact.get("coverage_zone") or coverage_zone_of(route_fact.get("file", ""))
+                fb_zone = route_fact.get("coverage_zone") or _nginx_coverage_zone_of(route_fact.get("file", ""))
                 if fb_zone and any(h == fb_zone or h.endswith("." + fb_zone) for h in route_hostnames):
                     has_fallback = True
                     break
@@ -164,7 +166,10 @@ def decide(
 
     # Read the store document for the zone
     try:
-        doc = store_client.read(z)
+        envelope = store_client.read(z)
+        if not isinstance(envelope, dict) or envelope.get("refused") or not isinstance(envelope.get("document"), dict):
+            raise ValueError("invalid read envelope")
+        doc = envelope["document"]
     except Exception:
         return _refusal(
             COVERAGE_STORE_UNAVAILABLE,
@@ -185,9 +190,9 @@ def decide(
         return {"mode": "exact", "zone": z, "drift_rule": True}
 
     # 6. Read zone_records. A provider failure refuses coverage_drift in apply.
-    if cf_client is None:
-        cf_client = cloudflare.Client()
     try:
+        if cf_client is None:
+            cf_client = cloudflare.Client()
         zone_id = doc.get("zone_id")
         if not zone_id:
             zone_id = cf_client.zone(z)["id"]
@@ -251,11 +256,7 @@ def decide(
         if (entry.get("name") and isinstance(validated, dict) and "project" in validated and "environment" in validated)
         else None
     )
-    target_in_dependents = (target_key in dependents) or any(
-        d.get("hostname") in route_hostnames
-        for d in dependents.values()
-        if isinstance(d, dict)
-    )
+    target_in_dependents = target_key in dependents
 
     if state in ("fallback_only", "disabled"):
         if target_in_dependents:
@@ -321,7 +322,10 @@ def decide(
             )
 
         # Check zone TLS mode is strict
-        ssl_mode = cf_client.current_ssl_mode(zone_id)
+        try:
+            ssl_mode = cf_client.current_ssl_mode(zone_id)
+        except Exception:
+            return _refusal(COVERAGE_DRIFT, "cloudflare SSL mode check failed", report)
         if ssl_mode != "strict":
             return _refusal(
                 COVERAGE_DRIFT,
@@ -351,7 +355,10 @@ def decide(
             )
         for exp in expected_shared:
             act = next((x for x in actual_shared if x.get("id") == exp.get("id")), None)
-            if not act or act.get("content") != exp.get("content") or bool(act.get("proxied")) != bool(exp.get("proxied")):
+            if (not act or act.get("type") != exp.get("type")
+                    or act.get("content") != exp.get("content")
+                    or exp.get("content") != {"A": origin_ipv4, "AAAA": origin_ipv6}.get(exp.get("type"))
+                    or exp.get("proxied") is not True or act.get("proxied") is not True):
                 return _refusal(
                     COVERAGE_DRIFT,
                     "observed shared records do not match store document",
@@ -361,7 +368,7 @@ def decide(
         # Check fallback file is present in facts
         if facts and isinstance(facts.get("routes"), list):
             fb_present = any(
-                (r.get("coverage_zone") or coverage_zone_of(r.get("file", ""))) == z
+                (r.get("coverage_zone") or _nginx_coverage_zone_of(r.get("file", ""))) == z
                 for r in facts["routes"]
             )
             if not fb_present:
@@ -442,12 +449,12 @@ def check_exact_record(
 
     matching = [
         r for r in zone_records_at_name
-        if r.get("type") in ("A", "AAAA", "CNAME")
+        if r.get("name") == hostname and r.get("type") in (wanted_type, "CNAME")
     ]
     if not matching:
         return {"action": "write"}
 
-    existing = matching[0]
+    existing = next((r for r in matching if r.get("type") == wanted_type), matching[0])
     if (
         existing.get("type") == wanted_type
         and existing.get("content") == wanted_content
@@ -461,7 +468,7 @@ def check_exact_record(
             continue
         snap = item.get("applied")
         if isinstance(snap, dict):
-            if snap.get("name") == hostname or item.get("created_id") == existing.get("id"):
+            if snap.get("name") == hostname and snap.get("type") == existing.get("type"):
                 applied_snap = snap
                 break
 

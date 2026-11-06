@@ -54,6 +54,7 @@ from unittest import mock
 class GuardedIO:
     def __init__(self):
         self.commands = set()
+        self.git_roots = set()
         self.endpoints = set()
         self.attempts = []
         self.stack = contextlib.ExitStack()
@@ -81,6 +82,8 @@ class GuardedIO:
         if not (store or git or openssl):
             raise AssertionError("unapproved process registration")
         self.commands.add(argv)
+        if git and argv[3:] == ("init", "--initial-branch=main"):
+            self.git_roots.add(Path(argv[2]).resolve())
 
     def allow_loopback(self, host, port):
         if not ipaddress.ip_address(host).is_loopback or not 0 < port < 65536:
@@ -111,6 +114,11 @@ class GuardedIO:
                 if any(value is alias for alias in aliases):
                     self.stack.enter_context(mock.patch.object(module, name, self.reject))
         def popen(argv, *args, **kwargs):
+            if (isinstance(argv, (tuple, list)) and len(argv) == 5
+                    and tuple(argv[:2]) == ("git", "-C")
+                    and tuple(argv[3:]) == ("rev-parse", "--show-toplevel")
+                    and any(Path(argv[2]).resolve().is_relative_to(root) for root in self.git_roots)):
+                self.commands.add(tuple(argv))
             if (kwargs.get('shell') or kwargs.get('executable') is not None
                     or not isinstance(argv, (tuple, list))
                     or tuple(argv) not in self.commands):

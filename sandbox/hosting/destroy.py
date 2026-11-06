@@ -202,6 +202,29 @@ def namesakes(remote_name: str, project: str, environment: str) -> list[str]:
     return sorted(keys)
 
 
+def _coverage_claims(record: dict | None) -> list[dict]:
+    claims = []
+    for field in ("dns_coverage", "coverage_release_pending"):
+        claim = (record or {}).get(field)
+        if isinstance(claim, dict) and claim.get("mode") == "shared" and isinstance(claim.get("zone"), str) and claim["zone"]:
+            if not any(row["zone"] == claim["zone"] for row in claims):
+                claims.append(claim)
+    return claims
+
+
+def _target_dns_records(record: dict | None) -> list[dict]:
+    zones = {claim["zone"] for claim in _coverage_claims(record)}
+    records = []
+    for item in (record or {}).get("records") or []:
+        if not isinstance(item, dict) or not item.get("zone_id"):
+            continue
+        names = [row.get("name") for row in (item.get("applied"), item.get("previous")) if isinstance(row, dict)]
+        if any(name == "*." + zone for name in names for zone in zones):
+            continue
+        records.append(item)
+    return records
+
+
 def plan(state: dict, entry: dict, remote_name: str, project: str, environment: str, *,
          probe=None) -> dict:
     """What destroy would remove. Reads only; ``probe`` is injectable for tests."""
@@ -242,33 +265,21 @@ def plan(state: dict, entry: dict, remote_name: str, project: str, environment: 
     held = _records_held_elsewhere(state, key)
     dns = []
     shared_coverage_retained = None
-    dns_coverage = (record or {}).get("dns_coverage")
-    if dns_coverage and dns_coverage.get("mode") == "shared":
-        dns = []
-        hostname = (
-            dns_coverage.get("hostname")
-            or (record.get("hosting_operation") or {}).get("evidence", {}).get("edge_intent", {}).get("certificate_hostnames", [None])[0]
-            or (record.get("routes") or [{}])[0].get("hostname")
-        )
-        if not hostname:
-            try:
-                from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
-                doc = ZoneCoverageClient(entry).read(dns_coverage["zone"])
-                hostname = (doc.get("dependents", {}).get(key) or {}).get("hostname")
-            except Exception:
-                pass
-        shared_coverage_retained = [{"hostname": hostname or f"{project}-{environment}.{dns_coverage['zone']}", "zone": dns_coverage["zone"]}]
-    else:
-        for item in (record or {}).get("records") or []:
-            if isinstance(item, dict) and item.get("zone_id") and (
-                    item.get("created_id") or item.get("previous")):
-                shared = bool(_record_identities(item) & held)
-                action = ("keep_shared" if shared else
-                          "keep_unverifiable" if _snapshot_untrusted(item) else
-                          "restore_previous" if item.get("previous") else "delete")
-                dns.append({"zone_id": item["zone_id"], "action": action,
-                            "record_id": (item.get("previous") or {}).get("id") or item.get("created_id"),
-                            "verifiable": isinstance(item.get("applied"), dict) and not _snapshot_untrusted(item)})
+    claims = _coverage_claims(record)
+    if claims:
+        shared_coverage_retained = [
+            {"hostname": claim.get("hostname") or f"{project}-{environment}.{claim['zone']}", "zone": claim["zone"]}
+            for claim in claims
+        ]
+    for item in _target_dns_records(record):
+        if item.get("created_id") or item.get("previous"):
+            shared = bool(_record_identities(item) & held)
+            action = ("keep_shared" if shared else
+                      "keep_unverifiable" if _snapshot_untrusted(item) else
+                      "restore_previous" if item.get("previous") else "delete")
+            dns.append({"zone_id": item["zone_id"], "action": action,
+                        "record_id": (item.get("previous") or {}).get("id") or item.get("created_id"),
+                        "verifiable": isinstance(item.get("applied"), dict) and not _snapshot_untrusted(item)})
     certificate = (record or {}).get("certificate")
     origin_cert = certificate.get("id") if isinstance(certificate, dict) else None
     fences = [field for field in ("active_operation", "recovery_uncertainty")
@@ -425,21 +436,10 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             state = hosting.load_host_state()
         found = plan(state, entry, remote_name, project, environment)
         record = state.get("hosts", {}).get(key)
-        dns_coverage = (record or {}).get("dns_coverage")
-        if dns_coverage and dns_coverage.get("mode") == "shared":
-            found["_records"] = []
-            try:
-                from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
-                from sandbox.hosting.zone_coverage import targets
-                cov_client = ZoneCoverageClient(entry)
-                targets.release(cov_client, dns_coverage["zone"], key)
-            except Exception:
-                pass
-        else:
-            held = _records_held_elsewhere(state, key)
-            found["_records"] = [item for item in (record or {}).get("records") or []
-                                 if isinstance(item, dict) and item.get("zone_id")
-                                 and not (_record_identities(item) & held)]
+        claims = _coverage_claims(record)
+        held = _records_held_elsewhere(state, key)
+        found["_records"] = [item for item in _target_dns_records(record)
+                             if not (_record_identities(item) & held)]
         if not found["found"]:
             return {"state": "absent", "target": key, "remote": _retained(found["remote"])}
         if found["fences"] and not clear_fenced:
@@ -454,6 +454,8 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             # Every key that maps to this Compose name is fenced, so a first apply
             # of a colliding name cannot start under a still-running teardown.
             state = hosting.load_host_state()
+            if claims:
+                state.setdefault("coverage_release_pending", {})[key] = [claim["zone"] for claim in claims]
             fence = {"action": "destroy", "started_at": int(time.time())}
             for owned_key in namesakes(remote_name, project, environment):
                 fenced = state.setdefault("hosts", {}).setdefault(owned_key, {"compose_project": name})
@@ -495,8 +497,28 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
         except TimeoutError:
             cause, advice, code = step
             raise DestroyError(f"remote teardown finished, but {cause}; {advice}", code) from None
+        release_status = None
+        if claims:
+            try:
+                from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
+                from sandbox.hosting.zone_coverage import targets
+                cov_client = ZoneCoverageClient(entry)
+                for claim in claims:
+                    targets.release(cov_client, claim["zone"], key)
+                with repository.state_lock(timeout_seconds=lock_wait):
+                    latest = hosting.load_host_state()
+                    latest.get("coverage_release_pending", {}).pop(key, None)
+                    repository._write(latest)
+                release_status = "released"
+            except Exception:
+                release_status = "unknown"
     found.pop("_records", None)
-    return {"state": "destroyed", **found, "cloudflare": cloud}
+    result = {"state": "destroyed", **found, "cloudflare": cloud}
+    if claims:
+        result["shared_coverage_rows"] = found.get("shared_coverage_retained", [])
+        result["shared_coverage_retained"] = True
+        result["coverage_release"] = release_status
+    return result
 
 
 def _kept_text(remote: dict) -> str:
@@ -527,7 +549,10 @@ def render(result: dict, *, confirmed: bool) -> str:
     if r.get("source_kb"):
         lines.append(f"  deploy source {r['source_kb']} KB kept (shared by the project's "
                      "environments; remove it by hand once none is left)")
-    for row in result.get("shared_coverage_retained") or []:
+    retained_rows = result.get("shared_coverage_retained")
+    if not isinstance(retained_rows, list):
+        retained_rows = result.get("shared_coverage_rows") or []
+    for row in retained_rows:
         lines.append(f"  shared zone coverage retained for {row['hostname']} in {row['zone']}")
     for row in result["dns_records"]:
         note = "" if row.get("verifiable") else " (applied before verification; check it by hand)"

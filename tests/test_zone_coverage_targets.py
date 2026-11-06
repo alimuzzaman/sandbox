@@ -1526,6 +1526,36 @@ class TestTransitionsAndReleases(unittest.TestCase):
                             {"file": "/etc/nginx/conf.d/sandbox-coverage-other.test.conf"}], "version": [1, 26, 0]}
         nginx.probe.return_value = facts
         nginx.preflight.return_value = facts
+        # The transition's successful-delivery control uses real pinned TLS.
+        authority = make_tls_authority(self)
+        servers = {zone: make_loopback_tls_server(authority, "app." + zone)
+                   for zone in ("asb.bd", "other.test")}
+        for server in servers.values():
+            self.addCleanup(server["cleanup"])
+        context = ssl.create_default_context(cafile=authority[2])
+        addresses = {"asb.bd": "127.0.0.1", "other.test": "127.0.0.2"}
+        def resolver(host, port, *args, **kwargs):
+            for zone, address in addresses.items():
+                if host.startswith("sb-verify-") and host.endswith("." + zone):
+                    self.assertEqual(port, 443)
+                    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]
+            raise socket.gaierror(socket.EAI_NONAME, "synthetic target negative")
+        fixture.patch.object(socket, "getaddrinfo", side_effect=resolver)
+        fixture.transition_resolver = resolver
+        original_connect = socket.create_connection
+        def connect(address, *args, **kwargs):
+            for zone, pinned in addresses.items():
+                if address == (pinned, 443):
+                    return original_connect(("127.0.0.1", servers[zone]["port"]), *args, **kwargs)
+            raise AssertionError("unexpected pinned destination")
+        fixture.patch.object(socket, "create_connection", side_effect=connect)
+        original_build = urllib.request.build_opener
+        def opener(*handlers):
+            for handler in handlers:
+                if isinstance(handler, targets._PinnedHTTPSHandler):
+                    handler._context = context
+            return original_build(*handlers)
+        fixture.patch.object(urllib.request, "build_opener", side_effect=opener)
         return fixture, store, provider, args, calls, failing, shared, other, fallback, certificate
 
     def move_to_other_zone(self, fixture):
@@ -1537,6 +1567,7 @@ class TestTransitionsAndReleases(unittest.TestCase):
         self.move_to_other_zone(fixture)
         self.next_delivery(fixture, "zone-b-success")
         self.assertTrue(self.apply(args)["ok"])
+        self.assertTrue(fixture.delivery()["operation"]["delivery_succeeded"])
         self.assertEqual(calls, ["asb.bd"])
         self.assertNotIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
         self.assertEqual(store.read("other.test")["document"]["dependents"][fixture.key]["state"], "bound")
@@ -1544,6 +1575,33 @@ class TestTransitionsAndReleases(unittest.TestCase):
         self.assertIn(other, provider._records)
         self.assertEqual(fallback.read_bytes(), b"shared fallback fixture")
         self.assertEqual(certificate.read_bytes(), b"shared certificate fixture")
+
+    def test_unverified_shared_zone_move_keeps_old_claim(self):
+        fixture, store, provider, args, calls, failing, shared, other, fallback, certificate = self.setup_two_zone_transition()
+        self.move_to_other_zone(fixture)
+        self.next_delivery(fixture, "zone-b-unverified")
+        socket.getaddrinfo.side_effect = socket.gaierror(socket.EAI_NONAME, "synthetic negative")
+        result = self.apply(args)
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [])
+        self.assertEqual(result["coverage_binding"], "unknown")
+        self.assertEqual(result["edge"]["state"], "ready")
+        self.assertEqual(result["edge"]["evidence"]["public_edge"]["result"], "unverified")
+        self.assertFalse(fixture.delivery()["operation"]["delivery_succeeded"])
+        self.assertEqual(calls, [])
+        self.assertIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertEqual(store.read("other.test")["document"]["dependents"][fixture.key]["state"], "bound")
+        from sandbox.hosting.zone_coverage.claims import shared_claims
+        self.assertEqual({c["zone"] for c in shared_claims(fixture.repository.load()["hosts"][fixture.key])},
+                         {"asb.bd", "other.test"})
+        self.next_delivery(fixture, "zone-b-retry-after-unverified")
+        socket.getaddrinfo.side_effect = fixture.transition_resolver
+        retry = self.apply(args)
+        self.assertTrue(retry["ok"])
+        self.assertTrue(fixture.delivery()["operation"]["delivery_succeeded"])
+        self.assertEqual(calls, ["asb.bd"])
+        self.assertNotIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertEqual(store.read("other.test")["document"]["dependents"][fixture.key]["state"], "bound")
 
     def test_failed_shared_zone_move_preserves_both_claims(self):
         fixture, store, provider, args, calls, failing, shared, other, fallback, certificate = self.setup_two_zone_transition()

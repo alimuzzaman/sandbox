@@ -7643,12 +7643,18 @@ def cmd_host(cfg, args) -> None:
                     # The current shared zone stays bound; all other claims are
                     # independently retryable until their release is persisted.
                     pending = [claim for claim in claims if claim["zone"] != current_zone]
-                    try:
-                        set_pending(state["hosts"][target_key], pending)
-                        recovery_repository._write(state)
-                    except Exception:
+                    if pending and result.get("delivery", {}).get("delivery_succeeded") is not True:
+                        # Runtime readiness does not prove delivery when the public
+                        # edge was unobserved. Keep all claims for a later retry.
                         binding_known = False
                         result["coverage_binding"] = "unknown"
+                    else:
+                        try:
+                            set_pending(state["hosts"][target_key], pending)
+                            recovery_repository._write(state)
+                        except Exception:
+                            binding_known = False
+                            result["coverage_binding"] = "unknown"
                     if binding_known:
                         for claim in list(pending):
                             try:

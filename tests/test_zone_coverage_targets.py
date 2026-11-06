@@ -58,6 +58,8 @@ from tests.test_zone_coverage_matrix import StatefulFakeProvider
 
 # Every acceptance test in this module runs under a removable I/O boundary.
 _guard = None
+_raw_build_opener = urllib.request.build_opener
+_raw_cloudflare_drift = hosting_cmd._cloudflare_drift
 
 def setUpModule():
     global _guard
@@ -357,6 +359,29 @@ class TestZoneCoverageDecideRows(unittest.TestCase):
         res_exact = targets.decide(val_uncovered, self.entry, None, store_client=store_client, cf_client=mock_cf, facts={"routes": []}, report=True)
         self.assertEqual(res_exact, {"mode": "exact"})
 
+    def test_retired_zone_with_fallback_refuses(self):
+        seed_store_zone(self.td, state="retired")
+        store = make_real_store(self.td, self.entry)
+        refusal = targets.decide(self.validated, self.entry, None, store_client=store,
+                                 cf_client=self.cf_client, facts=self.facts, report=True)
+        self.assertEqual(refusal["code"], COVERAGE_RECORD_MISSING)
+        without_fallback = targets.decide(self.validated, self.entry, None, store_client=store,
+                                          cf_client=self.cf_client, facts={"routes": []}, report=True)
+        self.assertEqual(without_fallback, {"mode": "exact"})
+
+    def test_dns_only_owned_and_equal_records_stay_exact(self):
+        seed_store_zone(self.td)
+        store = make_real_store(self.td, self.entry)
+        validated = copy.deepcopy(self.validated); validated["cloudflare"]["proxied"] = False
+        owned = {"records": [{"applied": {"name": "app.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": False}}]}
+        result = targets.decide(validated, self.entry, owned, store_client=store,
+                                cf_client=self.cf_client, facts=self.facts, report=True)
+        self.assertEqual(result, {"mode": "exact", "zone": "asb.bd", "drift_rule": True})
+        self.cf_client.create_address("z-asb", "app.asb.bd", "198.51.100.1", proxied=False)
+        adopted = targets.decide(validated, self.entry, None, store_client=store,
+                                 cf_client=self.cf_client, facts=self.facts, report=True)
+        self.assertEqual(adopted, {"mode": "exact", "zone": "asb.bd", "drift_rule": True})
+
     def test_decide_row_4_explicit_exact_and_dns_only(self):
         # cloudflare.dns == "exact", or DNS-only (proxied: false):
         # exact with drift_rule: True.
@@ -600,6 +625,46 @@ class TestPinnedTLSVerification(unittest.TestCase):
         self.assertIn("hostname mismatch", str(failure.exception.reason).lower())
         self.assertEqual(wrong["received_sni"], ["app.asb.bd"])
 
+    def test_shared_pin_bypasses_explicit_https_proxy(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        observed = []
+        class Proxy(BaseHTTPRequestHandler):
+            def do_CONNECT(self):
+                observed.append(self.path)
+                self.send_error(502)
+            def log_message(self, *_args):
+                pass
+        proxy = HTTPServer(("127.0.0.1", 0), Proxy)
+        _guard.allow_loopback("127.0.0.1", proxy.server_port)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True); thread.start()
+        self.addCleanup(thread.join, 3); self.addCleanup(proxy.server_close); self.addCleanup(proxy.shutdown)
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        # Positive control: an ordinary explicit proxy handler reaches this proxy.
+        with mock.patch.object(urllib.request, "build_opener", _raw_build_opener):
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"https": proxy_url}))
+            with self.assertRaises(URLError):
+                opener.open("https://app.asb.bd/", timeout=3)
+        self.assertEqual(len(observed), 1)
+        server = self.server("app.asb.bd")
+        real_factory = targets.pinned_edge_handler
+        def factory(*args, **kwargs):
+            handler = real_factory(*args, **kwargs)
+            handler._context = self.context
+            return handler
+        def resolver(host, port):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+        with mock.patch.object(urllib.request, "build_opener", _raw_build_opener), \
+             mock.patch.object(urllib.request, "getproxies", return_value={"https": proxy_url}), \
+             mock.patch.object(urllib.request, "proxy_bypass", return_value=False), \
+             mock.patch.object(targets, "pinned_edge_handler", side_effect=factory), \
+             self.mapped(server), mock.patch.object(hosting_cmd.time, "sleep"):
+            evidence = targets.verify_shared([{"hostname": "app.asb.bd", "mode": "serve"}],
+                                             "asb.bd", hosting_cmd._verify_edge, resolver=resolver)
+        self.assertEqual(evidence["public_edge"]["result"], "passed")
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(server["received_sni"], ["app.asb.bd"])
+        self.assertIn("Host: app.asb.bd\r\n", server["received_headers"][0])
+
     def test_shared_label_unresolved_is_unverified(self):
         def failing_resolver(host, port):
             raise socket.gaierror(socket.EAI_NONAME, "not found")
@@ -773,6 +838,31 @@ environments:
         self.assertFalse([c for c in provider.calls if c[0] in ("create_address", "upsert_address", "delete_record", "update_record", "restore_record")])
         self.assertTrue(any(c[0] == "create_origin_certificate" and "app.asb.bd" in c[2] for c in provider.calls))
         self.assertEqual(provider._records, shared)
+
+    def test_shared_apply_retained_request_does_not_downgrade_bound(self):
+        fixture, store, provider, shared, args, events, fallback, certificate = self.setup_shared(with_revision=True)
+        first = io.StringIO()
+        with contextlib.redirect_stdout(first):
+            hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(first.getvalue())["ok"])
+        before = store.read("asb.bd")["document"]["dependents"][fixture.key]
+        self.assertEqual(before["state"], "bound")
+        effects = len(fixture.compose.mock_calls)
+        binding_events = list(events)
+        self.assertNotIn("coverage_release_pending", fixture.repository.load()["hosts"][fixture.key])
+        replay = io.StringIO()
+        with contextlib.redirect_stdout(replay):
+            try:
+                hosting_cmd.cmd_host(None, args)
+            except SystemExit as exc:
+                self.assertEqual(exc.code, 1)
+        after = store.read("asb.bd")["document"]["dependents"][fixture.key]
+        self.assertEqual(after["state"], "bound")
+        self.assertEqual(after, before)
+        self.assertEqual(len(fixture.compose.mock_calls), effects)
+        self.assertEqual(events, binding_events)
+        self.assertNotIn("coverage_release_pending", fixture.repository.load()["hosts"][fixture.key])
+        self.assertTrue(json.loads(replay.getvalue())["lookup_only"])
 
     def test_failed_shared_apply_retains_pending_and_shared_resources(self):
         fixture, store, provider, shared, args, events, fallback, certificate = self.setup_shared()
@@ -999,6 +1089,23 @@ environments:
             with self.assertRaisesRegex(hosting.HostingError, "cloudflare.dns must be auto or exact"):
                 hosting.validate_manifest(str(fixture.manifest_root))
 
+    def test_image_preflight_covered_exact_and_adopted_controls(self):
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+        provider._records.append({"id": "exact-target", "name": "app.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True})
+        validated = hosting.validate_manifest(str(fixture.root))
+        for mode in ("exact", "auto"):
+            with self.subTest(mode=mode):
+                current = copy.deepcopy(validated); current["cloudflare"]["dns"] = mode
+                before = copy.deepcopy(current); provider.calls.clear()
+                with mock.patch.object(hosting_cmd, "_cloudflare_drift", side_effect=_raw_cloudflare_drift), \
+                     mock.patch.object(cloudflare, "cloudflare_token", return_value="synthetic") as token:
+                    plan = hosting_cmd._HostImageEdgeAdapter(current).preflight(fixture.entry, fixture.remote_name)
+                token.assert_called_once()
+                self.assertEqual(current, before)
+                self.assertEqual(plan["routes"][0]["hostname"], "app.asb.bd")
+                self.assertTrue(any(call[0] == ("zone_records" if mode == "auto" else "records") for call in provider.calls))
+                self.assertFalse([call for call in provider.calls if call[0] in ("upsert_address", "update_record", "delete_record", "create_address")])
+
     def test_image_preflight_refuses_shared_without_mutating_validated(self):
         val = {
             "project": "demo", "environment": "main",
@@ -1060,6 +1167,16 @@ class TestDecideRefusesForeignNodes(unittest.TestCase):
 
 class TestExactRecordDriftAndMatrix(unittest.TestCase):
     """Item 8: test_exact_record_matrix, dual stack, redirect CNAME, uncovered overwrite."""
+
+    def test_exact_owned_record_changes_to_new_desired_address(self):
+        existing = {"id": "owned", "name": "app.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}
+        snapshot = [{"created_id": "owned", "applied": dict(existing)}]
+        wanted = {"hostname": "app.asb.bd", "address": "198.51.100.2", "proxied": True}
+        self.assertEqual(targets.check_exact_record(wanted, [existing], snapshot), {"action": "write"})
+        changed = {**existing, "content": "198.51.100.3"}
+        with self.assertRaises(CoverageError) as failure:
+            targets.check_exact_record(wanted, [changed], snapshot)
+        self.assertEqual(failure.exception.code, MANAGED_RECORD_DRIFT)
 
     def test_exact_record_matrix(self):
         wanted = {"hostname": "app.asb.bd", "address": "198.51.100.1", "proxied": True}

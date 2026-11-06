@@ -4377,7 +4377,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 purge_edge_cache: bool = False, delivery_holder=None,
                 local_images_digest: str | None = None,
                 active_image_lease=None,
-                allow_record_overwrite: bool = False) -> dict:
+                allow_record_overwrite: bool = False,
+                before_effects=None) -> dict:
     # Validate genuine retained child/source evidence before secret publication or effects.
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities(['delivery_outcomes_v1',
@@ -4473,6 +4474,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         except (OSError, ValueError, RuntimeError) as exc:
             # Retain original authority after an ambiguous commit. Never clear or retry it.
             raise hosting.HostingError("recovery_receipt_unavailable") from exc
+    if before_effects is not None:
+        before_effects()
     attempt.checkpoint('source', 'source_publish')
     reservation = _prepare_host_apply(entry, home, validated)
     try:
@@ -7592,23 +7595,21 @@ def cmd_host(cfg, args) -> None:
                 current_zone = decision.get("zone") if decision.get("mode") == "shared" else None
                 if current_zone and not any(claim["zone"] == current_zone for claim in claims):
                     claims.append({"mode": "shared", "zone": current_zone})
-                if claims:
-                    set_pending(state.setdefault("hosts", {}).setdefault(target_key, {}), claims)
-                    # Keep every claim durable before a new bind or target effects.
-                    recovery_repository._write(state)
                 runtime = hosting.desired_runtime(validated, args.remote, state)
                 runtime["records"] = current_plan["records"]
 
-                store_client = None
-                if decision.get("mode") == "shared":
-                    store_client = ZoneCoverageClient(current_entry)
-                    targets.bind_pending(
-                        store_client,
-                        decision["zone"],
-                        target_key,
-                        validated["routes"][0]["hostname"],
-                        generation=decision.get("generation"),
-                    )
+                store_client = ZoneCoverageClient(current_entry) if current_zone else None
+                def prepare_coverage():
+                    if claims:
+                        set_pending(state.setdefault("hosts", {}).setdefault(target_key, {}), claims)
+                        # Persist every claim before a new bind or target effects.
+                        recovery_repository._write(state)
+                    if current_zone:
+                        targets.bind_pending(
+                            store_client, current_zone, target_key,
+                            validated["routes"][0]["hostname"],
+                            generation=decision.get("generation"),
+                        )
 
                 with _hold_controller_awake(), _local_image_apply_lease(
                         validated, args.remote,
@@ -7622,6 +7623,7 @@ def cmd_host(cfg, args) -> None:
                         local_images_digest=getattr(args, "local_images", None),
                         active_image_lease=active_image_lease,
                         allow_record_overwrite=bool(getattr(args, "allow_record_overwrite", False)),
+                        before_effects=prepare_coverage,
                     )
 
                 binding_known = True

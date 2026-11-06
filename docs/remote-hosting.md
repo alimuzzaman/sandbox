@@ -1162,7 +1162,7 @@ Destroy removes the target state before releasing its shared-coverage dependent.
 
 When a target moves between shared zones or from shared coverage to exact DNS, a successful apply releases obsolete dependent claims while keeping the currently used shared zone bound. Each uncertain release is retained for a later retry and the apply reports `coverage_binding: unknown`. A failed apply does not release old claims. Older single-zone pending markers remain readable; multiple pending zones are stored together.
 
-For a shared-coverage apply, JSON output includes the observed origin, public-edge and resolver evidence under `edge.evidence`; text status reports each result separately. If the fresh verification label does not resolve, apply can finish with the runtime ready while public-edge evidence is `unverified` and the delivery remains incomplete.
+For a shared-coverage apply, the fresh-label edge verification connects directly to the resolved edge address, bypassing ambient HTTPS proxies. JSON output includes the observed origin, public-edge and resolver evidence under `edge.evidence`; text status reports each result separately. If the fresh verification label does not resolve, apply can finish with the runtime ready while public-edge evidence is `unverified` and the delivery remains incomplete.
 
 Enabling installs one error-only nginx route, `/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`, with its own wildcard origin certificate, checks it at the origin, then publishes a proxied `*.<zone>` record and checks it through the public edge. Names under the zone with no site get a generic 404 marked `noindex`, including multi-level names that reach the server.
 

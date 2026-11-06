@@ -579,7 +579,10 @@ def verify_shared(
         # Strip fresh_hostnames from verify_kwargs to bypass DNS propagation wait
         vk = dict(verify_kwargs)
         vk.pop("fresh_hostnames", None)
-        verify(routes, handlers=(handler,), fresh_hostnames=frozenset(), **vk)
+        # A shared verification must connect to the freshly resolved edge IP,
+        # so ambient proxies cannot replace that destination with a CONNECT hop.
+        verify(routes, handlers=(urllib.request.ProxyHandler({}), handler),
+               fresh_hostnames=frozenset(), **vk)
         public_edge = {"result": "passed"}
 
     return {

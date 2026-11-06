@@ -1157,86 +1157,93 @@ class TestExactRecordDriftAndMatrix(unittest.TestCase):
 
 
 class TestPreservationAndEnableSafety(unittest.TestCase):
-    """Item 9: Auto preserves exact target, multi-route, and enable safety."""
-
     def test_auto_preserves_existing_exact_target(self):
-        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
-        val = {
-            "project": "demo", "environment": "main",
-            "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],
-            "cloudflare": {"proxied": True, "tls": "origin-ca", "ssl_mode": "strict", "dns": "auto"},
-        }
-        target_record = {"records": [{"applied": {"name": "app.asb.bd", "type": "A", "content": "198.51.100.1"}}]}
-        td = tempfile.mkdtemp()
-        try:
-            store = make_real_store(td, entry)
-            seed_store_zone(td, "asb.bd", "active")
-            cf = StatefulFakeProvider("z-asb", "asb.bd", "strict")
-            facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf", "coverage_zone": "asb.bd"}]}
-            res = targets.decide(val, entry, target_record, store_client=store, cf_client=cf, facts=facts, report=True)
-            self.assertEqual(res, {"mode": "exact", "zone": "asb.bd", "drift_rule": True})
-        finally:
-            shutil.rmtree(td, ignore_errors=True)
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+        target = {"id": "owned", "name": "app.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True}
+        provider._records.append(dict(target))
+        fixture.repository._write({"version": 1, "hosts": {fixture.key: {"records": [{"zone_id": "z-asb", "created_id": "owned", "applied": dict(target)}]}}})
+        args.action = "plan"
+        fixture.patch.object(hosting_cmd, "_add_front_door_plan")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): hosting_cmd.cmd_host(None, args)
+        self.assertEqual(json.loads(output.getvalue())["dns_coverage"]["mode"], "exact")
+        args.action = "apply"; output = io.StringIO()
+        with contextlib.redirect_stdout(output): hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(output.getvalue())["ok"])
+        self.assertEqual(events, [])
+        self.assertIn(target, provider._records)
+        self.assertFalse([c for c in provider.calls if c[0] in ("upsert_address", "update_record", "delete_record")])
 
     def test_multi_route_owned_equal_refused(self):
         entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
-        val = {
-            "project": "demo", "environment": "main",
-            "routes": [{"hostname": "a.asb.bd", "mode": "serve"}, {"hostname": "b.asb.bd", "mode": "serve"}],
-            "cloudflare": {"proxied": True, "tls": "origin-ca", "ssl_mode": "strict", "dns": "auto"},
-        }
-        td = tempfile.mkdtemp()
-        try:
-            store = make_real_store(td, entry)
-            seed_store_zone(td, "asb.bd", "active")
+        val = {"project": "demo", "environment": "main", "routes": [{"hostname": "a.asb.bd", "mode": "serve"}, {"hostname": "b.asb.bd", "mode": "serve"}],
+               "cloudflare": {"proxied": True, "tls": "origin-ca", "ssl_mode": "strict", "dns": "auto"}}
+        with tempfile.TemporaryDirectory() as td:
+            store = make_real_store(td, entry); seed_store_zone(td)
             cf = StatefulFakeProvider("z-asb", "asb.bd", "strict")
-            facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf", "coverage_zone": "asb.bd"}]}
-
-            # Neither owned nor equal -> refuses
-            res = targets.decide(val, entry, None, store_client=store, cf_client=cf, facts=facts, report=True)
-            self.assertEqual(res.get("code"), COVERAGE_NAME_INELIGIBLE)
-
-            # All owned -> exact
-            target_owned = {"records": [
-                {"applied": {"name": "a.asb.bd", "type": "A"}},
-                {"applied": {"name": "b.asb.bd", "type": "A"}},
-            ]}
-            res_owned = targets.decide(val, entry, target_owned, store_client=store, cf_client=cf, facts=facts, report=True)
-            self.assertEqual(res_owned, {"mode": "exact", "zone": "asb.bd", "drift_rule": True})
-        finally:
-            shutil.rmtree(td, ignore_errors=True)
+            facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"}]}
+            self.assertEqual(targets.decide(val, entry, None, store_client=store, cf_client=cf, facts=facts, report=True)["code"], COVERAGE_NAME_INELIGIBLE)
+            owned = {"records": [{"applied": {"name": name, "type": "A"}} for name in ("a.asb.bd", "b.asb.bd")]}
+            self.assertEqual(targets.decide(val, entry, owned, store_client=store, cf_client=cf, facts=facts, report=True)["mode"], "exact")
+            cf._records.extend({"id": name, "name": name, "type": "A", "content": "198.51.100.1", "proxied": True} for name in ("a.asb.bd", "b.asb.bd"))
+            self.assertEqual(targets.decide(val, entry, None, store_client=store, cf_client=cf, facts=facts, report=True)["mode"], "exact")
+            self.assertFalse([c for c in cf.calls if c[0] in ("create_address", "delete_record")])
 
     def test_hostname_owned_by_other_route_refuses(self):
-        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "capabilities": ["zone_coverage_v1"]}
-        val = {
-            "project": "demo", "environment": "main",
-            "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],
-            "cloudflare": {"proxied": True, "tls": "origin-ca", "ssl_mode": "strict", "dns": "auto"},
-        }
-        # Hostname owned by other target
-        other_target_record = {"records": [{"applied": {"name": "app.asb.bd", "type": "A", "target": "r1/other/main"}}]}
-        td = tempfile.mkdtemp()
-        try:
-            store = make_real_store(td, entry)
-            seed_store_zone(td, "asb.bd", "active")
-            cf = StatefulFakeProvider("z-asb", "asb.bd", "strict")
-            facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf", "coverage_zone": "asb.bd"}]}
-            res = targets.decide(val, entry, other_target_record, store_client=store, cf_client=cf, facts=facts, report=True)
-            # Must refuse or be guarded
-            self.assertIn(res.get("mode"), ("exact", "refused"))
-        finally:
-            shutil.rmtree(td, ignore_errors=True)
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+        target = {"id": "owned", "name": "app.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True}
+        provider._records.append(dict(target))
+        row = {"zone_id": "z-asb", "created_id": "owned", "applied": dict(target)}
+        owner = "myvps/other/production"
+        fixture.repository._write({"version": 1, "hosts": {owner: {"records": [row]}}})
+        fixture.patch.object(hosting_cmd, "_add_front_door_plan")
+        args.action = "plan"; output = io.StringIO()
+        with contextlib.redirect_stdout(output): hosting_cmd.cmd_host(None, args)
+        refusal = json.loads(output.getvalue())["dns_coverage"]
+        self.assertEqual(refusal["code"], COVERAGE_NAME_INELIGIBLE)
+        self.assertIn(owner, refusal["reason"])
+        args.action = "apply"; output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit): hosting_cmd.cmd_host(None, args)
+        self.assertEqual(json.loads(output.getvalue())["code"], COVERAGE_NAME_INELIGIBLE)
+        self.assertIn(owner, output.getvalue())
+        fixture.compose.assert_not_called()
+        self.assertFalse([c for c in provider.calls if c[0] in ("upsert_address", "update_record", "delete_record")])
+        fixture.repository._write({"version": 1, "hosts": {fixture.key: {"records": [row]}}})
+        args.action = "plan"; output = io.StringIO()
+        with contextlib.redirect_stdout(output): hosting_cmd.cmd_host(None, args)
+        self.assertEqual(json.loads(output.getvalue())["dns_coverage"]["mode"], "exact")
+        args.action = "apply"; output = io.StringIO()
+        with contextlib.redirect_stdout(output): hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(output.getvalue())["ok"])
 
     def test_enable_leaves_existing_target_files_and_records(self):
-        from sandbox.hosting.zone_coverage.service import plan_enable
-        entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1", "ssh": "u@h"}
-        cf = StatefulFakeProvider("z-asb", "asb.bd", "strict", records=[
-            {"id": "rec-target", "name": "target.asb.bd", "type": "A", "content": "1.1.1.1", "proxied": True}
-        ])
-        plan = plan_enable(entry, "asb.bd", cf_client=cf)
-        self.assertEqual(plan["zone"], "asb.bd")
-        # Target record untouched
-        self.assertEqual(len(cf.records("z-asb", "target.asb.bd")), 1)
+        from sandbox.hosting.zone_coverage.service import plan_enable, enable
+        from sandbox.hosting.zone_coverage import fallback as fallback_module
+        from sandbox.hosting.front_door import nginx
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); entry = {"name": "r1", "front_door": "nginx", "origin_ipv4": "198.51.100.1"}
+            store = make_real_store(td, entry)
+            route = root / "target.conf"; route.write_bytes(b"existing exact route")
+            cert = root / "target.pem"; cert.write_bytes(b"existing exact certificate")
+            host_state = root / "hosts.json"; host_state.write_text(json.dumps({"version": 1, "hosts": {"r1/site/prod": {"records": [{"created_id": "target"}]}}}))
+            snapshots = [path.read_bytes() for path in (route, cert, host_state)]
+            target = {"id": "target", "name": "target.asb.bd", "type": "A", "content": "192.0.2.9", "proxied": True}
+            provider = StatefulFakeProvider("z-asb", "asb.bd", "strict", records=[dict(target)])
+            facts = {"config_valid": True, "version": [1, 26, 0], "routes": [{"file": "/etc/nginx/conf.d/sandbox-host-site-prod.conf", "hostnames": ["target.asb.bd"]}]}
+            def install(entry, zone, **kwargs):
+                self.assertEqual(zone, "asb.bd")
+                (root / "fallback.conf").write_bytes(b"new fallback")
+                (root / "fallback.pem").write_bytes(b"new fallback cert")
+                return {"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"}
+            with mock.patch.object(nginx, "probe", return_value=facts), mock.patch.object(fallback_module, "install_fallback", side_effect=install) as installed, mock.patch("sandbox.hosting.zone_coverage.service.public_probe", return_value=True):
+                plan = plan_enable(entry, "asb.bd", store_client=store, cf_client=provider)
+                result = enable(entry, "asb.bd", plan, store_client=store, cf_client=provider)
+            installed.assert_called_once()
+            self.assertEqual(result["state"], "active")
+            self.assertEqual(store.read("asb.bd")["document"]["state"], "active")
+            self.assertEqual([path.read_bytes() for path in (route, cert, host_state)], snapshots)
+            self.assertIn(target, provider._records)
+            self.assertEqual(len(provider.records("z-asb", "*.asb.bd")), 1)
 
 
 class TestTransitionsAndReleases(unittest.TestCase):

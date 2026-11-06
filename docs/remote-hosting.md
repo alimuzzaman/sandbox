@@ -1121,12 +1121,16 @@ Moving every site from one remote to another: [server-migration.md](server-migra
 
 ### Shared zone coverage
 
-Stage 2: hosted targets use an enabled zone with shared wildcard coverage and no per-target DNS write. `sb remote coverage` plans, enables, and manages covered zones on nginx remotes.
+Status: partly built. `sb remote coverage` can plan, enable and show one zone on an nginx remote, and hosted targets can use an enabled zone. Disable, repair, certificate renewal, fallback removal and releasing a dependent are not available yet. Do not enable coverage on a real zone until they are.
 
 When a target is hosted under an active covered zone:
 - The target binds as a dependent in the remote's coverage store.
 - No individual DNS record is created on Cloudflare for the target hostname; traffic resolves via the shared `*.<zone>` record.
 - Destroying a target (`sb host destroy`) drops the target's web service and nginx routes, releasing the store dependent, but leaves the shared `*.<zone>` record and the fallback catch-all configuration file intact.
+
+With a zone enabled, a new single-route proxied target at an eligible first-level name makes no DNS change and uses the shared record. Verification reaches the public edge using a fresh label under the zone, so a cached "does not exist" answer for the target's name cannot fail delivery; `host status` reports origin, public edge and resolver results separately. A name with its own TXT, address or delegation record, or a record below it, is not eligible, nor is a target with aliases or one delivered through image activation: apply refuses, and `cloudflare.dns: exact` in the manifest selects a managed record instead. Each target keeps its own origin certificate.
+
+In a zone with coverage, apply refuses to overwrite an address record that changed since Sandbox wrote it (`managed_record_drift`), unless `--allow-record-overwrite` is passed, and always refuses to overwrite a record Sandbox never wrote (`record_not_owned`). Other zones keep today's behaviour.
 
 #### Target DNS Mode (`cloudflare.dns`)
 

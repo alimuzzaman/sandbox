@@ -22,6 +22,22 @@ from sandbox.hosting.zone_coverage.service import (
 )
 
 
+_guard = None
+
+def setUpModule():
+    global _guard
+    from tests.zone_coverage_test_support import GuardedIO
+    _guard = GuardedIO()
+    _guard.__enter__()
+
+def tearDownModule():
+    global _guard
+    guard, _guard = _guard, None
+    guard.__exit__(None, None, None)
+    if guard.attempts:
+        raise AssertionError("unexpected I/O attempts: %r" % (guard.attempts,))
+
+
 class FakeStoreClient:
     def __init__(self, doc=None):
         self.doc = doc
@@ -499,7 +515,8 @@ class TestZoneCoverageService(unittest.TestCase):
         self.assertEqual(store.doc["state"], "incomplete")
         self.assertEqual(store.doc["interrupted_kind"], "enable")
 
-    def test_status(self):
+    @patch("sandbox.hosting.front_door.nginx.read_route", return_value=None)
+    def test_status(self, _read_route):
         store = FakeStoreClient(doc={
             "schema_version": 1,
             "zone": "asb.bd",
@@ -1289,11 +1306,8 @@ class TestZoneCoverageService(unittest.TestCase):
         from tests.subprocess_support import synthetic_environment
 
         with tempfile.TemporaryDirectory() as td:
-            def real_ssh_run(entry, command, timeout=15):
-                env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
-                return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
-
-            store = ZoneCoverageClient(self.entry, ssh_run=real_ssh_run)
+            from tests.zone_coverage_test_support import store_transport
+            store = ZoneCoverageClient(self.entry, ssh_run=store_transport(td))
             cf = FakeCfClient()
             plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)
 
@@ -1492,11 +1506,8 @@ class TestZoneCoverageService(unittest.TestCase):
 
         # 1. Service test with real store
         with tempfile.TemporaryDirectory() as td:
-            def real_ssh_run(entry, command, timeout=15):
-                env = synthetic_environment({'SANDBOX_HOME': td, 'HOME': td})
-                return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
-
-            store = ZoneCoverageClient(self.entry, ssh_run=real_ssh_run)
+            from tests.zone_coverage_test_support import store_transport
+            store = ZoneCoverageClient(self.entry, ssh_run=store_transport(td))
             cf = FakeCfClient()
             cf.create_origin_certificate = lambda *a, **kw: None
             plan = plan_enable(self.entry, "asb.bd", store_client=store, cf_client=cf)

@@ -33,7 +33,7 @@ import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
 from sandbox.hosting import edge_cache
-from sandbox.hosting.zone_coverage import COVERAGE_STORE_UNAVAILABLE, CoverageError, targets
+from sandbox.hosting.zone_coverage import COVERAGE_NAME_INELIGIBLE, COVERAGE_STORE_UNAVAILABLE, CoverageError, targets
 from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
 from sandbox.delivery.hosting import HostingAttempt, RetainedDelivery
 from sandbox.delivery.models import DeliveryError, operation_summary
@@ -5144,6 +5144,22 @@ def _cmd_host_image_verify(args) -> None:
         raise SystemExit(1)
 
 
+def _coverage_owner_conflict(state: dict, target_key: str, validated: dict, decision: dict) -> str | None:
+    """Identify an exact record already held by a different target in this zone."""
+    if not decision.get("zone"):
+        return None
+    hostnames = {hosting.normalize_hostname(route["hostname"])
+                 for route in validated.get("routes") or []}
+    for owner, record in (state.get("hosts") or {}).items():
+        if owner == target_key or not isinstance(record, dict):
+            continue
+        for row in record.get("records") or []:
+            applied = row.get("applied") if isinstance(row, dict) else None
+            if isinstance(applied, dict) and applied.get("name") in hostnames:
+                return owner
+    return None
+
+
 def _coverage_decision(validated, entry, target_record, *, report=False, image=False):
     """Supply observed fallback routes only for coverage-capable front doors."""
     from sandbox.hosting.front_door import ZONE_COVERAGE, declaration, front_door_mode
@@ -7505,6 +7521,10 @@ def cmd_host(cfg, args) -> None:
         target_key = hosting.state_key(args.remote, validated)
         target_rec = state.get("hosts", {}).get(target_key)
         coverage_decision = _coverage_decision(validated, entry, target_rec, report=True)
+        owner = _coverage_owner_conflict(state, target_key, validated, coverage_decision)
+        if owner:
+            coverage_decision = {"mode": "refused", "code": COVERAGE_NAME_INELIGIBLE,
+                                 "reason": f"hostname is already managed by target {owner}"}
         if coverage_decision.get("mode") == "refused" or coverage_decision.get("zone"):
             validated["dns_coverage"] = coverage_decision
 
@@ -7558,6 +7578,9 @@ def cmd_host(cfg, args) -> None:
                                  if isinstance(previous_coverage, dict)
                                  and previous_coverage.get("mode") == "shared" else None)
                 decision = _coverage_decision(validated, current_entry, target_rec, report=False)
+                owner = _coverage_owner_conflict(state, target_key, validated, decision)
+                if owner:
+                    raise CoverageError(COVERAGE_NAME_INELIGIBLE, f"hostname is already managed by target {owner}")
                 if decision.get("mode") == "shared" or decision.get("zone"):
                     validated["dns_coverage"] = decision
 

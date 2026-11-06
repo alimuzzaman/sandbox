@@ -30,6 +30,22 @@ from sandbox.hosting.zone_coverage.service import (
 )
 
 
+_guard = None
+
+def setUpModule():
+    global _guard
+    from tests.zone_coverage_test_support import GuardedIO
+    _guard = GuardedIO()
+    _guard.__enter__()
+
+def tearDownModule():
+    global _guard
+    guard, _guard = _guard, None
+    guard.__exit__(None, None, None)
+    if guard.attempts:
+        raise AssertionError("unexpected I/O attempts: %r" % (guard.attempts,))
+
+
 class Crash(BaseException):
     """Simulated unhandled crash during operation."""
     pass
@@ -141,11 +157,8 @@ class TestZoneCoverageMatrix(unittest.TestCase):
         self.addCleanup(self._public_probe_patcher.stop)
 
     def _make_store_client(self) -> ZoneCoverageClient:
-        def real_ssh_run(entry, command, timeout=15):
-            from tests.subprocess_support import synthetic_environment
-            env = synthetic_environment({'SANDBOX_HOME': self.td, 'HOME': self.td})
-            return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
-        return ZoneCoverageClient(self.entry, ssh_run=real_ssh_run)
+        from tests.zone_coverage_test_support import store_transport
+        return ZoneCoverageClient(self.entry, ssh_run=store_transport(self.td))
 
     def _expire_lease(self, zone: str = "asb.bd"):
         doc_path = os.path.join(self.td, "runtime", "zone-coverage", "zones", f"{zone}.json")

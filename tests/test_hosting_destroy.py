@@ -25,6 +25,57 @@ def _record(**extra):
             "certificate": {"id": "cert1", "hostnames": ["wp-site.example"]}, **extra}
 
 
+
+def guarded_destroy_case(method):
+    """Deny every transport unless the individual fixture explicitly supplies it."""
+    from functools import wraps
+    from tests.zone_coverage_test_support import GuardedIO
+    @wraps(method)
+    def wrapped(self):
+        with GuardedIO() as guard:
+            try:
+                return method(self)
+            finally:
+                if guard.attempts:
+                    raise AssertionError("unexpected I/O attempts: %r" % (guard.attempts,))
+    return wrapped
+
+
+def destroy_dispatch(project, environment, probe, store=None, events=None):
+    """Match commands generated for exactly one fixture target; never execute them."""
+    name = destroy.compose_name(project, environment)
+    home = "/fixture/sandbox"
+    paths = destroy._paths(home, project, environment)
+    route = destroy._route_file(name, "nginx")
+    certs = destroy._cert_dirs(name, "nginx")
+    expected_probe = destroy._probe_command(name, paths, route, certs)
+    expected_teardown = destroy._remote_teardown_command(name, paths)
+    capture = []
+    def capture_command(entry, command, timeout=30):
+        capture.append(command)
+        return subprocess.CompletedProcess([], 0, "", "")
+    with mock.patch.object(destroy.remote, "ssh_run", capture_command):
+        destroy._remove_edge({}, name, "nginx", False)
+    expected_edge, = capture
+    def dispatch(entry, command, timeout=30):
+        if command == "echo ${SANDBOX_HOME:-$HOME/sandbox}":
+            return subprocess.CompletedProcess([], 0, home + "\n", "")
+        if command == expected_probe:
+            return subprocess.CompletedProcess([], 0, probe, "")
+        if command == expected_edge:
+            return subprocess.CompletedProcess([], 0, "", "")
+        if command == expected_teardown:
+            return subprocess.CompletedProcess([], 0, "removed\n", "")
+        from tests.zone_coverage_test_support import validate_store_command
+        validate_store_command(command)
+        if store is None:
+            raise AssertionError("unexpected store command")
+        result = store(entry, command, timeout=timeout)
+        if events is not None:
+            events.append("store_release")
+        return result
+    return dispatch
+
 class TargetParsing(unittest.TestCase):
     def test_target_needs_project_and_environment(self):
         self.assertEqual(destroy.parse_target("site/sandbox"), ("site", "sandbox"))
@@ -209,7 +260,7 @@ orig_load_host_state = hosting.load_host_state
 @mock.patch.object(destroy.remote, "resolve_sandbox_home", lambda entry: "/home/u/sandbox")
 class Execution(unittest.TestCase):
     def _run(self, record, ssh_outputs, client, extra_hosts=None,
-             project="site", environment="sandbox", record_ssh=False, **kwargs):
+             project="site", environment="sandbox", record_ssh=False, strict_dispatch=None, **kwargs):
         from sandbox.hosting.recovery.repository import RecoveryRepository
         self.events = []
         directory = tempfile.TemporaryDirectory()
@@ -230,6 +281,8 @@ class Execution(unittest.TestCase):
             if record_ssh:
                 self.events.append("ssh")
             commands.append(command)
+            if strict_dispatch is not None:
+                return strict_dispatch(entry, command, timeout=timeout)
             reply = next(replies)
             if callable(reply):
                 reply = reply(repository)
@@ -783,6 +836,7 @@ class Execution(unittest.TestCase):
         kept_idx = next(i for i, line in enumerate(lines) if "kept 1 labelled images not proven ours" in line)
         self.assertLess(removed_idx, kept_idx)
 
+    @guarded_destroy_case
     def test_shared_destroy_releases_after_state_removal_real_store(self):
         with tempfile.TemporaryDirectory() as td:
             zones_dir = Path(td) / "runtime" / "zone-coverage" / "zones"
@@ -807,10 +861,7 @@ class Execution(unittest.TestCase):
 
             from tests.zone_coverage_test_support import store_transport
             transport = store_transport(td)
-            def tracking_ssh(entry, command, timeout=30):
-                result = transport(entry, command, timeout=timeout)
-                events.append("store_release")
-                return result
+            tracking_ssh = destroy_dispatch("site", "sandbox", self.PROBE, transport, events)
 
             def tracking_write(target_state):
                 if KEY not in target_state.get("hosts", {}):
@@ -840,6 +891,7 @@ class Execution(unittest.TestCase):
             end_doc = json.loads((zones_dir / "example.com.json").read_text())
             self.assertNotIn(KEY, end_doc["dependents"])
 
+    @guarded_destroy_case
     def test_shared_destroy_release_failure_is_reported(self):
         with tempfile.TemporaryDirectory() as td:
             zones_dir = Path(td) / "runtime" / "zone-coverage" / "zones"
@@ -866,6 +918,7 @@ class Execution(unittest.TestCase):
                 validate_store_command(command)
                 return subprocess.CompletedProcess([], 1, "", "store locked")
 
+            failing_ssh = destroy_dispatch("site", "sandbox", self.PROBE, failing_ssh)
             directory = tempfile.TemporaryDirectory()
             self.addCleanup(directory.cleanup)
             root = Path(directory.name)
@@ -881,6 +934,7 @@ class Execution(unittest.TestCase):
             end_state = destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")
             self.assertNotIn(KEY, end_state["hosts"])
 
+    @guarded_destroy_case
     def test_fenced_or_failed_destroy_keeps_dependent(self):
         with tempfile.TemporaryDirectory() as td:
             zones_dir = Path(td) / "runtime" / "zone-coverage" / "zones"
@@ -908,7 +962,7 @@ class Execution(unittest.TestCase):
             repository._write({"version": 1, "hosts": {KEY: cov_record}})
 
             from tests.zone_coverage_test_support import store_transport
-            dummy_ssh = store_transport(td)
+            dummy_ssh = destroy_dispatch("site", "sandbox", self.PROBE, store_transport(td))
 
             with mock.patch.object(destroy.remote, "ssh_run", dummy_ssh),                  mock.patch("sandbox.hosting.recovery.repository.RecoveryRepository", lambda: repository),                  mock.patch.object(destroy.hosting, "load_host_state", lambda *a, **k: destroy.hosting.load_host_state.__wrapped__(root / "hosts.json") if hasattr(destroy.hosting.load_host_state, "__wrapped__") else orig_load_host_state(root / "hosts.json")):
                 with self.assertRaises(destroy.DestroyError) as ctx:
@@ -918,6 +972,7 @@ class Execution(unittest.TestCase):
             end_doc = json.loads((zones_dir / "example.com.json").read_text())
             self.assertIn(KEY, end_doc["dependents"])
 
+    @guarded_destroy_case
     def test_coverage_name_collision_never_removes_fallback_or_certificate(self):
         client = FakeClient()
         target_key = "r1/coverage/asb.bd"
@@ -929,11 +984,10 @@ class Execution(unittest.TestCase):
             dns_coverage={"mode": "shared", "zone": "asb.bd", "hostname": "app.asb.bd"},
         )
         commands = []
+        dispatch = destroy_dispatch("coverage", "asb.bd", self.PROBE)
         def capturing_ssh(entry, command, timeout=30):
             commands.append(command)
-            if 'rm -rf' in command or 'xargs -r docker rmi' in command:
-                return subprocess.CompletedProcess([], 0, 'removed\n', '')
-            return subprocess.CompletedProcess([], 0, self.PROBE, '')
+            return dispatch(entry, command, timeout=timeout)
 
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -948,6 +1002,7 @@ class Execution(unittest.TestCase):
             self.assertNotIn("sandbox-coverage-asb.bd.conf", cmd)
             self.assertNotIn("/certs/coverage-asb.bd", cmd)
 
+    @guarded_destroy_case
     def test_shared_destroy_with_leftover_owned_records(self):
         client = FakeClient()
         cov_record = _record(
@@ -964,7 +1019,7 @@ class Execution(unittest.TestCase):
         self.assertIn("shared zone coverage retained for site.example.com in example.com", rendered)
 
         with mock.patch("sandbox.hosting.zone_coverage.targets.release"):
-            result, _, end_state = self._run(cov_record, [self.PROBE, "", "removed\n"], client)
+            result, _, end_state = self._run(cov_record, [], client, strict_dispatch=destroy_dispatch("site", "sandbox", self.PROBE))
             self.assertEqual(result["state"], "destroyed")
             self.assertEqual(client.calls, [("dns", "z1", "rec-leftover"), ("cert", "cert1")])
             self.assertNotIn(KEY, end_state["hosts"])

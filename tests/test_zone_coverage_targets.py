@@ -56,6 +56,38 @@ from tests.test_hosting import _HostingOwnerFixture, _public_acme_manifest
 from tests.test_zone_coverage_matrix import StatefulFakeProvider
 
 
+# Every acceptance test in this module runs under a removable I/O boundary.
+_guard = None
+
+def setUpModule():
+    global _guard
+    from tests.zone_coverage_test_support import GuardedIO
+    _guard = GuardedIO()
+    _guard.__enter__()
+    import tests.test_hosting as fixture_module
+    original = fixture_module.run_test_process
+    def fixture_process(argv, **kwargs):
+        args = tuple(argv)
+        if (len(args) >= 5 and args[:2] == ("git", "-C")
+                and Path(args[2]).resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
+                and (args[3:] in (("init", "--initial-branch=main"), ("add", "."),
+                                  ("commit", "-m", "Synthetic hosting source"),
+                                  ("rev-parse", "HEAD")))):
+            _guard.allow_command(args)
+        return original(argv, **kwargs)
+    _guard.stack.enter_context(mock.patch.object(fixture_module, "run_test_process", fixture_process))
+    original_build = urllib.request.build_opener
+    def no_proxy(*handlers):
+        return original_build(urllib.request.ProxyHandler({}), *handlers)
+    _guard.stack.enter_context(mock.patch.object(urllib.request, "build_opener", no_proxy))
+
+def tearDownModule():
+    global _guard
+    guard, _guard = _guard, None
+    guard.__exit__(None, None, None)
+    if guard.attempts:
+        raise AssertionError("unexpected I/O attempts: %r" % (guard.attempts,))
+
 def make_real_store(temp_dir: str, entry: dict) -> ZoneCoverageClient:
     """Create a real ZoneCoverageClient running against temp_dir as SANDBOX_HOME."""
     from tests.zone_coverage_test_support import store_transport
@@ -98,9 +130,11 @@ def make_loopback_tls_server(san_hostname: str, status_code: int = 200, body: by
     td = tempfile.mkdtemp(prefix="sb-tls-")
     key_path = os.path.join(td, "key.pem")
     cert_path = os.path.join(td, "cert.pem")
+    argv = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
+            "-out", cert_path, "-days", "1", "-nodes", "-subj", f"/CN={san_hostname}"]
+    _guard.allow_command(argv)
     run_test_process(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
-         "-out", cert_path, "-days", "1", "-nodes", "-subj", f"/CN={san_hostname}"],
+        argv,
         env={"HOME": td}, timeout=30, check=True, capture_output=True,
     )
     server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -119,6 +153,7 @@ def make_loopback_tls_server(san_hostname: str, status_code: int = 200, body: by
     server_sock.bind(("127.0.0.1", 0))
     server_sock.listen(5)
     port = server_sock.getsockname()[1]
+    _guard.allow_loopback("127.0.0.1", port)
 
     running = True
 

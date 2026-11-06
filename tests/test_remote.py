@@ -331,11 +331,13 @@ class TestRemoteListProjectSelection(unittest.TestCase):
             seen["project_dir"] = getattr(args, "project_dir", None)
 
         with patch.object(sys, "argv", ["sb", "remote", "list", "--project-dir", "."]), \
+             patch.object(cli, "write_compose_files") as compose, \
              patch.object(remote_cmd, "_cmd_list", capture):
             try:
                 cli.main()
             except SystemExit as exc:
                 self.assertIn(exc.code, (0, None))
+        compose.assert_called_once()
         self.assertEqual(seen.get("project_dir"), ".")
 
 

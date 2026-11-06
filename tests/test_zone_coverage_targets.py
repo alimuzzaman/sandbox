@@ -594,112 +594,163 @@ class TestPinnedTLSVerification(unittest.TestCase):
 
 
 class TestSharedApplyWiring(unittest.TestCase):
-    """Item 4: test_shared_apply_... through real _apply_host and command wiring."""
+    def setup_shared(self):
+        manifest = """version: 1
+project: demo
+environments:
+  production:
+    compose:
+      files: [compose.yml]
+      service: web
+      container_port: 8080
+    healthcheck:
+      path: /
+      statuses: [200]
+    deploy:
+      allowed_branches: [main]
+      require_clean: true
+    host:
+      primary: app.asb.bd
+    cloudflare:
+      proxied: true
+      tls: origin-ca
+      ssl_mode: strict
+"""
+        identity = mock.patch("sandbox.jobs.process._portable_start_identity", return_value="synthetic-start")
+        boot = mock.patch("sandbox.jobs.process._boot_id", return_value="00000000-0000-0000-0000-000000000001")
+        identity.start(); boot.start()
+        self.addCleanup(identity.stop); self.addCleanup(boot.stop)
+        fixture = _HostingOwnerFixture(self, manifest)
+        fixture.entry.update(name=fixture.remote_name, front_door="nginx", capabilities=["zone_coverage_v1"])
+        shared = [{"id": "rec-w", "name": "*.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True}]
+        seed_store_zone(str(fixture.home), shared_records=shared)
+        store = make_real_store(str(fixture.home), fixture.entry)
+        events = []
+        transport = store._ssh_run
+        def recording_transport(entry, command, timeout=15):
+            from tests.zone_coverage_test_support import validate_store_command
+            request = json.loads(base64.b64decode(validate_store_command(command), validate=True))
+            if request.get("action") == "dependent-bind" and request.get("state") == "bound":
+                operation = fixture.delivery()["operation"]
+                self.assertIsNotNone(operation)
+                self.assertEqual(operation["execution_state"], "succeeded")
+            result = transport(entry, command, timeout=timeout)
+            if request.get("action") == "dependent-bind" and not json.loads(result.stdout).get("refused"):
+                events.append(request.get("state"))
+            return result
+        fixture.patch.object(remote, "ssh_run", recording_transport)
+        fallback = fixture.home / "fallback.conf"
+        certificate = fixture.home / "shared-cert.pem"
+        fallback.write_bytes(b"shared fallback fixture")
+        certificate.write_bytes(b"shared certificate fixture")
+        class Provider(StatefulFakeProvider):
+            def upsert_address(self, zone_id, hostname, address, proxied=True):
+                self.calls.append(("upsert_address", zone_id, hostname, address, proxied))
+                return self.create_address(zone_id, hostname, address, proxied)
+            def update_record(self, zone_id, record, **changes):
+                self.calls.append(("update_record", zone_id, record["id"]))
+                record.update(changes)
+                return record
+            def restore_record(self, zone_id, record):
+                self.calls.append(("restore_record", zone_id, record["id"]))
+                self._records.append(copy.deepcopy(record))
+                return record
+        provider = Provider("z-asb", "asb.bd", "strict", records=copy.deepcopy(shared))
+        fixture.patch.object(hosting_cmd.cloudflare, "Client", return_value=provider)
+        fixture.patch.object(hosting_cmd, "_cloudflare_drift", return_value={"configured": False})
+        fixture.patch.object(hosting_cmd, "_host_recovery_eligibility", return_value={"eligible": True})
+        fixture.patch.object(hosting_cmd, "_validate_apply_source", return_value="main")
+        fixture.patch("sandbox.delivery.context.source_commit", return_value="a" * 40)
+        fixture.patch.object(hosting_cmd, "_durable_host_context", return_value=fixture.context)
+        fixture.patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=fixture.commit)
+        artifact = {"schema_version": 1, "kind": "git_commit", "root_relative": ".", "revision": fixture.commit}
+        fixture.patch.object(hosting_cmd, "_prepare_host_source_artifact", return_value=(artifact, fixture.checkout))
+        def source_git(root, *arguments):
+            if arguments == ("rev-parse", "--show-toplevel"):
+                return str(fixture.checkout)
+            if arguments == ("rev-parse", "HEAD"):
+                return fixture.commit
+            if arguments == ("cat-file", "-t", fixture.commit):
+                return "commit"
+            if arguments == ("cat-file", "-t", fixture.commit + "^{tree}"):
+                return "tree"
+            if arguments == ("rev-parse", fixture.commit + "^{tree}"):
+                return "b" * 40
+            raise AssertionError("unexpected source git " + repr(arguments))
+        fixture.patch.object(hosting_cmd, "_host_source_git", side_effect=source_git)
+        fixture.patch.object(remote, "capture_uncommitted", return_value=("", []))
+        fixture.patch.object(remote, "registered_remote_lock", return_value=contextlib.nullcontext())
+        fixture.patch.object(hosting_cmd, "_hold_controller_awake", return_value=contextlib.nullcontext())
+        fixture.patch.object(hosting_cmd.hosting, "load_host_state", side_effect=lambda: fixture.repository.load())
+        from sandbox.hosting.front_door import nginx
+        facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"}], "version": [1, 26, 0]}
+        fixture.patch.object(nginx, "probe", return_value=facts)
+        fixture.patch.object(nginx, "preflight", return_value=facts)
+        target_routes = {}
+        def read_route(entry, name):
+            if name == "coverage-asb.bd":
+                return fallback.read_text()
+            return target_routes.get(name)
+        def apply_route(entry, name, content, **kwargs):
+            self.assertNotEqual(name, "coverage-asb.bd")
+            target_routes[name] = content
+            return {}
+        def restore_route(entry, name, previous):
+            self.assertNotEqual(name, "coverage-asb.bd")
+            target_routes[name] = previous
+            return {}
+        fixture.patch.object(nginx, "read_route", side_effect=read_route)
+        fixture.patch.object(nginx, "apply_route", side_effect=apply_route)
+        fixture.patch.object(nginx, "restore_route", side_effect=restore_route)
+        def issue(entry, name, hosts, client):
+            issued = client.create_origin_certificate("synthetic csr", hosts)
+            return "/fixture/target.pem", "/fixture/target.key", {"id": issued["id"], "hostnames": hosts}
+        fixture.patch.object(nginx, "ensure_origin_certificate", side_effect=issue)
+        def negative(host, port, *args, **kwargs):
+            raise socket.gaierror(socket.EAI_NONAME, "synthetic negative")
+        fixture.patch.object(socket, "getaddrinfo", side_effect=negative)
+        fixture.patch.object(hosting_cmd.hosting, "load_host_state", side_effect=lambda: fixture.repository.load())
+        args = types.SimpleNamespace(action="apply", project_dir=str(fixture.root), environment=None,
+                                     remote=fixture.remote_name, confirm=True, json=True, allow_zone_ssl_change=False)
+        return fixture, store, provider, shared, args, events, fallback, certificate
 
     def test_shared_apply_negative_resolver_zero_dns_pending_then_bound(self):
-        manifest = """version: 1
-project: demo
-environments:
-  production:
-    compose:
-      files: [compose.yml]
-      service: web
-      container_port: 8080
-    healthcheck:
-      path: /
-    deploy:
-      allowed_branches: [main]
-      require_clean: true
-    host:
-      primary: app.asb.bd
-    cloudflare:
-      proxied: true
-      tls: origin-ca
-      ssl_mode: strict
-"""
-        fixture = _HostingOwnerFixture(self, manifest)
-        fixture.entry["front_door"] = "nginx"
-        fixture.entry["capabilities"] = ["zone_coverage_v1"]
-
-        # Real store in temp dir
-        seed_store_zone(str(fixture.home), "asb.bd", "active")
-        store_client = make_real_store(str(fixture.home), fixture.entry)
-        fixture.patch.object(remote, "ssh_run", store_client._ssh_run)
-
-        cf = StatefulFakeProvider(
-            zone_id="z-asb", zone_name="asb.bd", ssl_mode="strict",
-            records=[{"id": "rec-w", "name": "*.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True}],
-        )
-        fixture.patch.object(hosting_cmd.cloudflare, "Client", return_value=cf)
-        fixture.patch.object(targets, "resolver_state", return_value="negative")
-
-        # Nginx probe facts
-        facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf", "coverage_zone": "asb.bd"}]}
-        fixture.patch.object(hosting_cmd.nginx, "probe", return_value=facts)
-
-        # Run apply
-        result = fixture.apply()
-        self.assertTrue(result.get("ok"))
-
-        # Zero DNS writes for target hostname
-        target_dns_writes = [c for c in cf.calls if c[0] == "create_address" and c[2] == "app.asb.bd"]
-        self.assertEqual(target_dns_writes, [])
-
-        # Origin certificate still requested
-        self.assertTrue(any("cert" in c[0] or "certificate" in c[0] for c in cf.calls))
-
-        # Store dependent went from pending to bound
-        doc = store_client.read("asb.bd")["document"]
-        self.assertEqual(doc["dependents"][fixture.key]["binding"], "bound")
+        fixture, store, provider, shared, args, events, fallback, certificate = self.setup_shared()
+        seen = []
+        def compose(*args, **kwargs):
+            seen.append(store.read("asb.bd")["document"]["dependents"][fixture.key]["state"])
+        fixture.compose.side_effect = compose
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(output.getvalue())["ok"])
+        self.assertEqual(seen, ["pending"])
+        self.assertEqual(events, ["pending", "bound"])
+        fixture.health.assert_called_once()
+        self.assertEqual(fallback.read_bytes(), b"shared fallback fixture")
+        self.assertEqual(certificate.read_bytes(), b"shared certificate fixture")
+        self.assertEqual(store.read("asb.bd")["document"]["dependents"][fixture.key]["state"], "bound")
+        self.assertFalse([c for c in provider.calls if c[0] in ("create_address", "upsert_address", "delete_record", "update_record", "restore_record")])
+        self.assertTrue(any(c[0] == "create_origin_certificate" and "app.asb.bd" in c[2] for c in provider.calls))
+        self.assertEqual(provider._records, shared)
 
     def test_failed_shared_apply_retains_pending_and_shared_resources(self):
-        manifest = """version: 1
-project: demo
-environments:
-  production:
-    compose:
-      files: [compose.yml]
-      service: web
-      container_port: 8080
-    healthcheck:
-      path: /
-    deploy:
-      allowed_branches: [main]
-      require_clean: true
-    host:
-      primary: app.asb.bd
-    cloudflare:
-      proxied: true
-      tls: origin-ca
-      ssl_mode: strict
-"""
-        fixture = _HostingOwnerFixture(self, manifest)
-        fixture.entry["front_door"] = "nginx"
-        fixture.entry["capabilities"] = ["zone_coverage_v1"]
-
-        seed_store_zone(str(fixture.home), "asb.bd", "active")
-        store_client = make_real_store(str(fixture.home), fixture.entry)
-        fixture.patch.object(remote, "ssh_run", store_client._ssh_run)
-
-        cf = StatefulFakeProvider(
-            zone_id="z-asb", zone_name="asb.bd", ssl_mode="strict",
-            records=[{"id": "rec-w", "name": "*.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True}],
-        )
-        fixture.patch.object(hosting_cmd.cloudflare, "Client", return_value=cf)
-        facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf", "coverage_zone": "asb.bd"}]}
-        fixture.patch.object(hosting_cmd.nginx, "probe", return_value=facts)
-
-        # Make apply fail during verify_remote_health
-        fixture.health.side_effect = RuntimeError("healthcheck failed")
-
-        with self.assertRaises(RuntimeError):
-            fixture.apply()
-
-        # Dependent is retained in pending state (not bound, not released)
-        doc = store_client.read("asb.bd")["document"]
-        self.assertEqual(doc["dependents"][fixture.key]["binding"], "pending")
-        # Shared wildcard record retained
-        self.assertEqual(len(cf.records("z-asb", "*.asb.bd")), 1)
+        fixture, store, provider, shared, args, events, fallback, certificate = self.setup_shared()
+        fixture.health.side_effect = RuntimeError("synthetic health failure")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            hosting_cmd.cmd_host(None, args)
+        failure = json.loads(output.getvalue())
+        self.assertFalse(failure["ok"])
+        self.assertIn("synthetic health failure", failure["message"])
+        fixture.health.assert_called_once()
+        fixture.compose.assert_called_once()
+        self.assertEqual(events, ["pending"])
+        self.assertEqual(fallback.read_bytes(), b"shared fallback fixture")
+        self.assertEqual(certificate.read_bytes(), b"shared certificate fixture")
+        self.assertEqual(store.read("asb.bd")["document"]["dependents"][fixture.key]["state"], "pending")
+        self.assertEqual(provider._records, shared)
+        self.assertFalse([c for c in provider.calls if c[0] in ("create_address", "upsert_address", "delete_record", "update_record", "restore_record")])
 
 
 class TestRecoveryIntentAndAuthority(unittest.TestCase):

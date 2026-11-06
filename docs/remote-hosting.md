@@ -1150,7 +1150,7 @@ cloudflare:
 
 #### Overwriting Drifted DNS Records (`--allow-record-overwrite`)
 
-When applying host configuration (`sb host apply`), if an existing DNS record on Cloudflare differs from the target's desired IP or was created outside Sandbox, apply refuses by default (`managed_record_drift` or `record_not_owned`). Passing `--allow-record-overwrite` permits updating/overwriting the drifted record.
+When applying host configuration (`sb host apply`), if an existing DNS record on Cloudflare differs from the target's desired IP or was created outside Sandbox, apply refuses by default (`managed_record_drift` or `record_not_owned`). Passing `--allow-record-overwrite` permits updating/overwriting the drifted record. The override applies only to a record already owned by the target. Covered exact-record recovery uses the recorded intent and refuses managed drift; it does not accept an overwrite override. Redirect CNAME updates follow the same ownership check.
 
 For a shared-coverage apply, JSON output includes the observed origin, public-edge and resolver evidence under `edge.evidence`; text status reports each result separately. If the fresh verification label does not resolve, apply can finish with the runtime ready while public-edge evidence is `unverified` and the delivery remains incomplete.
 

@@ -120,6 +120,21 @@ def validate_edge_intent(value: object) -> dict:
             any(not isinstance(item, str) or not item for item in hostnames) or
             len(hostnames) != len(set(hostnames))):
         raise ValueError("edge intent exceeds its collection bounds")
+    coverage = value.get("dns_coverage")
+    if "dns_coverage" in value:
+        from sandbox.hosting.zone_coverage.models import normalize_zone
+        if not isinstance(coverage, dict) or not isinstance(coverage.get("zone"), str) or not coverage["zone"]:
+            raise ValueError("edge coverage intent is invalid")
+        if normalize_zone(coverage["zone"]) != coverage["zone"]:
+            raise ValueError("edge coverage intent is invalid")
+        if coverage.get("mode") == "shared":
+            if set(coverage) != {"mode", "zone"}:
+                raise ValueError("edge coverage intent is invalid")
+        elif coverage.get("mode") == "exact":
+            if set(coverage) != {"mode", "zone", "drift_rule"} or coverage.get("drift_rule") is not True:
+                raise ValueError("edge coverage intent is invalid")
+        else:
+            raise ValueError("edge coverage intent is invalid")
     safe = json.loads(json.dumps(value, sort_keys=True))
     if len(json.dumps(safe, sort_keys=True, separators=(",", ":")).encode()) > MAX_EDGE_INTENT_BYTES:
         raise ValueError("edge intent exceeds its byte bound")

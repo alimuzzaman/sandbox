@@ -442,8 +442,8 @@ def check_exact_record(
 
     Compares only A, AAAA, and CNAME records at the name.
     """
-    wanted_type = "AAAA" if ":" in wanted.get("address", "") else "A"
-    wanted_content = wanted.get("address")
+    wanted_type = wanted.get("record_type") or ("AAAA" if ":" in wanted.get("address", "") else "A")
+    wanted_content = wanted.get("content") if wanted_type == "CNAME" else wanted.get("address")
     wanted_proxied = bool(wanted.get("proxied"))
     hostname = wanted.get("hostname")
 
@@ -468,7 +468,8 @@ def check_exact_record(
             continue
         snap = item.get("applied")
         if isinstance(snap, dict):
-            if snap.get("name") == hostname and snap.get("type") == existing.get("type"):
+            if (snap.get("name") == hostname and snap.get("type") == existing.get("type")
+                    and (not item.get("created_id") or item["created_id"] == existing.get("id"))):
                 applied_snap = snap
                 break
 

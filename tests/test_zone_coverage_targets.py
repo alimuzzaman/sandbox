@@ -653,9 +653,12 @@ environments:
                 self.calls.append(("update_record", zone_id, record["id"]))
                 record.update(changes)
                 return record
-            def restore_record(self, zone_id, record):
-                self.calls.append(("restore_record", zone_id, record["id"]))
-                self._records.append(copy.deepcopy(record))
+            def restore_record(self, zone_id, record, created_id=None):
+                self.calls.append(("restore_record", zone_id, created_id))
+                if created_id:
+                    self._records = [row for row in self._records if row.get("id") != created_id]
+                if record:
+                    self._records.append(copy.deepcopy(record))
                 return record
         provider = Provider("z-asb", "asb.bd", "strict", records=copy.deepcopy(shared))
         fixture.patch.object(hosting_cmd.cloudflare, "Client", return_value=provider)
@@ -756,79 +759,70 @@ environments:
 
 
 class TestRecoveryIntentAndAuthority(unittest.TestCase):
-    """Item 5: Recovery intent, drift rule, and authority tests."""
+    def applied(self, exact=False):
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self, with_revision=True)
+        if exact:
+            path = fixture.manifest_root / "sandbox.hosting.yml"
+            path.write_text(path.read_text().replace("      ssl_mode: strict\n", "      ssl_mode: strict\n      dns: exact\n"))
+            provider._records.append({"id": "rec-target", "name": "app.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True})
+        with contextlib.redirect_stdout(io.StringIO()):
+            hosting_cmd.cmd_host(None, args)
+        validated = hosting.validate_manifest(str(fixture.manifest_root))
+        recorded = fixture.repository.load()["hosts"][fixture.key]
+        operation = recorded["hosting_operation"]
+        return fixture, store, provider, shared, validated, operation
+
+    def request(self, fixture):
+        from sandbox.hosting.recovery.models import RecoveryAction, RecoveryRequest, TargetIdentity
+        return RecoveryRequest(RecoveryAction.CONTINUE_EDGE, "recovery", "job", "original", TargetIdentity(fixture.remote_name, "demo", "production"), 1, "observation", "sha256:" + "a" * 64, True)
 
     def test_shared_recovery_uses_recorded_intent_after_generation_change(self):
-        fixture = _HostingOwnerFixture(self)
-        edge_intent = {
-            "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],
-            "proxied": True,
-            "records": [],
-            "certificate_hostnames": ["app.asb.bd"],
-            "dns_coverage": {"mode": "shared", "zone": "asb.bd"},
-        }
-        operation = {
-            "evidence": {
-                "edge_intent": edge_intent,
-                "edge_intent_digest": hosting_cmd.canonical_digest(edge_intent),
-            },
-        }
-
-        # Trap decide: must NOT be called during recovery
-        with mock.patch("sandbox.hosting.zone_coverage.targets.decide", side_effect=AssertionError("decide must not be called during recovery")):
-            with mock.patch("sandbox.hosting.zone_coverage.targets.resolver_state", return_value="negative"):
-                # Authority check succeeds using expected edge intent
-                with hosting_cmd._registered_recovery_authority(fixture.validated, fixture.remote_name, operation, {}):
-                    pass
+        fixture, store, provider, shared, validated, operation = self.applied()
+        zonefile = fixture.home / "runtime" / "zone-coverage" / "zones" / "asb.bd.json"
+        doc = json.loads(zonefile.read_text()); original_generation = doc["generation"]
+        doc["generation"] += 1; zonefile.write_text(json.dumps(doc))
+        self.assertEqual(store.read("asb.bd")["document"]["generation"], original_generation + 1)
+        authority = {}
+        with mock.patch.object(targets, "decide", side_effect=AssertionError("unexpected decide")) as decide:
+            with hosting_cmd._registered_recovery_authority(validated, fixture.remote_name, operation, authority):
+                result = hosting_cmd._continue_host_edge_only(validated, authority["entry"], fixture.remote_name, self.request(fixture), operation)
+            decide.assert_not_called()
+        self.assertEqual(result["record"]["edge"]["evidence"]["public_edge"]["result"], "unverified")
+        self.assertEqual(provider._records, shared)
 
     def test_exact_recovery_refuses_drifted_record(self):
-        # B6: When target admitted as exact in covered zone, edge intent must record drift_rule.
-        # Drifted record in continuation refuses managed_record_drift.
-        fixture = _HostingOwnerFixture(self)
-        cf = StatefulFakeProvider(
-            zone_id="z-asb", zone_name="asb.bd", ssl_mode="strict",
-            records=[{"id": "rec-1", "name": "app.asb.bd", "type": "A", "content": "1.2.3.4", "proxied": True}],
-        )
-        fixture.patch.object(hosting_cmd.cloudflare, "Client", return_value=cf)
-        edge_intent = {
-            "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],
-            "proxied": True,
-            "records": [{"hostname": "app.asb.bd", "address": "198.51.100.1", "mode": "serve", "proxied": True}],
-            "certificate_hostnames": ["app.asb.bd"],
-            "dns_coverage": {"mode": "exact", "zone": "asb.bd", "drift_rule": True},
-        }
-        operation = {
-            "evidence": {
-                "edge_intent": edge_intent,
-                "edge_intent_digest": hosting_cmd.canonical_digest(edge_intent),
-            },
-        }
-        req = mock.Mock()
-        with self.assertRaises(CoverageError) as ctx:
-            hosting_cmd._continue_host_edge_only(
-                fixture.validated, fixture.entry, fixture.remote_name, req, operation
-            )
-        self.assertEqual(ctx.exception.code, MANAGED_RECORD_DRIFT)
+        fixture, store, provider, shared, validated, operation = self.applied(exact=True)
+        intent = operation["evidence"]["edge_intent"]
+        self.assertEqual(intent["dns_coverage"], {"mode": "exact", "zone": "asb.bd", "drift_rule": True})
+        moved = {**validated, "dns_coverage": {"mode": "shared", "zone": "asb.bd"}}
+        with hosting_cmd._registered_recovery_authority(moved, fixture.remote_name, operation, {}):
+            pass
+        from sandbox.hosting.recovery.models import validate_edge_intent
+        for invalid in (None, {"mode": "exact", "zone": "asb.bd", "drift_rule": False},
+                        {"mode": "shared", "zone": "ASB.BD"}, {"mode": "auto", "zone": "asb.bd"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_edge_intent({**intent, "dns_coverage": invalid})
+        record = next(r for r in provider._records if r["id"] == "rec-target")
+        record["content"] = "192.0.2.9"
+        provider.calls.clear()
+        with self.assertRaises(CoverageError) as failure:
+            hosting_cmd._continue_host_edge_only(validated, fixture.entry, fixture.remote_name, self.request(fixture), operation)
+        self.assertEqual(failure.exception.code, MANAGED_RECORD_DRIFT)
+        self.assertFalse([c for c in provider.calls if c[0] in ("upsert_address", "update_record", "delete_record")])
+        record["content"] = "203.0.113.10"
+        result = hosting_cmd._continue_host_edge_only(validated, fixture.entry, fixture.remote_name, self.request(fixture), operation)
+        self.assertEqual(result["record"]["records"][0]["created_id"], "rec-target")
 
     def test_recovery_refuses_changed_binding_after_manifest_moves_to_exact(self):
-        fixture = _HostingOwnerFixture(self)
-        edge_intent = {
-            "routes": [{"hostname": "app.asb.bd", "mode": "serve"}],
-            "proxied": True,
-            "records": [],
-            "certificate_hostnames": ["app.asb.bd"],
-            "dns_coverage": {"mode": "shared", "zone": "asb.bd"},
-        }
-        operation = {
-            "evidence": {
-                "edge_intent": edge_intent,
-                "edge_intent_digest": hosting_cmd.canonical_digest(edge_intent),
-            },
-        }
-        val_moved = copy.deepcopy(fixture.validated)
-        val_moved["cloudflare"]["dns"] = "exact"
-        with self.assertRaises(hosting_cmd.RecoveryAuthorityError):
-            with hosting_cmd._registered_recovery_authority(val_moved, fixture.remote_name, operation, {}):
+        fixture, store, provider, shared, validated, operation = self.applied()
+        validated["cloudflare"]["dns"] = "exact"
+        authority = {}
+        with hosting_cmd._registered_recovery_authority(validated, fixture.remote_name, operation, authority):
+            self.assertEqual(authority["entry"], fixture.entry)
+        changed = dict(fixture.entry, ssh="fixture@different.example.test")
+        fixture.patch.object(remote, "get_remote", return_value=changed)
+        with self.assertRaisesRegex(hosting_cmd.RecoveryAuthorityError, "registered remote changed"):
+            with hosting_cmd._registered_recovery_authority(validated, fixture.remote_name, operation, {}):
                 pass
 
 
@@ -1083,21 +1077,53 @@ class TestExactRecordDriftAndMatrix(unittest.TestCase):
         self.assertEqual(ctx.exception.code, MANAGED_RECORD_DRIFT)
 
     def test_redirect_cname_ownership(self):
-        # B5: Redirect CNAME branch checks exact record before update
-        wanted = {"hostname": "asb.bd", "mode": "redirect", "target": "https://other.com"}
-        cname_unowned = {"id": "c-1", "name": "asb.bd", "type": "CNAME", "content": "foreign.target"}
-        with self.assertRaises(CoverageError) as ctx:
-            targets.check_exact_record(wanted, [cname_unowned], None, allow_overwrite=False)
-        self.assertEqual(ctx.exception.code, RECORD_NOT_OWNED)
+        for scenario in ("unowned", "owned", "drift", "overwrite"):
+            with self.subTest(scenario=scenario):
+                fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+                path = fixture.manifest_root / "sandbox.hosting.yml"
+                manifest = path.read_text().replace("      primary: app.asb.bd\n", "      primary: app.asb.bd\n      aliases:\n        - hostname: redir.asb.bd\n          mode: redirect\n          target: https://destination.example\n").replace("      ssl_mode: strict\n", "      ssl_mode: strict\n      dns: exact\n")
+                path.write_text(manifest)
+                provider._records.extend([
+                    {"id": "primary", "name": "app.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True},
+                    {"id": "redirect", "name": "redir.asb.bd", "type": "CNAME", "content": "destination.example", "proxied": False},
+                ])
+                snapshot = {"name": "redir.asb.bd", "type": "CNAME", "content": "destination.example", "proxied": scenario in ("drift", "overwrite")}
+                records = [] if scenario == "unowned" else [{"zone_id": "z-asb", "created_id": "redirect", "applied": snapshot}]
+                fixture.repository._write({"version": 1, "hosts": {fixture.key: {"records": records}}})
+                args.allow_record_overwrite = scenario in ("unowned", "overwrite")
+                output = io.StringIO()
+                if scenario in ("unowned", "drift"):
+                    with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+                        hosting_cmd.cmd_host(None, args)
+                    self.assertEqual(json.loads(output.getvalue())["code"], RECORD_NOT_OWNED if scenario == "unowned" else MANAGED_RECORD_DRIFT, output.getvalue())
+                    self.assertFalse([c for c in provider.calls if c[0] == "update_record"])
+                else:
+                    with contextlib.redirect_stdout(output):
+                        hosting_cmd.cmd_host(None, args)
+                    self.assertTrue(json.loads(output.getvalue())["ok"])
+                    self.assertEqual([c[2] for c in provider.calls if c[0] == "update_record"], ["redirect"])
 
     def test_uncovered_zone_overwrites_as_today(self):
-        # Uncovered zone target runs apply loop without drift rule
-        fixture = _HostingOwnerFixture(self)
-        cf = fixture.client
-        cf.records.return_value = [{"id": "rec-1", "name": "app.uncovered.test", "type": "A", "content": "10.0.0.1", "proxied": True}]
-        # Ordinary apply succeeds and overwrites
-        result = fixture.apply()
-        self.assertTrue(result.get("ok"))
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+        path = fixture.manifest_root / "sandbox.hosting.yml"
+        path.write_text(path.read_text().replace("app.asb.bd", "app.uncovered.test"))
+        provider._records.append({"id": "old", "name": "app.uncovered.test", "type": "A", "content": "192.0.2.9", "proxied": True})
+        args.action = "plan"
+        fixture.patch.object(hosting_cmd, "_add_front_door_plan")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hosting_cmd.cmd_host(None, args)
+        plan = json.loads(output.getvalue())
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["records"], [{"address": "203.0.113.10", "hostname": "app.uncovered.test", "mode": "serve", "proxied": True, "target": None}])
+        self.assertNotIn("dns_coverage", plan)
+        args.action = "apply"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(output.getvalue())["ok"])
+        self.assertTrue(any(c[0] == "upsert_address" and c[2] == "app.uncovered.test" and c[3] == "203.0.113.10" for c in provider.calls))
+        self.assertEqual(events, [])
 
 
 class TestPreservationAndEnableSafety(unittest.TestCase):

@@ -2455,6 +2455,8 @@ def _desired_edge_intent(validated: dict, entry: dict) -> dict:
     dns_coverage = validated.get("dns_coverage") or {}
     if dns_coverage.get("mode") == "shared":
         intent["dns_coverage"] = {"mode": "shared", "zone": dns_coverage["zone"]}
+    elif dns_coverage.get("mode") == "exact" and dns_coverage.get("drift_rule") is True:
+        intent["dns_coverage"] = {"mode": "exact", "zone": dns_coverage["zone"], "drift_rule": True}
     return validate_edge_intent(intent)
 
 
@@ -2514,9 +2516,9 @@ def _registered_recovery_authority(validated: dict, remote_name: str, operation:
             raise RecoveryAuthorityError("stable machine identity changed")
         try:
             expected_edge_intent = validate_edge_intent(expected.get("edge_intent"))
-            val = validated
+            val = {key: value for key, value in validated.items() if key != "dns_coverage"}
             if "dns_coverage" in expected_edge_intent:
-                val = {**validated, "dns_coverage": expected_edge_intent["dns_coverage"]}
+                val["dns_coverage"] = expected_edge_intent["dns_coverage"]
             current_edge_intent = _desired_edge_intent(val, current)
         except ValueError:
             raise RecoveryAuthorityError("registered edge intent is invalid") from None
@@ -3712,7 +3714,7 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
         content = edge.render(validated, port, cert_path, key_path, secret_values)
         edge.configure(caddy_name, content, previous_caddy, log_path=apply_log)
         zones: dict[str, dict] = {}
-        drift_rule = bool((validated.get("dns_coverage") or {}).get("drift_rule")) and ("dns_coverage" not in edge_intent)
+        drift_rule = bool((edge_intent.get("dns_coverage") or {}).get("drift_rule"))
         for wanted in edge_intent["records"]:
             hostname = wanted["hostname"]
             zone = zones.setdefault(hostname, _zone_for_hostname(client, hostname))
@@ -4762,6 +4764,17 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 target_host = hosting.normalize_hostname(urllib.parse.urlsplit(wanted["target"]).hostname or "", wildcard=False)
                 cname_target = hosting.normalize_hostname(str(cname.get("content") or ""), wildcard=False)
                 if cname_target == target_host:
+                    if drift_rule:
+                        cname_wanted = {"hostname": hostname, "record_type": "CNAME",
+                                        "content": target_host, "proxied": proxied}
+                        checked = targets.check_exact_record(
+                            cname_wanted, [cname], state["hosts"][key].get("records"),
+                            allow_overwrite=allow_record_overwrite)
+                        if checked.get("action") == "adopt":
+                            changes.append({"zone_id": zone["id"], "previous": cname,
+                                            "created_id": cname.get("id"),
+                                            "applied": _applied_record(cname)})
+                            continue
                     updated = client.update_record(zone["id"], cname, proxied=proxied)
                     changes.append({"zone_id": zone["id"], "previous": cname, "created_id": updated.get("id"),
                                     "applied": _applied_record(updated)})

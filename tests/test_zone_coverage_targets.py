@@ -9,6 +9,7 @@ evidence using:
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import copy
 import http.client
@@ -17,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import socket
 import ssl
 import subprocess
@@ -47,7 +49,7 @@ from sandbox.hosting.zone_coverage import (
     targets,
 )
 from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
-from sandbox.hosting.zone_coverage import models
+from sandbox.hosting.zone_coverage import models, program
 from tests.subprocess_support import run_test_process, synthetic_environment
 from tests.test_hosting import _HostingOwnerFixture, _public_acme_manifest
 from tests.test_zone_coverage_matrix import StatefulFakeProvider
@@ -56,8 +58,22 @@ from tests.test_zone_coverage_matrix import StatefulFakeProvider
 def make_real_store(temp_dir: str, entry: dict) -> ZoneCoverageClient:
     """Create a real ZoneCoverageClient running against temp_dir as SANDBOX_HOME."""
     def real_ssh_run(e, command, timeout=15):
+        # Accept only the exact command emitted by the real store client. Decode
+        # its argument as data and execute the fixed program without a shell.
+        parts = shlex.split(command)
+        if (len(parts) != 5 or parts[:3] != ["python3", "-c", program.PROGRAM]
+                or parts[3] != "${SANDBOX_HOME:-$HOME/sandbox}"):
+            raise AssertionError("unexpected store transport command")
+        try:
+            request = json.loads(base64.b64decode(parts[4], validate=True))
+        except (ValueError, TypeError) as exc:
+            raise AssertionError("invalid store request") from exc
+        if not isinstance(request, dict) or program.remote_command(request) != command:
+            raise AssertionError("noncanonical store request")
         env = synthetic_environment({"SANDBOX_HOME": temp_dir, "HOME": temp_dir})
-        return subprocess.run(command, shell=True, env=env, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run([sys.executable, "-I", "-B", "-c", program.PROGRAM,
+                               temp_dir, parts[4]], env=env, capture_output=True,
+                              text=True, timeout=timeout)
     return ZoneCoverageClient(entry, ssh_run=real_ssh_run)
 
 

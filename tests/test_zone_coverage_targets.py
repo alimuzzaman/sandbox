@@ -756,7 +756,7 @@ class TestExactRecordDriftAndMatrix(unittest.TestCase):
     """Item 8: test_exact_record_matrix, dual stack, redirect CNAME, uncovered overwrite."""
 
     def test_exact_record_matrix(self):
-        wanted = {"hostname": "app.asb.bd", "address": "198.51.100.1"}
+        wanted = {"hostname": "app.asb.bd", "address": "198.51.100.1", "proxied": True}
 
         # No record -> write
         res = targets.check_exact_record(wanted, [], None, allow_overwrite=False)
@@ -764,7 +764,7 @@ class TestExactRecordDriftAndMatrix(unittest.TestCase):
 
         # Unchanged owned -> adopt
         existing_owned = {"id": "rec-1", "name": "app.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}
-        recorded = [{"applied": {"name": "app.asb.bd", "type": "A", "content": "198.51.100.1"}}]
+        recorded = [{"applied": {"name": "app.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}}]
         res = targets.check_exact_record(wanted, [existing_owned], recorded, allow_overwrite=False)
         self.assertEqual(res["action"], "adopt")
 
@@ -797,14 +797,14 @@ class TestExactRecordDriftAndMatrix(unittest.TestCase):
 
     def test_exact_dual_stack_provider_order(self):
         # B4: check_exact_record must match by record type (A vs AAAA), not matching[0]
-        wanted_a = {"hostname": "app.asb.bd", "address": "198.51.100.1"}
-        wanted_aaaa = {"hostname": "app.asb.bd", "address": "2001:db8::1"}
+        wanted_a = {"hostname": "app.asb.bd", "address": "198.51.100.1", "proxied": True}
+        wanted_aaaa = {"hostname": "app.asb.bd", "address": "2001:db8::1", "proxied": True}
 
         rec_a = {"id": "rec-a", "name": "app.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}
         rec_aaaa_drift = {"id": "rec-aaaa", "name": "app.asb.bd", "type": "AAAA", "content": "2001:db8::99", "proxied": True}
         recorded = [
-            {"applied": {"name": "app.asb.bd", "type": "A", "content": "198.51.100.1"}},
-            {"applied": {"name": "app.asb.bd", "type": "AAAA", "content": "2001:db8::1"}},
+            {"applied": {"name": "app.asb.bd", "type": "A", "content": "198.51.100.1", "proxied": True}},
+            {"applied": {"name": "app.asb.bd", "type": "AAAA", "content": "2001:db8::1", "proxied": True}},
         ]
 
         # Order 1: [A, AAAA]

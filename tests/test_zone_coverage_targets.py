@@ -521,6 +521,41 @@ class TestUncoveredPlanAndIntentMatchStage1(unittest.TestCase):
         self.assertEqual(json.dumps(intent, sort_keys=True), expected_intent_json)
         self.assertEqual(digest, expected_digest)
 
+    def test_stage1_full_plan_command_json_caddy_no_new_calls(self):
+        # Literal captured by running cmd_host from git archive 41defd9 in a
+        # synthetic scratch overlay; provider, SSH and subprocess were trapped.
+        validated = {
+            "project": "test-app", "environment": "sandbox", "project_root": "/fixture/source",
+            "deploy": {"allowed_branches": ["main"], "require_clean": True, "min_free_disk_mb": 1024},
+            "routes": [{"hostname": "app.uncovered.test", "mode": "serve"}],
+            "compose": {"service": "web", "container_port": 8080, "services": {"web": {"image": "nginx:alpine"}}},
+            "cloudflare": {"proxied": True, "tls": "origin-ca", "ssl_mode": "strict"},
+            "secrets": {"values": {}, "required": {}, "generated": {}},
+            "healthcheck": {"path": "/", "statuses": [200]},
+        }
+        entry = {"name": "test-remote", "front_door": "caddy", "provisioned": True,
+                 "origin_ipv4": "198.51.100.1", "origin_ipv6": "2001:db8::1"}
+        args = types.SimpleNamespace(action="plan", project_dir="/fixture/source", environment=None,
+                                     remote="test-remote", json=True)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(hosting, "validate_manifest", return_value=validated))
+            stack.enter_context(mock.patch.object(hosting, "load_host_state", return_value={"version": 1, "hosts": {}}))
+            stack.enter_context(mock.patch.object(remote, "get_remote", return_value=entry))
+            stack.enter_context(mock.patch.object(hosting_cmd, "_host_recovery_eligibility", return_value={"eligible": True}))
+            stack.enter_context(mock.patch.object(hosting_cmd, "_secret_status", return_value=({}, [])))
+            stack.enter_context(mock.patch.object(hosting_cmd, "_declared_secret_sources", return_value=set()))
+            stack.enter_context(mock.patch.object(hosting_cmd, "_cloudflare_drift", return_value={"configured": False, "records": [], "ssl": None}))
+            ssh = stack.enter_context(mock.patch.object(remote, "ssh_run", side_effect=AssertionError("unexpected SSH")))
+            provider = stack.enter_context(mock.patch.object(cloudflare, "Client", side_effect=AssertionError("unexpected provider")))
+            store = stack.enter_context(mock.patch.object(targets, "ZoneCoverageClient", side_effect=AssertionError("unexpected store")))
+            from sandbox.hosting.front_door import nginx
+            probe = stack.enter_context(mock.patch.object(nginx, "probe", side_effect=AssertionError("unexpected probe")))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output): hosting_cmd.cmd_host(None, args)
+            ssh.assert_not_called(); provider.assert_not_called(); store.assert_not_called(); probe.assert_not_called()
+        actual = json.dumps(json.loads(output.getvalue()), sort_keys=True, separators=(",", ":"))
+        self.assertEqual(actual, '{"basic_auth":{"enabled":false,"username":null},"certificate_hostnames":["app.uncovered.test"],"cloudflare":{"configured":false,"records":[],"ssl":null},"edge_cache_purge":null,"environment":"sandbox","ok":true,"project":"test-app","records":[{"address":"198.51.100.1","hostname":"app.uncovered.test","mode":"serve","proxied":true,"target":null},{"address":"2001:db8::1","hostname":"app.uncovered.test","mode":"serve","proxied":true,"target":null}],"recovery_eligibility":{"eligible":true},"remote":"test-remote","remote_selection":"explicit","routes":[{"hostname":"app.uncovered.test","mode":"serve"}],"runtime":{"basic_auth_enabled":false,"caddyfile":"app.uncovered.test {\\n    @sandbox_untrusted_cloudflare_peer not remote_ip 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32\\n    request_header @sandbox_untrusted_cloudflare_peer -CF-Connecting-IP\\n    reverse_proxy 127.0.0.1:18543\\n}\\n","certificate_hostnames":["app.uncovered.test"],"compose_override":"services:\\n  web:\\n    ports:\\n      - \\"127.0.0.1:18543:8080\\"\\n","compose_project":"sandbox-host-test-app-sandbox","healthcheck":{"path":"/","statuses":[200]},"key":"test-remote/test-app/sandbox","loopback_port":18543,"min_free_disk_mb":1024,"records":[{"address":"198.51.100.1","hostname":"app.uncovered.test","mode":"serve","proxied":true,"target":null},{"address":"2001:db8::1","hostname":"app.uncovered.test","mode":"serve","proxied":true,"target":null}],"routes":[{"hostname":"app.uncovered.test","mode":"serve"}],"services":[{"name":"web","role":"primary"}]},"secrets":{"missing":[],"required":[]},"ssl_mode":"strict","warnings":[]}')
+
 
 class TestPinnedTLSVerification(unittest.TestCase):
     def setUp(self):

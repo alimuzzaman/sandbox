@@ -506,9 +506,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         if self._tunnel_host:
             self._tunnel()
         server_hostname = (self._tunnel_host or self.host or "").split(":")[0]
-        if self.context is None:
-            self.context = ssl.create_default_context()
-        self.sock = self.context.wrap_socket(
+        self.sock = self._context.wrap_socket(
             self.sock,
             server_hostname=server_hostname,
         )
@@ -522,7 +520,7 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
         def _factory(host, **conn_kwargs):
             return _PinnedHTTPSConnection(self._pinned_ip, host, **conn_kwargs)
-        return self.do_open(_factory, req)
+        return self.do_open(_factory, req, context=self._context)
 
 
 def pinned_edge_handler(

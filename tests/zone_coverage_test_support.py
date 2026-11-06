@@ -79,7 +79,24 @@ class GuardedIO:
                    and local(argv[6]) and argv[7] == "-out" and local(argv[8])
                    and argv[9:13] == ("-days", "1", "-nodes", "-subj")
                    and argv[13].startswith("/CN="))
-        if not (store or git or openssl):
+        # Only the exact fixture CA/leaf command shapes in one owned directory.
+        cert = False
+        if argv[:2] == ("openssl", "req") and len(argv) == 13:
+            cert = (argv[2:6] == ("-new", "-newkey", "rsa:2048", "-nodes")
+                    and argv[6] == "-keyout" and local(argv[7]) and argv[8] == "-out"
+                    and local(argv[9]) and argv[10] == "-subj" and argv[11] == "/CN=Sandbox Test CA"
+                    and argv[12] == "-x509")
+        if argv[:2] == ("openssl", "req") and len(argv) == 12:
+            cert = (argv[2:6] == ("-new", "-newkey", "rsa:2048", "-nodes")
+                    and argv[6] == "-keyout" and local(argv[7]) and argv[8] == "-out"
+                    and local(argv[9]) and argv[10] == "-subj" and argv[11] == "/CN=fixture")
+        if argv[:2] == ("openssl", "x509") and len(argv) == 18:
+            cert = (argv[2] == "-req" and argv[3] == "-in" and local(argv[4])
+                    and argv[5] == "-CA" and local(argv[6]) and argv[7] == "-CAkey" and local(argv[8])
+                    and argv[9:11] == ("-set_serial", "1") and argv[11] == "-out" and local(argv[12])
+                    and argv[13:15] == ("-days", "1") and argv[15] == "-extfile" and local(argv[16])
+                    and argv[17] == "-sha256")
+        if not (store or git or openssl or cert):
             raise AssertionError("unapproved process registration")
         self.commands.add(argv)
         if git and argv[3:] == ("init", "--initial-branch=main"):

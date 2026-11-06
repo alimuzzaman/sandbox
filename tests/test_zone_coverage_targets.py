@@ -126,18 +126,28 @@ def seed_store_zone(temp_dir: str, zone: str = "asb.bd", state: str = "active", 
     return doc
 
 
-def make_loopback_tls_server(san_hostname: str, status_code: int = 200, body: bytes = b"OK"):
-    """Start a real loopback TLS server serving an openssl self-signed cert with san_hostname."""
-    td = tempfile.mkdtemp(prefix="sb-tls-")
-    key_path = os.path.join(td, "key.pem")
-    cert_path = os.path.join(td, "cert.pem")
-    argv = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", key_path,
-            "-out", cert_path, "-days", "1", "-nodes", "-subj", f"/CN={san_hostname}"]
-    _guard.allow_command(argv)
-    run_test_process(
-        argv,
-        env={"HOME": td}, timeout=30, check=True, capture_output=True,
-    )
+def make_tls_authority(test):
+    td = tempfile.mkdtemp(prefix="sb-ca-")
+    test.addCleanup(shutil.rmtree, td, True)
+    ca_key, ca_cert = (os.path.join(td, x) for x in ("ca.key", "ca.pem"))
+    def run(argv):
+        _guard.allow_command(argv)
+        run_test_process(argv, env={"HOME": td}, timeout=30, check=True, capture_output=True)
+    run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", ca_key,
+         "-out", ca_cert, "-subj", "/CN=Sandbox Test CA", "-x509"])
+    return td, ca_key, ca_cert, run
+
+
+def make_loopback_tls_server(authority, san_hostname: str, status_code: int = 200, body: bytes = b"OK"):
+    """Serve a CA-signed SAN certificate on an owned loopback port."""
+    td, ca_key, ca_cert, run = authority
+    leaf_dir = tempfile.mkdtemp(dir=td, prefix="leaf-")
+    key_path, cert_path, csr_path, ext_path = (os.path.join(leaf_dir, x) for x in ("key.pem", "cert.pem", "leaf.csr", "ext.cnf"))
+    Path(ext_path).write_text("subjectAltName=DNS:" + san_hostname + "\n")
+    run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", key_path,
+         "-out", csr_path, "-subj", "/CN=fixture"])
+    run(["openssl", "x509", "-req", "-in", csr_path, "-CA", ca_cert, "-CAkey", ca_key,
+         "-set_serial", "1", "-out", cert_path, "-days", "1", "-extfile", ext_path, "-sha256"])
     server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     server_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
 
@@ -196,7 +206,7 @@ def make_loopback_tls_server(san_hostname: str, status_code: int = 200, body: by
         except Exception:
             pass
         th.join(timeout=2)
-        shutil.rmtree(td, ignore_errors=True)
+        shutil.rmtree(leaf_dir, ignore_errors=True)
 
     return {
         "port": port,
@@ -513,67 +523,74 @@ class TestUncoveredPlanAndIntentMatchStage1(unittest.TestCase):
 
 
 class TestPinnedTLSVerification(unittest.TestCase):
-    """Item 3: test_pinned_tls_preserves_sni_host_and_rejects_wrong_certificate."""
+    def setUp(self):
+        self.authority = make_tls_authority(self)
+        self.context = ssl.create_default_context(cafile=self.authority[2])
+        self.assertTrue(self.context.check_hostname)
+        self.assertEqual(self.context.verify_mode, ssl.CERT_REQUIRED)
+
+    def server(self, hostname, status=200):
+        server = make_loopback_tls_server(self.authority, hostname, status)
+        self.addCleanup(server["cleanup"])
+        return server
+
+    def handler(self):
+        def resolver(host, port):
+            self.assertRegex(host, r"^sb-verify-[0-9a-f]{16}\.asb\.bd$")
+            self.assertEqual(port, 443)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+        handler = targets.pinned_edge_handler("asb.bd", resolver=resolver)
+        handler._context = self.context
+        return handler
+
+    def mapped(self, server):
+        original = socket.create_connection
+        def connect(address, *args, **kwargs):
+            if address != ("127.0.0.1", 443):
+                raise AssertionError("unexpected pinned endpoint")
+            return original(("127.0.0.1", server["port"]), *args, **kwargs)
+        return mock.patch.object(socket, "create_connection", connect)
 
     def test_pinned_tls_preserves_sni_host_and_rejects_wrong_certificate(self):
-        # Real loopback TLS server serving app.asb.bd
-        server = make_loopback_tls_server("app.asb.bd")
-        self.addCleanup(server["cleanup"])
-
-        def test_resolver(host, port, **kw):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", server["port"]))]
-
-        handler = targets.pinned_edge_handler("asb.bd", resolver=test_resolver)
-        opener = urllib.request.build_opener(handler)
-
-        # In cab1fec, opening https://app.asb.bd/test fails with AttributeError: 'self.context'
-        req = urllib.request.Request("https://app.asb.bd/test")
-        with opener.open(req, timeout=3) as resp:
-            self.assertEqual(resp.status, 200)
-
-        self.assertIn("app.asb.bd", server["received_sni"])
-        self.assertTrue(any("Host: app.asb.bd" in h for h in server["received_headers"]))
-
-        # Rejects wrong certificate
-        wrong_server = make_loopback_tls_server("wrong.asb.bd")
-        self.addCleanup(wrong_server["cleanup"])
-
-        def wrong_resolver(host, port, **kw):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", wrong_server["port"]))]
-
-        wrong_handler = targets.pinned_edge_handler("asb.bd", resolver=wrong_resolver)
-        wrong_opener = urllib.request.build_opener(wrong_handler)
-        with self.assertRaises((URLError, ssl.SSLCertVerificationError)):
-            wrong_opener.open(urllib.request.Request("https://app.asb.bd/test"), timeout=3)
+        server = self.server("app.asb.bd")
+        with self.mapped(server):
+            with urllib.request.build_opener(self.handler()).open("https://app.asb.bd/test", timeout=3) as response:
+                self.assertEqual(response.status, 200)
+        self.assertEqual(server["received_sni"], ["app.asb.bd"])
+        self.assertIn("Host: app.asb.bd\r\n", server["received_headers"][0])
+        wrong = self.server("wrong.asb.bd")
+        with self.mapped(wrong), self.assertRaises(URLError) as failure:
+            urllib.request.build_opener(self.handler()).open("https://app.asb.bd/test", timeout=3)
+        self.assertIsInstance(failure.exception.reason, ssl.SSLCertVerificationError)
+        self.assertIn("hostname mismatch", str(failure.exception.reason).lower())
+        self.assertEqual(wrong["received_sni"], ["app.asb.bd"])
 
     def test_shared_label_unresolved_is_unverified(self):
-        def failing_resolver(host, port, **kw):
-            raise socket.gaierror(-2, "Name or service not known")
-
-        handler = targets.pinned_edge_handler("asb.bd", resolver=failing_resolver)
-        self.assertIsNone(handler)
-
-        routes = [{"hostname": "app.asb.bd", "mode": "serve"}]
-        mock_verifier = mock.Mock()
-        ev = targets.verify_shared(routes, "asb.bd", mock_verifier, resolver=failing_resolver)
-        self.assertEqual(ev.get("public_edge", {}).get("result"), "unverified")
-        self.assertEqual(ev.get("public_edge", {}).get("reason"), "shared_label_unresolved")
-        mock_verifier.assert_not_called()
+        def failing_resolver(host, port):
+            raise socket.gaierror(socket.EAI_NONAME, "not found")
+        self.assertIsNone(targets.pinned_edge_handler("asb.bd", resolver=failing_resolver))
+        verifier = mock.Mock()
+        ev = targets.verify_shared([{"hostname": "app.asb.bd", "mode": "serve"}], "asb.bd", verifier, resolver=failing_resolver)
+        self.assertEqual(ev["public_edge"]["reason"], "shared_label_unresolved")
+        self.assertEqual(ev["resolver"]["result"], "negative")
+        verifier.assert_not_called()
+        def error_resolver(host, port):
+            raise socket.gaierror(socket.EAI_AGAIN, "temporary")
+        self.assertEqual(targets.resolver_state("app.asb.bd", resolver=error_resolver), "error")
 
     def test_pinned_http_502_fails_after_retries(self):
-        server = make_loopback_tls_server("app.asb.bd", status_code=502, body=b"Bad Gateway")
-        self.addCleanup(server["cleanup"])
-
-        def test_resolver(host, port, **kw):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", server["port"]))]
-
-        handler = targets.pinned_edge_handler("asb.bd", resolver=test_resolver)
-        opener = urllib.request.build_opener(handler)
-
-        with mock.patch("time.sleep", return_value=None):
-            with self.assertRaises(HTTPError) as ctx:
-                opener.open("https://app.asb.bd/test", timeout=3)
-            self.assertEqual(ctx.exception.code, 502)
+        routes = [{"hostname": "app.asb.bd", "mode": "serve"}]
+        server = self.server("app.asb.bd", 502)
+        with self.mapped(server), mock.patch.object(hosting_cmd.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "edge verification failed for app.asb.bd"):
+                hosting_cmd._verify_edge(routes, handlers=(self.handler(),))
+        self.assertEqual(len(server["received_headers"]), 30)
+        self.assertEqual(sleep.call_count, 30)
+        healthy = self.server("app.asb.bd", 200)
+        with self.mapped(healthy), mock.patch.object(hosting_cmd.time, "sleep") as sleep:
+            hosting_cmd._verify_edge(routes, handlers=(self.handler(),))
+        self.assertEqual(len(healthy["received_headers"]), 1)
+        sleep.assert_not_called()
 
 
 class TestSharedApplyWiring(unittest.TestCase):

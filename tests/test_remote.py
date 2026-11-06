@@ -2181,7 +2181,8 @@ class TestUploadRuntimeSource(unittest.TestCase):
                         else: tracked.unlink()
                         with self.assertRaisesRegex(RuntimeError, "dirty"):
                             remote_cmd._assert_clean_source_revision(revision)
-                        run_test_process(("git", "-C", str(root), "reset", "--hard", "-q"), check=True)
+                        # Restore only this fixture's known tracked file.
+                        tracked.write_text("v1")
                         (root / "untracked.txt").unlink(missing_ok=True)
                 with self.assertRaisesRegex(RuntimeError, "revision changed"):
                     remote_cmd._assert_clean_source_revision("b" * 40)
@@ -2445,7 +2446,8 @@ class TestInstallHandlersFailClosedOnReadinessInvalidation(unittest.TestCase):
 
 
 class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
-    def test_invalid_upload_timeout_refuses_before_journal_or_remote_upload(self):
+    @patch("sandbox.hosting.front_door.nginx.probe", return_value={"listeners": []})
+    def test_invalid_upload_timeout_refuses_before_journal_or_remote_upload(self, probe):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
@@ -2458,6 +2460,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                      patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                     remote_cmd._cmd_provision(args, as_json=True)
+                probe.assert_called_once()
                 journal.assert_not_called()
                 upload.assert_not_called()
 
@@ -2566,7 +2569,8 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 self.assertFalse(payload["provisioned"])
                 self.assertTrue(payload["data"]["requires_confirm"])
 
-    def test_failed_staging_leaves_a_redacted_owner_only_journal(self):
+    @patch("sandbox.hosting.front_door.nginx.probe", return_value={"listeners": []})
+    def test_failed_staging_leaves_a_redacted_owner_only_journal(self, probe):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
@@ -2582,6 +2586,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                                   side_effect=RuntimeError("token=private-value staging failed")) as upload:
                     with self.assertRaises(SystemExit):
                         remote_cmd._cmd_provision(args, as_json=True)
+                probe.assert_called_once()
                 upload.assert_called_once_with(
                     "ubuntu@1.2.3.4", source_revision="a" * 40, upload_timeout=611
                 )
@@ -2592,7 +2597,8 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 self.assertNotIn("private-value", journal.read_text())
                 self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
 
-    def test_provision_preserves_indeterminate_runtime_source_code(self):
+    @patch("sandbox.hosting.front_door.nginx.probe", return_value={"listeners": []})
+    def test_provision_preserves_indeterminate_runtime_source_code(self, probe):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
@@ -2613,6 +2619,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                                   side_effect=failure), \
                      redirect_stderr(error), self.assertRaises(SystemExit):
                     remote_cmd._cmd_provision(args, as_json=True)
+                probe.assert_called_once()
                 self.assertIn("remote_runtime_source_indeterminate", error.getvalue())
 
     def test_next_plan_surfaces_an_incomplete_previous_provision_log(self):

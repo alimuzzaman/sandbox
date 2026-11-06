@@ -4895,10 +4895,14 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     attempt.checkpoint('edge', 'edge_apply', state='observed')
     generation = (state['hosts'][key].get('hosting_operation') or {}).get('starting_generation')
     observed_revision = state['hosts'][key].get('observed_runtime_revision')
+    edge_evidence = (state['hosts'][key].get('edge') or {}).get('evidence')
+    public_edge_known = (not isinstance(edge_evidence, dict)
+                         or (edge_evidence.get('public_edge') or {}).get('result') == 'passed')
     for kind in ('authority', 'runtime', 'edge'):
         attempt.block(kind, True, generation=generation,
                       initializer='passed' if kind == 'runtime' else None,
-                      known=kind != 'runtime' or observed_revision == sha,
+                      known=(observed_revision == sha if kind == 'runtime' else
+                             public_edge_known if kind == 'edge' else True),
                       application_revision=observed_revision,
                       contract_digest=config_digest,
                       images=[local_images_digest]
@@ -7383,6 +7387,12 @@ def cmd_host(cfg, args) -> None:
                 if result.get("deployed_revision") and observed_rev != result["deployed_revision"]:
                     print(f"  warning: deployed revision does not match observed runtime revision ({result['deployed_revision']} vs {observed_rev})")
             print(f"  health: {result['health']['state']}")
+            edge_evidence = (result.get("edge") or {}).get("evidence")
+            if isinstance(edge_evidence, dict):
+                for key, label in (("origin", "origin"), ("public_edge", "public edge"), ("resolver", "resolver")):
+                    item = edge_evidence.get(key)
+                    if isinstance(item, dict):
+                        print(f"  {label}: {item.get('result', 'unknown')}")
             print(f"  generation: {result['generation']}")
             cache = result.get("edge_cache_purge")
             if isinstance(cache, dict):
@@ -7671,6 +7681,8 @@ def cmd_host(cfg, args) -> None:
         "derived_environment": result["derived_environment"],
         "delivery": result.get("delivery"),
     }
+    if isinstance(result.get("edge"), dict) and isinstance(result["edge"].get("evidence"), dict):
+        evidence["edge"] = result["edge"]
     if result.get("apply_log"):
         evidence["apply_log"] = result["apply_log"]
     if result.get("edge_cache_purge") is not None:

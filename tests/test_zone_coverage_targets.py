@@ -594,7 +594,7 @@ class TestPinnedTLSVerification(unittest.TestCase):
 
 
 class TestSharedApplyWiring(unittest.TestCase):
-    def setup_shared(self):
+    def setup_shared(self, *, with_revision=False):
         manifest = """version: 1
 project: demo
 environments:
@@ -616,6 +616,8 @@ environments:
       tls: origin-ca
       ssl_mode: strict
 """
+        if with_revision:
+            manifest = manifest.replace("      require_clean: true\n", "      require_clean: true\n      derived_environment:\n        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")
         identity = mock.patch("sandbox.jobs.process._portable_start_identity", return_value="synthetic-start")
         boot = mock.patch("sandbox.jobs.process._boot_id", return_value="00000000-0000-0000-0000-000000000001")
         identity.start(); boot.start()
@@ -1279,25 +1281,75 @@ class TestProviderErrorHygieneAndEvidence(unittest.TestCase):
         self.assertNotIn(secret_marker, out.getvalue())
 
     def test_apply_json_and_status_text_show_evidence(self):
-        fixture = _HostingOwnerFixture(self)
-        # Apply JSON includes edge evidence
-        args = types.SimpleNamespace(action="apply", project_dir=str(fixture.root), environment=None, remote=fixture.remote_name, confirm=True, json=True, allow_zone_ssl_change=False)
-        fixture.patch.object(hosting_cmd, "_cloudflare_drift", return_value={"configured": False})
-        fixture.patch.object(hosting_cmd, "_declared_secret_sources", return_value=set())
-        fixture.patch.object(hosting_cmd.hosting, "load_host_state", return_value=fixture.state)
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        real_verify = hosting_cmd._verify_edge
+        guarded_resolver = socket.getaddrinfo
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self, with_revision=True)
+        fixture.patch.object(hosting_cmd, "_verify_edge", real_verify)
+        authority = make_tls_authority(self)
+        server = make_loopback_tls_server(authority, "app.asb.bd")
+        self.addCleanup(server["cleanup"])
+        context = ssl.create_default_context(cafile=authority[2])
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        def resolver(host, port, *args, **kwargs):
+            if (host, port) == ("127.0.0.1", server["port"]):
+                return guarded_resolver(host, port, *args, **kwargs)
+            if host.startswith("sb-verify-") and host.endswith(".asb.bd"):
+                self.assertEqual(port, 443)
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+            raise socket.gaierror(socket.EAI_NONAME, "synthetic target negative")
+        fixture.patch.object(socket, "getaddrinfo", side_effect=resolver)
+        original_connect = socket.create_connection
+        def mapped(address, *args, **kwargs):
+            self.assertEqual(address, ("127.0.0.1", 443))
+            return original_connect(("127.0.0.1", server["port"]), *args, **kwargs)
+        fixture.patch.object(socket, "create_connection", side_effect=mapped)
+        fixture.patch.object(hosting_cmd.time, "sleep", return_value=None)
+        original_build = urllib.request.build_opener
+        def opener(*handlers):
+            for handler in handlers:
+                if isinstance(handler, targets._PinnedHTTPSHandler):
+                    handler._context = context
+            return original_build(*handlers)
+        fixture.patch.object(urllib.request, "build_opener", side_effect=opener)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
             hosting_cmd.cmd_host(None, args)
-        payload = json.loads(out.getvalue())
-        self.assertIn("edge", payload)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        evidence = payload["edge"]["evidence"]
+        self.assertEqual(payload["edge"]["state"], "ready")
+        self.assertEqual(evidence["origin"]["result"], "passed")
+        self.assertEqual(evidence["public_edge"]["result"], "passed")
+        self.assertEqual(evidence["resolver"]["result"], "negative")
+        self.assertIsInstance(evidence["observed_at"], str)
+        self.assertEqual(len(server["received_headers"]), 1)
+        self.assertTrue(fixture.delivery()["operation"]["delivery_succeeded"])
+        args.action = "status"
+        args.json = False
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hosting_cmd.cmd_host(None, args)
+        for line in ("origin: passed", "public edge: passed", "resolver: negative"):
+            self.assertIn(line, output.getvalue())
 
     def test_unverified_edge_marks_delivery_incomplete(self):
-        fixture = _HostingOwnerFixture(self)
-        edge_evidence = {"result": "unverified", "reason": "shared_label_unresolved"}
-        # Unverified edge marks delivery incomplete while apply succeeds
-        res = fixture.apply()
-        self.assertTrue(res.get("ok"))
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self, with_revision=True)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            hosting_cmd.cmd_host(None, args)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        operation = fixture.delivery()["operation"]
+        self.assertEqual(operation["execution_state"], "succeeded")
+        self.assertEqual(operation["runtime"]["state"], "known")
+        self.assertEqual(operation["edge"]["state"], "partial")
+        self.assertEqual(operation["edge"]["result"], "unknown")
+        self.assertFalse(operation["delivery_succeeded"])
+        self.assertEqual(operation["evidence_completeness"], "partial")
+        self.assertEqual(payload["edge"]["state"], "ready")
+        self.assertEqual(payload["edge"]["evidence"]["public_edge"]["result"], "unverified")
+        self.assertEqual(fixture.repository.load()["hosts"][fixture.key]["runtime"]["state"], "ready")
 
 
 if __name__ == "__main__":

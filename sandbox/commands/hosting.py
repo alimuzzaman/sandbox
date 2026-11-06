@@ -7573,10 +7573,8 @@ def cmd_host(cfg, args) -> None:
                     raise hosting.HostingError("registered remote changed before host apply")
                 state = hosting.load_host_state()
                 target_rec = state.get("hosts", {}).get(target_key) or {}
-                previous_coverage = target_rec.get("coverage_release_pending") or target_rec.get("dns_coverage") or {}
-                previous_zone = (previous_coverage.get("zone")
-                                 if isinstance(previous_coverage, dict)
-                                 and previous_coverage.get("mode") == "shared" else None)
+                from sandbox.hosting.zone_coverage.claims import shared_claims, set_pending
+                claims = shared_claims(target_rec)
                 decision = _coverage_decision(validated, current_entry, target_rec, report=False)
                 owner = _coverage_owner_conflict(state, target_key, validated, decision)
                 if owner:
@@ -7591,9 +7589,13 @@ def cmd_host(cfg, args) -> None:
                 _host_edge_preflight(validated, current_entry)
                 # Apply and recovery share one owner. Reload after acquisition so
                 # the generation/receipt view cannot be stale at the first effect.
-                if decision.get("mode") != "shared" and previous_zone:
-                    state.setdefault("hosts", {}).setdefault(target_key, {})["coverage_release_pending"] = {
-                        "mode": "shared", "zone": previous_zone}
+                current_zone = decision.get("zone") if decision.get("mode") == "shared" else None
+                if current_zone and not any(claim["zone"] == current_zone for claim in claims):
+                    claims.append({"mode": "shared", "zone": current_zone})
+                if claims:
+                    set_pending(state.setdefault("hosts", {}).setdefault(target_key, {}), claims)
+                    # Keep every claim durable before a new bind or target effects.
+                    recovery_repository._write(state)
                 runtime = hosting.desired_runtime(validated, args.remote, state)
                 runtime["records"] = current_plan["records"]
 
@@ -7622,25 +7624,41 @@ def cmd_host(cfg, args) -> None:
                         allow_record_overwrite=bool(getattr(args, "allow_record_overwrite", False)),
                     )
 
-                if decision.get("mode") == "shared":
+                binding_known = True
+                if current_zone:
                     try:
                         targets.bind_bound(
                             store_client,
-                            decision["zone"],
+                            current_zone,
                             target_key,
                             validated["routes"][0]["hostname"],
                             generation=decision.get("generation"),
                         )
                     except Exception:
+                        binding_known = False
                         result["coverage_binding"] = "unknown"
-                elif previous_zone:
+                if binding_known and claims:
+                    # The current shared zone stays bound; all other claims are
+                    # independently retryable until their release is persisted.
+                    pending = [claim for claim in claims if claim["zone"] != current_zone]
                     try:
-                        store_client = store_client or ZoneCoverageClient(current_entry)
-                        targets.release(store_client, previous_zone, target_key)
-                        state["hosts"][target_key].pop("coverage_release_pending", None)
+                        set_pending(state["hosts"][target_key], pending)
                         recovery_repository._write(state)
                     except Exception:
+                        binding_known = False
                         result["coverage_binding"] = "unknown"
+                    if binding_known:
+                        for claim in list(pending):
+                            try:
+                                store_client = store_client or ZoneCoverageClient(current_entry)
+                                targets.release(store_client, claim["zone"], target_key)
+                                remaining = [item for item in pending if item["zone"] != claim["zone"]]
+                                set_pending(state["hosts"][target_key], remaining)
+                                recovery_repository._write(state)
+                                pending = remaining
+                            except Exception:
+                                set_pending(state["hosts"][target_key], pending)
+                                result["coverage_binding"] = "unknown"
     except RetainedDelivery as exc:
         retained = operation_summary(exc.operation) if exc.operation else None
         payload = {'ok': bool(exc.status == 'existing' and retained and retained['delivery_succeeded']),

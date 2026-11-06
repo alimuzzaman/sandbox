@@ -999,6 +999,54 @@ class Execution(unittest.TestCase):
         self.assertNotIn(key, json.loads(zonefile.read_text())["dependents"])
 
     @guarded_destroy_case
+    def test_destroy_releases_all_current_and_pending_zone_claims(self):
+        record = _record(records=[], dns_coverage={"mode": "shared", "zone": "other.test", "hostname": "app.other.test"},
+                         coverage_release_pending=[{"mode": "shared", "zone": "example.com"},
+                                                   {"mode": "shared", "zone": "other.test"}])
+        root, key, zonefile, shared, repository, events, client = self.shared_fixture(record)
+        otherfile = zonefile.parent / "other.test.json"
+        doc = json.loads(zonefile.read_text())
+        doc["zone"] = "other.test"
+        doc["record"] = {**doc["record"], "name": "*.other.test"}
+        doc["shared_records"] = [doc["record"]]
+        doc["dependents"][key]["hostname"] = "app.other.test"
+        otherfile.write_text(json.dumps(doc))
+        plan = destroy.plan(repository.load(), ENTRY, "r1", "site", "sandbox", probe=dict(EMPTY_PROBE))
+        self.assertEqual({row["zone"] for row in plan["shared_coverage_retained"]}, {"example.com", "other.test"})
+        result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+        self.assertEqual(result["coverage_release"], "released")
+        self.assertNotIn(key, json.loads(zonefile.read_text())["dependents"])
+        self.assertNotIn(key, json.loads(otherfile.read_text())["dependents"])
+        self.assertEqual(events.count("store_release"), 2)
+        self.assertLess(events.index("state_removal"), events.index("store_release"))
+
+    @guarded_destroy_case
+    def test_destroy_retains_only_failed_zone_claim(self):
+        record = _record(records=[], dns_coverage={"mode": "shared", "zone": "other.test"},
+                         coverage_release_pending={"mode": "shared", "zone": "example.com"})
+        root, key, zonefile, shared, repository, events, client = self.shared_fixture(record)
+        otherfile = zonefile.parent / "other.test.json"
+        doc = json.loads(zonefile.read_text()); doc["zone"] = "other.test"
+        doc["record"] = {**doc["record"], "name": "*.other.test"}; doc["shared_records"] = [doc["record"]]
+        otherfile.write_text(json.dumps(doc))
+        previous = destroy.remote.ssh_run
+        def one_failure(entry, command, timeout=15):
+            from tests.zone_coverage_test_support import validate_store_command
+            try:
+                request = json.loads(base64.b64decode(validate_store_command(command), validate=True))
+            except AssertionError:
+                return previous(entry, command, timeout=timeout)
+            if request.get("action") == "dependent-release" and request.get("zone") == "other.test":
+                return subprocess.CompletedProcess([], 1, "", "synthetic failure")
+            return previous(entry, command, timeout=timeout)
+        with mock.patch.object(destroy.remote, "ssh_run", side_effect=one_failure):
+            result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+        self.assertEqual(result["coverage_release"], "unknown")
+        self.assertIn(key, json.loads(otherfile.read_text())["dependents"])
+        self.assertNotIn(key, json.loads(zonefile.read_text())["dependents"])
+        self.assertEqual(repository.load()["coverage_release_pending"][key], ["other.test"])
+
+    @guarded_destroy_case
     def test_pending_coverage_claim_survives_failed_teardown(self):
         record = _record(records=[], coverage_release_pending={"mode": "shared", "zone": "example.com"})
         root, key, zonefile, shared, repository, events, client = self.shared_fixture(record, fail_teardown=True)

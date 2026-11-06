@@ -1160,7 +1160,7 @@ When applying host configuration (`sb host apply`), if an existing DNS record on
 
 Destroy removes the target state before releasing its shared-coverage dependent. A failed release is reported as `coverage_release: unknown` and leaves a `coverage_release_pending` entry in host state with the target key and zones. This entry is prepared before teardown, so after interruption it does not by itself prove that target removal completed. Destroy does not automatically retry release from that entry after the target state is gone; inspect the retained claim and target state before resolving it.
 
-When a target moves from shared coverage to exact DNS, a successful apply releases its dependent claim from the previously recorded zone. If release is uncertain, the apply reports `coverage_binding: unknown` and retains the claim for a later retry. A failed apply does not release the claim.
+When a target moves between shared zones or from shared coverage to exact DNS, a successful apply releases obsolete dependent claims while keeping the currently used shared zone bound. Each uncertain release is retained for a later retry and the apply reports `coverage_binding: unknown`. A failed apply does not release old claims. Older single-zone pending markers remain readable; multiple pending zones are stored together.
 
 For a shared-coverage apply, JSON output includes the observed origin, public-edge and resolver evidence under `edge.evidence`; text status reports each result separately. If the fresh verification label does not resolve, apply can finish with the runtime ready while public-edge evidence is `unverified` and the delivery remains incomplete.
 

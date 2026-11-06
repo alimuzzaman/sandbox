@@ -1339,8 +1339,105 @@ class TestTransitionsAndReleases(unittest.TestCase):
                 hosting_cmd.cmd_host(None, args)
         else:
             with contextlib.redirect_stdout(output):
-                hosting_cmd.cmd_host(None, args)
+                try:
+                    hosting_cmd.cmd_host(None, args)
+                except SystemExit:
+                    self.fail(output.getvalue())
         return json.loads(output.getvalue())
+
+    def setup_two_zone_transition(self):
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self, with_revision=True)
+        calls, failing = [], set()
+        original = remote.ssh_run
+        def transport(entry, command, timeout=15):
+            from tests.zone_coverage_test_support import validate_store_command
+            request = json.loads(base64.b64decode(validate_store_command(command), validate=True))
+            if request.get("action") == "dependent-release":
+                operation = fixture.delivery()["operation"]
+                self.assertEqual(operation["execution_state"], "succeeded")
+                calls.append(request["zone"])
+                if request["zone"] in failing:
+                    return subprocess.CompletedProcess([], 1, "", "synthetic release failure")
+            return original(entry, command, timeout=timeout)
+        fixture.patch.object(remote, "ssh_run", transport)
+        first = self.apply(args)
+        self.assertTrue(first["ok"])
+        self.assertEqual(store.read("asb.bd")["document"]["dependents"][fixture.key]["state"], "bound")
+        other = {"id": "rec-other", "name": "*.other.test", "type": "A", "content": "203.0.113.10", "proxied": True}
+        seed_store_zone(str(fixture.home), zone="other.test", shared_records=[other])
+        provider._records.append(other)
+        from sandbox.hosting.front_door import nginx
+        facts = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"},
+                            {"file": "/etc/nginx/conf.d/sandbox-coverage-other.test.conf"}], "version": [1, 26, 0]}
+        nginx.probe.return_value = facts
+        nginx.preflight.return_value = facts
+        return fixture, store, provider, args, calls, failing, shared, other, fallback, certificate
+
+    def move_to_other_zone(self, fixture):
+        path = fixture.manifest_root / "sandbox.hosting.yml"
+        path.write_text(path.read_text().replace("app.asb.bd", "app.other.test").replace("      dns: exact\n", ""))
+
+    def test_shared_zone_move_releases_old_zone_after_success(self):
+        fixture, store, provider, args, calls, failing, shared, other, fallback, certificate = self.setup_two_zone_transition()
+        self.move_to_other_zone(fixture)
+        self.next_delivery(fixture, "zone-b-success")
+        self.assertTrue(self.apply(args)["ok"])
+        self.assertEqual(calls, ["asb.bd"])
+        self.assertNotIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertEqual(store.read("other.test")["document"]["dependents"][fixture.key]["state"], "bound")
+        self.assertIn(shared[0], provider._records)
+        self.assertIn(other, provider._records)
+        self.assertEqual(fallback.read_bytes(), b"shared fallback fixture")
+        self.assertEqual(certificate.read_bytes(), b"shared certificate fixture")
+
+    def test_failed_shared_zone_move_preserves_both_claims(self):
+        fixture, store, provider, args, calls, failing, shared, other, fallback, certificate = self.setup_two_zone_transition()
+        self.move_to_other_zone(fixture)
+        fixture.commit = "b" * 40
+        fixture.context["source_commit"] = fixture.commit
+        hosting_cmd._resolve_host_source_commit.return_value = fixture.commit
+        hosting_cmd._prepare_host_source_artifact.return_value = (
+            {"schema_version": 1, "kind": "git_commit", "root_relative": ".", "revision": fixture.commit}, fixture.checkout)
+        fixture.push.return_value = fixture.commit
+        for row in fixture.observe.return_value["revision_checks"]:
+            row["observed"] = fixture.commit
+        self.next_delivery(fixture, "zone-b-failed")
+        fixture.health.side_effect = RuntimeError("synthetic health failure")
+        self.assertFalse(self.apply(args, failure=True)["ok"])
+        self.assertEqual(calls, [])
+        self.assertIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertIn(fixture.key, store.read("other.test")["document"]["dependents"])
+        from sandbox.hosting.destroy import _coverage_claims
+        self.assertEqual({claim["zone"] for claim in _coverage_claims(fixture.repository.load()["hosts"][fixture.key])}, {"asb.bd", "other.test"})
+
+    def test_pending_old_zone_then_new_shared_then_exact_releases_both(self):
+        fixture, store, provider, args, calls, failing, shared, other, fallback, certificate = self.setup_two_zone_transition()
+        self.exact_manifest(fixture)
+        self.next_delivery(fixture, "a-exact-failed-release")
+        failing.add("asb.bd")
+        self.assertEqual(self.apply(args)["coverage_binding"], "unknown")
+        marker = fixture.repository.load()["hosts"][fixture.key]["coverage_release_pending"]
+        self.assertEqual(marker, {"mode": "shared", "zone": "asb.bd"})
+        self.move_to_other_zone(fixture)
+        self.next_delivery(fixture, "b-shared-failed-old-release")
+        self.assertEqual(self.apply(args)["coverage_binding"], "unknown")
+        self.assertEqual(store.read("other.test")["document"]["dependents"][fixture.key]["state"], "bound")
+        self.assertIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertNotIn("other.test", calls)
+        self.exact_manifest(fixture)
+        self.next_delivery(fixture, "b-exact-partial-release")
+        failing.remove("asb.bd"); failing.add("other.test")
+        self.assertEqual(self.apply(args)["coverage_binding"], "unknown")
+        self.assertNotIn(fixture.key, store.read("asb.bd")["document"]["dependents"])
+        self.assertIn(fixture.key, store.read("other.test")["document"]["dependents"])
+        self.assertEqual(fixture.repository.load()["hosts"][fixture.key]["coverage_release_pending"], {"mode": "shared", "zone": "other.test"})
+        failing.clear()
+        self.next_delivery(fixture, "b-exact-retry")
+        self.assertTrue(self.apply(args)["ok"])
+        self.assertNotIn(fixture.key, store.read("other.test")["document"]["dependents"])
+        self.assertNotIn("coverage_release_pending", fixture.repository.load()["hosts"][fixture.key])
+        self.assertEqual(calls.count("asb.bd"), 3)
+        self.assertEqual(calls.count("other.test"), 2)
 
     def test_shared_to_exact_apply_releases_then_next_apply_manages_record(self):
         fixture, store, provider, shared, args, calls, fallback, certificate = self.setup_transition()

@@ -203,13 +203,8 @@ def namesakes(remote_name: str, project: str, environment: str) -> list[str]:
 
 
 def _coverage_claims(record: dict | None) -> list[dict]:
-    claims = []
-    for field in ("dns_coverage", "coverage_release_pending"):
-        claim = (record or {}).get(field)
-        if isinstance(claim, dict) and claim.get("mode") == "shared" and isinstance(claim.get("zone"), str) and claim["zone"]:
-            if not any(row["zone"] == claim["zone"] for row in claims):
-                claims.append(claim)
-    return claims
+    from sandbox.hosting.zone_coverage.claims import shared_claims
+    return shared_claims(record)
 
 
 def _target_dns_records(record: dict | None) -> list[dict]:
@@ -499,17 +494,28 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
             raise DestroyError(f"remote teardown finished, but {cause}; {advice}", code) from None
         release_status = None
         if claims:
+            remaining = list(claims)
             try:
                 from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
                 from sandbox.hosting.zone_coverage import targets
                 cov_client = ZoneCoverageClient(entry)
                 for claim in claims:
-                    targets.release(cov_client, claim["zone"], key)
-                with repository.state_lock(timeout_seconds=lock_wait):
-                    latest = hosting.load_host_state()
-                    latest.get("coverage_release_pending", {}).pop(key, None)
-                    repository._write(latest)
-                release_status = "released"
+                    try:
+                        targets.release(cov_client, claim["zone"], key)
+                        after = [item for item in remaining if item["zone"] != claim["zone"]]
+                        with repository.state_lock(timeout_seconds=lock_wait):
+                            latest = hosting.load_host_state()
+                            markers = latest.setdefault("coverage_release_pending", {})
+                            if after:
+                                markers[key] = [item["zone"] for item in after]
+                            else:
+                                markers.pop(key, None)
+                            repository._write(latest)
+                        remaining = after
+                    except Exception:
+                        # Keep this claim while still attempting independent zones.
+                        pass
+                release_status = "unknown" if remaining else "released"
             except Exception:
                 release_status = "unknown"
     found.pop("_records", None)

@@ -33,7 +33,7 @@ import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
 from sandbox.hosting import edge_cache
-from sandbox.hosting.zone_coverage import CoverageError, targets
+from sandbox.hosting.zone_coverage import COVERAGE_STORE_UNAVAILABLE, CoverageError, targets
 from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
 from sandbox.delivery.hosting import HostingAttempt, RetainedDelivery
 from sandbox.delivery.models import DeliveryError, operation_summary
@@ -5127,6 +5127,28 @@ def _cmd_host_image_verify(args) -> None:
         raise SystemExit(1)
 
 
+def _coverage_decision(validated, entry, target_record, *, report=False, image=False):
+    """Supply observed fallback routes only for coverage-capable front doors."""
+    from sandbox.hosting.front_door import ZONE_COVERAGE, declaration, front_door_mode
+    from sandbox.hosting.front_door import nginx
+    capabilities = entry.get("capabilities")
+    supported = (ZONE_COVERAGE in declaration(front_door_mode(entry)).capabilities
+                 and (not isinstance(capabilities, (list, set, tuple, frozenset))
+                      or ZONE_COVERAGE in capabilities or "zone_coverage_v1" in capabilities))
+    facts = None
+    if supported:
+        try:
+            facts = nginx.probe(entry)
+            if not isinstance(facts, dict) or not isinstance(facts.get("routes"), list):
+                raise ValueError("invalid probe facts")
+        except Exception:
+            if report:
+                return {"mode": "refused", "code": COVERAGE_STORE_UNAVAILABLE,
+                        "reason": "zone coverage probe is unavailable on this remote"}
+            raise CoverageError(COVERAGE_STORE_UNAVAILABLE, "zone coverage probe is unavailable on this remote") from None
+    return targets.decide(validated, entry, target_record, facts=facts, report=report, image=image)
+
+
 class _HostImageEdgeAdapter:
     """Immutable edge-readiness request over the existing public-route verifier."""
 
@@ -5152,7 +5174,7 @@ class _HostImageEdgeAdapter:
         state = hosting.load_host_state()
         target_key = hosting.state_key(remote_name, self.validated) if (isinstance(self.validated, dict) and "project" in self.validated and "environment" in self.validated) else None
         target_rec = state.get("hosts", {}).get(target_key) if target_key else None
-        targets.decide(val_copy, entry, target_rec, image=True)
+        _coverage_decision(val_copy, entry, target_rec, image=True)
         plan = _guarded_host_apply_plan(self.validated, entry, remote_name,
                                        allow_zone_ssl_change=False)
         provider = plan.get("cloudflare")
@@ -7459,7 +7481,7 @@ def cmd_host(cfg, args) -> None:
     if args.action == "plan":
         target_key = hosting.state_key(args.remote, validated)
         target_rec = state.get("hosts", {}).get(target_key)
-        coverage_decision = targets.decide(validated, entry, target_rec, report=True)
+        coverage_decision = _coverage_decision(validated, entry, target_rec, report=True)
         if coverage_decision.get("mode") == "refused" or coverage_decision.get("zone"):
             validated["dns_coverage"] = coverage_decision
 
@@ -7507,7 +7529,7 @@ def cmd_host(cfg, args) -> None:
                 if not isinstance(current_entry, dict):
                     raise hosting.HostingError("registered remote changed before host apply")
                 target_rec = state.get("hosts", {}).get(target_key)
-                decision = targets.decide(validated, current_entry, target_rec, report=False)
+                decision = _coverage_decision(validated, current_entry, target_rec, report=False)
                 if decision.get("mode") == "shared" or decision.get("zone"):
                     validated["dns_coverage"] = decision
 

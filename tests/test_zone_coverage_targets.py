@@ -782,6 +782,92 @@ class TestRecoveryIntentAndAuthority(unittest.TestCase):
 class TestHostPlanRefusalsAndImagePreflight(unittest.TestCase):
     """Item 6: test_host_plan_each_refusal_is_exit_zero_data & test_image_preflight."""
 
+    def test_real_plan_requires_observed_fallback(self):
+        manifest = """version: 1
+project: demo
+environments:
+  production:
+    compose:
+      files: [compose.yml]
+      service: web
+      container_port: 8080
+    healthcheck:
+      path: /
+      statuses: [200]
+    deploy:
+      allowed_branches: [main]
+      require_clean: true
+    host:
+      primary: app.asb.bd
+    cloudflare:
+      proxied: true
+      tls: origin-ca
+      ssl_mode: strict
+"""
+        identity = mock.patch("sandbox.jobs.process._portable_start_identity", return_value="synthetic-start")
+        boot = mock.patch("sandbox.jobs.process._boot_id", return_value="00000000-0000-0000-0000-000000000001")
+        identity.start(); boot.start()
+        self.addCleanup(identity.stop); self.addCleanup(boot.stop)
+        fixture = _HostingOwnerFixture(self, manifest)
+        fixture.entry.update(name=fixture.remote_name, front_door="nginx", capabilities=["zone_coverage_v1"])
+        records = [{"id": "rec-w", "name": "*.asb.bd", "type": "A", "content": "203.0.113.10", "proxied": True}]
+        seed_store_zone(str(fixture.home), shared_records=records)
+        store = make_real_store(str(fixture.home), fixture.entry)
+        fixture.patch.object(remote, "ssh_run", store._ssh_run)
+        provider = StatefulFakeProvider("z-asb", "asb.bd", "strict", records=records)
+        fixture.patch.object(hosting_cmd.cloudflare, "Client", return_value=provider)
+        fixture.patch.object(hosting_cmd, "_cloudflare_drift", return_value={})
+        fixture.patch.object(hosting_cmd, "_host_recovery_eligibility", return_value={"eligible": True})
+        fixture.patch.object(hosting_cmd, "_add_front_door_plan")
+        from sandbox.hosting.front_door import nginx
+        probe = fixture.patch.object(nginx, "probe", return_value={"routes": []})
+        args = types.SimpleNamespace(action="plan", project_dir=str(fixture.root), environment=None, remote=fixture.remote_name, json=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            hosting_cmd.cmd_host(None, args)
+        payload = json.loads(out.getvalue())
+        probe.assert_called_once()
+        self.assertEqual(payload["dns_coverage"]["code"], COVERAGE_DRIFT)
+        self.assertTrue(payload["ok"])
+        probe.return_value = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"}]}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            hosting_cmd.cmd_host(None, args)
+        self.assertEqual(json.loads(out.getvalue())["dns_coverage"]["mode"], "shared")
+        probe.side_effect = RuntimeError("private marker")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            hosting_cmd.cmd_host(None, args)
+        self.assertEqual(json.loads(out.getvalue())["dns_coverage"]["code"], COVERAGE_STORE_UNAVAILABLE)
+        self.assertNotIn("private marker", out.getvalue())
+        fixture.entry["front_door"] = "caddy"
+        probe.reset_mock()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(out.getvalue())["ok"])
+        probe.assert_not_called()
+        fixture.entry["front_door"] = "nginx"
+        probe.side_effect = None
+        probe.return_value = {"routes": [{"file": "/etc/nginx/conf.d/sandbox-coverage-asb.bd.conf"}]}
+        snapshot = copy.deepcopy(fixture.validated)
+        with self.assertRaises(CoverageError) as refused:
+            hosting_cmd._HostImageEdgeAdapter(fixture.validated).preflight(fixture.entry, fixture.remote_name)
+        self.assertEqual(refused.exception.code, COVERAGE_IMAGE_UNSUPPORTED)
+        self.assertEqual(fixture.validated, snapshot)
+        fixture.patch.object(hosting_cmd, "_validate_apply_source", return_value="main")
+        fixture.patch.object(remote, "registered_remote_lock", return_value=contextlib.nullcontext())
+        probe.side_effect = RuntimeError("private marker")
+        args.action = "apply"
+        args.confirm = True
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            hosting_cmd.cmd_host(None, args)
+        failure = json.loads(out.getvalue())
+        self.assertEqual(failure["code"], COVERAGE_STORE_UNAVAILABLE)
+        self.assertNotIn("private marker", out.getvalue())
+        fixture.compose.assert_not_called()
+
     def test_host_plan_each_refusal_is_exit_zero_data(self):
         fixture = _HostingOwnerFixture(self)
         fixture.entry["front_door"] = "nginx"

@@ -916,23 +916,53 @@ environments:
         fixture.compose.assert_not_called()
 
     def test_host_plan_each_refusal_is_exit_zero_data(self):
-        fixture = _HostingOwnerFixture(self)
-        fixture.entry["front_door"] = "nginx"
-        fixture.entry["capabilities"] = ["zone_coverage_v1"]
+        for scenario in ("store", "missing", "ineligible", "drift", "disabled", "not_active"):
+            with self.subTest(scenario=scenario):
+                fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+                args.action = "plan"
+                fixture.patch.object(hosting_cmd, "_add_front_door_plan")
+                control = io.StringIO()
+                with contextlib.redirect_stdout(control): hosting_cmd.cmd_host(None, args)
+                self.assertEqual(json.loads(control.getvalue())["dns_coverage"]["mode"], "shared")
+                zonefile = fixture.home / "runtime" / "zone-coverage" / "zones" / "asb.bd.json"
+                doc = json.loads(zonefile.read_text())
+                expected = {"store": COVERAGE_STORE_UNAVAILABLE, "missing": COVERAGE_RECORD_MISSING,
+                            "ineligible": COVERAGE_NAME_INELIGIBLE, "drift": COVERAGE_DRIFT,
+                            "disabled": COVERAGE_DISABLED_DEPENDENT, "not_active": COVERAGE_NOT_ACTIVE}[scenario]
+                if scenario == "store":
+                    probe = fixture.patch.object(remote, "ssh_run", side_effect=RuntimeError("private-store-marker"))
+                elif scenario == "missing":
+                    zonefile.unlink()
+                elif scenario == "ineligible":
+                    provider._records.append({"id": "txt", "name": "app.asb.bd", "type": "TXT", "content": "foreign"})
+                elif scenario == "drift":
+                    provider.ssl_mode = "flexible"
+                elif scenario == "disabled":
+                    doc["state"] = "disabled"; doc["dependents"] = {fixture.key: {"hostname": "app.asb.bd", "state": "bound"}}
+                    zonefile.write_text(json.dumps(doc))
+                elif scenario == "not_active":
+                    doc["state"] = "enabling"; zonefile.write_text(json.dumps(doc))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertIsNone(hosting_cmd.cmd_host(None, args))
+                data = json.loads(output.getvalue())
+                self.assertTrue(data["ok"])
+                self.assertEqual(data["dns_coverage"]["code"], expected)
+                self.assertNotIn("private-store-marker", output.getvalue())
+                if scenario == "store": probe.assert_called()
+                fixture.compose.assert_not_called()
 
-        for code in [
-            COVERAGE_STORE_UNAVAILABLE, COVERAGE_RECORD_MISSING, COVERAGE_NAME_INELIGIBLE,
-            COVERAGE_DRIFT, COVERAGE_DISABLED_DEPENDENT, COVERAGE_NOT_ACTIVE, COVERAGE_IMAGE_UNSUPPORTED
-        ]:
-            with mock.patch("sandbox.hosting.zone_coverage.targets.decide", return_value={"mode": "refused", "code": code, "reason": "test refusal"}):
-                args = types.SimpleNamespace(action="plan", project_dir=str(fixture.root), environment=None, remote=fixture.remote_name, json=True)
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    rc = hosting_cmd.cmd_host(None, args)
-                self.assertEqual(rc, 0)
-                data = json.loads(out.getvalue())
-                self.assertEqual(data.get("dns_coverage", {}).get("mode"), "refused")
-                self.assertEqual(data.get("dns_coverage", {}).get("code"), code)
+    def test_cloudflare_dns_validation(self):
+        fixture, *_ = TestSharedApplyWiring.setup_shared(self)
+        path = fixture.manifest_root / "sandbox.hosting.yml"
+        original = path.read_text()
+        for setting in ("", "      dns: auto\n", "      dns: exact\n"):
+            path.write_text(original + setting)
+            hosting.validate_manifest(str(fixture.manifest_root))
+        for setting in ("      dns: null\n", "      dns: invalid\n"):
+            path.write_text(original + setting)
+            with self.assertRaisesRegex(hosting.HostingError, "cloudflare.dns must be auto or exact"):
+                hosting.validate_manifest(str(fixture.manifest_root))
 
     def test_image_preflight_refuses_shared_without_mutating_validated(self):
         val = {
@@ -1350,21 +1380,64 @@ class TestProviderErrorHygieneAndEvidence(unittest.TestCase):
     """Also items: provider error hygiene, status evidence, incomplete edge delivery."""
 
     def test_provider_error_text_never_in_output(self):
-        # Secret marker in provider error must never leak into plan or apply output
-        fixture = _HostingOwnerFixture(self)
-        secret_marker = "SECRET_MARKER_DO_NOT_LEAK_XYZ"
-        cf_failing = mock.Mock()
-        cf_failing.current_ssl_mode.side_effect = RuntimeError(f"error with {secret_marker}")
-        fixture.patch.object(hosting_cmd.cloudflare, "Client", return_value=cf_failing)
+        marker = "PRIVATE_PROVIDER_MARKER"
+        # Each scenario starts from an independently healthy real-store fixture.
+        for action in ("plan", "apply"):
+            for seam in ("constructor", "zone_records", "current_ssl_mode"):
+                with self.subTest(action=action, seam=seam):
+                    fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+                    fixture.patch.object(hosting_cmd, "_add_front_door_plan")
+                    args.action = "plan"
+                    healthy = io.StringIO()
+                    with contextlib.redirect_stdout(healthy): hosting_cmd.cmd_host(None, args)
+                    self.assertEqual(json.loads(healthy.getvalue())["dns_coverage"]["mode"], "shared")
+                    if seam == "constructor":
+                        failing = fixture.patch.object(hosting_cmd.cloudflare, "Client", side_effect=RuntimeError(marker))
+                    else:
+                        failing = fixture.patch.object(provider, seam, side_effect=RuntimeError(marker))
+                    args.action = action
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        if action == "apply":
+                            with self.assertRaises(SystemExit): hosting_cmd.cmd_host(None, args)
+                        else:
+                            self.assertIsNone(hosting_cmd.cmd_host(None, args))
+                    payload = json.loads(output.getvalue())
+                    self.assertEqual(payload["dns_coverage"]["code"] if action == "plan" else payload["code"], COVERAGE_DRIFT)
+                    self.assertNotIn(marker, output.getvalue())
+                    failing.assert_called()
+                    fixture.compose.assert_not_called()
+                    self.assertFalse([c for c in provider.calls if c[0] in ("create_address", "upsert_address", "update_record", "restore_record", "delete_record")])
+        fixture, store, provider, shared, args, events, fallback, certificate = TestSharedApplyWiring.setup_shared(self)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): hosting_cmd.cmd_host(None, args)
+        self.assertTrue(json.loads(output.getvalue())["ok"])
 
-        args = types.SimpleNamespace(action="plan", project_dir=str(fixture.root), environment=None, remote=fixture.remote_name, json=True)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            try:
-                hosting_cmd.cmd_host(None, args)
-            except Exception as e:
-                self.assertNotIn(secret_marker, str(e))
-        self.assertNotIn(secret_marker, out.getvalue())
+    def test_store_mutation_error_text_is_fixed(self):
+        marker = "PRIVATE_STORE_MARKER"
+        for action in ("pending", "bound", "release"):
+            with self.subTest(action=action):
+                def rejected(entry, command, timeout=15):
+                    request = json.loads(base64.b64decode(validate_store_command(command), validate=True))
+                    return subprocess.CompletedProcess([], 0, json.dumps({"ok": True, "action": request["action"], "refused": "coverage_not_active", "reason": marker}), "")
+                from tests.zone_coverage_test_support import validate_store_command
+                client = ZoneCoverageClient({}, ssh_run=rejected)
+                call = {"pending": lambda c: targets.bind_pending(c, "asb.bd", "r1/demo/main", "app.asb.bd"),
+                        "bound": lambda c: targets.bind_bound(c, "asb.bd", "r1/demo/main", "app.asb.bd"),
+                        "release": lambda c: targets.release(c, "asb.bd", "r1/demo/main")}[action]
+                with self.assertRaises(CoverageError) as failure: call(client)
+                self.assertNotIn(marker, str(failure.exception))
+                self.assertIsNone(failure.exception.__cause__)
+                def broken(entry, command, timeout=15):
+                    raise RuntimeError(marker)
+                with self.assertRaises(CoverageError) as failure:
+                    call(ZoneCoverageClient({}, ssh_run=broken))
+                self.assertNotIn(marker, str(failure.exception))
+                self.assertIsNone(failure.exception.__cause__)
+                with tempfile.TemporaryDirectory() as td:
+                    seed_store_zone(td)
+                    actual = make_real_store(td, {})
+                    self.assertTrue(call(actual)["ok"])
 
     def test_apply_json_and_status_text_show_evidence(self):
         real_verify = hosting_cmd._verify_edge

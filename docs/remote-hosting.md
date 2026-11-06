@@ -1140,6 +1140,8 @@ cloudflare:
   dns: auto # auto (default) | exact
 ```
 
+Omit `dns` for the default, or set it to `auto` or `exact`; an explicit `null` is invalid.
+
 - `auto` (default): Uses shared zone coverage whenever the remote has an nginx front door with an active covered zone matching the target hostname. If no zone covers the target or the remote uses Caddy, it falls back to creating an exact DNS record.
 - `exact`: Forces creation of an individual DNS record on Cloudflare. Required when:
   - The hostname is an apex domain (e.g. `example.com`).

@@ -384,51 +384,43 @@ def decide(
     return _refusal(COVERAGE_NOT_ACTIVE, f"zone coverage state {state} is not supported", report)
 
 
-def bind_pending(
-    store_client: ZoneCoverageClient,
-    zone: str,
-    state_key: str,
-    hostname: str,
-    generation: int | None = None,
-    operation_id: str | None = None,
-) -> dict:
-    """Register this target as pending on the zone coverage store."""
-    res = store_client.dependent_bind(
-        zone, state_key, hostname, "pending", generation=generation, operation_id=operation_id
+def _store_mutation(operation: str, call: Callable[[], dict]) -> dict:
+    """Keep transport diagnostics and untrusted store reasons out of public errors."""
+    from sandbox.hosting.zone_coverage import (
+        REFUSAL_CODES, COVERAGE_GENERATION_STALE, COVERAGE_DEPENDENTS_STALE,
+        COVERAGE_DOCUMENT_CORRUPT, COVERAGE_KIND_MISMATCH, COVERAGE_LEASE_ACTIVE,
     )
-    if isinstance(res, dict) and res.get("refused"):
-        raise CoverageError(res["refused"], res.get("reason", f"bind_pending refused: {res['refused']}"))
-    return res
+    allowed = set(REFUSAL_CODES) | {COVERAGE_GENERATION_STALE, COVERAGE_DEPENDENTS_STALE,
+                                  COVERAGE_DOCUMENT_CORRUPT, COVERAGE_KIND_MISMATCH, COVERAGE_LEASE_ACTIVE}
+    try:
+        result = call()
+        if not isinstance(result, dict):
+            raise ValueError("invalid store response")
+        if result.get("refused"):
+            code = result["refused"] if result["refused"] in allowed else COVERAGE_STORE_UNAVAILABLE
+            raise CoverageError(code, f"zone coverage {operation} was refused")
+        return result
+    except CoverageError as exc:
+        code = exc.code if exc.code in allowed else COVERAGE_STORE_UNAVAILABLE
+        raise CoverageError(code, f"zone coverage {operation} failed") from None
+    except Exception:
+        raise CoverageError(COVERAGE_STORE_UNAVAILABLE, f"zone coverage {operation} failed") from None
 
 
-def bind_bound(
-    store_client: ZoneCoverageClient,
-    zone: str,
-    state_key: str,
-    hostname: str,
-    generation: int | None = None,
-    operation_id: str | None = None,
-) -> dict:
-    """Transition this target from pending to bound on the zone coverage store."""
-    res = store_client.dependent_bind(
-        zone, state_key, hostname, "bound", generation=generation, operation_id=operation_id
-    )
-    if isinstance(res, dict) and res.get("refused"):
-        raise CoverageError(res["refused"], res.get("reason", f"bind_bound refused: {res['refused']}"))
-    return res
+def bind_pending(store_client: ZoneCoverageClient, zone: str, state_key: str, hostname: str,
+                 generation: int | None = None, operation_id: str | None = None) -> dict:
+    return _store_mutation("pending bind", lambda: store_client.dependent_bind(
+        zone, state_key, hostname, "pending", generation=generation, operation_id=operation_id))
+
+
+def bind_bound(store_client: ZoneCoverageClient, zone: str, state_key: str, hostname: str,
+               generation: int | None = None, operation_id: str | None = None) -> dict:
+    return _store_mutation("bound bind", lambda: store_client.dependent_bind(
+        zone, state_key, hostname, "bound", generation=generation, operation_id=operation_id))
 
 
 def release(store_client: ZoneCoverageClient, zone: str, state_key: str) -> dict:
-    """Release this target from the zone coverage store (idempotent)."""
-    try:
-        res = store_client.dependent_release(zone, state_key)
-        if isinstance(res, dict) and res.get("refused"):
-            raise CoverageError(res["refused"], res.get("reason", f"release refused: {res['refused']}"))
-        return res
-    except CoverageError:
-        raise
-    except Exception as exc:
-        raise CoverageError(COVERAGE_STORE_UNAVAILABLE, str(exc)) from exc
+    return _store_mutation("release", lambda: store_client.dependent_release(zone, state_key))
 
 
 def check_exact_record(

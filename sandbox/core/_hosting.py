@@ -652,7 +652,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
             "or DNS-only public ACME"
         )
     cf_dns = cf.get("dns")
-    if cf_dns is not None:
+    if "dns" in cf:
         if not isinstance(cf_dns, str) or cf_dns not in {"auto", "exact"}:
             raise HostingError("cloudflare.dns must be auto or exact")
     if public_acme and any(route["hostname"].startswith("*.") for route in routes):

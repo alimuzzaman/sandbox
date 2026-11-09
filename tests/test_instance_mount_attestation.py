@@ -243,7 +243,9 @@ class TestSourceMountAttestation(unittest.TestCase):
                         "ok": False, "code": "instance_mount_drift",
                     }) as attest, \
                     mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=AssertionError), \
-                    mock.patch.object(_instances, "resolve_instances", side_effect=AssertionError):
+                    mock.patch.object(_instances, "resolve_instances", return_value={
+                        "fixture": {"server": "apache", "extra_mounts": [str(stale_source)]},
+                    }):
                 result = _instances.ensure_instance(
                     {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
                 )

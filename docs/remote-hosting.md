@@ -1704,6 +1704,24 @@ install, not backed up or losslessly recoverable.
 
 ## 9. Troubleshooting a failed `host apply`
 
+### `binding_mismatch` after a remote's connection changed
+
+Each deployment records a digest of how its remote was registered: SSH target, control
+transport and URL, port and Sandbox home. Changing any of them, such as moving the control
+connection to Tailscale, makes the next `host apply` refuse with `binding_mismatch`, even
+though the machine is the same.
+
+```bash
+./sb remote rebind-host myvps --json            # report only
+./sb remote rebind-host myvps --confirm --json  # record it
+```
+
+It refuses unless every hosted target on the remote records one host identity and one
+machine, and the control service reached now proves that same machine. The confirmation is
+tied to the exact registration it saw, so any later change refuses again until it is
+confirmed again. Use the same Sandbox revision for the rebind and the following applies,
+and run it while no apply is in progress.
+
 ### Observation-only receipt recovery
 
 Do not retry ordinary `host apply` merely to learn whether a failed durable apply

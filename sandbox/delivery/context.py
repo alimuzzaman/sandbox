@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from sandbox.config.facade import project_identity
@@ -50,8 +51,26 @@ def control_metadata(entry=None):
             'capability_versions': require_delivery_capabilities()}
 
 
+_DIGEST = re.compile(r'sha256:[0-9a-f]{64}')
+
+
 def registered_host_digest(entry, remote_name, home=None):
-    """Use the hosting owner's existing nonsecret registered-target binding."""
+    """The stable host identity recorded on delivery evidence.
+
+    A confirmed `remote rebind-host` pin keeps an earlier identity, but only
+    while the registration is exactly the one that was confirmed.
+    """
+    digest = registration_digest(entry, remote_name, home)
+    pin = entry.get('host_identity_pin')
+    if isinstance(pin, dict) and pin.get('accepted_digest') == digest:
+        pinned = pin.get('registered_digest')
+        if isinstance(pinned, str) and _DIGEST.fullmatch(pinned):
+            return pinned
+    return digest
+
+
+def registration_digest(entry, remote_name, home=None):
+    """Digest the nonsecret fields of the remote as it is registered now."""
     ssh = _remote.remote_ssh_parts(entry)
     control_url = entry.get('control_url')
     if isinstance(control_url, str):

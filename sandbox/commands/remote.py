@@ -254,6 +254,7 @@ def cmd_remote(cfg, args) -> None:
         "remove": _cmd_remove,
         "set-origin": _cmd_set_origin,
         "set-storage-floor": _cmd_set_storage_floor,
+        "rebind-host": _cmd_rebind_host,
         "docker-pool": _cmd_docker_pool,
         "domains": _cmd_domains,
         "service": _cmd_service,
@@ -1215,6 +1216,57 @@ def _cmd_set_storage_floor(args, as_json: bool) -> None:
            "that would cross it are refused")
     else:
         ok(f"cleared the storage floor for '{name}'")
+
+
+def _cmd_rebind_host(args, as_json: bool) -> None:
+    """Keep recorded delivery evidence valid after a remote's connection changed.
+
+    Refuses unless every hosted target recorded on this remote names one host
+    identity and one machine, and the service now reached proves that machine.
+    """
+    from sandbox.commands.hosting import _authenticated_machine_identity
+    from sandbox.core import _hosting
+    from sandbox.delivery.context import registered_host_digest, registration_digest
+    name = _require_name(args)
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    evidence = [
+        (record.get("hosting_operation") or {}).get("evidence") or {}
+        for record in _hosting.load_host_state()["hosts"].values()
+        if ((record.get("hosting_operation") or {}).get("target") or {}).get("remote") == name]
+    recorded = {item.get("host_identity") for item in evidence}
+    machines = {item.get("machine_identity") for item in evidence}
+    if not evidence:
+        die(f"rebind_evidence_missing: no hosted target is recorded on '{name}'")
+    if len(recorded) != 1 or len(machines) != 1 or not all(recorded | machines):
+        die(f"rebind_evidence_ambiguous: hosted targets on '{name}' do not agree on one host")
+    registered, machine = recorded.pop(), machines.pop()
+    try:
+        observed = _authenticated_machine_identity(name)
+    except Exception as exc:  # Any failure to prove the machine refuses the rebind.
+        die(f"rebind_machine_unproven: {type(exc).__name__}")
+    if observed != machine:
+        die(f"rebind_machine_mismatch: '{name}' is not the machine its targets were deployed to")
+    home = sr.resolve_sandbox_home(entry)
+    accepted = registration_digest(entry, name, home)
+    status = "already_bound" if registered_host_digest(entry, name, home) == registered else (
+        "rebound" if getattr(args, "confirm", False) else "planned")
+    if status == "rebound":
+        _invalidate_readiness(name, before=True)
+        sr.put_remote(name, host_identity_pin={
+            "registered_digest": registered, "accepted_digest": accepted,
+            "machine_identity": machine,
+            "confirmed_at": datetime.now(timezone.utc).isoformat()})
+        _invalidate_readiness(name)
+    result = {"ok": True, "name": name, "status": status, "registered_digest": registered,
+              "accepted_digest": accepted, "targets": len(evidence), "error": None}
+    if as_json:
+        print(json.dumps(result))
+    elif status == "planned":
+        ok(f"'{name}' can be rebound for {len(evidence)} target(s); add --confirm to record it")
+    else:
+        ok(f"'{name}' is bound to its recorded host identity ({status})")
 
 
 def _cmd_remove(args, as_json: bool) -> None:

@@ -945,10 +945,15 @@ def _run_streamable_http(bind: str, port: int, token: str,
                                 status_code=400)
         return JSONResponse(result)
 
+    from tailnet_access import build_attribution
+    attribution = build_attribution(bind, os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
+
     class _BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             if request.headers.get("authorization") != f"Bearer {token}":
                 return PlainTextResponse("Unauthorized", status_code=401)
+            if attribution is not None:
+                return await attribution.observe(request, call_next)
             return await call_next(request)
 
     mcp.settings.host = bind

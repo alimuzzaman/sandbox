@@ -1460,6 +1460,25 @@ provide hostile-code containment or tenant isolation.
 - A remote stop controls only the proven Sandbox service unit. Sandbox never scans or
   terminates generic streamable-HTTP processes by their command-line flags.
 
+### Who made each control request
+
+When the control service binds to a Tailscale address, it records each authenticated
+request in `$SANDBOX_HOME/runtime/logs/control-access.jsonl` (mode 0600, rotated at 10 MB
+with three old files kept). Each line is JSON with the UTC time, Tailscale login, device
+name, HTTP method, path, status and, for an MCP tool call, the tool name:
+
+```bash
+tail -n 20 ~/sandbox/runtime/logs/control-access.jsonl
+```
+
+Tokens, headers, request bodies and tool arguments are never written. The login comes from
+`tailscale whois` and is cached for a minute. This is attribution only: the bearer token
+still decides access, and a failed lookup serves the request and records `unknown` with a
+short `reason`. Records are written in the background and may be dropped under extreme
+load. Public HTTPS mode records nothing, because the client it sees is the proxy.
+Whether someone reaching the machine through Tailscale machine sharing resolves to their
+own login has not been verified.
+
 ## 8. CLI + MCP surface
 
 See `specs/014-remote-vps-hosting/contracts/cli-and-mcp.md` for the full flag/JSON-shape

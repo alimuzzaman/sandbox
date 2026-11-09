@@ -4772,7 +4772,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                                         "content": target_host, "proxied": proxied}
                         checked = targets.check_exact_record(
                             cname_wanted, [cname], state["hosts"][key].get("records"),
-                            allow_overwrite=allow_record_overwrite)
+                            allow_overwrite=allow_record_overwrite,
+                            previously_owned=targets._target_has_owned_record(
+                                state["hosts"][key], {hostname}))
                         if checked.get("action") == "adopt":
                             changes.append({"zone_id": zone["id"], "previous": cname,
                                             "created_id": cname.get("id"),

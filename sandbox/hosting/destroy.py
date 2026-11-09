@@ -467,6 +467,8 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
                     else:
                         markers.pop(key, None)
                     repository._write(latest)
+                return {"state": "absent", "target": key, "remote": _retained(found["remote"]),
+                        "coverage_release": "unknown" if remaining else "released"}
             return {"state": "absent", "target": key, "remote": _retained(found["remote"])}
         if found["fences"] and not clear_fenced:
             raise DestroyError(

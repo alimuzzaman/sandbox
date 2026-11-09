@@ -349,6 +349,7 @@ class Execution(unittest.TestCase):
         return result, commands, load()
 
     PROBE = "containers=1\nvolumes=2\nnetworks=1\nimages=1\nretained_images=0\nretained_untagged=0\nruntime_kb=24\nsource_kb=9\nroute=0\ncerts=0\n"
+    GONE = "containers=0\nvolumes=0\nnetworks=0\nimages=0\nretained_images=0\nretained_untagged=0\nruntime_kb=0\nsource_kb=0\nroute=0\ncerts=0\n"
 
     def test_removes_remote_then_cloudflare_then_state(self):
         client = FakeClient()
@@ -941,13 +942,24 @@ class Execution(unittest.TestCase):
 
     @guarded_destroy_case
     def test_absent_destroy_retries_legacy_pending_coverage_release(self):
-        root, key, zonefile, shared, repository, events, client = self.shared_fixture()
+        root, key, zonefile, shared, repository, events, client = self.shared_fixture(probe=self.GONE)
         repository._write({"version": 1, "hosts": {},
                            "coverage_release_pending": {key: ["example.com"]}})
         result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
-        self.assertIn(result["state"], {"absent", "destroyed"})
+        self.assertEqual(result["state"], "absent")
+        self.assertEqual(result["coverage_release"], "released")
         self.assertNotIn(key, json.loads(zonefile.read_text())["dependents"])
         self.assertNotIn(key, repository.load().get("coverage_release_pending", {}))
+
+    @guarded_destroy_case
+    def test_absent_destroy_reports_a_retry_that_fails(self):
+        root, key, zonefile, shared, repository, events, client = self.shared_fixture(fail_store=True, probe=self.GONE)
+        repository._write({"version": 1, "hosts": {},
+                           "coverage_release_pending": {key: ["example.com"]}})
+        result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+        self.assertEqual(result["state"], "absent")
+        self.assertEqual(result["coverage_release"], "unknown")
+        self.assertIn(key, repository.load()["coverage_release_pending"])
 
     @guarded_destroy_case
     def test_fenced_or_failed_destroy_keeps_dependent(self):

@@ -429,6 +429,7 @@ def check_exact_record(
     recorded_records: list[dict] | None,
     *,
     allow_overwrite: bool = False,
+    previously_owned: bool = False,
 ) -> dict:
     """Evaluate DNS drift rule for an exact record in a covered zone.
 
@@ -478,6 +479,9 @@ def check_exact_record(
             MANAGED_RECORD_DRIFT,
             f"DNS record for {hostname} has drifted from recorded applied state; pass --allow-record-overwrite to overwrite",
         )
+
+    if allow_overwrite and previously_owned:
+        return {"action": "write"}
 
     raise CoverageError(
         RECORD_NOT_OWNED,

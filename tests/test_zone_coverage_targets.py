@@ -1251,6 +1251,21 @@ class TestExactRecordDriftAndMatrix(unittest.TestCase):
             targets.check_exact_record(wanted, [drifted], None, allow_overwrite=True)
         self.assertEqual(ctx.exception.code, RECORD_NOT_OWNED)
 
+        # An older target can be adopted only with explicit evidence from its host state.
+        with self.assertRaises(CoverageError) as ctx:
+            targets.check_exact_record(wanted, [drifted], None, allow_overwrite=False,
+                                       previously_owned=True)
+        self.assertEqual(ctx.exception.code, RECORD_NOT_OWNED)
+        self.assertEqual(
+            targets.check_exact_record(wanted, [drifted], None, allow_overwrite=True,
+                                       previously_owned=True),
+            {"action": "write"},
+        )
+        with self.assertRaises(CoverageError) as ctx:
+            targets.check_exact_record(wanted, [drifted], None, allow_overwrite=True,
+                                       previously_owned=False)
+        self.assertEqual(ctx.exception.code, RECORD_NOT_OWNED)
+
         # TXT at name ignored
         txt_rec = {"id": "txt-1", "name": "app.asb.bd", "type": "TXT", "content": "v=spf1"}
         res = targets.check_exact_record(wanted, [txt_rec], None, allow_overwrite=False)

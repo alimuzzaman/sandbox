@@ -4790,6 +4790,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 record_check = targets.check_exact_record(
                     wanted, all_records, state["hosts"][key].get("records"),
                     allow_overwrite=allow_record_overwrite,
+                    previously_owned=targets._target_has_owned_record(
+                        state["hosts"][key], {hostname}),
                 )
                 if record_check.get("action") == "adopt":
                     existing = record_check.get("existing") or previous

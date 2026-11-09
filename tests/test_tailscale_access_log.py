@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,7 +51,7 @@ class Base(unittest.TestCase):
         return [json.loads(line) for line in self.path.read_text().splitlines()]
 
     def observe(self, attribution, *, client=PEER, method="GET", path="/diagnostics",
-                body=b"", status=200):
+                body=b"", status=200, drain=True):
         async def read():
             return body
         request = SimpleNamespace(
@@ -60,7 +61,20 @@ class Base(unittest.TestCase):
             body=read)
         async def call_next(_request):
             return SimpleNamespace(status_code=status)
-        return asyncio.run(attribution.observe(request, call_next))
+        response = asyncio.run(attribution.observe(request, call_next))
+        if drain:
+            attribution.drain()
+        return response
+
+
+class BlockedRun(FakeRun):
+    def __init__(self):
+        super().__init__()
+        self.release = threading.Event()
+
+    def __call__(self, argv, **kwargs):
+        self.release.wait(5)
+        return super().__call__(argv, **kwargs)
 
 
 class ModeTest(unittest.TestCase):
@@ -153,6 +167,21 @@ class AccessLogTest(Base):
         self.assertFalse(Path(f"{self.path}.3").exists())
         self.assertEqual(stat.S_IMODE(os.stat(f"{self.path}.1").st_mode), 0o600)
 
+    def test_a_symlink_at_the_log_path_is_not_followed(self):
+        self.path.parent.mkdir(mode=0o700)
+        target = self.path.parent / "elsewhere"
+        target.write_text("original")
+        self.path.symlink_to(target)
+        access.AccessLog(self.path).write({"login": "a"})
+        self.assertEqual(target.read_text(), "original")
+
+    def test_an_existing_file_is_made_private(self):
+        self.path.parent.mkdir(mode=0o700)
+        self.path.write_text("")
+        os.chmod(self.path, 0o644)
+        access.AccessLog(self.path).write({"login": "a"})
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+
     def test_write_failure_is_swallowed(self):
         self.path.parent.parent.mkdir(exist_ok=True)
         self.path.parent.write_text("a file where the directory should be")
@@ -168,6 +197,24 @@ class ObserveTest(Base):
                           record["status"]),
                          ("person@example.test", "laptop", "GET", "/diagnostics", 201))
         self.assertTrue(record["time"].endswith("Z"))
+
+    def test_the_response_does_not_wait_for_the_lookup(self):
+        run = BlockedRun()
+        attribution = self.attribution(run)
+        self.assertEqual(self.observe(attribution, status=202, drain=False).status_code, 202)
+        self.assertFalse(self.path.exists())
+        run.release.set()
+        attribution.drain()
+        self.assertEqual(self.records()[0]["login"], "person@example.test")
+
+    def test_a_full_queue_drops_records_and_still_serves(self):
+        run = BlockedRun()
+        attribution = access.Attribution(access.AccessLog(self.path), access.Whois(run=run), max_queue=1)
+        for _ in range(5):
+            self.assertEqual(self.observe(attribution, drain=False).status_code, 200)
+        run.release.set()
+        attribution.drain()
+        self.assertLess(len(self.records()), 5)
 
     def test_whois_failure_still_serves_and_records_unknown(self):
         for error in (subprocess.TimeoutExpired("tailscale", 2), FileNotFoundError()):
@@ -238,6 +285,7 @@ class RealMiddlewareTest(Base):
         client = TestClient(app, client=(PEER, 50000))
         response = client.post("/mcp", content=body)
         self.assertEqual(response.json(), {"received": body})
+        attribution.drain()
         self.assertEqual(self.records()[0]["tool"], "wp_status")
         self.assertEqual(self.records()[0]["login"], "person@example.test")
 

@@ -5,10 +5,10 @@ fail a request, and no token, header, body or tool argument is ever written.
 """
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import json
 import os
+import queue
 import re
 import subprocess
 import threading
@@ -68,22 +68,20 @@ class Whois:
     def __init__(self, run=subprocess.run, clock=time.monotonic, ttl_seconds=60, max_entries=1024):
         self.run, self.clock, self.ttl_seconds, self.max_entries = run, clock, ttl_seconds, max_entries
         self.entries: dict[str, tuple[float, dict]] = {}
-        self.lock = threading.Lock()
 
     def lookup(self, address) -> dict:
         if not is_tailnet_address(address):
             return _unknown("invalid_address")
         key = str(ipaddress.ip_address(address))
-        with self.lock:
-            now = self.clock()
-            cached = self.entries.get(key)
-            if cached is not None and now < cached[0]:
-                return cached[1]
-            result = self._resolve(key)
-            if key not in self.entries and len(self.entries) >= self.max_entries:
-                self.entries.pop(next(iter(self.entries)))
-            self.entries[key] = (now + self.ttl_seconds, result)
-            return result
+        now = self.clock()
+        cached = self.entries.get(key)
+        if cached is not None and now < cached[0]:
+            return cached[1]
+        result = self._resolve(key)
+        if key not in self.entries and len(self.entries) >= self.max_entries:
+            self.entries.pop(next(iter(self.entries)))
+        self.entries[key] = (now + self.ttl_seconds, result)
+        return result
 
     def _resolve(self, address: str) -> dict:
         try:
@@ -112,19 +110,18 @@ class AccessLog:
 
     def __init__(self, path, max_bytes=10 * 1024 * 1024, backups=3):
         self.path, self.max_bytes, self.backups = Path(path), max_bytes, backups
-        self.lock = threading.Lock()
 
     def write(self, record: dict) -> None:
         try:
             line = (json.dumps(record, separators=(",", ":")) + "\n").encode()
-            with self.lock:
-                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                self._rotate_for(len(line))
-                descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-                try:
-                    os.write(descriptor, line)
-                finally:
-                    os.close(descriptor)
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._rotate_for(len(line))
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                os.fchmod(descriptor, 0o600)
+                os.write(descriptor, line)
+            finally:
+                os.close(descriptor)
         except (OSError, TypeError, ValueError):
             return
 
@@ -143,18 +140,36 @@ class AccessLog:
 
 
 class Attribution:
-    def __init__(self, log: AccessLog, whois: Whois):
+    """One worker resolves and writes, so requests never wait on a lookup."""
+
+    def __init__(self, log: AccessLog, whois: Whois, max_queue=1024):
         self.log, self.whois = log, whois
+        self.pending: queue.Queue = queue.Queue(maxsize=max_queue)
+        threading.Thread(target=self._work, name="tailnet-attribution", daemon=True).start()
+
+    def drain(self) -> None:
+        self.pending.join()
+
+    def _work(self) -> None:
+        while True:
+            item = self.pending.get()
+            try:
+                self._record(*item)
+            except Exception:  # One bad record must not end the worker.
+                pass
+            finally:
+                self.pending.task_done()
 
     async def observe(self, request, call_next):
-        """Serve the request, then record who made it."""
+        """Serve the request and queue a record of who made it."""
         tool = await self._tool(request)
         response = await call_next(request)
         try:
             client = request.client.host if request.client else None
-            await asyncio.to_thread(self._record, client, request.method, request.url.path,
-                                    response.status_code, tool)
-        except Exception:  # Attribution must never fail the request it describes.
+            when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.pending.put_nowait((when, client, request.method, request.url.path,
+                                     response.status_code, tool))
+        except Exception:  # Includes a full queue: attribution never fails a request.
             pass
         return response
 
@@ -169,9 +184,9 @@ class Attribution:
         except Exception:
             return None
 
-    def _record(self, client, method, path, status, tool) -> None:
+    def _record(self, when, client, method, path, status, tool) -> None:
         identity = self.whois.lookup(client)
-        record = {"time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        record = {"time": when,
                   "login": identity["login"], "node": identity["node"],
                   "method": _clean(method), "path": _clean(path), "status": status}
         if identity["reason"]:

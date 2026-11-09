@@ -1471,7 +1471,8 @@ tail -n 20 ~/sandbox/runtime/logs/control-access.jsonl
 Tokens, headers, request bodies and tool arguments are never written. The login comes from
 `tailscale whois` and is cached for a minute. This is attribution only: the bearer token
 still decides access, and a failed lookup serves the request and records `unknown` with a
-short `reason`. Public HTTPS mode records nothing, because the client it sees is the proxy.
+short `reason`. Records are written in the background and may be dropped under extreme
+load. Public HTTPS mode records nothing, because the client it sees is the proxy.
 Whether someone reaching the machine through Tailscale machine sharing resolves to their
 own login has not been verified.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sys
 import hmac
 import os
 import re
@@ -866,7 +867,9 @@ def _classify_remote_kill(entry: dict, output_tail: str,
 
 def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
                    progress=None, log_path: str | None = None,
-                   log_phase: str = "unclassified") -> str:
+                   log_phase: str = "unclassified", input_data=None) -> str:
+    if input_data is not None and (progress is not None or log_path):
+        raise ValueError("a streamed remote command cannot take input")
     if log_path:
         command = _logged_remote_command(command, log_path, phase=log_phase)
     try:
@@ -874,7 +877,8 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
             result = remote.ssh_stream(entry, command, timeout=timeout,
                                        on_line=progress)
         else:
-            result = remote.ssh_run(entry, command, timeout=timeout)
+            stdin = {} if input_data is None else {"input_data": input_data}
+            result = remote.ssh_run(entry, command, timeout=timeout, **stdin)
     except subprocess.TimeoutExpired as exc:
         partial = "\n".join(
             value for value in (
@@ -1699,11 +1703,38 @@ def _initializer_dependency_status(entry: dict, prefix: str, service: str,
     )["status"]
 
 
+def _assert_login_service_applicable(validated: dict) -> None:
+    """Refuse to apply a login service whose expiry has passed or is too far out."""
+    declaration = validated.get("login_service")
+    if not declaration:
+        return
+    from sandbox.hosting import login_service as login
+    try:
+        login.assert_applicable(declaration, now=time.time())
+    except login.LoginServiceError as exc:
+        raise hosting.HostingError(str(exc)) from None
+
+
+def _preflight_login_service(entry: dict, prefix: str, validated: dict) -> None:
+    """Refuse an apply when the capture service or login service publishes a port."""
+    from sandbox.hosting import login_service as login
+    capture = validated["login_service"]["capture"]["service"]
+    try:
+        login.check_preflight(_remote_checked(
+            entry, login.preflight_command(prefix, capture), timeout=75))
+    except login.LoginServiceError as exc:
+        raise hosting.HostingError(str(exc)) from None
+    except (RuntimeError, subprocess.SubprocessError, OSError):
+        raise hosting.HostingError(
+            "login_service_preflight_failed: the Compose topology could not be read") from None
+
+
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict, progress=None, apply_log: str | None = None,
                  *, force_recreate: bool = True,
                  runtime_convergence_proof: dict | None = None,
                  local_images_verified: bool = False) -> None:
+    _assert_login_service_applicable(validated)
     proof = runtime_convergence_proof or {}
     revisions = [proof.get(key) for key in (
         "requested_revision", "recorded_revision", "observed_runtime_revision",
@@ -1734,6 +1765,8 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
             timeout=30,
         )
     prefix = _compose_prefix(validated, source_dir, override, env_file)
+    if validated.get("login_service"):
+        _preflight_login_service(entry, prefix, validated)
     runtime_services = [
         shlex.quote(validated["compose"]["service"]),
         *(shlex.quote(service) for service in validated["compose"].get("background_services", [])),
@@ -3206,6 +3239,15 @@ def _reconcile_exact_runtime_state(validated: dict, remote_name: str, state: dic
     return True
 
 
+def _login_service_status(validated: dict) -> dict | None:
+    """Expose each declared entry and its expiry so a left-on service is visible."""
+    declaration = validated.get("login_service")
+    if not declaration:
+        return None
+    from sandbox.hosting import login_service as login
+    return login.status_view(declaration, now=time.time())
+
+
 def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
                          state: dict) -> dict:
     """Read deployed revision and bounded Compose health without mutation."""
@@ -3245,6 +3287,7 @@ def _host_runtime_status(validated: dict, entry: dict, remote_name: str,
         "generation": recorded.get("generation", 0),
         "latest_recovery": _latest_recovery_summary(recorded),
         "state_record": "present" if recorded else "missing",
+        "login_service": _login_service_status(validated),
         "services": [],
         "topology": {
             "state": "unavailable",
@@ -3928,6 +3971,101 @@ def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
     (save_state or hosting.save_host_state)(state)
     return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
             "one_time": True, "user": config["user"]}
+
+
+def _issue_host_login_link(validated: dict, entry: dict, remote_name: str, state: dict,
+                           name: str, ttl_seconds: int | None, email, save_state=None) -> dict:
+    """Deliver one token record to the login service and return its link."""
+    from sandbox.hosting import login_service as login
+    config = validated["login_service"]["entries"][name]
+    ttl = config["ttl_seconds"] if ttl_seconds is None else ttl_seconds
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or not 60 <= ttl <= 3600:
+        raise hosting.HostingError("--ttl-seconds must be between 60 and 3600")
+    key = hosting.state_key(remote_name, validated)
+    host_state = state.get("hosts", {}).get(key)
+    if not isinstance(host_state, dict):
+        raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
+    token = secrets.token_urlsafe(32)
+    issued_at = int(time.time())
+    expires_at = issued_at + ttl
+    record = login.render_token_record(
+        name, hashlib.sha256(token.encode()).hexdigest(), issued_at, expires_at,
+        email.address if email is not None else None)
+    home = remote.resolve_sandbox_home(entry)
+    runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+    prefix = _compose_prefix(validated, f"{home}/deploy-src/hosts/{validated['project']}",
+                             f"{runtime_dir}/compose.override.yml", f"{runtime_dir}/environment.env")
+    target = login.record_path(name)
+    service = shlex.quote(login.SERVICE_NAME)
+    # Over stdin: the record names a person and argv is visible to process listings.
+    _remote_checked(entry, f"{prefix} exec -T {service} sh -c {shlex.quote(login.install_script(target))}",
+                    timeout=60, input_data=record)
+    _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
+    email_saved = False
+    if (email is not None and email.source != "saved_default"
+            and (email.replace_default or not host_state.get(login.STATE_KEY))):
+        host_state[login.STATE_KEY] = email.address
+        (save_state or hosting.save_host_state)(state)
+        email_saved = True
+    result = {"url": login.login_link(config, token), "expires_at": expires_at, "one_time": True,
+              "service": name, "hostname": config["hostname"]}
+    if email is not None:
+        result.update(email=email.address, email_source=email.source, email_saved=email_saved)
+    return result
+
+
+def _cmd_host_login_link(validated: dict, entry: dict, args) -> None:
+    """Issue a link for a named login-service entry and report it."""
+    from sandbox.hosting import login_service as login
+
+    def refuse(code: str, message: str) -> None:
+        if args.json:
+            print(json.dumps({"ok": False, "code": code, "message": message}, sort_keys=True))
+            raise SystemExit(1)
+        die(f"{code}: {message}")
+
+    declaration = validated.get("login_service")
+    try:
+        if not declaration:
+            raise login.LoginServiceError(
+                "login_service_not_declared", "this environment declares no autologin.login_service")
+        if not args.service:
+            raise login.LoginServiceError(
+                "login_entry_required",
+                "pass --service with one of: " + ", ".join(sorted(declaration["entries"])))
+        config = declaration["entries"].get(args.service)
+        if config is None:
+            raise login.LoginServiceError(
+                "login_entry_unknown",
+                "declared entries are: " + ", ".join(sorted(declaration["entries"])))
+        login.assert_applicable(declaration, now=time.time())
+        # Resolved before the writer lock, so a person typing an address never
+        # holds up an apply. The lock re-reads the saved default before writing.
+        recorded = hosting.load_host_state().get("hosts", {}).get(
+            hosting.state_key(args.remote, validated)) or {}
+        email = login.resolve_email(
+            config, requested=args.email, replace_default=args.save_email,
+            saved=recorded.get(login.STATE_KEY), stdin=sys.stdin, stderr=sys.stderr)
+    except login.LoginServiceError as exc:
+        refuse(exc.code, exc.message)
+    except hosting.HostingError as exc:
+        refuse("login_link_failed", remote.redact_text(str(exc))[:500])
+    try:
+        result = _with_host_writer_lock(
+            validated, args.remote,
+            lambda current, durable_save: _issue_host_login_link(
+                validated, entry, args.remote, current, args.service,
+                getattr(args, "ttl_seconds", None), email, save_state=durable_save))
+    except TimeoutError:
+        refuse("login_link_failed", "another host apply or recovery owns this target")
+    except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        refuse("login_link_failed", remote.redact_text(str(exc))[:500])
+    if args.json:
+        print(json.dumps({"ok": True, **result}, sort_keys=True))
+        return
+    if email is not None:
+        print(f"Login link for {result['email']} ({result['email_source']})")
+    print(result["url"])
 
 
 def _ensure_host_source(entry: dict, home: str, project: str) -> str:
@@ -7370,6 +7508,10 @@ def cmd_host(cfg, args) -> None:
     if args.action == "apply":
         if not args.confirm:
             die("host apply is protected; review `./sb host plan` then pass --confirm")
+        try:
+            _assert_login_service_applicable(validated)
+        except hosting.HostingError as exc:
+            die(str(exc))
         local_images_digest = getattr(args, "local_images", None)
         if local_images_digest is not None and re.fullmatch(
                 r"sha256:[0-9a-f]{64}", local_images_digest) is None:
@@ -7430,6 +7572,11 @@ def cmd_host(cfg, args) -> None:
                     if isinstance(item, dict):
                         print(f"  {label}: {item.get('result', 'unknown')}")
             print(f"  generation: {result['generation']}")
+            login_view = result.get("login_service")
+            if login_view:
+                print(f"  login service: {login_view['state']} until {login_view['enabled_until']}")
+                for row in login_view["entries"]:
+                    print(f"    {row['name']}: {row['mode']} on {row['hostname']}")
             cache = result.get("edge_cache_purge")
             if isinstance(cache, dict):
                 print(f"  edge cache purge: {cache.get('status', 'unknown')}")
@@ -7508,6 +7655,10 @@ def cmd_host(cfg, args) -> None:
             die("host login-url is protected; pass --confirm to issue a one-time admin link")
         if not entry.get("provisioned"):
             die(f"remote '{args.remote}' is not provisioned")
+        if (validated.get("login_service") or getattr(args, "service", None)
+                or getattr(args, "email", None) or getattr(args, "save_email", False)):
+            _cmd_host_login_link(validated, entry, args)
+            return
         try:
             result = _with_host_writer_lock(
                 validated, args.remote,

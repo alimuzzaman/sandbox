@@ -365,6 +365,9 @@ def _autologin(env: dict) -> dict | None:
         return None
     if not isinstance(raw, dict):
         raise HostingError("autologin must be a mapping")
+    from sandbox.hosting import login_service
+    if login_service.is_declared(raw):
+        return None
     user = str(raw.get("user") or "").strip()
     if not user or len(user) > 60 or any(ord(char) < 33 or ord(char) > 126 for char in user):
         raise HostingError("autologin.user must be a printable WordPress login name")
@@ -675,12 +678,23 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     robots = env.get("robots", "allow")
     if robots not in {"allow", "deny"}:
         raise HostingError("robots must be allow or deny")
+    from sandbox.hosting import login_service
+    try:
+        login_declaration = login_service.parse_declaration(
+            env.get("autologin"), routes=routes, compose=compose, secrets=secrets)
+    except login_service.LoginServiceError as exc:
+        raise HostingError(str(exc)) from None
     normalized_compose = {
         **compose,
         "files": compose_paths,
         "build": build,
         "build_timeout_seconds": build_timeout_seconds,
     }
+    if login_declaration:
+        # A background service gets start, health, and teardown from the
+        # existing delivery path, with nothing special-cased for it.
+        normalized_compose["background_services"] = [
+            *background_services, login_service.SERVICE_NAME]
     return {"project_root": str(source_root), "source_root": str(source_root),
             "manifest_root": str(root),
             "source_root_nested": source_root_nested,
@@ -688,7 +702,8 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
             "project": project, "environment": env_name,
             "compose": normalized_compose, "healthcheck": healthcheck, "routes": routes,
             "deploy": deploy, "cloudflare": cf, "secrets": secrets,
-            "autologin": _autologin(env), "basic_auth": basic_auth,
+            "autologin": _autologin(env), "login_service": login_declaration,
+            "basic_auth": basic_auth,
             "robots": robots, "warnings": _fingerprint_warnings(deploy, secrets)}
 
 
@@ -784,12 +799,17 @@ def allocate_loopback_port(state: dict, key: str) -> int:
 def compose_override(validated: dict, loopback_port: int) -> str:
     """Minimal generated Compose override binding only the declared web service."""
     compose = validated["compose"]
-    return (
+    rendered = (
         "services:\n"
         f"  {compose['service']}:\n"
         "    ports:\n"
         f"      - \"127.0.0.1:{int(loopback_port)}:{int(compose['container_port'])}\"\n"
     )
+    declaration = validated.get("login_service")
+    if not declaration:
+        return rendered
+    from sandbox.hosting import login_service
+    return rendered + login_service.render_service(declaration)
 
 
 def resolve_environment(validated: dict, source_values: dict[str, str],

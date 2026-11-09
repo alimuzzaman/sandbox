@@ -1265,6 +1265,9 @@ new link replaces the previous unused link. Treat the returned URL like a passwo
 to `compose.service` for stacks where WordPress is also the public service.
 `request_path` selects the public route that reaches WordPress; it defaults to `/`.
 
+For a project that is not WordPress, `autologin` can instead declare a Sandbox login
+service with named entries. See [login-service.md](login-service.md).
+
 The default policy is Cloudflare-proxied DNS with Origin CA certificates and Full
 (strict) TLS. Origin keys are generated on the VPS and never returned by Sandbox.
 

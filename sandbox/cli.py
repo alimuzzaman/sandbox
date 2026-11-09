@@ -1073,6 +1073,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="generate any declared generated secrets that are missing")
     host_p.add_argument("--ttl-seconds", type=int, default=None,
         help="one-time login URL lifetime (60-3600 seconds; manifest default when omitted)")
+    host_p.add_argument("--service", default=None, metavar="ENTRY",
+        help="host login-url: declared autologin entry to issue a link for")
+    host_p.add_argument("--email", default=None,
+        help="host login-url: sign in as this address for this link only")
+    host_p.add_argument("--save-email", action="store_true",
+        help="host login-url: also make --email this target's saved default")
     host_p.add_argument("--lines", "--tail", dest="lines", type=int, default=200,
         help="bounded number of recent hosted-service log lines (1-1000; --tail is an alias)")
     host_p.add_argument("--apply-log", action="store_true",

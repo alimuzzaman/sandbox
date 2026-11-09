@@ -74,6 +74,7 @@ may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 | 067 | Cross-Platform Open-Source Secret Manager | Open (2 of 39) | — | Internal |
 | 068 | Local Images for Hosted Deployments | Open (4 of 35) | — | Internal |
 | 069 | Secret Profiles and Create-Only Manager Migration | Open (3 of 67) | — | Internal |
+| 070 | Wildcard Subdomain Hosting | Open (49 of 49) | — | Internal |
 
 Statuses are counted from each feature's `tasks.md` (reconciled 2026-10-08). `Ledger closed`
 means no unchecked task; `Open (n of m)` counts unchecked tasks, which are mostly

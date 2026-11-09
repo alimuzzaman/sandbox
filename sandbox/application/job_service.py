@@ -1395,7 +1395,7 @@ class JobService:
                     cursor_job_id=current_cursor,
                 )
             except ValueError as exc:
-                if current_cursor is None or "cursor is stale" not in str(exc):
+                if explicit_cursor or current_cursor is None or "cursor is stale" not in str(exc):
                     raise
                 current_cursor = None
                 continue

@@ -1334,6 +1334,7 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(len(sweep1["cleaned"]), 0)
             self.assertTrue(sweep1["truncated"])
             self.assertIsNotNone(sweep1["cursor"])
+            self.assertEqual(repository.get_retention_bookmark(), sweep1["cursor"])
 
             # A default sweep resumes from its durable bookmark.
             sweep2 = service.retention_sweep(retention_days=7, limit=10)
@@ -1341,6 +1342,44 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(sweep2["cleaned"][0]["job_id"], newer_jid)
             self.assertFalse(sweep2["truncated"])
             self.assertIsNone(sweep2["cursor"])
+            self.assertIsNone(repository.get_retention_bookmark())
+
+            repository.close()
+
+    def test_retention_bookmark_restarts_when_stale_and_ignores_explicit_cursors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _desc: None)
+            row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "old",
+                ("echo", "ok"), 60, SourceIdentity("source"),
+                request_id="req-old",
+            ))
+            jid = row["job_id"]
+            repository.transition(jid, "running")
+            repository.transition(jid, "succeeded", exit_code=0)
+            old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat().replace("+00:00", "Z")
+            repository.connection.execute("UPDATE jobs SET finished_at=? WHERE job_id=?", (old, jid))
+            (storage.job_dir(jid, create=True) / "output").mkdir()
+            (storage.job_dir(jid) / "output" / "data").write_text("ok")
+            missing = "0" * 32
+
+            # An explicit stale cursor still fails and leaves the bookmark alone.
+            repository.set_retention_bookmark(missing)
+            with self.assertRaisesRegex(ValueError, "stale"):
+                service.retention_sweep(retention_days=7, limit=10, cursor_job_id=missing)
+            self.assertEqual(repository.get_retention_bookmark(), missing)
+
+            # A default sweep restarts past a stale bookmark and reaches the job.
+            sweep = service.retention_sweep(retention_days=7, limit=10)
+            self.assertEqual([item["job_id"] for item in sweep["cleaned"]], [jid])
+            self.assertIsNone(repository.get_retention_bookmark())
+
+            # A valid explicit cursor neither reads nor changes the bookmark.
+            repository.set_retention_bookmark(jid)
+            service.retention_sweep(retention_days=7, limit=10, cursor_job_id=jid)
+            self.assertEqual(repository.get_retention_bookmark(), jid)
 
             repository.close()
 

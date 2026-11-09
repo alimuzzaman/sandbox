@@ -1335,8 +1335,8 @@ class JobServiceTests(unittest.TestCase):
             self.assertTrue(sweep1["truncated"])
             self.assertIsNotNone(sweep1["cursor"])
 
-            # Second sweep: resumes from cursor past no-op prefix and cleans the eligible job
-            sweep2 = service.retention_sweep(retention_days=7, limit=10, cursor_job_id=sweep1["cursor"])
+            # A default sweep resumes from its durable bookmark.
+            sweep2 = service.retention_sweep(retention_days=7, limit=10)
             self.assertEqual(len(sweep2["cleaned"]), 1)
             self.assertEqual(sweep2["cleaned"][0]["job_id"], newer_jid)
             self.assertFalse(sweep2["truncated"])

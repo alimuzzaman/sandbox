@@ -1374,7 +1374,10 @@ class JobService:
         before_finished_at = None if storage_pressure else cutoff.isoformat().replace("+00:00", "Z")
         max_scanned = max(limit * 2, 200)
         total_scanned = 0
+        explicit_cursor = cursor is not None or cursor_job_id is not None
         current_cursor = cursor if cursor is not None else cursor_job_id
+        if not explicit_cursor and hasattr(self.repository, "get_retention_bookmark"):
+            current_cursor = self.repository.get_retention_bookmark(storage_pressure=storage_pressure)
         truncated = False
         exhausted = False
 
@@ -1385,11 +1388,17 @@ class JobService:
 
         while len(cleaned) < limit and total_scanned < max_scanned:
             batch_limit = min(limit - len(cleaned), 50)
-            rows = self.repository.list_retention_candidates(
-                limit=batch_limit,
-                before_finished_at=before_finished_at,
-                cursor_job_id=current_cursor,
-            )
+            try:
+                rows = self.repository.list_retention_candidates(
+                    limit=batch_limit,
+                    before_finished_at=before_finished_at,
+                    cursor_job_id=current_cursor,
+                )
+            except ValueError as exc:
+                if current_cursor is None or "cursor is stale" not in str(exc):
+                    raise
+                current_cursor = None
+                continue
             if not rows:
                 exhausted = True
                 break
@@ -1463,6 +1472,10 @@ class JobService:
         else:
             truncated = False
             out_cursor = None
+
+        if not explicit_cursor and hasattr(self.repository, "set_retention_bookmark"):
+            self.repository.set_retention_bookmark(out_cursor if truncated else None,
+                                                   storage_pressure=storage_pressure)
 
         return {
             "ok": sweep_ok,

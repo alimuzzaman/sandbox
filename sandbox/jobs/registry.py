@@ -652,6 +652,21 @@ class JobRepository:
         ).fetchone()
         return int(row[0])
 
+    def get_retention_bookmark(self, *, storage_pressure: bool = False) -> str | None:
+        key = "retention_bookmark_pressure" if storage_pressure else "retention_bookmark_normal"
+        row = self.connection.execute("SELECT value FROM schema_meta WHERE key=?", (key,)).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def set_retention_bookmark(self, cursor_job_id: str | None, *, storage_pressure: bool = False) -> None:
+        key = "retention_bookmark_pressure" if storage_pressure else "retention_bookmark_normal"
+        with self.transaction(immediate=True) as connection:
+            if cursor_job_id is None:
+                connection.execute("DELETE FROM schema_meta WHERE key=?", (key,))
+            else:
+                connection.execute(
+                    "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, cursor_job_id))
+
     @staticmethod
     def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None

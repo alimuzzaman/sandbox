@@ -326,9 +326,24 @@ class InboxGateTests(_Base):
         self.issue()
         cookie = self.consume()[0].getheader("Set-Cookie")
         self.assertTrue(cookie.startswith("__Host-sandbox_login_inbox="))
-        for attribute in ("Secure", "HttpOnly", "SameSite=Strict", "Path=/", "Max-Age=3600"):
+        for attribute in ("Secure", "HttpOnly", "SameSite=Strict", "Path=/"):
             self.assertIn(attribute, cookie)
         self.assertNotIn("Domain", cookie)
+
+    def test_cookie_ends_with_the_browser_session(self):
+        self.issue()
+        cookie = self.consume()[0].getheader("Set-Cookie")
+        self.assertNotIn("Max-Age", cookie)
+        self.assertNotIn("Expires", cookie)
+
+    def test_server_side_limit_still_applies_to_a_browser_session_cookie(self):
+        self.config["session_ttl_seconds"] = 172800
+        self.config["enabled_until_epoch"] = int(self.now) + 5 * 86400
+        cookie = self.session()
+        self.now += 172799
+        self.assertEqual(self.request("GET", "/mail/", headers={"Cookie": cookie})[0].status, 200)
+        self.now += 2
+        self.assertEqual(self.request("GET", "/mail/", headers={"Cookie": cookie})[0].status, 404)
 
     def test_session_reaches_the_inbox_with_the_gate_credential(self):
         cookie = self.session()

@@ -141,9 +141,8 @@ class Gate:
         return hmac.new(self.session_key, f"{name}:{expires}".encode(), hashlib.sha256).hexdigest()
 
     def new_session(self, name):
-        ttl = self.config["session_ttl_seconds"]
-        expires = int(self.clock()) + ttl
-        return f"{expires}.{self._signature(name, expires)}", ttl
+        expires = int(self.clock()) + self.config["session_ttl_seconds"]
+        return f"{expires}.{self._signature(name, expires)}"
 
     def session_valid(self, name, value):
         expires, _, signature = (value or "").partition(".")
@@ -409,8 +408,10 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         return self._exchange_magic_link(name, entry, email)
 
     def _start_session(self, name, entry):
-        value, ttl = self.gate.new_session(name)
-        cookie = (f"{self.gate.cookie_name(name)}={value}; Path=/; Max-Age={ttl}; "
+        # No Max-Age or Expires: the cookie ends with the browser session. The
+        # server-side limit is carried, signed, inside the value.
+        value = self.gate.new_session(name)
+        cookie = (f"{self.gate.cookie_name(name)}={value}; Path=/; "
                   "Secure; HttpOnly; SameSite=Strict")
         self._reply(303, b"", [("Location", entry.get("landing_path") or "/"), ("Set-Cookie", cookie)])
 

@@ -14,7 +14,7 @@ autologin:
   login_service:
     image: python:3.13-alpine@sha256:<digest>   # must be pinned by digest
     enabled_until: 2026-12-01                   # required; within 30 days of apply
-    session_ttl_seconds: 3600                   # required; 300 to 86400
+    session_ttl_seconds: 172800                 # required; 300 to 172800
     allowed_host_suffixes: [dev.example.test]   # required
     capture:
       service: capture                          # a background service of this project
@@ -125,8 +125,9 @@ range, counts as no record.
 - Responses send `Referrer-Policy: no-referrer` and redirect to an address with no token.
 
 **`inbox_gate`.** A consumed link starts a session and redirects to `landing_path`.
-The cookie is `__Host-` prefixed, Secure, HttpOnly, SameSite=Strict, host-only, and
-lasts `session_ttl_seconds`. Requests with a session reach the capture service with the
+The cookie is `__Host-` prefixed, Secure, HttpOnly, SameSite=Strict, and host-only. It
+has no `Max-Age` or `Expires`, so it ends when the browser closes, and the service also
+refuses it once `session_ttl_seconds` has passed. Requests with a session reach the capture service with the
 service's credential added, websocket included. While a link is outstanding, a visitor
 with no session reaches the capture service's own login; otherwise they get 404. Sessions
 are held by a key in process memory, so restarting the service ends all of them. There

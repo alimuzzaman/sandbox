@@ -150,6 +150,18 @@ class DeclarationTests(unittest.TestCase):
         self.assertRefused(lambda e: e["autologin"]["login_service"].pop("session_ttl_seconds"),
                            "session_ttl_seconds")
 
+    def test_session_lifetime_accepts_two_days(self):
+        environment = _environment(_login_block())
+        environment["autologin"]["login_service"]["session_ttl_seconds"] = 172800
+        self.assertEqual(_validate(environment)["login_service"]["session_ttl_seconds"], 172800)
+
+    def test_session_lifetime_keeps_its_bounds(self):
+        for value in (299, 172801):
+            with self.subTest(value=value):
+                self.assertRefused(
+                    lambda e: e["autologin"]["login_service"].update(session_ttl_seconds=value),
+                    "session_ttl_seconds")
+
     def test_image_must_be_pinned_by_digest(self):
         self.assertRefused(lambda e: e["autologin"]["login_service"].update(image="python:3.13"),
                            "image")

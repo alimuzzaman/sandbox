@@ -33,12 +33,16 @@ def guarded_destroy_case(method):
     from tests.zone_coverage_test_support import GuardedIO
     @wraps(method)
     def wrapped(self):
-        with GuardedIO() as guard:
-            try:
-                return method(self)
-            finally:
-                if guard.attempts:
-                    raise AssertionError("unexpected I/O attempts: %r" % (guard.attempts,))
+        guard = GuardedIO()
+        guard.__enter__()
+        # Leave through addCleanup: a patch the test registers with addCleanup saved
+        # guard.reject as its original, so it has to unwind before the guard does.
+        self.addCleanup(guard.__exit__, None, None, None)
+        try:
+            return method(self)
+        finally:
+            if guard.attempts:
+                raise AssertionError("unexpected I/O attempts: %r" % (guard.attempts,))
     return wrapped
 
 
@@ -83,6 +87,22 @@ def destroy_dispatch(project, environment, probe, store=None, events=None, *, fa
             events.append("store_release")
         return result
     return dispatch
+
+class GuardedCaseUnwinding(unittest.TestCase):
+    def test_patch_cleaned_up_after_a_guarded_case_does_not_restore_the_guard(self):
+        real = destroy.remote.ssh_run
+
+        class Case(unittest.TestCase):
+            @guarded_destroy_case
+            def runTest(self):
+                stack = contextlib.ExitStack()
+                self.addCleanup(stack.close)
+                stack.enter_context(mock.patch.object(destroy.remote, "ssh_run", mock.Mock()))
+
+        result = Case().run()
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertIs(destroy.remote.ssh_run, real)
+
 
 class TargetParsing(unittest.TestCase):
     def test_target_needs_project_and_environment(self):

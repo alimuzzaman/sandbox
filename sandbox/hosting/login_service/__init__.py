@@ -75,17 +75,53 @@ def _bounded_int(value: object, low: int, high: int, where: str) -> int:
 
 def _url_path(value: object, where: str) -> str:
     path = str(value or "").strip()
-    if not path.startswith("/") or "?" in path or "#" in path or ".." in path.split("/"):
+    if (not path.startswith("/") or path.startswith("//") or "?" in path or "#" in path
+            or ".." in path.split("/") or _has_unsafe_characters(path)):
         raise _invalid(f"{where} must be an absolute URL path without a query or fragment")
     return path
 
 
-def _origin(value: object, where: str) -> str:
+def _has_unsafe_characters(value: str) -> bool:
+    return "\\" in value or any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def _host_is_covered(hostname: str, suffixes: list[str]) -> bool:
+    return any(hostname == suffix or hostname.endswith(f".{suffix}") for suffix in suffixes)
+
+
+def _https_url(value: str) -> urllib.parse.SplitResult | None:
+    """Split an https URL with a host and no credentials, or return None."""
+    if _has_unsafe_characters(value):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        parsed.port  # noqa: B018 -- reading it validates the port
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or not parsed.hostname or "@" in parsed.netloc:
+        return None
+    return parsed
+
+
+def _origin(value: object, where: str, suffixes: list[str]) -> str:
     text = str(value or "").strip()
-    parsed = urllib.parse.urlsplit(text)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query or parsed.fragment:
-        raise _invalid(f"{where} must be an https origin with no path")
+    parsed = _https_url(text)
+    port = f":{parsed.port}" if parsed is not None and parsed.port is not None else ""
+    if parsed is None or text != f"https://{parsed.hostname}{port}":
+        raise _invalid(f"{where} must be a lowercase https origin with no credentials or path")
+    if not _host_is_covered(parsed.hostname, suffixes):
+        raise _invalid(f"{where} is not covered by allowed_host_suffixes")
     return text
+
+
+def _return_destination(value: str, where: str, suffixes: list[str]) -> str:
+    """A redirect destination is a local path or an https URL on an allowed host."""
+    if value.startswith("/"):
+        return _url_path(value, where)
+    parsed = _https_url(value)
+    if parsed is None or not _host_is_covered(parsed.hostname, suffixes):
+        raise _invalid(f"{where} must be a local path or an https URL on an allowed host")
+    return value
 
 
 def _internal_url(value: object, hosts: set[str], where: str) -> urllib.parse.SplitResult:
@@ -139,7 +175,7 @@ def _parse_capture(raw: object, *, primary: str, background: list[str], secrets:
             "username": username, "credential_secret": credential}
 
 
-def _parse_magic_link(raw: object, *, services: set[str], where: str) -> dict:
+def _parse_magic_link(raw: object, *, services: set[str], where: str, suffixes: list[str]) -> dict:
     if not isinstance(raw, dict):
         raise _invalid(f"{where}.magic_link must be a mapping")
     _reject_unknown(raw, _MAGIC_FIELDS, f"{where}.magic_link")
@@ -158,6 +194,8 @@ def _parse_magic_link(raw: object, *, services: set[str], where: str) -> dict:
     if not isinstance(required, dict) or not all(
             isinstance(key, str) and isinstance(value, str) for key, value in required.items()):
         raise _invalid(f"{prefix}.required_params must map names to exact values")
+    if "return" in required:
+        _return_destination(required["return"], f"{prefix}.required_params.return", suffixes)
     raw_denied = raw.get("denied_emails", [])
     if not isinstance(raw_denied, list):
         raise _invalid(f"{prefix}.denied_emails must be a list of email addresses")
@@ -167,8 +205,8 @@ def _parse_magic_link(raw: object, *, services: set[str], where: str) -> dict:
         raise _invalid(f"{prefix}.denied_emails must be a list of email addresses") from None
     return {
         "request_url": request.geturl(),
-        "request_origin": _origin(raw.get("request_origin"), f"{prefix}.request_origin"),
-        "link_origin": _origin(raw.get("link_origin"), f"{prefix}.link_origin"),
+        "request_origin": _origin(raw.get("request_origin"), f"{prefix}.request_origin", suffixes),
+        "link_origin": _origin(raw.get("link_origin"), f"{prefix}.link_origin", suffixes),
         "link_path": _url_path(raw.get("link_path"), f"{prefix}.link_path"),
         "link_pattern": pattern,
         "required_params": dict(required),
@@ -178,7 +216,8 @@ def _parse_magic_link(raw: object, *, services: set[str], where: str) -> dict:
     }
 
 
-def _parse_entry(name: object, raw: object, *, gate_hosts: set[str], services: set[str]) -> dict:
+def _parse_entry(name: object, raw: object, *, gate_hosts: set[str], services: set[str],
+                 suffixes: list[str]) -> dict:
     if not isinstance(name, str) or not _ENTRY_NAME.fullmatch(name):
         raise _invalid("entry name must be lowercase letters, digits, or hyphens")
     where = f"entries.{name}"
@@ -203,7 +242,8 @@ def _parse_entry(name: object, raw: object, *, gate_hosts: set[str], services: s
                                     MAX_LINK_SECONDS, f"{where}.ttl_seconds"),
     }
     if mode == "magic_link":
-        entry["magic_link"] = _parse_magic_link(raw.get("magic_link"), services=services, where=where)
+        entry["magic_link"] = _parse_magic_link(
+            raw.get("magic_link"), services=services, where=where, suffixes=suffixes)
     else:
         if "magic_link" in raw:
             raise _invalid(f"{where}.magic_link applies only to magic_link entries")
@@ -222,7 +262,7 @@ def _check_suffixes(raw: object, routes: list[dict]) -> list[str]:
         suffixes.append(suffix)
     for route in routes:
         hostname = route["hostname"].removeprefix("*.")
-        if not any(hostname == suffix or hostname.endswith(f".{suffix}") for suffix in suffixes):
+        if not _host_is_covered(hostname, suffixes):
             raise _invalid(f"allowed_host_suffixes does not cover target hostname {hostname}")
     return suffixes
 
@@ -260,7 +300,8 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
                   if route["mode"] == "serve" and not route.get("primary")
                   and not route["hostname"].startswith("*.")}
     callable_services = {primary, *background} - {capture["service"]}
-    parsed = {name: _parse_entry(name, item, gate_hosts=gate_hosts, services=callable_services)
+    parsed = {name: _parse_entry(name, item, gate_hosts=gate_hosts, services=callable_services,
+                                suffixes=suffixes)
               for name, item in entries.items()}
     seen, inbox_hosts = set(), set()
     for entry in parsed.values():

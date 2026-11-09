@@ -867,7 +867,7 @@ def _classify_remote_kill(entry: dict, output_tail: str,
 
 def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
                    progress=None, log_path: str | None = None,
-                   log_phase: str = "unclassified") -> str:
+                   log_phase: str = "unclassified", input_data=None) -> str:
     if log_path:
         command = _logged_remote_command(command, log_path, phase=log_phase)
     try:
@@ -875,7 +875,8 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
             result = remote.ssh_stream(entry, command, timeout=timeout,
                                        on_line=progress)
         else:
-            result = remote.ssh_run(entry, command, timeout=timeout)
+            stdin = {} if input_data is None else {"input_data": input_data}
+            result = remote.ssh_run(entry, command, timeout=timeout, **stdin)
     except subprocess.TimeoutExpired as exc:
         partial = "\n".join(
             value for value in (
@@ -3992,13 +3993,11 @@ def _issue_host_login_link(validated: dict, entry: dict, remote_name: str, state
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
     prefix = _compose_prefix(validated, f"{home}/deploy-src/hosts/{validated['project']}",
                              f"{runtime_dir}/compose.override.yml", f"{runtime_dir}/environment.env")
-    payload = base64.b64encode(record.encode()).decode()
     target = login.record_path(name)
     service = shlex.quote(login.SERVICE_NAME)
-    _remote_checked(entry, (
-        f"printf %s {shlex.quote(payload)} | base64 -d | {prefix} exec -T {service} "
-        f"sh -c {shlex.quote(login.install_script(target))}"
-    ), timeout=60)
+    # Over stdin: the record names a person and argv is visible to process listings.
+    _remote_checked(entry, f"{prefix} exec -T {service} sh -c {shlex.quote(login.install_script(target))}",
+                    timeout=60, input_data=record)
     _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
     email_saved = False
     if (email is not None and email.source != "saved_default"

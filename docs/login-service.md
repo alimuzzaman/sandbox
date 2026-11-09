@@ -69,6 +69,8 @@ to the capture service when the gate goes live.
 | `enabled_until` is required, unexpired, and within 30 days | Apply refuses; the running service answers 404 after it |
 | No standing access: without a live token or session, every public route is 404 | Running service; health answers only on an internal loopback port |
 | Every hostname of the target matches `allowed_host_suffixes` | Manifest parsing. List only development domains, so a production domain can never qualify |
+| `request_origin`, `link_origin` and an absolute required `return` are on `allowed_host_suffixes` | Manifest parsing. Origins are lowercase https with no credentials or path |
+| `enabled_until` holds through a request | Rechecked before a token is claimed and before the redirect; a websocket tunnel ends at that time or at its session expiry, whichever is first |
 | The capture service is in this Compose project and reachable | Manifest parsing, apply preflight, and service startup |
 | Any capture credential stays in this service's environment | Rendered override |
 | `sandbox-login` publishes nothing. The capture service publishes only on `127.0.0.1` or `::1`, and never uses host networking | Apply preflight (`login_port_published`, `capture_port_published`) |

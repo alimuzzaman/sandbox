@@ -297,6 +297,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
 
     def _not_found(self):
         self._drain()
+        self._answer_not_found()
+
+    def _answer_not_found(self):
         self._reply(404, b"Not found\n", [("Content-Type", "text/plain; charset=utf-8")])
 
     def _fail(self, status, code):
@@ -333,8 +336,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
                 return self._handle_entry(name, entry)
         for name, entry in entries.items():
             if entry["hostname"] == host and entry["mode"] == "inbox_gate":
-                if gate.session_valid(name, self._cookie(gate.cookie_name(name))):
-                    return self._proxy(authenticated=True)
+                cookie = self._cookie(gate.cookie_name(name))
+                if gate.session_valid(name, cookie):
+                    return self._proxy(authenticated=True, session_expires=int(cookie.partition(".")[0]))
                 if gate.is_live(name):
                     # Anyone without a link still meets the service's own login,
                     # but only while a link is outstanding (no standing access).
@@ -403,6 +407,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         email = record.get("email")
         if entry["mode"] == "magic_link" and not (isinstance(email, str) and _ADDRESS.fullmatch(email)):
             return self._fail(403, "invalid_link")
+        # The body can arrive long after dispatch checked the cutoff.
+        if not gate.enabled():
+            return self._answer_not_found()
         if not gate.claim(digest):
             return self._fail(410, "link_used")
         gate.log(f"consumed entry={name}")
@@ -424,6 +431,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         except SignInFailure as failure:
             self.gate.log(f"signin_failed entry={name} code={failure.code}")
             return self._fail(failure.status, failure.code)
+        if not self.gate.enabled():
+            return self._answer_not_found()
         self._reply(303, b"", [("Location", link)])
 
     def _upstream_headers(self, authenticated):
@@ -446,9 +455,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             headers.extend(capture_headers(gate.config["capture"], gate.credential).items())
         return headers
 
-    def _proxy(self, authenticated):
+    def _proxy(self, authenticated, session_expires=None):
         if self.headers.get("Upgrade", "").lower() == "websocket":
-            return self._tunnel(authenticated)
+            return self._tunnel(authenticated, session_expires)
         length = self._content_length()
         if length is None or "Transfer-Encoding" in self.headers:
             self.close_connection = True
@@ -507,7 +516,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             self.connection.setblocking(True)
         return self.rfile.read(len(pending)) if pending else b""
 
-    def _tunnel(self, authenticated):
+    def _tunnel(self, authenticated, session_expires):
         target = urllib.parse.urlsplit(self.gate.config["capture"]["api_url"])
         try:
             upstream = socket.create_connection((target.hostname, target.port), timeout=10)
@@ -522,20 +531,26 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             upstream.sendall("\r\n".join(lines).encode("latin-1", "replace"))
             upstream.sendall(self._buffered_client_bytes())
             self.wfile.flush()
-            self._pump(self.connection, upstream)
+            self._pump(self.connection, upstream, session_expires)
         except OSError:
             pass
         finally:
             upstream.close()
         return None
 
-    @staticmethod
-    def _pump(client, upstream):
-        """Copy bytes both ways until either side closes or the link idles out."""
+    def _pump(self, client, upstream, session_expires):
+        """Copy bytes both ways until a side closes, the link idles out, or access ends."""
+        gate = self.gate
+        ends_at = gate.config["enabled_until_epoch"]
+        if session_expires is not None:
+            ends_at = min(ends_at, session_expires)
         peers = {client: upstream, upstream: client}
         while True:
-            readable, _, _ = select.select(list(peers), [], [], TUNNEL_IDLE_SECONDS)
-            if not readable:
+            remaining = ends_at - gate.clock()
+            if remaining <= 0:
+                return
+            readable, _, _ = select.select(list(peers), [], [], min(TUNNEL_IDLE_SECONDS, remaining))
+            if not readable or gate.clock() >= ends_at:
                 return
             for source in readable:
                 data = source.recv(65536)

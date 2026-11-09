@@ -108,6 +108,57 @@ class DeclarationTests(unittest.TestCase):
         with self.assertRaisesRegex(hosting.HostingError, code):
             _validate(environment)
 
+    def _magic(self, environment):
+        return environment["autologin"]["entries"]["app"]["magic_link"]
+
+    def test_origins_must_be_on_an_allowed_host(self):
+        for field in ("request_origin", "link_origin"):
+            for value in ("https://other.invalid", "https://app.example.test.evil.invalid"):
+                with self.subTest(field=field, value=value):
+                    self.assertRefused(lambda e: self._magic(e).__setitem__(field, value), field)
+
+    def test_origins_must_be_canonical(self):
+        for value in ("https://user@app.example.test", "https://user:pw@app.example.test",
+                      "https://APP.example.test", "https://app.example.test:",
+                      "https://app.example.test/", "http://app.example.test",
+                      "https://app.example.test:99999"):
+            with self.subTest(value=value):
+                self.assertRefused(lambda e: self._magic(e).__setitem__("link_origin", value), "link_origin")
+
+    def test_origin_with_a_port_on_an_allowed_host_is_accepted(self):
+        environment = _environment(_login_block())
+        self._magic(environment)["link_origin"] = "https://app.example.test:8443"
+        self.assertEqual(
+            _validate(environment)["login_service"]["entries"]["app"]["magic_link"]["link_origin"],
+            "https://app.example.test:8443")
+
+    def test_return_destination_must_be_on_an_allowed_host(self):
+        for value in ("https://other.invalid", "https://user@app.example.test/",
+                      "http://app.example.test", "//other.invalid", "other.invalid",
+                      "https://other.invalid\\@app.example.test"):
+            with self.subTest(value=value):
+                self.assertRefused(
+                    lambda e: self._magic(e)["required_params"].__setitem__("return", value), "return")
+
+    def test_return_destination_on_an_allowed_host_or_local_path_is_accepted(self):
+        for value in ("https://app.example.test/account", "/account"):
+            with self.subTest(value=value):
+                environment = _environment(_login_block())
+                self._magic(environment)["required_params"]["return"] = value
+                _validate(environment)
+
+    def test_other_required_params_are_not_treated_as_destinations(self):
+        environment = _environment(_login_block())
+        self._magic(environment)["required_params"]["purpose"] = "login"
+        _validate(environment)
+
+    def test_paths_must_be_single_rooted_and_printable(self):
+        for value in ("//other.invalid", "/a\\b", "/a\x07b", "/a\x7fb"):
+            with self.subTest(value=value):
+                self.assertRefused(
+                    lambda e: e["autologin"]["entries"]["inbox"].__setitem__("landing_path", value),
+                    "landing_path")
+
     def test_declared_service_is_normalized_and_runs_with_the_stack(self):
         validated = _valid()
         self.assertEqual(sorted(validated["login_service"]["entries"]), ["app", "inbox"])
@@ -587,11 +638,19 @@ class LinkIssueTests(unittest.TestCase):
                 self.validated, {}, "remote", self.state, name, ttl, email,
                 save_state=lambda state: self.saves.append(copy.deepcopy(state)))
         self.commands = [call.args[1] for call in checked.call_args_list]
+        self.inputs = [call.kwargs.get("input_data") for call in checked.call_args_list]
         return result
 
     def _record(self):
-        payload = re.search(r"printf %s '?([A-Za-z0-9+/=]+)'? \| base64 -d", self.commands[0]).group(1)
-        return json.loads(base64.b64decode(payload))
+        return json.loads(self.inputs[0])
+
+    def test_record_and_email_stay_out_of_the_remote_command(self):
+        self._issue(email=self._email("person@example.test"))
+        self.assertIn("person@example.test", self.inputs[0])
+        encoded = base64.b64encode(self.inputs[0].encode()).decode()
+        for command in self.commands:
+            self.assertNotIn("person@example.test", command)
+            self.assertNotIn(encoded, command)
 
     def test_link_is_on_the_entry_host_with_the_token_in_the_fragment(self):
         result = self._issue(email=self._email("person@example.test"))
@@ -604,9 +663,7 @@ class LinkIssueTests(unittest.TestCase):
         token = result["url"].rsplit("=", 1)[1]
         blob = " ".join(self.commands) + json.dumps(self.saves) + json.dumps(self.state)
         self.assertNotIn(token, blob)
-        decoded = base64.b64decode(re.search(
-            r"printf %s '?([A-Za-z0-9+/=]+)'? \| base64 -d", self.commands[0]).group(1)).decode()
-        self.assertNotIn(token, decoded)
+        self.assertNotIn(token, self.inputs[0])
 
     def test_record_carries_hash_expiry_and_email(self):
         result = self._issue(email=self._email("person@example.test"), ttl=300)

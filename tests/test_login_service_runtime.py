@@ -14,6 +14,7 @@ import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -445,6 +446,80 @@ class RequestHardeningTests(_Base):
             self.assertTrue(chunk, received)
             received += chunk
         sock.close()
+
+
+class ServiceDeadlineTests(_Base):
+    def _post_after_cutoff(self, path, token):
+        """Dispatch while enabled, then cross the cutoff before the body arrives."""
+        gate = self.public.gate
+        gate.config["enabled_until_epoch"] = int(self.now) + 10
+        dispatched = threading.Event()
+        original = gate.enabled
+        def enabled():
+            result = original()
+            dispatched.set()
+            return result
+        gate.enabled = enabled
+        body = urllib.parse.urlencode({"token": token}).encode()
+        sock = socket.create_connection(("127.0.0.1", self.public.server_address[1]), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall((f"POST {path} HTTP/1.1\r\nHost: {GATE}\r\n"
+                      "Content-Type: application/x-www-form-urlencoded\r\n"
+                      f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode())
+        self.assertTrue(dispatched.wait(5))
+        self.now += 20
+        sock.sendall(body)
+        return sock.recv(4096)
+
+    def test_cutoff_after_dispatch_leaves_the_token_unclaimed(self):
+        token = self.issue(ttl=600)
+        reply = self._post_after_cutoff(INBOX_PATH, token)
+        self.assertIn(b" 404 ", reply.split(b"\r\n", 1)[0] + b" ")
+        self.assertNotIn(b"Set-Cookie", reply)
+        self.assertEqual(list((self.state_dir / "used").iterdir()), [])
+
+    def test_cutoff_during_the_exchange_returns_no_link(self):
+        self.issue("app", "m" * 43, email="person@example.test")
+        gate = self.public.gate
+        gate.config["enabled_until_epoch"] = int(self.now) + 10
+        def late_sign_in(_settings, _email):
+            self.now += 20
+            return VERIFY
+        gate.sign_in = late_sign_in
+        response, _ = self.consume(APP_PATH, "m" * 43)
+        self.assertEqual(response.status, 404)
+        self.assertIsNone(response.getheader("Location"))
+
+    def _pump(self, session_expires=None):
+        client, client_peer = socket.socketpair()
+        upstream, upstream_peer = socket.socketpair()
+        for item in (client, client_peer, upstream, upstream_peer):
+            self.addCleanup(item.close)
+        fake = SimpleNamespace(gate=self.public.gate)
+        thread = threading.Thread(
+            target=runtime._PublicHandler._pump, args=(fake, client, upstream, session_expires),
+            daemon=True)
+        thread.start()
+        client_peer.sendall(b"one")
+        upstream_peer.settimeout(5)
+        self.assertEqual(upstream_peer.recv(16), b"one")
+        return thread, client_peer, upstream_peer
+
+    def _assert_ends_under_traffic(self, thread, client_peer, upstream_peer):
+        self.now += 20
+        client_peer.sendall(b"two")
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        upstream_peer.setblocking(False)
+        with self.assertRaises(BlockingIOError):
+            upstream_peer.recv(16)
+
+    def test_tunnel_ends_at_the_service_deadline_under_traffic(self):
+        self.public.gate.config["enabled_until_epoch"] = int(self.now) + 10
+        self._assert_ends_under_traffic(*self._pump())
+
+    def test_authenticated_tunnel_ends_when_its_session_does(self):
+        self._assert_ends_under_traffic(*self._pump(session_expires=int(self.now) + 10))
 
 
 class MagicLinkTests(_Base):

@@ -619,6 +619,16 @@ class EmailResolutionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "email_not_applicable")
 
 
+class RemoteInputTests(unittest.TestCase):
+    def test_input_cannot_be_combined_with_a_streamed_command(self):
+        for options in ({"log_path": "/srv/log"}, {"progress": print}):
+            with self.subTest(options=sorted(options)), \
+                    patch.object(hosting_cmd.remote, "ssh_stream") as stream, \
+                    self.assertRaises(ValueError):
+                hosting_cmd._remote_checked({}, "cat", input_data="record", **options)
+            stream.assert_not_called()
+
+
 class LinkIssueTests(unittest.TestCase):
     def setUp(self):
         self.validated = _valid()

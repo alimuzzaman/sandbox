@@ -868,6 +868,8 @@ def _classify_remote_kill(entry: dict, output_tail: str,
 def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
                    progress=None, log_path: str | None = None,
                    log_phase: str = "unclassified", input_data=None) -> str:
+    if input_data is not None and (progress is not None or log_path):
+        raise ValueError("a streamed remote command cannot take input")
     if log_path:
         command = _logged_remote_command(command, log_path, phase=log_phase)
     try:

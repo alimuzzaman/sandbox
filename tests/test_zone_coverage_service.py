@@ -273,6 +273,19 @@ class TestZoneCoverageService(unittest.TestCase):
             self.assertFalse(kwargs.get("http2_directive"))
             self.assertFalse(kwargs.get("ipv6"))
 
+    def test_enable_reports_invalid_nginx_config_as_front_door_error(self):
+        plan = {
+            "action": "enable", "zone": "asb.bd", "zone_id": "z1",
+            "expected_generation": 0, "expected_dependents_revision": 0,
+            "records_to_create": [], "records_to_adopt": [], "exceptions": [],
+            "blockers": [], "dependents": {},
+        }
+        with patch("sandbox.hosting.front_door.nginx.probe", return_value={"config_valid": False}):
+            with self.assertRaises(CoverageError) as ctx:
+                enable(self.entry, "asb.bd", plan, store_client=FakeStoreClient(), cf_client=FakeCfClient())
+        self.assertEqual(ctx.exception.code, COVERAGE_FALLBACK_UNVERIFIED)
+        self.assertIn("nginx probe failed: FrontDoorError", ctx.exception.message)
+
     def test_f10_digest_nine_keys_and_infer_recovered_dependents(self):
         from sandbox.hosting.zone_coverage.service import compute_plan_digest
         p1 = {

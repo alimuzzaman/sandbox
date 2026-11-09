@@ -6,7 +6,7 @@ import secrets
 import time
 from typing import Any, Callable
 
-from sandbox.hosting.front_door import ZONE_COVERAGE, nginx, require_capability
+from sandbox.hosting.front_door import FrontDoorError, ZONE_COVERAGE, nginx, require_capability
 from sandbox.hosting.zone_coverage import (
     COVERAGE_CONFLICT,
     COVERAGE_FALLBACK_UNVERIFIED,
@@ -959,6 +959,3 @@ def status(
         "safe": safe,
         "history": doc.get("history", []),
     }
-
-
-

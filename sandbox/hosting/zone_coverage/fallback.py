@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import shlex
 from typing import Any, Callable
@@ -80,6 +81,11 @@ def render_fallback_conf(
         "    default_type text/html;",
         '    add_header X-Robots-Tag "noindex, nofollow" always;',
         '    add_header X-Sandbox-Fallback "1" always;',
+        # nginx uses this block as the implicit default when it is first on a
+        # socket, so hostnames outside the zone are refused here as well.
+        f'    if ($host !~* "^([^.*]+\\.)+{re.escape(clean_zone)}$") {{',
+        "        return 444;",
+        "    }",
         f'    return 404 "{FALLBACK_BODY}";',
         "}",
         "",

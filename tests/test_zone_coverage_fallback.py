@@ -98,6 +98,12 @@ class TestZoneCoverageFallback(unittest.TestCase):
         self.assertIn('add_header X-Sandbox-Fallback "1" always;', conf)
         self.assertIn(f'return 404 "{FALLBACK_BODY}";', conf)
 
+    def test_render_fallback_conf_refuses_hosts_outside_the_zone_before_answering(self):
+        conf = render_fallback_conf("my-zone.asb.bd", cert_path="/c.pem", key_path="/k.pem")
+        guard = 'if ($host !~* "^([^.*]+\\.)+my\\-zone\\.asb\\.bd$") {\n        return 444;\n    }'
+        self.assertIn(guard, conf)
+        self.assertLess(conf.index(guard), conf.index("return 404"))
+
     def test_render_fallback_conf_ipv6_and_legacy_http2(self):
         conf = render_fallback_conf(
             "asb.bd",

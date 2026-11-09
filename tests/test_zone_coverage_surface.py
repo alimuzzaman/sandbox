@@ -917,6 +917,7 @@ http {{
                 s.bind(("127.0.0.1", 0))
                 return s.getsockname()[1]
         h_port, s_port = get_port(), get_port()
+        lone_h_port, lone_s_port = get_port(), get_port()
 
         cert_path = os.path.join(td, "cert.pem")
         key_path = os.path.join(td, "key.pem")
@@ -925,17 +926,23 @@ http {{
             "-out", cert_path, "-days", "1", "-nodes", "-subj", "/CN=*.asb.bd"
         ], check=True, capture_output=True, env=synthetic_environment({"HOME": td}))
 
-        fb_conf = render_fallback_conf(
-            "asb.bd", cert_path=cert_path, key_path=key_path,
-            http_port=h_port, https_port=s_port, http2_directive=True,
-        )
-        # Test-only: keep the listeners on loopback. The rule under test is unchanged.
-        for port in (h_port, s_port):
-            self.assertIn(f"listen {port}", fb_conf)
-            fb_conf = fb_conf.replace(f"listen {port}", f"listen 127.0.0.1:{port}")
-        fb_path = os.path.join(td, "fallback.conf")
-        with open(fb_path, "w") as f:
-            f.write(fb_conf)
+        def write_fallback(filename, http_port, https_port):
+            fb_conf = render_fallback_conf(
+                "asb.bd", cert_path=cert_path, key_path=key_path,
+                http_port=http_port, https_port=https_port, http2_directive=True,
+            )
+            # Test-only: keep the listeners on loopback. The rule under test is unchanged.
+            for port in (http_port, https_port):
+                self.assertIn(f"listen {port}", fb_conf)
+                fb_conf = fb_conf.replace(f"listen {port}", f"listen 127.0.0.1:{port}")
+            path = os.path.join(td, filename)
+            with open(path, "w") as f:
+                f.write(fb_conf)
+            return path
+
+        fb_path = write_fallback("fallback.conf", h_port, s_port)
+        # Alone on its sockets, the fallback is nginx's implicit default for them.
+        lone_fb_path = write_fallback("fallback-lone.conf", lone_h_port, lone_s_port)
 
         # A decoy default server stands in for a panel site, so a pass proves the fallback
         # was selected by name rather than being the only server present.
@@ -962,6 +969,7 @@ http {{
         return 418 "decoy";
     }}
     include {fb_path};
+    include {lone_fb_path};
 }}
 """)
 
@@ -985,7 +993,7 @@ http {{
         ready = False
         while time.time() < deadline and not ready:
             try:
-                for port in (h_port, s_port):
+                for port in (h_port, s_port, lone_h_port, lone_s_port):
                     socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
                 ready = True
             except OSError:
@@ -996,8 +1004,8 @@ http {{
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
-        def request(scheme, host, method, path):
-            port = h_port if scheme == "http" else s_port
+        def request(scheme, host, method, path, *, http_port=h_port, https_port=s_port):
+            port = http_port if scheme == "http" else https_port
             raw = socket.create_connection(("127.0.0.1", port), timeout=5)
             sock = raw if scheme == "http" else ssl_ctx.wrap_socket(raw, server_hostname=host)
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -1030,6 +1038,15 @@ http {{
                 status, marker, _, _ = request(scheme, "example.org", "GET", "/")
                 self.assertEqual(status, 418)
                 self.assertIsNone(marker)
+
+        # As the implicit default, the fallback closes outside hosts and still answers its zone.
+        lone = {"http_port": lone_h_port, "https_port": lone_s_port}
+        for scheme in ("http", "https"):
+            with self.subTest(scheme=scheme, implicit_default=True):
+                with self.assertRaises((http.client.HTTPException, OSError)):
+                    request(scheme, "example.org", "GET", "/", **lone)
+                status, marker, _, _ = request(scheme, "sb-x.asb.bd", "GET", "/", **lone)
+                self.assertEqual((status, marker), (404, "1"))
 
     def test_subprocess_calls_supply_explicit_env(self):
         import ast

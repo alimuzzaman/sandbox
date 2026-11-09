@@ -959,7 +959,7 @@ class JobRepository:
             "lifecycle IN ('succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted')",
             "finished_at IS NOT NULL",
             "finished_at != ''",
-            "(cleanup_state != 'completed' OR (kind = 'ci' AND workspace_authority_digest IS NOT NULL))",
+            "cleanup_state != 'completed'",
         ]
         if before_finished_at is not None:
             clauses.append("finished_at <= ?")

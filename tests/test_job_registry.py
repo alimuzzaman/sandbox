@@ -467,6 +467,16 @@ class JobRegistryTests(unittest.TestCase):
         self.assertNotIn(active_job["job_id"], cand_ids)
         self.assertNotIn(completed_job["job_id"], cand_ids)
 
+    def test_completed_ci_with_preserved_authority_is_not_reselected(self):
+        repo = self.repository()
+        row, _ = repo.accept(submission("completed-ci"))
+        repo.connection.execute(
+            "UPDATE jobs SET kind='ci', lifecycle='succeeded', finished_at='2026-01-01T00:00:00Z', "
+            "cleanup_state='completed', workspace_authority_digest='kept' WHERE job_id=?",
+            (row["job_id"],),
+        )
+        self.assertEqual(repo.list_retention_candidates(limit=1), [])
+
 
 if __name__ == "__main__":
     unittest.main()

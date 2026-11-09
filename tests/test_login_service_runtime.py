@@ -4,6 +4,7 @@ import hashlib
 import http.client
 import http.server
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -48,7 +50,7 @@ class _Capture(http.server.BaseHTTPRequestHandler):
         store["seen_headers"].append(dict(self.headers))
         store["seen_paths"].append(self.path)
         expected = "Basic " + base64.b64encode(f"capture:{CREDENTIAL}".encode()).decode()
-        if self.headers.get("Authorization") != expected:
+        if not store.get("no_login") and self.headers.get("Authorization") != expected:
             return self._send(401, b"login", [("WWW-Authenticate", 'Basic realm="mail"')])
         if self.path.startswith("/mail/api/v1/messages"):
             messages = [{"ID": item["ID"], "Created": item["Created"]} for item in store["messages"]]
@@ -601,6 +603,44 @@ class MagicLinkTests(_Base):
         self.issue("app", self.token)
         self.assertEqual(self.go()[0].status, 403)
         self.assertEqual(self.app_store["requests"], [])
+
+
+class CaptureWithoutLoginTests(_Base):
+    token = "m" * 43
+
+    def setUp(self):
+        super().setUp()
+        self.capture_store["no_login"] = True
+        self.config["capture"]["username"] = None
+
+    def test_magic_link_works_and_sends_no_authorization(self):
+        self.issue("app", self.token, email="person@example.test")
+        response, _ = self.consume(APP_PATH, self.token)
+        self.assertEqual((response.status, response.getheader("Location")), (303, VERIFY))
+        self.assertTrue(self.capture_store["seen_headers"])
+        for seen in self.capture_store["seen_headers"]:
+            self.assertNotIn("Authorization", seen)
+
+    def _main(self, config):
+        servers = (MagicMock(), MagicMock())
+        environment = {"SANDBOX_LOGIN_CONFIG": base64.b64encode(json.dumps(config).encode()).decode()}
+        with patch.dict(os.environ, environment), \
+             patch.object(runtime, "wait_for_capture"), \
+             patch.object(runtime, "create_servers", return_value=servers) as created, \
+             patch.object(runtime, "_log"):
+            os.environ.pop("SANDBOX_LOGIN_CAPTURE_CREDENTIAL", None)
+            runtime.main()
+        return created
+
+    def test_startup_needs_no_credential_without_a_login(self):
+        created = self._main(self.config)
+        self.assertEqual(created.call_args.args[1], "")
+
+    def test_startup_still_needs_the_credential_with_a_login(self):
+        self.config["capture"]["username"] = "capture"
+        with self.assertRaises(SystemExit) as stopped:
+            self._main(self.config)
+        self.assertEqual(stopped.exception.code, 1)
 
 
 class StartupTests(_Base):

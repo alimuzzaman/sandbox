@@ -265,6 +265,9 @@ class Gate:
 
 
 def capture_headers(capture, credential):
+    """Basic auth for a capture service with a login; nothing for one without."""
+    if not capture.get("username"):
+        return {}
     secret = base64.b64encode(f"{capture['username']}:{credential}".encode()).decode()
     return {"Authorization": f"Basic {secret}"}
 
@@ -596,7 +599,7 @@ def _log(line):
 def main():
     config = json.loads(base64.b64decode(os.environ["SANDBOX_LOGIN_CONFIG"]))
     credential = os.environ.get("SANDBOX_LOGIN_CAPTURE_CREDENTIAL", "")
-    if not credential:
+    if config["capture"].get("username") and not credential:
         _log("refused code=capture_credential_missing")
         raise SystemExit(1)
     try:

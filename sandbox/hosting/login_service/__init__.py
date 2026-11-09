@@ -124,6 +124,11 @@ def _parse_capture(raw: object, *, primary: str, background: list[str], secrets:
     if raw.get("adapter") not in CAPTURE_ADAPTERS:
         raise _invalid("login_service.capture.adapter must be one of: " + ", ".join(CAPTURE_ADAPTERS))
     url = _internal_url(raw.get("api_url"), {service}, "login_service.capture.api_url")
+    if ("username" in raw) != ("credential_secret" in raw):
+        raise _invalid("login_service.capture needs both username and credential_secret, or neither")
+    if "username" not in raw:
+        return {"service": service, "adapter": raw["adapter"], "api_url": url.geturl(),
+                "username": None, "credential_secret": None}
     username = str(raw.get("username") or "").strip()
     if not username or ":" in username:
         raise _invalid("login_service.capture.username must be a non-empty name without a colon")
@@ -267,6 +272,10 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
             if entry["hostname"] in inbox_hosts:
                 raise _invalid("a hostname can front only one inbox_gate entry")
             inbox_hosts.add(entry["hostname"])
+            # While a link is live the gate passes visitors to the capture
+            # service's own login; with no login there it would be open access.
+            if capture["username"] is None:
+                raise _invalid("inbox_gate entries need a capture login (username and credential_secret)")
     return {"image": image, "enabled_until": enabled_until.isoformat(),
             "session_ttl_seconds": session, "allowed_host_suffixes": suffixes,
             "capture": capture, "entries": parsed}
@@ -343,7 +352,8 @@ def render_service(declaration: dict) -> str:
         "        condition: service_started",
         "    environment:",
         f'      SANDBOX_LOGIN_CONFIG: "{config}"',
-        f'      SANDBOX_LOGIN_CAPTURE_CREDENTIAL: "${{{capture["credential_secret"]}}}"',
+        *([f'      SANDBOX_LOGIN_CAPTURE_CREDENTIAL: "${{{capture["credential_secret"]}}}"']
+          if capture["credential_secret"] else []),
         f"    command: {json.dumps(['python3', '-c', loader, source])}",
         "    healthcheck:",
         f"      test: {json.dumps(['CMD', 'python3', '-c', probe])}",
@@ -361,10 +371,13 @@ def preflight_command(prefix: str, capture_service: str) -> str:
         "command,capture,login=sys.argv[1:4]",
         "done=subprocess.run(command,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=60,check=True)",
         "services=json.loads(done.stdout)['services']",
-        "def exposed(name):",
-        " service=services.get(name) or {}",
-        " return len(service.get('ports') or [])+(1 if service.get('network_mode')=='host' else 0)",
-        "print(json.dumps({'capture_present':capture in services,'capture_ports':exposed(capture),'login_ports':exposed(login)}))",
+        "LOOPBACK={'127.0.0.1','::1'}",
+        "def ports(name):return (services.get(name) or {}).get('ports') or []",
+        "def host_network(name):return 1 if (services.get(name) or {}).get('network_mode')=='host' else 0",
+        "def beyond_loopback(port):return not (isinstance(port,dict) and port.get('host_ip') in LOOPBACK)",
+        "capture_ports=sum(1 for port in ports(capture) if beyond_loopback(port))+host_network(capture)",
+        "login_ports=len(ports(login))+host_network(login)",
+        "print(json.dumps({'capture_present':capture in services,'capture_ports':capture_ports,'login_ports':login_ports}))",
     ))
     config = f"{prefix} --profile '*' config --format json"
     return shlex.join(["python3", "-c", program, config, capture_service, SERVICE_NAME])
@@ -380,7 +393,7 @@ def check_preflight(output: object) -> None:
     if not present:
         raise LoginServiceError("capture_not_in_project", "the capture service is not in this Compose project")
     if capture_ports:
-        raise LoginServiceError("capture_port_published", "the capture service must not publish a port")
+        raise LoginServiceError("capture_port_published", "the capture service may publish ports only on loopback")
     if login_ports:
         raise LoginServiceError("login_port_published", f"{SERVICE_NAME} must not publish a port")
 

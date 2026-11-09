@@ -46,6 +46,12 @@ autologin:
         denied_emails: [admin@dev.example.test]
 ```
 
+A capture service with no login omits both `username` and `credential_secret`: setting
+only one is refused. No `Authorization` header is sent, and no credential is rendered.
+`inbox_gate` entries still need a login, because while a link is live the gate passes
+visitors to the capture service's own login. A loopback-only port lets a private-network
+proxy on the host reach a capture service like this.
+
 `hostname` must be a served alias of the target, never its primary hostname. A
 cookie path is not a security boundary on a shared origin.
 
@@ -64,7 +70,9 @@ to the capture service when the gate goes live.
 | No standing access: without a live token or session, every public route is 404 | Running service; health answers only on an internal loopback port |
 | Every hostname of the target matches `allowed_host_suffixes` | Manifest parsing. List only development domains, so a production domain can never qualify |
 | The capture service is in this Compose project and reachable | Manifest parsing, apply preflight, and service startup |
-| The capture credential stays in this service's environment; no ports are published | Rendered override, apply preflight on `capture` and `sandbox-login`, and a refusal when the capture service is the routed service |
+| Any capture credential stays in this service's environment | Rendered override |
+| `sandbox-login` publishes nothing. The capture service publishes only on `127.0.0.1` or `::1`, and never uses host networking | Apply preflight (`login_port_published`, `capture_port_published`) |
+| No Sandbox route targets the capture service | Manifest parsing |
 | A left-on service is visible | `sb host status` lists each entry and the expiry |
 
 ## Issuing a link

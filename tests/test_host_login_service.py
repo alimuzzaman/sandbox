@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import re
+import shlex
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import sandbox.commands.hosting as hosting_cmd  # noqa: E402
 import sandbox.core._hosting as hosting  # noqa: E402
 from sandbox.hosting import login_service as login  # noqa: E402
+from tests.subprocess_support import run_test_process  # noqa: E402
 
 IMAGE = "python:3.13-alpine@sha256:" + "a" * 64
 
@@ -201,6 +203,37 @@ class DeclarationTests(unittest.TestCase):
             lambda e: e["autologin"]["login_service"]["capture"].update(
                 credential_secret="NOT_DECLARED"), "credential_secret")
 
+    @staticmethod
+    def _without_login(environment):
+        environment["autologin"]["entries"].pop("inbox")
+        capture = environment["autologin"]["login_service"]["capture"]
+        capture.pop("username")
+        capture.pop("credential_secret")
+
+    def test_capture_without_a_login_is_accepted(self):
+        environment = _environment(_login_block())
+        self._without_login(environment)
+        capture = _validate(environment)["login_service"]["capture"]
+        self.assertIsNone(capture["username"])
+        self.assertIsNone(capture["credential_secret"])
+
+    def test_capture_login_needs_both_fields(self):
+        for field in ("username", "credential_secret"):
+            with self.subTest(field=field):
+                def mutate(environment):
+                    environment["autologin"]["entries"].pop("inbox")
+                    environment["autologin"]["login_service"]["capture"].pop(field)
+                self.assertRefused(mutate, "username and credential_secret")
+
+    def test_inbox_gate_requires_a_capture_login(self):
+        # While a link is live the gate passes visitors to the capture service's
+        # own login. With no login there, that would be open access.
+        def mutate(environment):
+            capture = environment["autologin"]["login_service"]["capture"]
+            capture.pop("username")
+            capture.pop("credential_secret")
+        self.assertRefused(mutate, "inbox_gate")
+
     def test_refuses_a_reserved_service_name(self):
         self.assertRefused(
             lambda e: e["compose"]["background_services"].append(login.SERVICE_NAME), "reserved")
@@ -351,6 +384,13 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(sorted(config["entries"]), ["app", "inbox"])
         self.assertEqual(config["session_ttl_seconds"], 3600)
 
+    def test_capture_without_a_login_renders_no_credential(self):
+        environment = _environment(_login_block())
+        DeclarationTests._without_login(environment)
+        override = hosting.compose_override(_validate(environment), 18000)
+        self.assertNotIn("SANDBOX_LOGIN_CAPTURE_CREDENTIAL", override)
+        self.assertNotIn("CAPTURE_PASSWORD", override)
+
     def test_denied_addresses_stay_out_of_the_container(self):
         magic = self.validated["login_service"]["entries"]["app"]["magic_link"]
         magic["denied_emails"] = ["staff@example.test"]
@@ -398,6 +438,60 @@ class PreflightTests(unittest.TestCase):
         command = login.preflight_command("docker compose", "capture")
         self.assertNotIn("print(document", command)
         self.assertIn("capture_ports", command)
+
+
+class PreflightProbeTests(unittest.TestCase):
+    """Runs the real remote probe against a fake `docker compose config`."""
+
+    def _probe(self, capture=None, login_service=None):
+        document = {"services": {"capture": capture or {},
+                                 login.SERVICE_NAME: login_service or {}}}
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "config.json")
+            config.write_text(json.dumps(document))
+            fake = Path(directory, "compose.sh")
+            fake.write_text(f"#!/bin/sh\nexec /bin/cat {config}\n")
+            command = shlex.split(login.preflight_command(f"/bin/sh {fake}", "capture"))
+            done = run_test_process([sys.executable, *command[1:]], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    @staticmethod
+    def _port(**fields):
+        return {"mode": "ingress", "target": 8025, "published": "18025", "protocol": "tcp", **fields}
+
+    def assertCaptureRefused(self, capture):
+        with self.assertRaises(login.LoginServiceError) as raised:
+            login.check_preflight(self._probe(capture))
+        self.assertEqual(raised.exception.code, "capture_port_published")
+
+    def test_no_ports_pass(self):
+        login.check_preflight(self._probe())
+
+    def test_loopback_only_capture_ports_pass(self):
+        for host_ip in ("127.0.0.1", "::1"):
+            with self.subTest(host_ip=host_ip):
+                login.check_preflight(self._probe({"ports": [self._port(host_ip=host_ip)]}))
+
+    def test_other_bindings_are_refused(self):
+        for fields in ({"host_ip": "0.0.0.0"}, {"host_ip": "::"}, {"host_ip": ""}, {},
+                       {"host_ip": "127.0.0.2"}, {"host_ip": "100.64.0.1"}):
+            with self.subTest(fields=fields):
+                self.assertCaptureRefused({"ports": [self._port(**fields)]})
+
+    def test_one_public_mapping_among_loopback_is_refused(self):
+        self.assertCaptureRefused({"ports": [self._port(host_ip="127.0.0.1"), self._port()]})
+
+    def test_unrecognized_port_shape_is_refused(self):
+        self.assertCaptureRefused({"ports": ["127.0.0.1:18025:8025"]})
+
+    def test_host_network_is_refused(self):
+        self.assertCaptureRefused({"network_mode": "host"})
+
+    def test_login_service_may_not_publish_even_on_loopback(self):
+        with self.assertRaises(login.LoginServiceError) as raised:
+            login.check_preflight(self._probe(login_service={"ports": [self._port(host_ip="127.0.0.1")]}))
+        self.assertEqual(raised.exception.code, "login_port_published")
 
 
 class EmailResolutionTests(unittest.TestCase):

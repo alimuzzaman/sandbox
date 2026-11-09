@@ -940,6 +940,16 @@ class Execution(unittest.TestCase):
         self.assertIn(key, repository.load()["coverage_release_pending"])
 
     @guarded_destroy_case
+    def test_absent_destroy_retries_legacy_pending_coverage_release(self):
+        root, key, zonefile, shared, repository, events, client = self.shared_fixture()
+        repository._write({"version": 1, "hosts": {},
+                           "coverage_release_pending": {key: ["example.com"]}})
+        result = destroy.execute(ENTRY, "r1", "site", "sandbox", client_factory=lambda: client)
+        self.assertIn(result["state"], {"absent", "destroyed"})
+        self.assertNotIn(key, json.loads(zonefile.read_text())["dependents"])
+        self.assertNotIn(key, repository.load().get("coverage_release_pending", {}))
+
+    @guarded_destroy_case
     def test_fenced_or_failed_destroy_keeps_dependent(self):
         for kind in ("fence", "teardown", "provider", "save"):
             with self.subTest(kind=kind):

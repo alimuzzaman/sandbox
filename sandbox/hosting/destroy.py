@@ -432,10 +432,41 @@ def execute(entry: dict, remote_name: str, project: str, environment: str, *,
         found = plan(state, entry, remote_name, project, environment)
         record = state.get("hosts", {}).get(key)
         claims = _coverage_claims(record)
+        legacy_pending = state.get("coverage_release_pending", {}).get(key, [])
+        legacy_pending = legacy_pending if isinstance(legacy_pending, list) else [legacy_pending]
+        for item in legacy_pending:
+            zone = item if isinstance(item, str) else item.get("zone") if isinstance(item, dict) else None
+            if isinstance(zone, str) and zone and not any(claim["zone"] == zone for claim in claims):
+                claims.append({"mode": "shared", "zone": zone})
         held = _records_held_elsewhere(state, key)
         found["_records"] = [item for item in _target_dns_records(record)
                              if not (_record_identities(item) & held)]
         if not found["found"]:
+            # Older releases persisted failed releases outside the host record,
+            # so this is the only path that can retry them after state removal.
+            pending = state.get("coverage_release_pending", {}).get(key, [])
+            pending = pending if isinstance(pending, list) else [pending]
+            zones = [item if isinstance(item, str) else item.get("zone")
+                     for item in pending if isinstance(item, (str, dict))]
+            if zones:
+                from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
+                from sandbox.hosting.zone_coverage import targets
+                remaining = list(dict.fromkeys(zone for zone in zones if isinstance(zone, str) and zone))
+                client = ZoneCoverageClient(entry)
+                for zone in list(remaining):
+                    try:
+                        targets.release(client, zone, key)
+                        remaining.remove(zone)
+                    except Exception:
+                        pass
+                with repository.state_lock(timeout_seconds=lock_wait):
+                    latest = hosting.load_host_state()
+                    markers = latest.setdefault("coverage_release_pending", {})
+                    if remaining:
+                        markers[key] = remaining
+                    else:
+                        markers.pop(key, None)
+                    repository._write(latest)
             return {"state": "absent", "target": key, "remote": _retained(found["remote"])}
         if found["fences"] and not clear_fenced:
             raise DestroyError(

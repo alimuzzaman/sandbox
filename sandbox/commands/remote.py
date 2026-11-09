@@ -255,6 +255,7 @@ def cmd_remote(cfg, args) -> None:
         "set-origin": _cmd_set_origin,
         "set-storage-floor": _cmd_set_storage_floor,
         "rebind-host": _cmd_rebind_host,
+        "tailscale-ssh": _cmd_tailscale_ssh,
         "docker-pool": _cmd_docker_pool,
         "domains": _cmd_domains,
         "service": _cmd_service,
@@ -1267,6 +1268,79 @@ def _cmd_rebind_host(args, as_json: bool) -> None:
         ok(f"'{name}' can be rebound for {len(evidence)} target(s); add --confirm to record it")
     else:
         ok(f"'{name}' is bound to its recorded host identity ({status})")
+
+
+def _tailscale_ssh_enabled(entry: dict) -> bool:
+    result = sr.ssh_run(entry, "tailscale debug prefs", timeout=15)
+    if result.returncode != 0:
+        die("tailscale_unavailable: could not read Tailscale settings on the remote")
+    try:
+        return json.loads(result.stdout)["RunSSH"] is True
+    except (ValueError, KeyError, TypeError):
+        die("tailscale_unavailable: could not read Tailscale settings on the remote")
+
+
+def _tailscale_ssh_login_works(entry: dict, user: str) -> bool:
+    """Try the non-interactive login that Sandbox's own SSH would make."""
+    result = sr.ssh_run(entry, "tailscale ip -4", timeout=15)
+    address = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    if result.returncode != 0 or not address:
+        return False
+    # A throwaway file: Tailscale SSH answers with its own host key on this address.
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            login = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", f"UserKnownHostsFile={directory}/known_hosts",
+                 f"{user}@{address}", "true"],
+                capture_output=True, timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    return login.returncode == 0
+
+
+def _cmd_tailscale_ssh(args, as_json: bool) -> None:
+    """`sb remote tailscale-ssh <status|enable|disable> <name> [--confirm]`.
+
+    Optional and off by default. It never changes the registered SSH target or
+    the control connection, so deployments keep using what they use today.
+    """
+    operation, name = getattr(args, "name", None), getattr(args, "ssh_url", None)
+    if operation not in {"status", "enable", "disable"} or not name:
+        die("usage: ./sb remote tailscale-ssh <status|enable|disable> <name> [--confirm] [--json]")
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    enabled = _tailscale_ssh_enabled(entry)
+    result = {"ok": True, "name": name, "enabled": enabled, "error": None}
+    if operation == "status":
+        result["status"] = "observed"
+    else:
+        wanted = operation == "enable"
+        if not _arg_true(args, "confirm"):
+            result["status"] = f"already_{operation}d" if enabled is wanted else "planned"
+        else:
+            if enabled is not wanted:
+                change = sr.ssh_run(entry, f"sudo -n tailscale set --ssh={'true' if wanted else 'false'}",
+                                    timeout=30)
+                if change.returncode != 0 or _tailscale_ssh_enabled(entry) is not wanted:
+                    die(f"tailscale_ssh_change_failed: could not {operation} Tailscale SSH")
+            result.update(enabled=wanted,
+                          status=f"{operation}d" if enabled is not wanted else f"already_{operation}d")
+            if wanted:
+                user = sr.remote_ssh_parts(entry)["target"].partition("@")[0]
+                result["login"] = "ok" if _tailscale_ssh_login_works(entry, user) else "denied"
+                if result["login"] == "denied":
+                    result["required_rule"] = {"action": "accept", "src": ["YOUR_TAILSCALE_LOGIN"],
+                                               "dst": ["autogroup:self"], "users": [user]}
+    if as_json:
+        print(json.dumps(result))
+    else:
+        ok(f"Tailscale SSH on '{name}': {result['status']}")
+        if result.get("login") == "denied":
+            info("this controller could not log in; add the tailnet rule shown by --json "
+                 "and stop any `check` rule from matching this server")
 
 
 def _cmd_remove(args, as_json: bool) -> None:

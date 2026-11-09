@@ -1479,6 +1479,26 @@ load. Public HTTPS mode records nothing, because the client it sees is the proxy
 Whether someone reaching the machine through Tailscale machine sharing resolves to their
 own login has not been verified.
 
+### Optional Tailscale SSH
+
+Off by default and separate from the control connection. It takes port 22 on the server's
+Tailscale address only; normal SSH on other addresses keeps working.
+
+```bash
+./sb remote tailscale-ssh status myvps --json
+./sb remote tailscale-ssh enable myvps --json            # report only
+./sb remote tailscale-ssh enable myvps --confirm --json
+./sb remote tailscale-ssh disable myvps --confirm --json
+```
+
+`enable` needs passwordless `sudo` for `tailscale set` on the remote. It leaves the
+registered SSH target alone and then tries a non-interactive login. Tailscale's default
+rule uses `check`, which waits for a browser and so cannot work for automation; `login:
+denied` means the tailnet policy needs an `accept` rule for this user and no `check` rule
+matching the server. With `accept`, any device signed in as that Tailscale user gets a
+shell with that account's full rights, so this does not replace restricted SSH keys. Avoid
+running `enable` while a session to the Tailscale address is open, as it may hang.
+
 ## 8. CLI + MCP surface
 
 See `specs/014-remote-vps-hosting/contracts/cli-and-mcp.md` for the full flag/JSON-shape

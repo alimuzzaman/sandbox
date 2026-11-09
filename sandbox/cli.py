@@ -881,12 +881,13 @@ Per-project (each plugin carries its own sandbox.config.json):
             "Readiness (spec 063):\n"
             "  ./sb remote readiness [NAME] [--project-dir DIR] [--json]"
         ))
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "set-storage-floor", "rebind-host", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness", "coverage"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "set-storage-floor", "rebind-host", "tailscale-ssh", "service", "docker-pool", "domains", "plugins", "ssh", "edge", "pin", "network-range", "readiness", "coverage"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "plugins: mirror the local pro-plugin store to the host so every remote "
              "instance offers those slugs on its wp-admin On-Demand page; "
              "rebind-host: keep recorded deployments valid after this remote's connection changed; "
+             "tailscale-ssh: optional status/enable/disable of Tailscale SSH on the remote; "
              "up/down: start/stop the remote MCP server; docker-pool: plan/apply "
              "the fixed /24 daemon address pools; domains: list configured "
              "instance and hosted-route domains; remove: forget a remote "

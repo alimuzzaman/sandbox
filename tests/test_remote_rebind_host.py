@@ -117,6 +117,13 @@ class RebindCommandTest(unittest.TestCase):
         self.assertNotEqual(code, 0)
         put.assert_not_called()
 
+    def test_a_target_with_no_recorded_identity_is_refused(self):
+        state = host_state(OLD)
+        state["hosts"][f"{NAME}/unrecorded/env"] = {"commit": "abc"}
+        code, _, put, _ = self.run_command(state=state, confirm=True)
+        self.assertNotEqual(code, 0)
+        put.assert_not_called()
+
     def test_targets_that_disagree_are_refused(self):
         code, _, put, _ = self.run_command(
             state=host_state(OLD, "sha256:" + "b" * 64), confirm=True)

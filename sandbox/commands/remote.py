@@ -1233,8 +1233,8 @@ def _cmd_rebind_host(args, as_json: bool) -> None:
         die(f"no remote named '{name}'")
     evidence = [
         (record.get("hosting_operation") or {}).get("evidence") or {}
-        for record in _hosting.load_host_state()["hosts"].values()
-        if ((record.get("hosting_operation") or {}).get("target") or {}).get("remote") == name]
+        for key, record in _hosting.load_host_state()["hosts"].items()
+        if key.startswith(f"{name}/")]
     recorded = {item.get("host_identity") for item in evidence}
     machines = {item.get("machine_identity") for item in evidence}
     if not evidence:

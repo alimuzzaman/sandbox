@@ -467,30 +467,38 @@ class TestUpPhpExtensionImages(unittest.TestCase):
         }
         args = SimpleNamespace(resolved_instance="fixture", json=True)
         fake_core = SimpleNamespace(registry_find_instance=lambda _instance: None)
-        with tempfile.TemporaryDirectory() as directory, \
-                patch.object(lifecycle, "_core", return_value=fake_core), \
-                patch.object(lifecycle, "resolve_instances", return_value={"fixture": runtime}), \
-                patch.object(lifecycle, "_web_services", return_value=("db", "wp", "nginx")), \
-                patch.object(lifecycle, "prepare_php_extension_runtime",
-                             side_effect=lambda config, server: events.append(("prepare", config, server))), \
-                patch.object(lifecycle, "_compose_up",
-                             side_effect=lambda *a, **k: events.append(("compose", a[0], a[1]))), \
-                patch.object(lifecycle, "compose") as compose, \
-                patch.object(lifecycle, "php_extension_status",
-                             return_value={"drift": {"state": "ready"}}), \
-                patch.object(lifecycle, "wp_dir", return_value=Path(directory)), \
-                patch.object(lifecycle, "_is_herd_instance", side_effect=[False, True]), \
-                patch.object(lifecycle, "_write_mail_muplugin"), \
-                patch.object(lifecycle, "_write_loopback_muplugin"), \
-                patch.object(lifecycle, "_write_dl_cache_muplugin"), \
-                patch.object(lifecycle, "_write_ondemand_muplugin"), \
-                patch.object(lifecycle, "_write_host_runtime_muplugins"), \
-                patch.object(lifecycle, "_write_licensing_muplugin"), \
-                patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"), \
-                patch("sandbox.core._provision.read_local_abilities_enabled", return_value=None), \
-                patch("sandbox.commands.jobs.prune_jobs"), \
-                patch.object(lifecycle, "site_url", return_value="http://fixture.test"), \
-                contextlib.redirect_stdout(io.StringIO()) as output:
+        # One ExitStack instead of a single 21-manager `with`: the python3.12 on
+        # xspeed-dev rejects that as "too many statically nested blocks".
+        with contextlib.ExitStack() as stack:
+            directory = stack.enter_context(tempfile.TemporaryDirectory())
+            stack.enter_context(patch.object(lifecycle, "_core", return_value=fake_core))
+            stack.enter_context(patch.object(
+                lifecycle, "resolve_instances", return_value={"fixture": runtime}))
+            stack.enter_context(patch.object(
+                lifecycle, "_web_services", return_value=("db", "wp", "nginx")))
+            stack.enter_context(patch.object(
+                lifecycle, "prepare_php_extension_runtime",
+                side_effect=lambda config, server: events.append(("prepare", config, server))))
+            stack.enter_context(patch.object(
+                lifecycle, "_compose_up",
+                side_effect=lambda *a, **k: events.append(("compose", a[0], a[1]))))
+            compose = stack.enter_context(patch.object(lifecycle, "compose"))
+            stack.enter_context(patch.object(
+                lifecycle, "php_extension_status", return_value={"drift": {"state": "ready"}}))
+            stack.enter_context(patch.object(lifecycle, "wp_dir", return_value=Path(directory)))
+            stack.enter_context(patch.object(
+                lifecycle, "_is_herd_instance", side_effect=[False, True]))
+            for name in ("_write_mail_muplugin", "_write_loopback_muplugin",
+                         "_write_dl_cache_muplugin", "_write_ondemand_muplugin",
+                         "_write_host_runtime_muplugins", "_write_licensing_muplugin",
+                         "_remove_obsolete_builder_authoring_assets"):
+                stack.enter_context(patch.object(lifecycle, name))
+            stack.enter_context(patch(
+                "sandbox.core._provision.read_local_abilities_enabled", return_value=None))
+            stack.enter_context(patch("sandbox.commands.jobs.prune_jobs"))
+            stack.enter_context(patch.object(
+                lifecycle, "site_url", return_value="http://fixture.test"))
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             lifecycle.cmd_up({}, args)
 
         self.assertEqual(events[0], ("prepare", runtime, "nginx"))

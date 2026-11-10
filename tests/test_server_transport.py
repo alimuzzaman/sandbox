@@ -12,8 +12,10 @@ NOT the CLI venv the rest of this repo's tests run under -- run it via:
     mcp/wp-server/.venv/bin/python -m unittest tests.test_server_transport -v
 
 The whole-suite `.cli-venv/bin/python -m unittest discover -s tests` run
-(this repo's main convention) does NOT have those deps, so this module skips
-itself cleanly there instead of erroring out the whole discovery run.
+(this repo's main convention) does NOT have those deps, so each class here
+skips with the import error as its reason. The skip is per class, not a
+module-level SkipTest, so an explicit module list that names this file still
+loads and runs the other modules.
 """
 import asyncio
 import json
@@ -34,12 +36,17 @@ os.environ.setdefault("SANDBOX_ROOT", str(ROOT))
 try:
     import server  # noqa: E402
 except ImportError as e:
-    raise unittest.SkipTest(
+    server = None
+    SERVER_SKIP_REASON = (
         f"mcp/wp-server's own dependencies aren't importable here ({e}) -- "
         "run this file with mcp/wp-server/.venv/bin/python instead"
     )
+else:
+    SERVER_SKIP_REASON = ""
+needs_server = unittest.skipIf(server is None, SERVER_SKIP_REASON)
 
 
+@needs_server
 class TestParseTransportArgs(unittest.TestCase):
     def test_no_flags_defaults_to_stdio(self):
         # This is the FR-015 release gate: an existing `sb mcp` invocation
@@ -86,6 +93,7 @@ class TestParseTransportArgs(unittest.TestCase):
                 os.environ["SANDBOX_REMOTE_MCP_TOKEN"] = old
 
 
+@needs_server
 class TestStreamableHttpSafetyGates(unittest.TestCase):
     def test_memory_snapshot_reports_total_used_available_and_percent(self):
         class Meminfo:

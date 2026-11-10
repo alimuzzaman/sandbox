@@ -249,6 +249,10 @@ Apply only after the user explicitly authorizes the reviewed plan:
 sb resources cleanup --plan-id PLAN_ID --confirm --json
 ```
 
+That form is for `cache` and `stale` plans. A tier plan is applied with the
+tier it was planned with, `sb resources cleanup --tier T --plan-id PLAN_ID
+--confirm`; any other pairing is refused with `plan_kind_mismatch`.
+
 Do not supply paths or engine identifiers outside the plan. Never retry a
 timed-out remote cleanup automatically; rescan and create a new plan.
 
@@ -512,7 +516,7 @@ before protected effects.
 ## Hosting stacks from a template (spec 071)
 
 - A `sandbox.hosting.yml` with a `stack:` block is a template: placeholders `{slug}`, `{SLUG}`, `{port:<name>}`, `{ref_branch}` only in `project`, `host.primary`, alias hostnames, `deploy.allowed_branches`, `secrets.values` values and `secrets.generated` source names. Plain `sb host` commands refuse it with `stack_template_requires_stack_up`.
-- `sb host stack up --template <checkout>/sandbox.hosting.yml --name <slug> [--ref <branch|commit>] [--port NAME=N] --remote R --plan|--confirm [--generate] [--json]`: `--plan` changes nothing; `--confirm` renders to `$SANDBOX_HOME/runtime/stacks/<slug>/`, checks the commit out into a detached worktree and submits the durable `job-start` + `host apply`. Follow the returned job with `sb job-status`.
+- `sb host stack up --template <checkout>/sandbox.hosting.yml --name <slug> [--ref <branch|commit>] [--port NAME=N] --remote R --plan|--confirm [--generate] [--json]`: `--plan` changes nothing; `--confirm` renders to `$SANDBOX_HOME/runtime/stacks/<slug>/`, checks the commit out into a detached worktree and submits the durable `job-start` + `host apply`. Follow the returned job with `sb job-status`. A template may sit in a checkout subfolder; the job binds that folder (`--exact-project-dir`). `stack list` shows the commit an apply proved delivered (`not delivered` before the first); the requested one is `last_apply.commit`.
 - `sb host stack list --remote R` and `sb host stack down --name <slug> --remote R --confirm` (existing destroy, then ports released).
 - Spec 077 lifetimes: every stack is `temporary` (default, 14d TTL, `--ttl 36h|14d|2w`), `hosted` (`--lifetime hosted`, only the one canonical stack of the template's `stack.dev_branch`, default `dev`) or `permanent`. The remote record (`$SANDBOX_HOME/runtime/target-lifetimes/<compose_project>.json`) is authoritative; no record means protected. `up` claims the name on the remote first: another owner's or copy's name is `stack_slug_taken`, never taken over; `--copy <id>` targets your own copy from another machine; no `--name` generates `<branch>-<owner>-<n>`. `sb host stack ttl|sweep|reap|limits` and `sb host classify --target <project>/<env> --lifetime L|--unclassify --confirm`; `down`/`ttl` on another owner's stack need `--force-owner`. Server cleanup reaps expired or merged temporary stacks (nginx only, manifest first); `stack down` finishes a reaped stack's DNS and controller state.
 - Stack ports come from 18100-18199 per remote and persist until `down`. Every apply refuses a hostname another project holds on the remote (`hostname_owned_by_other_project`). `allowed_branches` accepts globs (`feat/*`).

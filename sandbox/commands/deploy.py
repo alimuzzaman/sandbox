@@ -57,7 +57,7 @@ def _stack_slug(args) -> str | None:
 
 
 def _stack_link_refusal(args, remote_name: str) -> tuple[str, str] | None:
-    """Why `--stack` cannot be honoured, checked before any remote effect (spec 073)."""
+    """Why `--stack` cannot be honoured, checked before any remote effect (spec 076)."""
     slug = _stack_slug(args)
     if slug is None:
         return None

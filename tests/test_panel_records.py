@@ -1,4 +1,4 @@
-"""Secret-free panel records written by host apply and deploy --stack (spec 073)."""
+"""Secret-free panel records written by host apply and deploy --stack (spec 076)."""
 from __future__ import annotations
 
 import base64

@@ -1,4 +1,4 @@
-// Stacks and hosted sites (spec 073): every server a stack created, with its
+// Stacks and hosted sites (spec 076): every server a stack created, with its
 // state, health and ref, plus plain hosted targets. Read-only: nothing here
 // posts an action.
 

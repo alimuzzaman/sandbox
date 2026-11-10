@@ -151,7 +151,7 @@ def _remote_view(name: str, deep: bool) -> tuple[int, dict]:
     return 200, inventory
 
 
-# Stacks and hosted sites (spec 073). One health cache per `sb web` process,
+# Stacks and hosted sites (spec 076). One health cache per `sb web` process,
 # so every viewer and refresh shares the same bounded probes.
 _HOSTING_HEALTH = None
 _HOSTING_HEALTH_LOCK = threading.Lock()

@@ -1,4 +1,4 @@
-"""`GET /api/hosting`: the read-only stacks and hosted sites endpoint (spec 073)."""
+"""`GET /api/hosting`: the read-only stacks and hosted sites endpoint (spec 076)."""
 from __future__ import annotations
 
 import contextlib

@@ -38,7 +38,7 @@ class LastApply(TypedDict, total=False):
 
 
 class SiteLinkRef(TypedDict, total=False):
-    """A WordPress site `sb deploy --stack` made for this stack (spec 073)."""
+    """A WordPress site `sb deploy --stack` made for this stack (spec 076)."""
     hostname: str
     instance: str
     label: str

@@ -28,7 +28,7 @@ from sandbox.secrets.models import (
 
 
 ACTIONS = ("source-info", "inspect", "validate", "use-profile", "credential-set",
-           "run", "set", "organize", "reveal", "migrate-zshrc", "ownership")
+           "run", "set", "unset", "copy", "organize", "reveal", "migrate-zshrc", "ownership")
 _DISPLAY_ENTRY_FIELDS = (
     "key", "state", "kind", "length_bucket", "exact_length",
     "public_prefix", "last4", "masked", "disclosed_material",
@@ -139,8 +139,35 @@ def configure_parser(parser) -> None:
     intent.add_argument("--replace-only", action="store_true")
     setting.add_argument("--if-revision")
     setting.add_argument("--profile")
+    setting.add_argument("--skip-unchanged", action="store_true",
+                         help="leave an identical existing value in place and report already_current")
     setting.add_argument("--json", action="store_true")
     setting.add_argument("--project-dir", default=".")
+
+    unsetting = actions.add_parser("unset", help="remove one assignment without displaying any value")
+    unsetting.add_argument("--source", required=True)
+    unsetting.add_argument("key")
+    unsetting.add_argument("--if-revision")
+    unsetting.add_argument("--json", action="store_true")
+    unsetting.add_argument("--project-dir", default=".")
+
+    copying = actions.add_parser(
+        "copy", help="copy one value to a registered remote's secret source over SSH stdin",
+    )
+    copying.add_argument("--source", required=True)
+    copying.add_argument("--key", required=True)
+    copying.add_argument("--remote", required=True)
+    copying.add_argument("--target-source", required=True)
+    copying.add_argument("--as", dest="target_key", metavar="NEWKEY",
+                         help="key name on the remote (default: the same name)")
+    copy_intent = copying.add_mutually_exclusive_group()
+    copy_intent.add_argument("--create-only", action="store_true")
+    copy_intent.add_argument("--replace-only", action="store_true")
+    copying.add_argument("--target-project-dir", metavar="REMOTE_DIR",
+                         help="absolute remote project directory whose registered sources "
+                              "resolve --target-source (default: the remote Sandbox home)")
+    copying.add_argument("--json", action="store_true")
+    copying.add_argument("--project-dir", default=".")
 
     organize = actions.add_parser(
         "organize", help="group one dotenv source into documented sections without reading values",
@@ -232,7 +259,11 @@ def _emit(payload: dict, as_json: bool) -> None:
             print(f"    {', '.join(group['keys'])}")
     if payload.get("validation"):
         print(json.dumps(payload["validation"], sort_keys=True))
-    if payload.get("action"):
+    if payload.get("action") and operation == "copy":
+        print(f"  {payload['action']}: {payload.get('key', '')} -> "
+              f"remote:{payload.get('remote', '')}/{payload.get('target_source', '')}/"
+              f"{payload.get('target_key', '')}")
+    elif payload.get("action"):
         print(f"  {payload['action']}: {payload.get('key', '')}")
     if operation == "source_info":
         fields = ", ".join(
@@ -766,6 +797,24 @@ def _ownership_dispatch(args, *, ownership_adapter=None) -> int:
     return _ownership_emit(body, getattr(args, "json", False))
 
 
+def _copy_sink(remote: str):
+    """Resolve the registered remote before any local value is read."""
+    from sandbox.secrets.remote_copy import SshRemoteSecretSink
+    return SshRemoteSecretSink.for_remote(remote)
+
+
+def _copy(service, args) -> dict:
+    from sandbox.secrets.remote_copy import RemoteSetRequest
+    intent = "create" if args.create_only else "replace" if args.replace_only else "either"
+    request = RemoteSetRequest(
+        remote=args.remote, target_source=args.target_source,
+        target_key=args.target_key or args.key, intent=intent,
+        target_project_dir=args.target_project_dir,
+    )
+    sink = _copy_sink(args.remote)
+    return service.copy_to_remote(args.source, args.key, request, sink)
+
+
 def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None) -> int:
     if args.action == "ownership" or (
             args.action == "run" and (getattr(args, "ownership_profile", None)
@@ -825,6 +874,8 @@ def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None)
             intent = "create" if args.create_only else "replace" if args.replace_only else "either"
             kwargs = dict(intent=intent, expected_revision=args.if_revision,
                           validation_profile=args.profile)
+            if args.skip_unchanged:
+                kwargs["skip_unchanged"] = True
             if args.from_ref:
                 if ":" not in args.from_ref:
                     raise SecretBrokerError("input_invalid", "reference must be SOURCE:KEY")
@@ -837,6 +888,11 @@ def cmd_secrets(cfg, args, *, ownership_adapter: OwnershipAdapter | None = None)
                 payload = service.set(args.source, args.key, value,
                                       input_channel="stdin" if args.stdin else "tty", **kwargs)
             _emit(payload, args.json)
+        elif args.action == "unset":
+            _emit(service.unset(args.source, args.key, expected_revision=args.if_revision),
+                  args.json)
+        elif args.action == "copy":
+            _emit(_copy(service, args), args.json)
         elif args.action == "organize":
             _emit(service.organize(args.source, apply=args.apply,
                                    expected_revision=args.if_revision), args.json)

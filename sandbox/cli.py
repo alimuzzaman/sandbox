@@ -1045,15 +1045,15 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, or run per-slug stacks from a template")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, or run one command in a hosted service (`host exec ... -- ARGV`)")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec"])
     host_p.add_argument("image_action", nargs="?",
         choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down"],
         help="immutable image action, or `host stack up|list|down`; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--template", default=None, metavar="PATH",
         help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
     host_p.add_argument("--name", default=None, metavar="SLUG",
-        help="host stack up/down: the stack slug")
+        help="host stack up/down: the stack slug; host exec/logs/status/diagnose: a recorded stack to target")
     host_p.add_argument("--ref", default=None, metavar="BRANCH|COMMIT",
         help="host stack up: ref to deploy, resolved on this controller (default: the checkout's HEAD)")
     host_p.add_argument("--port", action="append", default=None, metavar="NAME=PORT",
@@ -1068,7 +1068,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="with validate, check every declared environment")
     host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
     host_p.add_argument("--target", default=None, metavar="PROJECT/ENVIRONMENT",
-                        help="host destroy: the recorded target to remove (no manifest needed)")
+                        help="host destroy/heal: the recorded target (no manifest needed); host exec/logs/status/diagnose: the recorded target, a stack's rendered manifest when one matches")
     host_p.add_argument("--clear-fenced", action="store_true",
                         help="host destroy: remove a target still fenced by a stale apply or recovery record")
     host_p.add_argument("--confirm", action="store_true",
@@ -1082,7 +1082,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--local-images", default=None, metavar="DIGEST",
         help="immutable remote local-image receipt for `host apply`")
     host_p.add_argument("--timeout", type=int, default=None, metavar="SECONDS",
-        help="bounded local image build or aggregate transfer timeout")
+        help="bounded local image build or aggregate transfer timeout; host exec: 1-3600 seconds, default 300")
     host_p.add_argument("--artifact-timeout", type=int, default=None, metavar="SECONDS",
         help="per-artifact local image transfer timeout")
     host_p.add_argument("--purge-edge-cache", action="store_true",
@@ -1100,7 +1100,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--ttl-seconds", type=int, default=None,
         help="one-time login URL lifetime (60-3600 seconds; manifest default when omitted)")
     host_p.add_argument("--service", default=None, metavar="ENTRY",
-        help="host login-url: declared autologin entry to issue a link for")
+        help="host login-url: declared autologin entry to issue a link for; host exec: deployed Compose service to run in")
     host_p.add_argument("--email", default=None,
         help="host login-url: sign in as this address for this link only")
     host_p.add_argument("--save-email", action="store_true",
@@ -1502,7 +1502,16 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     raw_argv = _consume_strict_runtime(
         _normalize_test_routing_options(list(sys.argv[1:])))
-    args = p.parse_args(raw_argv)
+    head_argv, host_exec_argv = raw_argv, None
+    if "host" in raw_argv and "--" in raw_argv:
+        from sandbox.hosting.host_exec import split_passthrough
+        head_argv, host_exec_argv = split_passthrough(raw_argv)
+    args = p.parse_args(head_argv)
+    if host_exec_argv is not None:
+        if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) == "exec":
+            args.exec_argv = host_exec_argv
+        else:
+            args = p.parse_args(raw_argv)
     if getattr(args, "mode", None) == _TEST_MODE_OMITTED_SENTINEL:
         args.mode = None
     pre_command_label = _global_label_before_subcommand(raw_argv)
@@ -1511,6 +1520,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     if not args.cmd:
         p.print_help()
         return
+
+    # Spec 072: before any command effect, fast-forward this controller to a
+    # newer published revision a remote reported, then re-run once.
+    from sandbox.controller_update.hook import maybe_auto_update
+    maybe_auto_update(args, sys.argv)
 
     # Feedback storage is independent of machine config and must remain usable
     # when sandbox.local.yml itself needs recovery.

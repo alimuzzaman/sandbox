@@ -1,4 +1,4 @@
-"""The panel's stacks and hosted sites view model (spec 073)."""
+"""The panel's stacks and hosted sites view model (spec 076)."""
 from __future__ import annotations
 
 import json

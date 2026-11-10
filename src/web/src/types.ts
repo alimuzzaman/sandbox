@@ -42,7 +42,7 @@ export interface RemoteInventory {
   storage?: { status: string; attribution_status: string; capacity?: { total_bytes?: number; used_bytes?: number; available_bytes?: number } | null; category_outcomes?: Array<Record<string, unknown>> };
 }
 
-// GET /api/hosting: stacks and hosted sites (spec 073). Read-only.
+// GET /api/hosting: stacks and hosted sites (spec 076). Read-only.
 export type HealthStatus = "checking" | "up" | "up_login" | "redirect" | "client_error" |
   "server_error" | "unreachable" | "not_checked";
 export interface HostingHealth { status: HealthStatus; http_status: number | null; checked_at: number | null }

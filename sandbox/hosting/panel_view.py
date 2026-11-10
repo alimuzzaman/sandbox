@@ -1,4 +1,4 @@
-"""One read-only view of stacks and hosted sites for `sb web` (spec 073).
+"""One read-only view of stacks and hosted sites for `sb web` (spec 076).
 
 The view is built from two sources with the same shape:
 

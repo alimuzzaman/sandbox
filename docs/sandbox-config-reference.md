@@ -6,6 +6,14 @@
 listing/verification. `RECOVERY_PASSPHRASE` is inherited only for protected capture operations;
 never write it to config or pass it as a CLI/MCP argument.
 
+## Controller auto-update (machine config)
+
+`defaults.controller_auto_update` (YAML bool, default `true`) in
+`$SANDBOX_HOME/sandbox.local.yml` or `sandbox.yml` turns controller
+auto-update off for the machine; `SANDBOX_AUTO_UPDATE=0|1` overrides it per
+process. This is machine config, not a `sandbox.config.*` project key. See
+[controller-auto-update.md](controller-auto-update.md).
+
 A plugin repo becomes a **sandbox project** by carrying a `sandbox.config.json`
 (or `.yml`) at its root. This is the per-project source of truth in the
 MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /
@@ -654,7 +662,9 @@ See `docs/remote-hosting.md` → "Pro plugins on the remote host".
 
 A `sandbox.hosting.yml` with a top-level `stack:` block (`slug` pattern, `ports`
 names) is a template for `sb host stack up`; plain `sb host` commands refuse it with
-`stack_template_requires_stack_up`. Rendered stacks live on the controller under
+`stack_template_requires_stack_up`. `sb host logs|status|diagnose|exec --target
+<project>/<environment>` (or `--name <slug>`) resolve a recorded stack to its rendered
+manifest instead. Rendered stacks live on the controller under
 `$SANDBOX_HOME/runtime/stacks/` (`registry.json`, plus `<slug>/sandbox.hosting.yml` and
 `<slug>/source/` worktrees). `deploy.allowed_branches` accepts shell globs. See
 `docs/remote-hosting.md` → "Stack templates".

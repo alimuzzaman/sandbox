@@ -2,7 +2,7 @@
 
 **Branch**: `feat/web-host-stacks` | **Date**: 2026-11-10 | **Spec**: [spec.md](spec.md)
 
-**Input**: Feature specification from `specs/073-web-host-stacks/spec.md`
+**Input**: Feature specification from `specs/076-web-host-stacks/spec.md`
 
 ## Summary
 
@@ -51,7 +51,7 @@ Module-boundary rule (CLAUDE.md): no new consumers of `sandbox_core.py`. The vie
 ### Documentation (this feature)
 
 ```text
-specs/073-web-host-stacks/
+specs/076-web-host-stacks/
 ├── spec.md
 ├── plan.md
 ├── research.md

@@ -491,6 +491,80 @@ variable, an arbitrary input file, a shell command string, or an ordinary MCP
 field for the candidate. Do not verify by opening the source afterward; use
 metadata, validation, or a bounded trusted child.
 
+Add `--skip-unchanged` to leave a byte-identical existing value in place. The
+command then writes nothing and reports `already_current` with the current
+revision. The check runs before the create/replace intent check, so a
+`--create-only` rerun with the same value converges instead of refusing. Without
+the flag, `set` behaves as before and reports `updated`.
+
+### 6a. Remove one assignment
+
+```bash
+./sb secrets unset --source SOURCE_ALIAS SECRET_KEY --project-dir PROJECT_DIR
+./sb secrets unset --source SOURCE_ALIAS SECRET_KEY --if-revision OPAQUE_REVISION \
+  --project-dir PROJECT_DIR
+```
+
+Unset removes one dotenv assignment line and keeps every other byte, the file's
+ownership and its owner-only permissions. It uses the same continuity-checked
+removal as ownership cleanup: the update lock is taken without waiting, the
+file's metadata and key names must match what was read, and the new content goes
+through a sibling temporary file, `fsync` and an atomic rename. Nothing is
+decoded or printed; the result holds the source alias, key name, `removed` and the
+new opaque revision. Audit records the request and outcome as operation `unset`.
+
+An absent key refuses with `key_missing`. Rerunning a successful unset therefore
+refuses and changes nothing. Other refusals: `update_denied` (provider source or
+a non-CLI surface), `update_unsupported` (non-dotenv), `key_invalid`,
+`revision_conflict` (stale `--if-revision`, or the file changed during removal),
+`journal_locked` (another update holds the lock), `continuity_unreliable` (coarse
+timestamps, extra hard links or broad permissions) and `syntax_unsupported` /
+`duplicate_key`. There is no MCP form.
+
+### 6c. Copy one value to a remote host
+
+```bash
+./sb secrets copy --source SOURCE_ALIAS --key SECRET_KEY \
+  --remote REMOTE_NAME --target-source REMOTE_SOURCE_ALIAS \
+  [--as REMOTE_KEY] [--create-only | --replace-only] \
+  [--target-project-dir /absolute/remote/project] --project-dir PROJECT_DIR
+```
+
+Copy reads one value from a local file source and hands it to the remote host's
+own broker. The controller opens one SSH session to the registered, provisioned
+remote and runs
+`"$SANDBOX_HOME/sb-src/sb" secrets set --source REMOTE_SOURCE_ALIAS REMOTE_KEY --stdin --skip-unchanged --json`
+there. The value goes only to that session's standard input. It never appears in
+a command line, an environment variable, a temporary file, console output, logs
+or either host's audit journal. `--as` renames the key on the remote; without it
+the remote key has the local name.
+
+The remote compares the incoming value with its stored value itself and answers
+`already_current` without writing when they match, so a rerun converges. No value
+digest crosses hosts. Otherwise the remote answers `created` or `updated` under
+the same intent rules as `set`: `--create-only` refuses a different existing value
+and `--replace-only` refuses an absent key, both with `intent_conflict`.
+
+By default the remote resolves `REMOTE_SOURCE_ALIAS` in its Sandbox home context:
+its `personal` source and user-globally registered sources. Pass
+`--target-project-dir` to use a remote project's registered sources instead.
+
+Copy refuses before reading the local value when the source is a provider
+source, a name is invalid, or the remote is unknown (`remote_unknown`) or not
+provisioned (`remote_not_provisioned`). Later failures are bounded codes:
+`key_missing`, `input_invalid` (the value has a line break or exceeds 64 KiB),
+`remote_unreachable`, `remote_timeout`, `remote_unsupported` (the remote runtime
+predates `--skip-unchanged`; run `sb remote service migrate REMOTE_NAME --confirm`),
+`remote_failed`, or the remote broker's own refusal code. Remote stderr is never
+shown. A timeout is not retried, because the remote may have finished; rerun the
+same copy and it converges.
+
+The controller audit records operation `copy` with the local source and key,
+`input_channel` `remote_stdin` and a `destination` of
+`remote:REMOTE_NAME/REMOTE_SOURCE_ALIAS/REMOTE_KEY`; a succeeded outcome carries the
+remote's answer as `reason_code`. The remote records its own `set` audit. Copy has
+no MCP form.
+
 ### 6b. Group one dotenv source into documented sections
 
 ```bash

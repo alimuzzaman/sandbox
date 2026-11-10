@@ -1,4 +1,4 @@
-"""`sb deploy --stack`: link a WordPress site to its stack for the panel (spec 073)."""
+"""`sb deploy --stack`: link a WordPress site to its stack for the panel (spec 076)."""
 from __future__ import annotations
 
 import base64

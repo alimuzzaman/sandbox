@@ -1,4 +1,4 @@
-"""Bounded, cached health checks for the panel (spec 073)."""
+"""Bounded, cached health checks for the panel (spec 076)."""
 from __future__ import annotations
 
 import http.client

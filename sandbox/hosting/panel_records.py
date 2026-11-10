@@ -1,4 +1,4 @@
-"""Secret-free records the `sb web` panel reads to show stacks and hosted sites (spec 073).
+"""Secret-free records the `sb web` panel reads to show stacks and hosted sites (spec 076).
 
 `sb host apply` runs on a controller and writes to the remote over its existing
 connection, so a panel running on the remote cannot see the controller's stack

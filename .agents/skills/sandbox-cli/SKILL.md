@@ -265,6 +265,19 @@ sb resources swap-history --remote scaleway-sandbox --since 2026-09-04T00:00:00Z
 - **Fault Recovery & Rollback**: Any failure during apply triggers an automatic reverse teardown of owned
   artifacts. Aggregate history (`/var/log/sandbox/host-memory.jsonl`) and unowned files are strictly preserved.
 
+## Controller auto-update (spec 072)
+
+A remote-capable command (`remote`, `deploy`, `host`, `preview`, `hermes`,
+anything with `--remote`, and `test`/`e2e`/`ci`/`job`/`jobs` without
+`--local`) may fast-forward the controller checkout before it runs, when a
+remote recorded a newer revision that is on the checkout's `origin/<upstream>`
+on GitHub, then re-run itself once. It prints one `sb: controller ...` line on
+stderr. It never runs for `--json`, durable job children, detached (pinned)
+checkouts or dirty trees, and never fetches from the remote server. Turn it off
+with `SANDBOX_AUTO_UPDATE=0` or `defaults.controller_auto_update: false`.
+Agents parsing output should use `--json`, which stays byte-identical. See
+`docs/controller-auto-update.md`.
+
 ## Durable remote-first jobs
 
 ### Recoverable delivery admission and diagnosis
@@ -933,3 +946,5 @@ When verifying server configuration changes:
 - `sb host stack up --template <checkout>/sandbox.hosting.yml --name <slug> [--ref <branch|commit>] [--port NAME=N] --remote R --plan|--confirm [--generate] [--json]`: `--plan` changes nothing; `--confirm` renders to `$SANDBOX_HOME/runtime/stacks/<slug>/`, checks the commit out into a detached worktree and submits the durable `job-start` + `host apply`. Follow the returned job with `sb job-status`.
 - `sb host stack list --remote R` and `sb host stack down --name <slug> --remote R --confirm` (existing destroy, then ports released).
 - Stack ports come from 18100-18199 per remote and persist until `down`. Every apply refuses a hostname another project holds on the remote (`hostname_owned_by_other_project`). `allowed_branches` accepts globs (`feat/*`).
+- `sb host exec --remote R --target <project>/<env> | --name <slug> --service S [--timeout 1..3600] [--json] -- ARGV`: one argv in a running service of a target this controller recorded (`docker compose exec -T` with apply's own Compose files, as the service's user; no user flag). stdin passes straight through and is never logged, audited or echoed; `sb` exits with the command's status (`--json`: `ok` only on exit 0). Busy targets (apply, recovery, stack job in flight) are refused with `host_target_busy`, never waited for. Default timeout 300 s. Audit: `$SANDBOX_HOME/runtime/host-exec/audit.jsonl`.
+- `sb host logs|status|diagnose --remote R --target <project>/<env>` (or `--name <slug>`) reads a recorded stack's rendered manifest, so it works from a template checkout.

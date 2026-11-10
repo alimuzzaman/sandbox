@@ -492,7 +492,7 @@ def _up(args) -> dict:
             "ports": ports, "manifest": str(manifest_path),
             "worktrees": [*earlier, str(worktree)],
             "created_at": (previous or {}).get("created_at", now), "updated_at": now,
-            # Spec 073: sites `sb deploy --stack` linked to this stack outlive a re-apply.
+            # Spec 076: sites `sb deploy --stack` linked to this stack outlive a re-apply.
             **({"sites": list(previous["sites"])} if (previous or {}).get("sites") else {}),
             "last_apply": {"request_id": request_id, "job_id": None, "submitted_at": now,
                            "status": "submitting"},

@@ -1,4 +1,4 @@
-"""Bounded, cached HTTPS health checks for the panel's server rows (spec 073).
+"""Bounded, cached HTTPS health checks for the panel's server rows (spec 076).
 
 One cache per `sb web` process. `snapshot()` never waits: it returns what is
 cached (or "checking") and hands stale hostnames to a small worker pool, so

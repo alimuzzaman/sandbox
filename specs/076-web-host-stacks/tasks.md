@@ -1,6 +1,6 @@
 # Tasks: Stacks and Hosted Sites View
 
-**Input**: Design documents from `specs/073-web-host-stacks/`
+**Input**: Design documents from `specs/076-web-host-stacks/`
 
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
 
@@ -8,7 +8,7 @@
 
 ## Phase 1: Setup
 
-- [x] T001 Confirm the spec numbering (073) and record the shared-file list from plan.md in the handoff notes at /Users/alim/Sites/git/.scratch/sandbox/web-host-stacks/notes.txt
+- [x] T001 Confirm the spec numbering (076; 073-075 were taken on latest) and record the shared-file list from plan.md in the handoff notes at /Users/alim/Sites/git/.scratch/sandbox/web-host-stacks/notes.txt
 
 ## Phase 2: Foundational (types and records shared by every story)
 

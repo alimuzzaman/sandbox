@@ -31,7 +31,8 @@ from sandbox.core import (
     _write_snapshot_muplugin,
     active_project_file, compose, compose_file, die, ensure_instance, focus_file,
     info, mcp_server_name, ok, plugins_dir,
-    proxy_available, resolve_instances, run, save_local_app_password,
+    proxy_available, proxy_start_lease, resolve_instances, run,
+    save_local_app_password, stop_proxy_if_idle, local_runtime_selection,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
     runtime_health_lines, wp_dir, wpcli, prepare_php_extension_runtime,
     php_extension_status,
@@ -482,10 +483,15 @@ def cmd_up(cfg: dict, args) -> None:
     json_output = bool(getattr(args, "json", False))
     owner = _core().registry_find_instance(inst)
     if owner and owner.get("kind") == "compose":
-        with _suppress_progress_stdout(json_output):
+        with proxy_start_lease(), _suppress_progress_stdout(json_output):
             result = runtime_service(cfg).invoke(OperationRequest(
                 owner["root"], "start", label=owner.get("label", "default"),
             ))
+            if (not isinstance(result, OperationError) and result.ok
+                    and owner.get("domain")):
+                # Spec 082: the proxy no longer restarts itself, so a start
+                # brings a stopped, already-provisioned one back (no sudo).
+                _ensure_proxy_up(cfg)
         if isinstance(result, OperationError):
             if json_output:
                 _emit_generic_up_failure(inst, result.code, result.message)
@@ -535,8 +541,12 @@ def cmd_up(cfg: dict, args) -> None:
         else:
             ok(f"WordPress: {url}  (host-served by Herd)")
         return
-    # Clean-URL reconciliation is owned by the composed ingress/resolver
-    # lifecycle.  Never invoke the unreceipted aggregate proxy on instance up.
+    # Clean-URL routes are owned by the composed ingress/resolver lifecycle;
+    # `up` never plans, applies or reloads them. It only starts the default
+    # proxy when it is stopped and already provisioned (spec 082): the proxy
+    # has no restart policy, so after an engine restart nothing else would.
+    dom = inst_cfg.get("domain")
+    clean_domain = bool(dom and dom.endswith(f".{_tld(inst_cfg)}"))
     # Reconcile the declared service set on every boot.  In particular, this
     # removes stale sidecars left behind after switching web-server modes
     # (for example an old nginx service), so repeated setup cannot accumulate
@@ -558,10 +568,14 @@ def cmd_up(cfg: dict, args) -> None:
             from sandbox.services.redaction import redact_text
             detail = " ".join(redact_text(str(exc)).split())[:500]
             die(f"php_extension_image_prepare_failed: {detail}")
-    if json_output:
-        _compose_up(inst, services, quiet=True, json_output=True)
-    else:
-        _compose_up(inst, services)
+    with proxy_start_lease():
+        if json_output:
+            _compose_up(inst, services, quiet=True, json_output=True)
+        else:
+            _compose_up(inst, services)
+        if clean_domain:
+            with _suppress_progress_stdout(json_output):
+                _ensure_proxy_up(cfg)
     if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
         # Verify the image that just started before any project/WP wiring is
         # allowed to run.  The probe is standalone PHP and does not touch the
@@ -662,6 +676,7 @@ def cmd_down(cfg, args) -> None:
         if isinstance(result, OperationError):
             die(result.message)
         ok(f"stopped generic instance '{args.resolved_instance}'")
+        stop_proxy_if_idle(cfg)
         return
     if _is_herd_instance(args.resolved_instance):
         info("host-served by Herd — nothing to stop (sites serve while Herd "
@@ -681,6 +696,8 @@ def cmd_down(cfg, args) -> None:
                                  label=owner.get("label", "default"), status="stopped")
     else:
         compose("down", instance=args.resolved_instance)
+    # Spec 082: the last local instance going down takes the idle proxy with it.
+    stop_proxy_if_idle(cfg)
 
 def cmd_status(cfg, args) -> None:
     include_stats = bool(getattr(args, "stats", False))
@@ -1630,13 +1647,94 @@ def _storage_pressure_doctor_checks() -> list[tuple[str, bool, str]]:
     return checks
 
 
+def _local_runtime_or_die(json_mode: bool, inst):
+    """The machine local-runtime selection; an invalid switch fails doctor."""
+    from sandbox.config.local_runtime import LocalRuntimeConfigError
+    try:
+        return local_runtime_selection()
+    except LocalRuntimeConfigError as exc:
+        if json_mode:
+            payload = {"ok": False, "exit_code": 1, "instance": inst,
+                       "checks": [{"section": "Local runtime", "label": str(exc),
+                                   "ok": False}]}
+            print(json.dumps(_public_status_json(payload), sort_keys=True))
+            raise SystemExit(1)
+        die(str(exc))
+
+
+def _doctor_remote_only(selection, *, json_mode: bool, report_only: bool,
+                        inst) -> None:
+    """Doctor for a remote-only controller (spec 082).
+
+    No local container engine is expected, so none is probed and a missing one
+    is not a problem. What remains is what this controller does: reach its
+    remotes, and its own offline storage record.
+    """
+    from sandbox.core._remote import list_remotes, remote_doctor_checks
+    checks: list[dict] = []
+    problems = 0
+    current = "Local runtime"
+
+    def section(label: str) -> None:
+        nonlocal current
+        current = label
+        if not json_mode:
+            print(f"\n{label}:")
+
+    def check(label: str, ok_: bool, hint: str = "") -> None:
+        nonlocal problems
+        row = {"section": current, "label": label, "ok": bool(ok_)}
+        if not ok_ and hint:
+            row["hint"] = hint
+        checks.append(row)
+        if not ok_:
+            problems += 1
+        if not json_mode:
+            line = f"  {'✓' if ok_ else '✗'} {label}"
+            if not ok_ and hint:
+                line += f"\n      → {hint}"
+            print(line)
+
+    section("Local runtime")
+    check("local runtime: none (remote-only; local Docker checks skipped)", True)
+    remotes = list_remotes()
+    section("Remote targets")
+    if not remotes and not json_mode:
+        info("  (none configured — add one with `./sb remote add`)")
+    for name, remote in sorted(remotes.items()):
+        for remote_check in remote_doctor_checks(remote):
+            check(f"{name}: {remote_check['label']}", remote_check["ok"],
+                  hint=remote_check["hint"])
+    section("Storage pressure")
+    for label, pressure_ok, pressure_hint in _storage_pressure_doctor_checks():
+        check(label, pressure_ok, hint=pressure_hint)
+    if json_mode:
+        payload = {"ok": problems == 0, "exit_code": 0 if problems == 0 else 1,
+                   "instance": inst, "checks": checks,
+                   "local_runtime": selection.to_dict()}
+        print(json.dumps(_public_status_json(payload), sort_keys=True, default=str))
+        if problems and not report_only:
+            raise SystemExit(1)
+        return
+    print()
+    if problems:
+        info(f"{problems} issue(s) — see → hints above")
+        sys.exit(1)
+    ok("All checks passed.")
+
+
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
-    inst = args.resolved_instance
+    inst = getattr(args, "resolved_instance", None)
     json_mode = bool(getattr(args, "json", False))
     report_only = bool(getattr(args, "report_only", False))
     if report_only and not json_mode:
         die("--report-only requires --json; no command was executed")
+    runtime_selection = _local_runtime_or_die(json_mode, inst)
+    if runtime_selection.remote_only:
+        _doctor_remote_only(runtime_selection, json_mode=json_mode,
+                            report_only=report_only, inst=inst)
+        return
     error = preflight_instance_capability(cfg, inst, "wordpress.cli")
     if error is not None:
         if json_mode:
@@ -1727,6 +1825,11 @@ def cmd_doctor(cfg, args) -> None:
             print(_render_php_extension_text(extension_data).lstrip("\n"))
 
     section("Containers")
+    if inst_cfg.get("server") != "herd" and shutil.which("docker") is None:
+        check("Docker CLI available", False,
+              hint="install Docker Desktop/OrbStack, or set "
+                   "controller.local_runtime: none in sandbox.local.yml for a "
+                   "remote-only controller")
     ps = compose("ps", "--format", "json", instance=inst,
                  check=False, capture=True)
     containers = []
@@ -1895,7 +1998,8 @@ def cmd_doctor(cfg, args) -> None:
 
     if json_mode:
         payload = {"ok": problems == 0, "exit_code": 0 if problems == 0 else 1,
-                   "instance": inst, "checks": checks}
+                   "instance": inst, "checks": checks,
+                   "local_runtime": runtime_selection.to_dict()}
         if extension_data is not None:
             payload["php_extensions"] = extension_data
         print(json.dumps(_public_status_json(payload), sort_keys=True, default=str))

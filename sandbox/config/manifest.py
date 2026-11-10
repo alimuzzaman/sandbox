@@ -8,6 +8,7 @@ from .delivery import delivery_config_provider
 from .domains import normalize_domain_policy
 from .instance_lifecycle import normalize_instance_lifecycle
 from .job_scheduler import JobSchedulerConfigError, machine_job_scheduler_provider
+from .local_runtime import machine_local_runtime
 from .hosting_images import (
     HostingImageConfigError,
     machine_image_policy_provider,
@@ -69,6 +70,8 @@ MACHINE_CONFIG_PROVIDERS = (
      "sandbox.config.hosting_images", 20),
     ("jobs.scheduler", machine_job_scheduler_provider,
      "sandbox.config.job_scheduler", 30),
+    ("controller.local_runtime", machine_local_runtime,
+     "sandbox.config.local_runtime", 40),
 )
 
 
@@ -153,6 +156,15 @@ def apply_machine_config(result: dict) -> dict:
             jobs = dict(resolved["jobs"])
             jobs["scheduler"] = policy.as_mapping()
             resolved["jobs"] = jobs
+        elif key == "controller.local_runtime":
+            # Optional means inert: only a machine that declared a controller
+            # block gets the normalized mode written back (spec 082).
+            if "controller" not in resolved:
+                continue
+            mode = provider(resolved)
+            controller = dict(resolved["controller"] or {})
+            controller["local_runtime"] = mode
+            resolved["controller"] = controller
         else:
             resolved[key] = provider(resolved)
     return resolved

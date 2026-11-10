@@ -643,6 +643,51 @@ def write_compose_files(cfg: dict) -> None:
             existing.unlink(missing_ok=True)
 
 
+def local_runtime_selection():
+    """Effective machine local-runtime mode (spec 082): `docker` or `none`.
+
+    Precedence: SANDBOX_LOCAL_RUNTIME, then `controller.local_runtime` in
+    sandbox.local.yml, then `docker`. An unknown value raises
+    LocalRuntimeConfigError rather than silently meaning Docker.
+    """
+    from sandbox.config.local_runtime import resolve_local_runtime
+    machine: Mapping = {}
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        machine = _local_yaml() or {}
+    return resolve_local_runtime(env=os.environ, machine=machine)
+
+
+def local_runtime_remote_only() -> bool:
+    """True when this controller must not reach a local container engine.
+
+    For observational callers (inventory, proxy probes): a malformed switch
+    also counts, so a typo never turns into an engine call. Effectful callers
+    use `_require_local_docker_runtime`, which reports the error instead.
+    """
+    from sandbox.config.local_runtime import LocalRuntimeConfigError
+    try:
+        return local_runtime_selection().remote_only
+    except LocalRuntimeConfigError:
+        return True
+
+
+def _require_local_docker_runtime() -> None:
+    """Refuse before any engine call on a remote-only controller."""
+    from sandbox.config.local_runtime import (
+        LocalRuntimeConfigError, remote_only_message,
+    )
+    try:
+        selection = local_runtime_selection()
+    except LocalRuntimeConfigError as exc:
+        die(str(exc))
+    if selection.remote_only:
+        die(remote_only_message(selection))
+
+
 def compose(*args: str, instance: str,
             check: bool = True, capture: bool = False,
             timeout: float | None = None, stdin=None, stdout=None):
@@ -651,7 +696,19 @@ def compose(*args: str, instance: str,
     Uses the per-instance project name (-p sandbox-<instance>) and
     generated compose file. Caller must have run write_compose_files()
     at least once (the CLI entrypoint does this on every invocation).
+    Refuses on a remote-only controller (spec 082) before running Docker.
     """
+    _require_local_docker_runtime()
+    if shutil.which("docker") is None:
+        # Answer a missing engine here, where it first goes wrong, instead of
+        # letting every caller meet a FileNotFoundError traceback (spec 082).
+        message = ("Docker CLI is not installed or is not on PATH; install "
+                   "Docker Desktop/OrbStack, or set controller.local_runtime: "
+                   "none in sandbox.local.yml for a remote-only controller.")
+        if check:
+            die(message)
+        return subprocess.CompletedProcess(
+            ["docker", "compose", *args], 127, stdout="", stderr=message)
     run_kwargs = {
         "check": check,
         "capture": capture,
@@ -794,6 +851,16 @@ def docker_daemon_preflight(*, timeout: float = 5.0) -> dict[str, object]:
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
             or not math.isfinite(timeout) or timeout <= 0):
         raise ValueError("Docker daemon preflight timeout must be positive")
+    from sandbox.config.local_runtime import (
+        LocalRuntimeConfigError, remote_only_message,
+    )
+    try:
+        selection = local_runtime_selection()
+    except LocalRuntimeConfigError as exc:
+        return {"ok": False, "code": "local_runtime_invalid", "message": str(exc)}
+    if selection.remote_only:
+        return {"ok": False, "code": "local_runtime_none",
+                "message": remote_only_message(selection)}
     if shutil.which("docker") is None:
         return {
             "ok": False,

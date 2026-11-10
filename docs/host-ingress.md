@@ -5,6 +5,10 @@ and for every runtime; switch with `./sb domains use <provider>` and see
 [the clean-URL default](clean-url-default.md). Proof tiers below gate adoption only —
 with zero adoptable adapters the default provider still serves clean URLs.
 
+The default proxy runs only while a local Docker instance needs it, and a remote-only
+controller (`controller.local_runtime: none`) never starts it; see
+[when the proxy runs](clean-url-default.md#why-the-proxy-exists-and-when-it-runs).
+
 Sandbox treats listener ownership as a host-safety boundary. Detection reads kernel listener
 evidence and best-effort public process identity; it never binds a candidate socket, reloads
 an incumbent, reads a product's private state, or changes DNS.

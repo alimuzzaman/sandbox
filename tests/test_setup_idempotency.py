@@ -1,5 +1,6 @@
 import types
 import unittest
+from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 from sandbox.commands import lifecycle
@@ -36,13 +37,18 @@ class TestSetupIdempotency(unittest.TestCase):
                 "db_port": 3318, "mailpit_port": 8125}
         with patch.object(lifecycle, "resolve_instances", return_value={"demo": inst}), \
              patch.object(lifecycle, "_compose_up") as compose_up, \
+             patch.object(lifecycle, "proxy_start_lease", return_value=nullcontext()), \
              patch.object(lifecycle, "_web_services", return_value=("wp", "nginx")), \
              patch.object(lifecycle, "site_url", return_value="http://localhost:8188"), \
              patch.object(lifecycle, "wp_dir", return_value=types.SimpleNamespace(exists=lambda: False)):
             lifecycle.cmd_up(cfg, args)
         compose_up.assert_called_once_with("demo", ("wp", "nginx"))
 
-    def test_up_never_mutates_unreceipted_legacy_proxy_state(self):
+    def test_up_starts_a_stopped_default_proxy_without_touching_routes(self):
+        # Spec 082: the proxy has no restart policy, so `up` brings a stopped,
+        # already-provisioned one back (`_ensure_proxy_up`, no sudo, never a
+        # reload of a running proxy). Composed route state is still never
+        # planned or applied from `up`.
         cfg = {"instances": {"demo": {"server": "nginx"}}}
         args = types.SimpleNamespace(resolved_instance="demo")
         inst = {"server": "nginx", "domain": "demo.tst", "tld": "tst",
@@ -54,6 +60,7 @@ class TestSetupIdempotency(unittest.TestCase):
              patch.object(lifecycle, "proxy_available", return_value=True), \
              patch.object(lifecycle, "wordpress_runtime_dependencies", return_value=dependencies), \
              patch.object(lifecycle, "_ensure_proxy_up") as legacy_ensure, \
+             patch.object(lifecycle, "proxy_start_lease", return_value=nullcontext()) as lease, \
              patch.object(lifecycle, "compose"), \
              patch.object(lifecycle, "_web_services", return_value=("wp", "nginx")), \
              patch.object(lifecycle, "site_url", return_value="http://demo.tst"), \
@@ -61,6 +68,22 @@ class TestSetupIdempotency(unittest.TestCase):
             lifecycle.cmd_up(cfg, args)
         proxy.plan.assert_not_called()
         proxy.apply.assert_not_called()
+        legacy_ensure.assert_called_once_with(cfg)
+        lease.assert_called_once_with()
+
+    def test_up_without_a_clean_domain_never_starts_the_proxy(self):
+        cfg = {"instances": {"demo": {"server": "nginx"}}}
+        args = types.SimpleNamespace(resolved_instance="demo")
+        inst = {"server": "nginx", "wordpress_port": 8188,
+                "db_port": 3318, "mailpit_port": 8125}
+        with patch.object(lifecycle, "resolve_instances", return_value={"demo": inst}), \
+             patch.object(lifecycle, "_ensure_proxy_up") as legacy_ensure, \
+             patch.object(lifecycle, "proxy_start_lease", return_value=nullcontext()), \
+             patch.object(lifecycle, "_compose_up"), \
+             patch.object(lifecycle, "_web_services", return_value=("wp", "nginx")), \
+             patch.object(lifecycle, "site_url", return_value="http://localhost:8188"), \
+             patch.object(lifecycle, "wp_dir", return_value=types.SimpleNamespace(exists=lambda: False)):
+            lifecycle.cmd_up(cfg, args)
         legacy_ensure.assert_not_called()
 
     def test_port_conflicts_reassign_all_instance_ports(self):

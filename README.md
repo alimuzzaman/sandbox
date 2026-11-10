@@ -114,6 +114,20 @@ cd sandbox
 `setup` offers to install missing prerequisites (default always **No**)
 and never needs `sudo` for the base install.
 
+**Remote-only (no local Docker):** a controller that only runs jobs and hosts
+stacks on remote servers needs no container engine. Declare it once in
+`$SANDBOX_HOME/sandbox.local.yml`:
+
+```yaml
+controller:
+  local_runtime: none   # docker (default) | none
+```
+
+Remote commands never need local Docker either way. With the switch, local
+Docker instance commands refuse with a clear message, Herd instances keep
+working, and `sb doctor` checks only what a remote-only controller uses. See
+[remote-only controllers](docs/clean-url-default.md#remote-only-and-docker-less-controllers).
+
 `sb setup` is registry-wide and cannot be targeted with `--instance` or the
 routing `--label`. To reconcile an existing named instance, use
 `sb apply --instance NAME`; to prepare one project, use the project-scoped
@@ -1027,7 +1041,12 @@ Host-incumbent adoption is opt-in and has its own read-only planning surface:
 ```
 
 Adapter proof tiers gate adoption only, never the default path. The instance stays
-usable at `http://localhost:<port>` when the selected provider is unavailable. See
+usable at `http://localhost:<port>` when the selected provider is unavailable.
+
+The proxy container (`sandbox-proxy`) exists only to give local Docker instances
+those no-port names, so it runs only while one needs it: `sb up` starts it,
+`sb down` / `sb instance delete` stop it once nothing is running, and it does
+not come back on its own after Docker restarts. See
 [the clean-URL default](docs/clean-url-default.md) and
 [domain resolution](docs/domain-resolution.md).
 

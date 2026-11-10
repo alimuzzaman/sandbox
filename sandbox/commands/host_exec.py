@@ -106,9 +106,18 @@ def cmd_host_exec(args) -> None:
     command = host_exec.remote_command(prefix, request)
     ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
     outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source())
-    audit.write(request, outcome)
+    audit_failed = False
+    try:
+        audit.write(request, outcome)
+    except OSError as exc:
+        # The command already ran; keep its status and say the record is missing.
+        audit_failed = True
+        print(f"sb host exec: warning: audit record not written: {exc.strerror}", file=sys.stderr)
     if as_json:
-        print(json.dumps(outcome.envelope(request), sort_keys=True))
+        envelope = outcome.envelope(request)
+        if audit_failed:
+            envelope["audit"] = "failed"
+        print(json.dumps(envelope, sort_keys=True))
     elif outcome.code in {host_exec.TIMED_OUT, host_exec.TRANSPORT_FAILED,
                           host_exec.INTERRUPTED}:
         note = {

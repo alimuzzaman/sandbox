@@ -496,6 +496,8 @@ before protected effects.
 - `sb host stack up --template <checkout>/sandbox.hosting.yml --name <slug> [--ref <branch|commit>] [--port NAME=N] --remote R --plan|--confirm [--generate] [--json]`: `--plan` changes nothing; `--confirm` renders to `$SANDBOX_HOME/runtime/stacks/<slug>/`, checks the commit out into a detached worktree and submits the durable `job-start` + `host apply`. Follow the returned job with `sb job-status`.
 - `sb host stack list --remote R` and `sb host stack down --name <slug> --remote R --confirm` (existing destroy, then ports released).
 - Stack ports come from 18100-18199 per remote and persist until `down`. Every apply refuses a hostname another project holds on the remote (`hostname_owned_by_other_project`). `allowed_branches` accepts globs (`feat/*`).
+- `sb host exec --remote R --target <project>/<env> | --name <slug> --service S [--timeout 1..3600] [--json] -- ARGV`: one argv in a running service of a target this controller recorded (`docker compose exec -T` with apply's own Compose files, as the service's user; no user flag). stdin passes straight through and is never logged, audited or echoed; `sb` exits with the command's status (`--json`: `ok` only on exit 0). Busy targets (apply, recovery, stack job in flight) are refused with `host_target_busy`, never waited for. Default timeout 300 s. Audit: `$SANDBOX_HOME/runtime/host-exec/audit.jsonl`.
+- `sb host logs|status|diagnose --remote R --target <project>/<env>` (or `--name <slug>`) reads a recorded stack's rendered manifest, so it works from a template checkout.
 
 When the owner exited before recording anything, recovery cannot observe its way out:
 it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.

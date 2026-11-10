@@ -654,7 +654,9 @@ See `docs/remote-hosting.md` → "Pro plugins on the remote host".
 
 A `sandbox.hosting.yml` with a top-level `stack:` block (`slug` pattern, `ports`
 names) is a template for `sb host stack up`; plain `sb host` commands refuse it with
-`stack_template_requires_stack_up`. Rendered stacks live on the controller under
+`stack_template_requires_stack_up`. `sb host logs|status|diagnose|exec --target
+<project>/<environment>` (or `--name <slug>`) resolve a recorded stack to its rendered
+manifest instead. Rendered stacks live on the controller under
 `$SANDBOX_HOME/runtime/stacks/` (`registry.json`, plus `<slug>/sandbox.hosting.yml` and
 `<slug>/source/` worktrees). `deploy.allowed_branches` accepts shell globs. See
 `docs/remote-hosting.md` → "Stack templates".

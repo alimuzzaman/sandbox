@@ -1433,7 +1433,8 @@ values and `secrets.generated` source names. A placeholder anywhere else, or any
 other brace pattern, is `stack_template_invalid`; the basic-auth route parameter
 syntax (`/api/{id}`) is left to its own validation. `{port:...}` cannot appear in
 `project`. A template is not deployable on its own: `host validate`, `plan`, `apply`
-and the rest refuse it with `stack_template_requires_stack_up`.
+and the rest refuse it with `stack_template_requires_stack_up`. To inspect or exec
+into a deployed stack, pass `--target` or `--name` (see `sb host exec` below).
 
 ```bash
 ./sb host stack up   --template ~/src/hub/sandbox.hosting.yml --name pr-12 --ref stack/pr-12 \
@@ -1493,6 +1494,65 @@ its existing `coverage_name_ineligible` refusal.
 
 **Branch globs.** `deploy.allowed_branches` entries are case-sensitive shell globs in
 every manifest: `feat/*` allows `feat/x`; exact names and `"*"` keep their meaning.
+
+### Running a command in a hosted service (`sb host exec`, spec 072)
+
+```bash
+<producer> | ./sb host exec --remote myvps --target hub-pr-12/sandbox --service hub \
+    -- sh scripts/sandbox-hub-env.sh node scripts/dev-attach.mjs --site-url https://wp-pr-12.example.test
+./sb host exec --remote myvps --target example-site/production --service wordpress \
+    -- wp option get siteurl
+./sb host exec --remote myvps --name pr-12 --service hub --json --timeout 60 -- sh -c 'id -u'
+```
+
+`host exec` runs one argv inside a running service of a target this controller
+recorded with `host apply` or `host stack up`. On the remote it is `timeout
+--kill-after=10 N docker compose ... --profile '*' exec -T <service> <argv>`, with the
+same `-p sandbox-host-<project>-<environment>`, `--env-file` and `-f` files apply
+uses. The command runs as the service's own configured user: there is no user,
+working-directory or environment option, and none is added.
+
+- **Target.** `--target <project>/<environment>`, or `--name <slug>` for a stack.
+  A stack recorded for that remote resolves to its rendered manifest under
+  `$SANDBOX_HOME/runtime/stacks/<slug>/`; any other target is read from the manifest
+  in `--project-dir` (default: the current directory), which must declare that
+  project. The target must also be recorded in this controller's hosting state for
+  that remote, else `host_target_unknown`. `--service` must be one of the deployed
+  Compose services (`config --services`), else `host_exec_unknown_service`.
+- **stdin.** The caller's stdin descriptor is handed to the `ssh` child, so the
+  bytes go straight to the command's stdin and end at end of input. Sandbox never
+  reads them, so they never reach the remote command line, the child's environment,
+  logs, job records, the audit file, feedback or `--json` output, except whatever
+  the command itself prints. A terminal stdin is replaced by `/dev/null`; no TTY is
+  allocated. The SSH session does not share a ControlMaster.
+- **Output and exit status.** stdout and stderr stream back; `sb` exits with the
+  command's status. Refusals exit 1, usage errors 2, a timeout 124 and an SSH
+  failure 255 (`host_exec_transport_failed`; a command that itself exits 255 reads
+  the same). `--json` prints one object with `ok`, `code`, `exit_code`, `remote`,
+  `target`, `service`, `duration_ms` and the captured `stdout`/`stderr` (1 MiB each,
+  with `stdout_truncated`/`stderr_truncated`); `ok` is true only for exit 0.
+- **Busy targets are refused, never waited for.** `host_target_busy` when the
+  stack's apply job is accepted, queued, running or cancelling, when the hosting
+  record holds an active apply, recovery, destroy or image activation, or when the
+  target's apply lock is held at that moment. The check is made once at start; an
+  apply started later may restart the service under a running command.
+- **Timeout.** `--timeout` is 1-3600 seconds, default 300. At the limit the Compose
+  exec client on the server is stopped and the run reports `host_exec_timeout`;
+  Docker does not signal a process started by `exec` when its client goes away, so
+  a command that ignores end of input can keep running in the container.
+- **Audit.** Each run that reached the remote appends one line to
+  `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` (0600): `at`, `remote`, `target`,
+  `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else.
+
+**`--target` on read-only commands.** `host logs`, `host status` and `host diagnose`
+take the same `--target` or `--name` with `--remote` and resolve them the same way,
+so a stack can be inspected from the checkout that holds its template instead of
+failing with `stack_template_requires_stack_up`:
+
+```bash
+./sb host logs --remote myvps --target hub-pr-12/sandbox --lines 200
+./sb host status --remote myvps --name pr-12 --json
+```
 
 ### Disposable remote previews
 

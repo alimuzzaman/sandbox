@@ -123,6 +123,25 @@ class ComposeAdapter:
         self.optional_capabilities = frozenset({"ownership_repair"})
 
     @staticmethod
+    def _remote_only_refusal(request: OperationRequest) -> OperationResult | None:
+        """Refuse before any engine call on a remote-only controller (spec 082)."""
+        from sandbox.config.local_runtime import (
+            LocalRuntimeConfigError, remote_only_message,
+        )
+        from sandbox.core._docker import local_runtime_selection
+        try:
+            selection = local_runtime_selection()
+        except LocalRuntimeConfigError as exc:
+            code, message = "local_runtime_invalid", str(exc)
+        else:
+            if not selection.remote_only:
+                return None
+            code, message = "local_runtime_none", remote_only_message(selection)
+        return OperationResult(False, request.operation, request.project_root, "compose",
+                               {"error": {"code": code, "message": message},
+                                "mutated": False})
+
+    @staticmethod
     def _runtime_id(root: str, label: str, taken: set[str], *,
                     source_family: str | None = None,
                     require_source_family: bool = False) -> str:
@@ -385,6 +404,9 @@ class ComposeAdapter:
         return float(value)
 
     def invoke(self, request: OperationRequest) -> OperationResult:
+        refusal = self._remote_only_refusal(request)
+        if refusal is not None:
+            return refusal
         context = request.arguments.get('creation_context')
         if context is None:
             return self._invoke_impl(request)

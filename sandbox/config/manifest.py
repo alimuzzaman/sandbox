@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from .delivery import delivery_config_provider
 from .domains import normalize_domain_policy
 from .instance_lifecycle import normalize_instance_lifecycle
+from .local_runtime import machine_local_runtime
 from .hosting_images import (
     HostingImageConfigError,
     machine_image_policy_provider,
@@ -66,6 +67,8 @@ MACHINE_CONFIG_PROVIDERS = (
      "sandbox.config.storage_monitor", 10),
     ("hosting.images.policies", machine_image_policy_provider,
      "sandbox.config.hosting_images", 20),
+    ("controller.local_runtime", machine_local_runtime,
+     "sandbox.config.local_runtime", 30),
 )
 
 
@@ -135,6 +138,15 @@ def apply_machine_config(result: dict) -> dict:
             images["policies"] = policies
             hosting["images"] = images
             resolved["hosting"] = hosting
+        elif key == "controller.local_runtime":
+            # Optional means inert: only a machine that declared a controller
+            # block gets the normalized mode written back (spec 082).
+            if "controller" not in resolved:
+                continue
+            mode = provider(resolved)
+            controller = dict(resolved["controller"] or {})
+            controller["local_runtime"] = mode
+            resolved["controller"] = controller
         else:
             resolved[key] = provider(resolved)
     return resolved

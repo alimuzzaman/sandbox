@@ -305,7 +305,16 @@ def _resolve_instance(instance: str) -> dict:
     return out
 
 def _proxy_container_running() -> bool:
-    """True if the sandbox-proxy Caddy container is up. Mirrors sb."""
+    """True if the sandbox-proxy Caddy container is up. Mirrors sb, including
+    spec 082: no engine call on a remote-only controller."""
+    try:
+        import sys
+        if str(SANDBOX_ROOT) not in sys.path:
+            sys.path.insert(0, str(SANDBOX_ROOT))
+        from sandbox.core._domains import _proxy_running_state
+        return _proxy_running_state() is True
+    except Exception:
+        pass
     try:
         res = subprocess.run(
             ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),

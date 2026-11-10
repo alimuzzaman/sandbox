@@ -5,6 +5,7 @@ import json
 import shlex
 import subprocess
 import sys
+import time
 
 import sandbox.core._hosting as hosting
 import sandbox.core._remote as remote
@@ -106,8 +107,20 @@ def cmd_host_exec(args) -> None:
                 getattr(exc, "detail", None) or str(exc), as_json=as_json,
                 exit_code=host_exec.EXIT_REFUSAL)
     audit_failed = False
+    started = time.monotonic()
     with audit:
-        outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source())
+        try:
+            outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source())
+        except KeyboardInterrupt:
+            outcome = host_exec.ExecOutcome(
+                exit_code=130, code=host_exec.INTERRUPTED,
+                duration_ms=int((time.monotonic() - started) * 1000))
+        except Exception as exc:  # never leave a run unaudited or exit 0
+            outcome = host_exec.ExecOutcome(
+                exit_code=host_exec.EXIT_TRANSPORT, code=host_exec.TRANSPORT_FAILED,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                stderr=f"host exec failed locally: {type(exc).__name__}\n".encode()
+                if request.capture else b"")
         try:
             audit.write(request, outcome)
         except OSError as exc:
@@ -126,8 +139,11 @@ def cmd_host_exec(args) -> None:
             host_exec.TIMED_OUT: f"timed out after {request.timeout_seconds}s "
                                  f"(exit {outcome.exit_code})",
             host_exec.TRANSPORT_FAILED: "exit 255: the SSH connection failed, or the command exited 255",
-            host_exec.WATCHDOG_EXPIRED: "the local watchdog stopped ssh; the remote deadline was "
-                                        "not confirmed and the command may still be running",
+            host_exec.WATCHDOG_EXPIRED: (
+                "the local watchdog stopped ssh before the remote status arrived; the server's "
+                "timeout still stops the exec client on its own, but a command that ignores end "
+                "of input can keep running in the container. Check with: sb host status --remote "
+                f"{request.target.remote} --target {request.target.label}"),
             host_exec.INTERRUPTED: "interrupted",
         }[outcome.code]
         print(f"sb host exec: {outcome.code}: {note}", file=sys.stderr)

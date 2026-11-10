@@ -325,7 +325,12 @@ class AuditLog:
     def close(self) -> None:
         if self._fd is not None:
             fd, self._fd = self._fd, None
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                # The record, if any, is already written; a close error must not
+                # replace the command's result.
+                pass
 
     def write(self, request: ExecRequest, outcome: ExecOutcome, *, now=None) -> None:
         from sandbox.services.redaction import redact_text
@@ -343,4 +348,7 @@ class AuditLog:
         try:
             os.write(self._fd, line)
         finally:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except OSError:
+                pass  # close() releases the lock; never mask the write's own result

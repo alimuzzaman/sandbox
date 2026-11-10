@@ -385,6 +385,15 @@ class CommandTests(unittest.TestCase):
         record = json.loads((self.runtime / "host-exec" / "audit.jsonl").read_text())
         self.assertEqual((record["exit_code"], record["code"]), (255, "host_exec_transport_failed"))
 
+    def test_unexpected_local_error_is_audited_and_exits_255(self):
+        with patch.object(host_exec, "run", side_effect=RuntimeError("boom")):
+            code, out, _err = self._run(_exec_args())
+        self.assertEqual(code, 255)
+        payload = json.loads(out)
+        self.assertEqual((payload["ok"], payload["code"]), (False, "host_exec_transport_failed"))
+        record = json.loads((self.runtime / "host-exec" / "audit.jsonl").read_text())
+        self.assertEqual(record["code"], "host_exec_transport_failed")
+
     def test_unknown_service_is_refused_before_running(self):
         code, out, _err = self._run(_exec_args(service="db"))
         self.assertEqual(code, 1)

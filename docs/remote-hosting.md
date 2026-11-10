@@ -1544,8 +1544,9 @@ working-directory or environment option, and none is added.
   started by `exec` when its client goes away, so a command that ignores end of
   input can keep running in the container. If `ssh` is still running 40 seconds
   after the deadline, a local watchdog kills it and the run is
-  `host_exec_watchdog_expired` (exit 255): the remote deadline was not confirmed and
-  the command may still be running there.
+  `host_exec_watchdog_expired` (exit 255): the status never arrived. The server's
+  `timeout` still stops the exec client on its own; check the service with
+  `sb host status --remote R --target P/E`.
 - **Audit.** Each run that reached the remote appends one line to
   `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` (0600): `at`, `remote`, `target`,
   `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else.

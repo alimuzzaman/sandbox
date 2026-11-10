@@ -1042,11 +1042,21 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, or heal hosted services that exhausted their restarts")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, or run per-slug stacks from a template")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission"],
-        help="immutable image action; `host image recover` is distinct from failed-apply `host recover`")
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down"],
+        help="immutable image action, or `host stack up|list|down`; `host image recover` is distinct from failed-apply `host recover`")
+    host_p.add_argument("--template", default=None, metavar="PATH",
+        help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
+    host_p.add_argument("--name", default=None, metavar="SLUG",
+        help="host stack up/down: the stack slug")
+    host_p.add_argument("--ref", default=None, metavar="BRANCH|COMMIT",
+        help="host stack up: ref to deploy, resolved on this controller (default: the checkout's HEAD)")
+    host_p.add_argument("--port", action="append", default=None, metavar="NAME=PORT",
+        help="host stack up: pin a named stack port (repeatable)")
+    host_p.add_argument("--plan", action="store_true",
+        help="host stack up: report the render, ports and submission without changing anything")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--project", default=None, help="host heal or image storage-admission: hosted project name")

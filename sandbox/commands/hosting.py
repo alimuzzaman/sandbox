@@ -34,6 +34,7 @@ import sandbox.core._remote as remote
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._secrets as personal_secrets
 from sandbox.hosting import edge_cache
+from sandbox.hosting.stack_template import branch_allowed
 from sandbox.hosting.zone_coverage import COVERAGE_NAME_INELIGIBLE, COVERAGE_STORE_UNAVAILABLE, CoverageError, targets
 from sandbox.hosting.zone_coverage.client import ZoneCoverageClient
 from sandbox.delivery.hosting import HostingAttempt, RetainedDelivery
@@ -2596,20 +2597,29 @@ def _durable_host_context(project_dir: str) -> dict:
     return validate_durable_context(project_dir)
 
 
-def _host_delivery_guidance(validated: dict, remote_name: str) -> list[str]:
-    """A reviewable argv template, never an implicit job submission."""
+def _host_delivery_guidance(validated: dict, remote_name: str, *,
+                            request_id: str | None = None, source_commit: str | None = None,
+                            timeout: int = 900, json_output: bool = False) -> list[str]:
+    """A reviewable argv template, never an implicit job submission.
+
+    `sb host stack up` submits exactly this argv, with its own request id,
+    resolved commit and a timeout sized to the build.
+    """
     executable = str(Path(__file__).resolve().parents[2] / 'sb')
-    try:
-        source_commit = _resolve_host_source_commit(validated["project_root"])
-    except Exception:
-        source_commit = "<full-clean-HEAD>"
-    import secrets
-    req_token = secrets.token_hex(6)
-    env_name = validated.get("environment", "env")
-    request_id = f"deploy-{env_name}-{req_token}"
+    if source_commit is None:
+        try:
+            source_commit = _resolve_host_source_commit(validated["project_root"])
+        except Exception:
+            source_commit = "<full-clean-HEAD>"
+    if request_id is None:
+        import secrets
+        req_token = secrets.token_hex(6)
+        env_name = validated.get("environment", "env")
+        request_id = f"deploy-{env_name}-{req_token}"
     return [executable, "job-start", "--local", "--project-dir", validated["project_root"],
             "--request-id", request_id, "--source-commit", source_commit,
-            "--timeout", "900", "--", executable, "host", "apply", "--project-dir",
+            "--timeout", str(int(timeout)), *(["--json"] if json_output else []),
+            "--", executable, "host", "apply", "--project-dir",
             validated.get('manifest_root') or validated['project_root'], "--remote", remote_name, "--environment",
             validated["environment"], "--confirm"]
 
@@ -3436,9 +3446,9 @@ def _recovery_observer(validated: dict, entry: dict, remote_name: str,
         "source_revision": (raw.get("source_head") if
                             classified.get("source_revision", {}).get("state") == "ready"
                             and raw.get("source_head") == revision else None),
-        "source_branch": (raw.get("source_branch") if
-                          raw.get("source_branch") in validated["deploy"]["allowed_branches"]
-                          or "*" in validated["deploy"]["allowed_branches"] else None),
+        "source_branch": (raw.get("source_branch") if branch_allowed(
+                              raw.get("source_branch"), validated["deploy"]["allowed_branches"])
+                          else None),
         "source_clean": raw.get("source_clean") is True,
         "topology": configured,
         "images": images,
@@ -4241,12 +4251,25 @@ def _verify_edge(
 
 def _validate_apply_source(validated: dict) -> str:
     """Reject an ineligible deployment entirely on the local machine."""
-    branch = remote.current_branch(validated["project_root"])
+    stack = validated.get("stack")
+    if stack:
+        # `sb host stack up` checks the controller-resolved commit out detached;
+        # the branch it was resolved from is recorded in the rendered manifest.
+        branch = remote.current_branch(validated["project_root"], allow_detached=True)
+        if branch is None:
+            if _resolve_host_source_commit(validated["project_root"]) != stack["commit"]:
+                raise hosting.HostingRefusal(
+                    "stack_source_mismatch",
+                    "the stack source checkout is not at the rendered stack commit")
+            branch = stack.get("ref_branch") or ""
+    else:
+        branch = remote.current_branch(validated["project_root"])
     policy = validated["deploy"]
-    if branch not in policy["allowed_branches"] and "*" not in policy["allowed_branches"]:
+    if not branch_allowed(branch, policy["allowed_branches"]):
         allowed = ", ".join(policy["allowed_branches"])
+        shown = branch or "(detached commit)"
         raise hosting.HostingError(
-            f"branch '{branch}' is not allowed for {validated['environment']} "
+            f"branch '{shown}' is not allowed for {validated['environment']} "
             f"(allowed: {allowed})"
         )
     if policy["require_clean"]:
@@ -4630,8 +4653,12 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         sha = remote.push_commits(entry, source_checkout, target, branch,
             source_ref=published_commit, resolved_sha=published_commit)
     else:
-        sha = remote.push_commits(entry, validated['project_root'], target, branch,
-            resolved_sha=published_commit, source_root=None)
+        # A stack publishes to the immutable sandbox-source-<sha> ref, so a
+        # force-pushed PR branch never reads as a diverged deploy branch.
+        stack_source = bool(validated.get("stack"))
+        sha = remote.push_commits(entry, validated['project_root'], target,
+            None if stack_source else branch,
+            resolved_sha=published_commit, source_root=None, allow_detached=stack_source)
     if sha != published_commit:
         _release_host_apply_reservation(entry, reservation)
         raise _HostSourceArtifactError('source_artifact_mismatch')
@@ -4685,6 +4712,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         "source_state_clean": source_state_clean,
         "source_state_identity_version": _SOURCE_STATE_IDENTITY_VERSION,
         "config_digest": config_digest,
+        "hostnames": sorted(route["hostname"] for route in validated["routes"]),
         "runtime": {"state": "pending"},
         "edge": {"state": "pending"},
     }
@@ -7397,6 +7425,13 @@ def cmd_host(cfg, args) -> None:
     if args.action == "image" and getattr(args, "image_action", None) == "verify":
         _cmd_host_image_verify(args)
         return
+    if args.action == "stack" or image_action in {"up", "list", "down"}:
+        if args.action != "stack" or image_action not in {"up", "list", "down"}:
+            die("use `sb host stack up|list|down`")
+        from sandbox.commands.host_stack import cmd_host_stack
+        args.stack_action = image_action
+        cmd_host_stack(args)
+        return
     if args.action == "stage":
         _cmd_host_stage(args)
         return
@@ -7475,6 +7510,9 @@ def cmd_host(cfg, args) -> None:
         # Preserve command provenance separately from the manifest's source root.
         validated['_invocation_root'] = str(Path(args.project_dir or '.').resolve())
     except hosting.HostingError as exc:
+        if getattr(exc, "code", None) and getattr(args, "json", False):
+            print(json.dumps({"ok": False, "code": exc.code, "error": str(exc)}, sort_keys=True))
+            raise SystemExit(1)
         die(str(exc))
     if args.action == "secrets":
         _cmd_host_secrets(validated, args)
@@ -7737,6 +7775,14 @@ def cmd_host(cfg, args) -> None:
                 owner = _coverage_owner_conflict(state, target_key, validated, decision)
                 if owner:
                     raise CoverageError(COVERAGE_NAME_INELIGIBLE, f"hostname is already managed by target {owner}")
+                # Spec 071: refuse a hostname another project holds on this
+                # remote before any effect (shared-coverage owners above keep
+                # their existing refusal).
+                from sandbox.hosting import hostname_ownership, stack_registry
+                hostname_ownership.assert_available(
+                    state, args.remote, validated["project"],
+                    [route["hostname"] for route in validated.get("routes") or []],
+                    stack_registry.records_for_remote(stack_registry.read(), args.remote))
                 if decision.get("mode") == "shared" or decision.get("zone"):
                     validated["dns_coverage"] = decision
 
@@ -7926,7 +7972,7 @@ def cmd_host(cfg, args) -> None:
 
 def _host_predispatch_policy(args) -> bool:
     """Keep observation recovery ahead of compatibility state writers."""
-    return getattr(args, "action", None) in {"recover", "stage", "image", "plan", "apply"}
+    return getattr(args, "action", None) in {"recover", "stage", "image", "plan", "apply", "stack"}
 
 
 register_specs((CommandSpec(

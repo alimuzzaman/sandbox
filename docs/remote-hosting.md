@@ -1398,6 +1398,101 @@ an apply's read and its write. Local state also cannot see uses of a record outs
 planned fix for concurrent writers. A reused nginx Origin CA certificate keeps its recorded ID so destroy can
 revoke it.
 
+### Stack templates (`sb host stack`, spec 071)
+
+One committed `sandbox.hosting.yml` can serve any number of short-lived stacks (one
+per PR thread, say). Add a `stack:` block and placeholders; each stack then gets its
+own project, hostnames, secret names and named loopback ports.
+
+```yaml
+version: 1
+project: xspeed-hub-{slug}
+stack:
+  slug: '^[a-z0-9][a-z0-9-]{1,30}$'   # the stack name must fully match
+  ports: [mailpit]                     # named ports, allocated per stack
+environments:
+  sandbox:
+    host:
+      primary: hub-{slug}.example.test
+      aliases:
+        - hostname: admin-{slug}.example.test
+          mode: serve
+    deploy:
+      allowed_branches: ['{ref_branch}']
+      require_clean: true
+    secrets:
+      values: {BRANCH_SLUG: '{slug}', MAILPIT_PORT: '{port:mailpit}'}
+      generated: {PG_PASSWORD: 'XSPEED_HUB_SBX_{SLUG}_PG_PASSWORD'}
+```
+
+Placeholders: `{slug}`, `{SLUG}` (upper case, `-` becomes `_`), `{port:<name>}` (the
+name must be listed in `stack.ports`) and `{ref_branch}` (the branch `--ref` was
+resolved from; empty for a detached commit). They are allowed only in `project`,
+`host.primary`, each alias `hostname`, `deploy.allowed_branches`, `secrets.values`
+values and `secrets.generated` source names. A placeholder anywhere else, or any
+other brace pattern, is `stack_template_invalid`; the basic-auth route parameter
+syntax (`/api/{id}`) is left to its own validation. `{port:...}` cannot appear in
+`project`. A template is not deployable on its own: `host validate`, `plan`, `apply`
+and the rest refuse it with `stack_template_requires_stack_up`.
+
+```bash
+./sb host stack up   --template ~/src/hub/sandbox.hosting.yml --name pr-12 --ref stack/pr-12 \
+                     --remote myvps --plan            # changes nothing
+./sb host stack up   --template ~/src/hub/sandbox.hosting.yml --name pr-12 --ref stack/pr-12 \
+                     --remote myvps --confirm [--generate] [--port mailpit=8025]
+./sb host stack list --remote myvps [--json]
+./sb host stack down --name pr-12 --remote myvps --confirm
+```
+
+`up` resolves `--ref` on this controller (default: the checkout's `HEAD`; a branch
+that exists only locally works, so does a commit or a remote-tracking branch) and
+reads the template as committed at that commit, never the working file. With
+`--confirm` it checks the commit out into a detached worktree under
+`$SANDBOX_HOME/runtime/stacks/<slug>/source/`, writes the rendered manifest to
+`$SANDBOX_HOME/runtime/stacks/<slug>/sandbox.hosting.yml` with `source_root` pointing
+at that worktree, and submits the same durable `sb job-start --local ... -- sb host
+apply ... --confirm` an ordinary manifest uses, so the clean-source, recovery
+context, receipt and one-apply-per-target guards all apply. The rendered file is
+accepted only at that path; a copy elsewhere is refused. Stack applies publish the
+source to the immutable `sandbox-source-<sha>` ref on the remote, so a force-pushed
+PR branch never reads as diverged. The detached worktree passes the branch gate with
+the recorded `ref_branch`; a detached commit passes only `allowed_branches: ['*']`,
+and `['{ref_branch}']` refuses it with `stack_branch_unavailable`.
+
+Every `stack.ports` name gets a loopback port from 18100-18199 on that remote, chosen
+by one read-only SSH probe (`ss` plus Docker's published ports) so it is not bound by
+anything except the stack's own containers, and distinct from other stacks' ports and
+recorded hosting loopback ports. The port is recorded with the stack and reused by
+every later `up`; only `stack down` releases it. `--port NAME=N` pins a port (1024-65535)
+and is refused when another stack owns it or something else is bound to it. New web
+loopback allocations skip 18100-18199; ports already recorded are untouched. Use the
+port in Compose through the value, for example
+`"127.0.0.1:${MAILPIT_PORT:-8025}:8025"`; the value reaches Compose through the
+private `environment.env` file apply passes with `--env-file`.
+
+Missing generated secrets refuse `up --confirm` with `stack_secrets_missing` unless
+you pass `--generate`, which creates them exactly like `sb host secrets --generate`.
+Missing required secrets always refuse. `up` refuses while the stack's previous apply
+job is still queued or running (`stack_apply_in_progress`) and a slug already used on
+another remote (`stack_slug_in_use`). A failed submission keeps the stack record and
+its ports; re-run `up`.
+
+`down` runs the existing `sb host destroy` for the stack's target (nginx front door
+only) and, only once that succeeds, removes the worktrees, the rendered manifest and
+the record, releasing the ports. A destroy failure keeps all of them
+(`stack_destroy_failed`). `list` shows slug, project, ref and commit, hostnames,
+ports, and the last apply's status and time from the durable job.
+
+**Hostname ownership.** Every apply, a stack's or an ordinary one, refuses before any
+effect a hostname that a different project already holds on the same remote, with
+`hostname_owned_by_other_project` naming that project. Holdings are each target's
+recorded hostnames (recorded from this release on), its DNS rows and shared-coverage
+hostname, plus every recorded stack. A hostname held under shared zone coverage keeps
+its existing `coverage_name_ineligible` refusal.
+
+**Branch globs.** `deploy.allowed_branches` entries are case-sensitive shell globs in
+every manifest: `feat/*` allows `feat/x`; exact names and `"*"` keep their meaning.
+
 ### Disposable remote previews
 
 `./sb preview` creates a separate, public WordPress Sandbox instance for a
@@ -2002,8 +2097,8 @@ every failure, including a branch-gate refusal. Piping it to `tail`/`head` repla
 that status with the pager's, which reads as success — use `set -o pipefail`, check
 `${PIPESTATUS[0]}`, or redirect to a file instead.
 
-**Branch gates fire before any remote work.** `allowed_branches` is enforced per
-environment, so a checkout on the wrong branch fails instantly with
+**Branch gates fire before any remote work.** `allowed_branches` (exact names, `"*"`
+or shell globs such as `feat/*`) is enforced per environment, so a checkout on the wrong branch fails instantly with
 `branch 'X' is not allowed for <environment>`. Deploy from the checkout whose branch
 the environment allows.
 

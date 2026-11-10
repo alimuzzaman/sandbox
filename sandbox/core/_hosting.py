@@ -24,6 +24,15 @@ class HostingError(ValueError):
     pass
 
 
+class HostingRefusal(HostingError):
+    """A hosting refusal with a stable machine-readable ``code``."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.detail = message
+
+
 # One explicit capability registry names every target mutation that must share
 # the RecoveryRepository owner/CAS boundary.  Consumers validate membership
 # before opening state or entering an effect.  Unknown/bypass names fail closed.
@@ -72,6 +81,10 @@ _ROBOTS_DENY_BLOCK = (
 )
 _PORT_START = 18000
 _PORT_COUNT = 1000
+# Spec 071: named stack ports (Mailpit and friends) own this slice of the web
+# range. New web allocations skip it; ports already recorded are kept.
+STACK_PORT_START = 18100
+STACK_PORT_END = 18200
 _ENVIRONMENT_DISPLAY_LIMIT = 80
 _ENVIRONMENT_CHOICES_LIMIT = 16
 _CLOUDFLARE_PROXY_CIDRS = (
@@ -504,6 +517,27 @@ def _basic_auth_route_pattern(path_template: str) -> str:
 
 def validate_manifest(project_dir: str | Path, environment: str | None = None) -> dict:
     root, manifest = load_manifest(project_dir)
+    return validate_loaded(root, manifest, environment)
+
+
+def validate_loaded(root: Path, manifest: dict, environment: str | None = None, *,
+                    require_checkout: bool = True) -> dict:
+    """Validate an already-loaded manifest.
+
+    ``require_checkout=False`` lets ``sb host stack up --plan`` validate a
+    rendered stack manifest against a throwaway export of its compose files
+    without creating a Git worktree.
+    """
+    from sandbox.hosting import stack_template
+    kind = stack_template.manifest_kind(manifest)
+    if kind == "template":
+        raise stack_template.refuse_plain_use()
+    stack = None
+    if kind == "rendered":
+        from sandbox.core import _paths
+        stack = stack_template.rendered_instance(
+            manifest, manifest.get("_manifest_path", str(root / "sandbox.hosting.yml")),
+            _paths.RUNTIME_DIR / "stacks")
     if manifest.get("version") != 1:
         raise HostingError("manifest version must be 1")
     project = str(manifest.get("project") or "").strip()
@@ -520,19 +554,27 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     declared_source_root = manifest.get("source_root", manifest.get("project_root", "."))
     if not isinstance(declared_source_root, str) or not declared_source_root.strip():
         raise HostingError("source_root must be a non-empty relative directory")
-    if Path(declared_source_root).is_absolute():
-        raise HostingError("source_root must be a non-empty relative directory")
-    source_root_path = (root / declared_source_root).resolve()
-    if source_root_path != root.resolve():
-        checkout_root = _git_root(root)
-        if checkout_root is None:
-            raise HostingError("source_root must stay within the manifest project root")
-        try:
-            source_root_path.relative_to(checkout_root)
-        except ValueError as exc:
-            raise HostingError("source_root must stay within the manifest checkout") from exc
+    if stack is not None:
+        # A rendered stack manifest lives in Sandbox runtime state and points
+        # at the clean worktree `sb host stack up` created for its commit.
+        source_root_path = Path(stack["source_root"]).resolve()
+        checkout_root = _git_root(source_root_path) if source_root_path.is_dir() else None
+        if require_checkout and checkout_root is None:
+            raise HostingError("a rendered stack source_root must be inside a Git checkout")
     else:
-        checkout_root = _git_root(source_root_path)
+        if Path(declared_source_root).is_absolute():
+            raise HostingError("source_root must be a non-empty relative directory")
+        source_root_path = (root / declared_source_root).resolve()
+        if source_root_path != root.resolve():
+            checkout_root = _git_root(root)
+            if checkout_root is None:
+                raise HostingError("source_root must stay within the manifest project root")
+            try:
+                source_root_path.relative_to(checkout_root)
+            except ValueError as exc:
+                raise HostingError("source_root must stay within the manifest checkout") from exc
+        else:
+            checkout_root = _git_root(source_root_path)
     source_root_nested = bool(checkout_root and source_root_path != checkout_root)
     if not source_root_path.is_dir():
         raise HostingError(f"source_root does not exist: {declared_source_root}")
@@ -704,6 +746,8 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
             "deploy": deploy, "cloudflare": cf, "secrets": secrets,
             "autologin": _autologin(env), "login_service": login_declaration,
             "basic_auth": basic_auth,
+            "stack": ({key: value for key, value in stack.items() if key != "source_root"}
+                      if stack is not None else None),
             "robots": robots, "warnings": _fingerprint_warnings(deploy, secrets)}
 
 
@@ -791,6 +835,8 @@ def allocate_loopback_port(state: dict, key: str) -> int:
     offset = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) % _PORT_COUNT
     for index in range(_PORT_COUNT):
         candidate = _PORT_START + ((offset + index) % _PORT_COUNT)
+        if STACK_PORT_START <= candidate < STACK_PORT_END:
+            continue
         if candidate not in used:
             return candidate
     raise HostingError("no managed loopback ports are available")

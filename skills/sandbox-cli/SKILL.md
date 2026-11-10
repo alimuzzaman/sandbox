@@ -490,6 +490,13 @@ before protected effects.
 - Fallback route (`/etc/nginx/conf.d/sandbox-coverage-<zone>.conf`) returns generic 404 (`noindex`) and is protected: `sb remote edge --remove-route` refuses it.
 - Older checkouts refuse applies under covered zones.
 
+## Hosting stacks from a template (spec 071)
+
+- A `sandbox.hosting.yml` with a `stack:` block is a template: placeholders `{slug}`, `{SLUG}`, `{port:<name>}`, `{ref_branch}` only in `project`, `host.primary`, alias hostnames, `deploy.allowed_branches`, `secrets.values` values and `secrets.generated` source names. Plain `sb host` commands refuse it with `stack_template_requires_stack_up`.
+- `sb host stack up --template <checkout>/sandbox.hosting.yml --name <slug> [--ref <branch|commit>] [--port NAME=N] --remote R --plan|--confirm [--generate] [--json]`: `--plan` changes nothing; `--confirm` renders to `$SANDBOX_HOME/runtime/stacks/<slug>/`, checks the commit out into a detached worktree and submits the durable `job-start` + `host apply`. Follow the returned job with `sb job-status`.
+- `sb host stack list --remote R` and `sb host stack down --name <slug> --remote R --confirm` (existing destroy, then ports released).
+- Stack ports come from 18100-18199 per remote and persist until `down`. Every apply refuses a hostname another project holds on the remote (`hostname_owned_by_other_project`). `allowed_branches` accepts globs (`feat/*`).
+
 When the owner exited before recording anything, recovery cannot observe its way out:
 it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.
 Close that attempt explicitly, then apply again.

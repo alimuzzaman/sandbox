@@ -1,0 +1,578 @@
+"""Spec 071: `sb host stack` templates, ports, hostname ownership and commands."""
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import sandbox.core._hosting as hosting
+from sandbox.commands import host_stack
+from sandbox.commands import hosting as hosting_cmd
+from sandbox.hosting import hostname_ownership, stack_registry, stack_template
+from sandbox.hosting.stack_template import StackRef, StackTemplateError
+from tests.subprocess_support import run_test_process
+
+COMMIT = "a" * 40
+
+TEMPLATE = """\
+version: 1
+project: xspeed-hub-{slug}
+stack:
+  slug: '^[a-z0-9][a-z0-9-]{1,30}$'
+  ports: [mailpit]
+environments:
+  sandbox:
+    compose:
+      files: [compose.yml]
+      service: web
+      container_port: 80
+      background_services: [mailpit]
+    healthcheck: {path: /, statuses: [200]}
+    host:
+      primary: hub-{slug}.example.test
+      aliases:
+        - hostname: admin-{slug}.example.test
+          mode: serve
+        - hostname: renderer-{slug}.example.test
+          mode: serve
+    deploy:
+      allowed_branches: ['{ref_branch}']
+      require_clean: true
+    cloudflare: {proxied: true, tls: origin-ca, ssl_mode: strict}
+    secrets:
+      values:
+        BRANCH_SLUG: '{slug}'
+        HUB_HOST: 'hub-{slug}.example.test'
+        MAILPIT_PORT: '{port:mailpit}'
+      generated:
+        PG_PASSWORD: 'XSPEED_HUB_SBX_{SLUG}_PG_PASSWORD'
+"""
+COMPOSE = """\
+services:
+  web:
+    image: nginx:alpine
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "127.0.0.1:${MAILPIT_PORT:-8025}:8025"
+"""
+
+
+def _yaml(text: str) -> dict:
+    import yaml
+    return yaml.safe_load(text)
+
+
+def _git(cwd: Path, *arguments: str) -> str:
+    result = run_test_process(
+        ("git", "-C", str(cwd), *arguments),
+        env={"HOME": str(cwd), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test"},
+        capture_output=True, text=True, check=True, timeout=30)
+    return result.stdout.strip()
+
+
+class _Runtime:
+    """A temporary SANDBOX runtime dir patched into every reader."""
+
+    def __init__(self, test: unittest.TestCase):
+        self.base = Path(tempfile.mkdtemp())
+        test.addCleanup(shutil.rmtree, self.base, True)
+        self.runtime = self.base / "runtime"
+        self.runtime.mkdir()
+        patcher = patch("sandbox.core._paths.RUNTIME_DIR", self.runtime)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+    def checkout(self, template: str = TEMPLATE) -> Path:
+        root = self.base / "hub"
+        root.mkdir()
+        _git(root, "init", "--quiet", "--initial-branch=main")
+        (root / "sandbox.hosting.yml").write_text(template)
+        (root / "compose.yml").write_text(COMPOSE)
+        _git(root, "add", "-A")
+        _git(root, "commit", "--quiet", "-m", "init")
+        _git(root, "branch", "stack/demo")
+        return root
+
+
+class TemplateSchemaTests(unittest.TestCase):
+    def test_plain_commands_refuse_a_template(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "sandbox.hosting.yml").write_text(TEMPLATE)
+            Path(directory, "compose.yml").write_text(COMPOSE)
+            with self.assertRaises(hosting.HostingRefusal) as caught:
+                hosting.validate_manifest(directory)
+        self.assertEqual(caught.exception.code, "stack_template_requires_stack_up")
+
+    def test_placeholder_without_stack_block_is_still_a_template(self):
+        self.assertEqual(stack_template.manifest_kind({"project": "hub-{slug}"}), "template")
+        self.assertEqual(stack_template.manifest_kind({"project": "hub"}), "plain")
+        # Basic-auth route parameters are not stack placeholders.
+        self.assertEqual(stack_template.manifest_kind({"x": "/api/{id}"}), "plain")
+
+    def test_placeholder_outside_allowed_fields_is_refused(self):
+        data = _yaml(TEMPLATE)
+        data["environments"]["sandbox"]["healthcheck"]["path"] = "/{slug}"
+        with self.assertRaisesRegex(StackTemplateError, "healthcheck.path") as caught:
+            stack_template.parse_template(data)
+        self.assertEqual(caught.exception.code, "stack_template_invalid")
+
+    def test_unknown_placeholder_undeclared_port_and_stray_brace(self):
+        for field, value, message in (
+                ("BRANCH_SLUG", "{branch}", "unknown placeholder"),
+                ("BRANCH_SLUG", "{port:smtp}", "does not declare"),
+                ("BRANCH_SLUG", "{slug", "unbalanced"),
+        ):
+            data = _yaml(TEMPLATE)
+            data["environments"]["sandbox"]["secrets"]["values"][field] = value
+            with self.subTest(value=value), self.assertRaisesRegex(StackTemplateError, message):
+                stack_template.parse_template(data)
+
+    def test_basic_auth_subtree_keeps_its_own_brace_syntax(self):
+        data = _yaml(TEMPLATE)
+        data["environments"]["sandbox"]["basic_auth"] = {"bypass_routes": ["/api/{id}"]}
+        stack_template.parse_template(data)
+
+    def test_slug_must_match_template_pattern(self):
+        template = stack_template.parse_template(_yaml(TEMPLATE))
+        self.assertEqual(stack_template.validate_slug(template, "demo-1"), "demo-1")
+        for slug in ("d", "Demo", "-demo", "a" * 40, "de_mo"):
+            with self.subTest(slug=slug), self.assertRaises(StackTemplateError) as caught:
+                stack_template.validate_slug(template, slug)
+            self.assertEqual(caught.exception.code, "stack_slug_invalid")
+
+    def test_render_substitutes_only_allowed_fields(self):
+        template = stack_template.parse_template(_yaml(TEMPLATE))
+        ref = StackRef(ref="stack/demo", commit=COMMIT, ref_branch="stack/demo")
+        rendered = stack_template.render(template, slug="pr-12", ref=ref, ports={"mailpit": 18142},
+                                         source_root="/abs/src", template_path="/abs/hub/sandbox.hosting.yml")
+        env = rendered["environments"]["sandbox"]
+        self.assertEqual(rendered["project"], "xspeed-hub-pr-12")
+        self.assertEqual(env["host"]["primary"], "hub-pr-12.example.test")
+        self.assertEqual(env["host"]["aliases"][1]["hostname"], "renderer-pr-12.example.test")
+        self.assertEqual(env["deploy"]["allowed_branches"], ["stack/demo"])
+        self.assertEqual(env["secrets"]["values"]["MAILPIT_PORT"], "18142")
+        self.assertEqual(env["secrets"]["generated"]["PG_PASSWORD"], "XSPEED_HUB_SBX_PR_12_PG_PASSWORD")
+        self.assertNotIn("stack", rendered)
+        self.assertEqual(rendered["source_root"], "/abs/src")
+        self.assertEqual(rendered["stack_instance"]["ports"], {"mailpit": 18142})
+        self.assertEqual(rendered["stack_instance"]["commit"], COMMIT)
+
+    def test_detached_commit_cannot_fill_ref_branch(self):
+        template = stack_template.parse_template(_yaml(TEMPLATE))
+        ref = StackRef(ref=COMMIT, commit=COMMIT, ref_branch="")
+        with self.assertRaises(StackTemplateError) as caught:
+            stack_template.render(template, slug="demo", ref=ref, ports={"mailpit": 18142},
+                                  source_root="/abs", template_path="/abs/t.yml")
+        self.assertEqual(caught.exception.code, "stack_branch_unavailable")
+
+    def test_source_root_follows_template_location(self):
+        data = _yaml(TEMPLATE)
+        data["source_root"] = ".."
+        template = stack_template.parse_template(data)
+        self.assertEqual(str(stack_template.template_source_root(template, "config/sandbox.hosting.yml")), ".")
+        with self.assertRaises(StackTemplateError):
+            stack_template.template_source_root(template, "sandbox.hosting.yml")
+
+
+class BranchPolicyTests(unittest.TestCase):
+    def test_globs_exact_names_and_star(self):
+        allowed = stack_template.branch_allowed
+        self.assertTrue(allowed("feat/x", ["feat/*"]))
+        self.assertFalse(allowed("main", ["feat/*"]))
+        self.assertTrue(allowed("main", ["main"]))
+        self.assertTrue(allowed("anything", ["*"]))
+        self.assertTrue(allowed("", ["*"]))
+        self.assertFalse(allowed("", ["feat/*", "main"]))
+        self.assertFalse(allowed("Feat/x", ["feat/*"]))
+
+    def _validated(self, stack, allowed):
+        return {"project_root": "/src", "environment": "sandbox", "stack": stack,
+                "deploy": {"allowed_branches": allowed, "require_clean": False}}
+
+    def test_apply_source_uses_stack_ref_branch_on_detached_worktree(self):
+        stack = {"commit": COMMIT, "ref_branch": "stack/demo"}
+        with patch.object(hosting_cmd.remote, "current_branch", return_value=None) as current, \
+                patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=COMMIT):
+            branch = hosting_cmd._validate_apply_source(self._validated(stack, ["stack/*"]))
+        self.assertEqual(branch, "stack/demo")
+        current.assert_called_once_with("/src", allow_detached=True)
+
+    def test_apply_source_refuses_detached_head_at_another_commit(self):
+        stack = {"commit": COMMIT, "ref_branch": "stack/demo"}
+        with patch.object(hosting_cmd.remote, "current_branch", return_value=None), \
+                patch.object(hosting_cmd, "_resolve_host_source_commit", return_value="b" * 40):
+            with self.assertRaises(hosting.HostingRefusal) as caught:
+                hosting_cmd._validate_apply_source(self._validated(stack, ["*"]))
+        self.assertEqual(caught.exception.code, "stack_source_mismatch")
+
+    def test_detached_stack_commit_needs_star(self):
+        stack = {"commit": COMMIT, "ref_branch": ""}
+        with patch.object(hosting_cmd.remote, "current_branch", return_value=None), \
+                patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=COMMIT):
+            self.assertEqual(hosting_cmd._validate_apply_source(self._validated(stack, ["*"])), "")
+            with self.assertRaisesRegex(hosting.HostingError, "detached commit"):
+                hosting_cmd._validate_apply_source(self._validated(stack, ["feat/*"]))
+
+    def test_plain_manifest_branch_glob(self):
+        with patch.object(hosting_cmd.remote, "current_branch", return_value="feat/one"):
+            self.assertEqual(hosting_cmd._validate_apply_source(self._validated(None, ["feat/*"])),
+                             "feat/one")
+
+
+class PortAllocationTests(unittest.TestCase):
+    def allocate(self, **overrides):
+        options = dict(remote_name="r", slug="demo", names=("mailpit",), existing={}, pins={},
+                       other_stacks={}, reserved=set(), bound={},
+                       own_compose_project="sandbox-host-xspeed-hub-demo-sandbox")
+        options.update(overrides)
+        return stack_registry.allocate_ports(**options)
+
+    def test_allocates_deterministically_in_range(self):
+        first = self.allocate()["mailpit"]
+        self.assertIn(first, stack_registry.STACK_PORT_RANGE)
+        self.assertEqual(self.allocate()["mailpit"], first)
+
+    def test_skips_other_stacks_reserved_and_foreign_bound_ports(self):
+        first = self.allocate()["mailpit"]
+        taken = {first: "other"}
+        second = self.allocate(other_stacks=taken)["mailpit"]
+        self.assertNotEqual(second, first)
+        self.assertNotEqual(self.allocate(reserved={first})["mailpit"], first)
+        self.assertNotEqual(self.allocate(bound={first: set()})["mailpit"], first)
+
+    def test_own_binding_and_recorded_port_are_kept(self):
+        own = {18150: {"sandbox-host-xspeed-hub-demo-sandbox"}}
+        self.assertEqual(self.allocate(existing={"mailpit": 18150}, bound=own)["mailpit"], 18150)
+
+    def test_pins(self):
+        self.assertEqual(self.allocate(pins={"mailpit": 8025})["mailpit"], 8025)
+        for overrides in ({"other_stacks": {8025: "pr-1"}},
+                          {"bound": {8025: {"another-project"}}},
+                          {"bound": {8025: set()}}):
+            with self.subTest(overrides=overrides), self.assertRaises(stack_registry.StackRegistryError) as caught:
+                self.allocate(pins={"mailpit": 8025}, **overrides)
+            self.assertEqual(caught.exception.code, "stack_port_unavailable")
+
+    def test_recorded_port_taken_by_foreign_process_is_refused(self):
+        with self.assertRaises(stack_registry.StackRegistryError):
+            self.allocate(existing={"mailpit": 18150}, bound={18150: set()})
+
+    def test_exhausted_range(self):
+        everything = {port: "x" for port in stack_registry.STACK_PORT_RANGE}
+        with self.assertRaisesRegex(stack_registry.StackRegistryError, "no free stack port"):
+            self.allocate(other_stacks=everything)
+
+    def test_parse_pins(self):
+        self.assertEqual(stack_registry.parse_pins(["mailpit=8025"], ("mailpit",)), {"mailpit": 8025})
+        for values in (["mailpit"], ["smtp=1025"], ["mailpit=80"], ["mailpit=1", "mailpit=2"]):
+            with self.subTest(values=values), self.assertRaises(stack_registry.StackRegistryError):
+                stack_registry.parse_pins(values, ("mailpit",))
+
+    def test_web_loopback_allocation_skips_stack_range(self):
+        key = next(f"r/p{index}/e" for index in range(10_000)
+                   if 100 <= int(hashlib.sha256(f"r/p{index}/e".encode()).hexdigest()[:8], 16) % 1000 < 200)
+        port = hosting.allocate_loopback_port({"version": 1, "hosts": {}}, key)
+        self.assertNotIn(port, range(hosting.STACK_PORT_START, hosting.STACK_PORT_END))
+        recorded = {"version": 1, "hosts": {key: {"loopback_port": 18150}}}
+        self.assertEqual(hosting.allocate_loopback_port(recorded, key), 18150)
+
+    def test_parse_port_probe(self):
+        output = ("--listen--\n127.0.0.1:18150\n[::]:22\n*:443\n--docker--\n"
+                  "sandbox-host-a-b|127.0.0.1:18150->8025/tcp\n|0.0.0.0:9000->9000/tcp\n")
+        bound = host_stack.parse_port_probe(output)
+        self.assertEqual(bound[18150], {"sandbox-host-a-b"})
+        self.assertEqual(bound[22], set())
+        self.assertEqual(bound[9000], {"a non-Compose container"})
+
+
+class HostnameOwnershipTests(unittest.TestCase):
+    STATE = {"version": 1, "hosts": {
+        "r/alpha/production": {"hostnames": ["hub-a.example.test"]},
+        "r/beta/production": {"records": [{"applied": {"name": "beta.example.test"}}],
+                              "dns_coverage": {"hostname": "cov.example.test"}},
+        "other/gamma/production": {"hostnames": ["hub-g.example.test"]},
+    }}
+
+    def test_other_project_on_same_remote_is_refused(self):
+        for hostname, owner in (("hub-a.example.test", "alpha"), ("beta.example.test", "beta"),
+                                ("COV.example.test.", "beta")):
+            with self.subTest(hostname=hostname), self.assertRaises(hostname_ownership.HostnameOwnedError) as caught:
+                hostname_ownership.assert_available(self.STATE, "r", "new", [hostname])
+            self.assertEqual(caught.exception.code, "hostname_owned_by_other_project")
+            self.assertIn(owner, str(caught.exception))
+
+    def test_same_project_and_other_remote_pass(self):
+        hostname_ownership.assert_available(self.STATE, "r", "alpha", ["hub-a.example.test"])
+        hostname_ownership.assert_available(self.STATE, "r", "new", ["hub-g.example.test"])
+
+    def test_stack_records_count_as_holdings(self):
+        stacks = [{"remote": "r", "project": "xspeed-hub-pr-1", "hostnames": ["hub-pr-1.example.test"]}]
+        with self.assertRaises(hostname_ownership.HostnameOwnedError):
+            hostname_ownership.assert_available({"hosts": {}}, "r", "new", ["hub-pr-1.example.test"], stacks)
+
+
+class RenderedManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = _Runtime(self)
+        self.hub = self.runtime.checkout()
+        self.template = stack_template.parse_template(_yaml(TEMPLATE))
+        self.ref = StackRef(ref="stack/demo", commit=_git(self.hub, "rev-parse", "HEAD"), ref_branch="stack/demo")
+
+    def _render(self, source_root: Path) -> dict:
+        return stack_template.render(self.template, slug="demo", ref=self.ref, ports={"mailpit": 18142},
+                                     source_root=source_root, template_path=self.hub / "sandbox.hosting.yml")
+
+    def _write(self, rendered: dict, path: Path) -> Path:
+        import yaml
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(rendered, sort_keys=False))
+        return path
+
+    def test_rendered_manifest_is_valid_only_at_its_runtime_path(self):
+        rendered = self._render(self.hub)
+        target = self._write(rendered, self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml")
+        validated = hosting.validate_manifest(target)
+        self.assertEqual(validated["project"], "xspeed-hub-demo")
+        self.assertEqual(validated["source_root"], str(self.hub.resolve()))
+        self.assertEqual(validated["stack"]["ref_branch"], "stack/demo")
+        self.assertEqual(validated["secrets"]["values"]["MAILPIT_PORT"], "18142")
+        copy = self._write(rendered, self.runtime.base / "copy" / "sandbox.hosting.yml")
+        with self.assertRaisesRegex(hosting.HostingRefusal, "runtime path"):
+            hosting.validate_manifest(copy)
+
+    def test_rendered_source_root_must_be_a_checkout(self):
+        loose = self.runtime.base / "loose"
+        loose.mkdir()
+        (loose / "compose.yml").write_text(COMPOSE)
+        target = self._write(self._render(loose), self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml")
+        with self.assertRaisesRegex(hosting.HostingError, "Git checkout"):
+            hosting.validate_manifest(target)
+
+    def test_env_file_reaches_compose_ports(self):
+        target = self._write(self._render(self.hub), self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml")
+        validated = hosting.validate_manifest(target)
+        env_text = hosting.render_env_file(
+            validated, {"XSPEED_HUB_SBX_DEMO_PG_PASSWORD": "synthetic-value"})
+        self.assertIn("MAILPIT_PORT=18142\n", env_text)
+        env_path = self.runtime.base / "environment.env"
+        env_path.write_text(env_text)
+        docker = shutil.which("docker")
+        if not docker:
+            self.skipTest("docker is not installed; env-file content asserted above")
+        result = run_test_process(
+            (docker, "compose", "-p", "stackcheck", "--env-file", str(env_path),
+             "-f", str(self.hub / "compose.yml"), "config", "--format", "json"),
+            env={"HOME": str(self.runtime.base), "PATH": os.path.dirname(docker)},
+            capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            self.skipTest("docker compose config is unavailable here")
+        import json
+        ports = json.loads(result.stdout)["services"]["mailpit"]["ports"]
+        self.assertEqual(str(ports[0]["published"]), "18142")
+        self.assertEqual(ports[0]["host_ip"], "127.0.0.1")
+
+
+class StackCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = _Runtime(self)
+        self.hub = self.runtime.checkout()
+        self.head = _git(self.hub, "rev-parse", "HEAD")
+        self.entry = {"name": "r", "front_door": "nginx"}
+        for target, value in ((host_stack.remote, "get_remote"),):
+            patcher = patch.object(target, value, return_value=self.entry)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.probe = patch.object(host_stack, "probe_ports", return_value={})
+        self.probe.start()
+        self.addCleanup(self.probe.stop)
+        state = patch.object(host_stack.hosting, "load_host_state",
+                             return_value={"version": 1, "hosts": {}})
+        state.start()
+        self.addCleanup(state.stop)
+        secrets_status = patch.object(hosting_cmd, "_secret_status",
+                                      return_value=({"XSPEED_HUB_SBX_DEMO_PG_PASSWORD": "x"}, []))
+        secrets_status.start()
+        self.addCleanup(secrets_status.stop)
+
+    def args(self, action, **values):
+        base = dict(stack_action=action, template=str(self.hub / "sandbox.hosting.yml"), name="demo",
+                    ref="stack/demo", port=None, remote="r", plan=False, confirm=False, json=True,
+                    environment=None, request_id=None, generate_secrets=False, lock_wait=600)
+        base.update(values)
+        return SimpleNamespace(**base)
+
+    def test_resolve_ref_kinds(self):
+        self.assertEqual(host_stack.resolve_ref(self.hub, "stack/demo").ref_branch, "stack/demo")
+        self.assertEqual(host_stack.resolve_ref(self.hub, None).ref_branch, "main")
+        detached = host_stack.resolve_ref(self.hub, self.head[:10])
+        self.assertEqual((detached.commit, detached.ref_branch), (self.head, ""))
+        _git(self.hub, "update-ref", "refs/remotes/origin/feat/x", self.head)
+        self.assertEqual(host_stack.resolve_ref(self.hub, "origin/feat/x").ref_branch, "feat/x")
+        for ref in ("nosuch", "-x"):
+            with self.subTest(ref=ref), self.assertRaises(host_stack.StackCommandError) as caught:
+                host_stack.resolve_ref(self.hub, ref)
+            self.assertEqual(caught.exception.code, "stack_ref_unresolved")
+
+    def test_plan_changes_nothing(self):
+        before = _git(self.hub, "worktree", "list", "--porcelain")
+        result = host_stack._up(self.args("up", plan=True))
+        self.assertEqual(result["mode"], "plan")
+        self.assertEqual(result["project"], "xspeed-hub-demo")
+        self.assertIn(result["ports"]["mailpit"], stack_registry.STACK_PORT_RANGE)
+        self.assertEqual(result["commit"], self.head)
+        self.assertIn("job-start", result["submission"])
+        self.assertFalse((self.runtime.runtime / "stacks").exists())
+        self.assertEqual(_git(self.hub, "worktree", "list", "--porcelain"), before)
+
+    def test_up_without_mode_and_with_both_modes_is_refused(self):
+        for values in ({}, {"plan": True, "confirm": True}):
+            with self.subTest(values=values), self.assertRaises(host_stack.StackCommandError) as caught:
+                host_stack._up(self.args("up", **values))
+            self.assertEqual(caught.exception.code, "stack_confirmation_required")
+
+    def test_confirm_writes_manifest_worktree_record_and_submits_once(self):
+        with patch.object(host_stack, "_submit", return_value="job-1") as submit:
+            result = host_stack._up(self.args("up", confirm=True))
+        submit.assert_called_once()
+        argv = submit.call_args.args[0]
+        self.assertEqual(argv[1:3], ["job-start", "--local"])
+        self.assertEqual(argv[argv.index("--source-commit") + 1], self.head)
+        self.assertEqual(argv[argv.index("--") + 2:argv.index("--") + 4], ["host", "apply"])
+        manifest = self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml"
+        self.assertTrue(manifest.is_file())
+        worktree = Path(result["source_root"])
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(_git(worktree, "status", "--porcelain"), "")
+        record = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual(record["ports"], result["ports"])
+        self.assertEqual(record["last_apply"]["job_id"], "job-1")
+        # A second up reuses the port and replaces the earlier worktree.
+        with patch.object(host_stack, "job_view", return_value={"lifecycle": "failed"}), \
+                patch.object(host_stack, "_submit", return_value="job-2"):
+            again = host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(again["ports"], result["ports"])
+        self.assertFalse(worktree.exists())
+        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["worktrees"], [again["source_root"]])
+
+    def test_up_refused_while_previous_job_is_active(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            host_stack._up(self.args("up", confirm=True))
+        with patch.object(host_stack, "job_view", return_value={"lifecycle": "running"}), \
+                self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_apply_in_progress")
+
+    def test_failed_submission_keeps_ports(self):
+        failure = host_stack.StackCommandError("stack_submission_failed", "refused")
+        with patch.object(host_stack, "_submit", side_effect=failure), \
+                self.assertRaises(host_stack.StackCommandError):
+            host_stack._up(self.args("up", confirm=True))
+        record = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual(record["last_apply"]["status"], "submission_failed")
+        self.assertIn("mailpit", record["ports"])
+
+    def test_hostname_owned_by_other_project_refuses_before_any_change(self):
+        state = {"version": 1, "hosts": {"r/other/production": {"hostnames": ["admin-demo.example.test"]}}}
+        with patch.object(host_stack.hosting, "load_host_state", return_value=state), \
+                patch.object(host_stack, "_submit") as submit, \
+                self.assertRaises(hostname_ownership.HostnameOwnedError):
+            host_stack._up(self.args("up", confirm=True))
+        submit.assert_not_called()
+        self.assertFalse((self.runtime.runtime / "stacks" / "demo" / "source").exists())
+
+    def test_missing_generated_secret_needs_generate(self):
+        with patch.object(hosting_cmd, "_secret_status",
+                          return_value=({}, ["XSPEED_HUB_SBX_DEMO_PG_PASSWORD"])), \
+                self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_secrets_missing")
+        with patch.object(hosting_cmd, "_secret_status",
+                          return_value=({}, ["XSPEED_HUB_SBX_DEMO_PG_PASSWORD"])), \
+                patch.object(hosting_cmd.personal_secrets, "write_secret") as write, \
+                patch.object(hosting_cmd.personal_secrets, "generate_secret", return_value="generated"), \
+                patch.object(host_stack, "_submit", return_value="job-1"):
+            host_stack._up(self.args("up", confirm=True, generate_secrets=True))
+        write.assert_called_once_with("XSPEED_HUB_SBX_DEMO_PG_PASSWORD", "generated")
+
+    def test_list_and_down(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            created = host_stack._up(self.args("up", confirm=True))
+        listed = host_stack._list(self.args("list"))
+        self.assertEqual([item["slug"] for item in listed["stacks"]], ["demo"])
+        self.assertEqual(listed["stacks"][0]["ports"], created["ports"])
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._down(self.args("down"))
+        self.assertEqual(caught.exception.code, "stack_confirmation_required")
+        from sandbox.hosting import destroy
+        with patch.object(destroy, "execute", side_effect=destroy.DestroyError("boom", "remote_probe_failed")), \
+                self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._down(self.args("down", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_destroy_failed")
+        self.assertIn("r/demo", stack_registry.read()["stacks"])
+        with patch.object(destroy, "execute", return_value={"state": "destroyed"}) as execute:
+            down = host_stack._down(self.args("down", confirm=True))
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.args[2:4], ("xspeed-hub-demo", "sandbox"))
+        self.assertEqual(down["released_ports"], created["ports"])
+        self.assertNotIn("r/demo", stack_registry.read()["stacks"])
+        self.assertFalse(Path(created["source_root"]).exists())
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._down(self.args("down", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_not_found")
+
+    def test_slug_on_another_remote_is_refused(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            host_stack._up(self.args("up", confirm=True))
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", plan=True, remote="r2"))
+        self.assertEqual(caught.exception.code, "stack_slug_in_use")
+
+
+class HostDispatchTests(unittest.TestCase):
+    def test_stack_actions_dispatch_and_image_mixups_are_refused(self):
+        with patch("sandbox.commands.host_stack.cmd_host_stack") as handler:
+            hosting_cmd.cmd_host({}, SimpleNamespace(action="stack", image_action="list", remote="r", json=True))
+        self.assertEqual(handler.call_args.args[0].stack_action, "list")
+        for action, sub in (("image", "up"), ("stack", "status"), ("stack", None)):
+            with self.subTest(action=action, sub=sub), self.assertRaises(SystemExit):
+                hosting_cmd.cmd_host({}, SimpleNamespace(action=action, image_action=sub, remote="r", json=True))
+
+    def test_cli_parses_stack_up(self):
+        import json
+        import sys
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import sandbox.cli as cli
+        argv = ["sb", "host", "stack", "up", "--template", "/t/sandbox.hosting.yml", "--name", "demo",
+                "--ref", "stack/demo", "--port", "mailpit=8025", "--remote", "r", "--plan", "--json"]
+        seen = []
+        forbidden = AssertionError("compatibility writer reached host stack")
+        with patch.object(sys, "argv", argv), redirect_stdout(StringIO()), \
+                patch.object(cli, "load_config", return_value={}), \
+                patch.object(cli, "resolve_instances", return_value={}), \
+                patch.object(cli, "_cwd_instance", return_value=None), \
+                patch.object(cli, "_core", return_value=SimpleNamespace(registry_all=lambda: {})), \
+                patch("sandbox.commands.migrate.maybe_auto_migrate", side_effect=forbidden), \
+                patch("sandbox.commands.migrate.finalize_auto_migration", side_effect=forbidden), \
+                patch.object(cli, "write_compose_files", side_effect=forbidden), \
+                patch.object(cli, "write_env_for_compose", side_effect=forbidden), \
+                patch("sandbox.commands.host_stack.cmd_host_stack", side_effect=seen.append):
+            try:
+                cli.main()
+            except SystemExit as exc:
+                self.assertIn(exc.code, (0, None))
+        self.assertEqual(len(seen), 1)
+        args = seen[0]
+        self.assertEqual((args.action, args.stack_action, args.port, args.plan, args.name, args.ref),
+                         ("stack", "up", ["mailpit=8025"], True, "demo", "stack/demo"))
+
+if __name__ == "__main__":
+    unittest.main()

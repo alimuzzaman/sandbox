@@ -650,6 +650,15 @@ to `<remote $SANDBOX_HOME>/plugins-pro` and merges those slugs as bare paths int
 remote user-global catalog, so every instance on that host resolves them on demand.
 See `docs/remote-hosting.md` → "Pro plugins on the remote host".
 
+### Hosting stack templates
+
+A `sandbox.hosting.yml` with a top-level `stack:` block (`slug` pattern, `ports`
+names) is a template for `sb host stack up`; plain `sb host` commands refuse it with
+`stack_template_requires_stack_up`. Rendered stacks live on the controller under
+`$SANDBOX_HOME/runtime/stacks/` (`registry.json`, plus `<slug>/sandbox.hosting.yml` and
+`<slug>/source/` worktrees). `deploy.allowed_branches` accepts shell globs. See
+`docs/remote-hosting.md` → "Stack templates".
+
 If an on-demand local path disappears after provisioning, it remains registered
 so the install interception returns a clear local-source error. Sandbox never
 falls back to downloading that configured slug from the registry. Re-provisioning

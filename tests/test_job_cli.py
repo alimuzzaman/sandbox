@@ -312,6 +312,8 @@ class JobCliTests(unittest.TestCase):
         source = checkout / "stacks" / "wp-site"
         source.mkdir(parents=True)
         (base / "elsewhere").mkdir()
+        # A link inside the project that resolves outside it.
+        (checkout / "stacks" / "escape").symlink_to(base / "elsewhere", target_is_directory=True)
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)
 
@@ -344,7 +346,8 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(exact[0].source.identity, digest)
         same, _ = start(checkout, "--exact-project-dir")
         self.assertEqual(same[0].project_root, str(checkout))
-        for project_dir, kind in ((base / "elsewhere", "local"), (source, "remote")):
+        for project_dir, kind in ((base / "elsewhere", "local"), (source / ".." / ".." / "..", "local"),
+                                  (checkout / "stacks" / "escape", "local"), (source, "remote")):
             with self.subTest(project_dir=project_dir, kind=kind):
                 refused, errors = start(project_dir, "--exact-project-dir", kind=kind)
                 self.assertEqual(refused, [])

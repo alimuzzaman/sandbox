@@ -1495,7 +1495,7 @@ its existing `coverage_name_ineligible` refusal.
 **Branch globs.** `deploy.allowed_branches` entries are case-sensitive shell globs in
 every manifest: `feat/*` allows `feat/x`; exact names and `"*"` keep their meaning.
 
-### Running a command in a hosted service (`sb host exec`, spec 072)
+### Running a command in a hosted service (`sb host exec`, spec 074)
 
 ```bash
 <producer> | ./sb host exec --remote myvps --target hub-pr-12/sandbox --service hub \

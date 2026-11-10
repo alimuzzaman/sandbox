@@ -653,6 +653,26 @@ class AddTests(ServiceTestCase):
         self.assertEqual((result.ok, result.code), (False, m.PUBLIC_EXPOSED))
         self.assertNotIn("tailnet-" + FQDN, self.remote.blocks)
         self.assertIn(("remove_route", "tailnet-" + FQDN), self.remote.calls)
+        self.assertEqual(self.store.load()[FQDN].steps.get("server_block"), "removed")
+
+    def test_exposure_with_failed_removal_is_recorded_as_such(self):
+        self.public_leaf = LEAF_SHA
+
+        def failing_remove(entry, name):
+            raise FrontDoorError("front_door_reload_failed", "reload failed")
+        self.deps.remove_route = failing_remove
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, m.PUBLIC_EXPOSED))
+        self.assertIn("may still be exposed", result.error)
+        self.assertEqual(self.store.load()[FQDN].steps.get("server_block"), "remove_failed")
+
+    def test_exposure_after_renewal_removes_and_records(self):
+        self.assertTrue(self.add().ok)
+        self.public_leaf = LEAF_SHA
+        result = service.renew(self.ctx, self.deps, self.name, force=True)
+        self.assertEqual(result.results[0].code, m.PUBLIC_EXPOSED)
+        self.assertNotIn("tailnet-" + FQDN, self.remote.blocks)
+        self.assertEqual(self.store.load()[FQDN].steps.get("server_block"), "removed")
 
     def test_other_certificate_on_public_address_passes(self):
         self.public_leaf = "ff" * 32

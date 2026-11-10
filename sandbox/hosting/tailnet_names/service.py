@@ -217,29 +217,35 @@ def _gate(ctx: Context, deps: Deps, run: _Run, locks: tuple[str, ...]) -> None:
 
 
 def _verify(ctx: Context, deps: Deps, run: _Run, name: TailnetName,
-            expected_sha: str | None) -> bool:
-    """Run both probes; on exposure remove the block. Returns True when exposed."""
+            expected_sha: str | None) -> str | None:
+    """Run both probes; on exposure remove the block.
+
+    Returns None when not exposed, ``"removed"`` when the exposed block was
+    removed, or ``"remove_failed"`` when it may still be served.
+    """
     target = ctx.target
     run.add(tailnet_outcome(deps.probe(target.tailnet_ip, name.fqdn, send_request=True),
                             expected_sha))
     if target.public_ip is None:
         run.add(StepOutcome("verify_public", "not_run", PUBLIC_PROBE_UNAVAILABLE,
                             "no public IPv4 is known for this remote; pass --public-address"))
-        return False
+        return None
     outcome, exposed = public_outcome(
         deps.probe(target.public_ip, name.fqdn, send_request=False), expected_sha)
     if exposed:
-        detail = outcome.detail + "; the block was removed"
+        removal, detail = "removed", outcome.detail + "; the block was removed"
         try:
             deps.remove_route(target.entry, name.route_name)
         except FrontDoorError as exc:
-            detail = outcome.detail + f"; removing the block failed: {exc}"
+            removal = "remove_failed"
+            detail = (outcome.detail + "; removing the block FAILED, so the name may still be "
+                      f"exposed: run `sb host tailnet-name remove` ({exc})")
         outcome = replace(outcome, detail=detail)
         run.add(outcome)
         run.result.code, run.result.error = PUBLIC_EXPOSED, detail
-        return True
+        return removal
     run.add(outcome)
-    return False
+    return None
 
 
 class _Recorder:
@@ -382,9 +388,9 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                 run.done("server_block", "tested and reloaded")
 
             # Verification (FR-017, FR-018)
-            exposed = _verify(ctx, deps, run, name, expected)
-            if exposed:
-                rec.save("server_block", "removed")
+            removal = _verify(ctx, deps, run, name, expected)
+            if removal:
+                rec.save("server_block", removal)
             rec.save("verify", "done" if run.result.ok else "failed",
                      state="published" if run.result.ok else "publishing")
             run.result.record = _record_view(rec.record)
@@ -447,7 +453,9 @@ def _renew_one(ctx: Context, deps: Deps, name: TailnetName, row: RemoteInventory
             name.fqdn, name.zone, row.upstream or "", ctx.target.tailnet_ip, state="published")
         rec = _Recorder(store, record, deps.now)
         expected = _issue_and_install(ctx, deps, run, rec, name, lego, reload=True)
-        _verify(ctx, deps, run, name, expected)
+        removal = _verify(ctx, deps, run, name, expected)
+        if removal:
+            rec.save("server_block", removal)
         rec.save("verify", "done" if run.result.ok else "failed")
         run.result.record = _record_view(rec.record)
     except _Stop:

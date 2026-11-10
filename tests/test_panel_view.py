@@ -5,8 +5,11 @@ import json
 import unittest
 from unittest import mock
 
+from sandbox.hosting import panel_lifetime as pl
 from sandbox.hosting import panel_records as pr
 from sandbox.hosting import panel_view as pv
+from sandbox.hosting.lifetime import hoststore as hs
+from tests.test_target_lifetime import NOW, OWNER_B, stack_record
 
 COMMIT = "b" * 40
 SECRET = "planted-secret-value-9876543210"
@@ -114,6 +117,71 @@ class StackViewTest(unittest.TestCase):
             return {host: {"status": "up", "http_status": 200, "checked_at": 5} for host, _ in targets}
         view = pv.build_view([server([summary()])], health=lookup)
         self.assertEqual({row["health"]["status"] for row in view["stacks"][0]["servers"]}, {"up"})
+
+
+class LifetimeViewTest(unittest.TestCase):
+    """Spec 076 follow-up: each card carries its spec 077 lifetime; one ordered list of all of them."""
+
+    def listing(self, *records):
+        return pl.listing({record["compose_project"]: pl.project(record, NOW) for record in records})
+
+    def test_cards_carry_lifetime_and_the_list_is_ordered(self):
+        demo = summary()  # compose project sandbox-host-xspeed-hub-demo-staging
+        demo_record = stack_record("demo", project="xspeed-hub-demo", expires=hs.to_rfc3339(NOW + 7200))
+        demo_record.update(environment="staging", compose_project="sandbox-host-xspeed-hub-demo-staging")
+        orphan = stack_record("gone", copy_id="0000000b", owner=OWNER_B, project="hub-gone",
+                              expires=hs.to_rfc3339(NOW - 60))
+        plain = summary("marketing", "production", slug=None, routes=[
+            {"hostname": "www.example.test", "mode": "serve", "primary": True}])
+        legacy_record = stack_record("wp-test-stacks", project="xspeed-wp", expires=hs.to_rfc3339(NOW + 99999))
+        legacy_record.update(environment="test-stacks", compose_project="sandbox-host-xspeed-wp-test-stacks")
+        view = pv.build_view(
+            [server([demo, plain], legacy=[{"project": "xspeed-wp", "environment": "test-stacks"}])],
+            lifetimes={"this-server": self.listing(demo_record, orphan, legacy_record)}, clock=lambda: NOW)
+        stack = view["stacks"][0]
+        self.assertEqual(stack["compose_project"], "sandbox-host-xspeed-hub-demo-staging")
+        self.assertEqual((stack["lifetime"]["lifetime"], stack["lifetime"]["seconds_left"]), ("temporary", 7200))
+        by_project = {target["project"]: target for target in view["targets"]}
+        self.assertEqual(by_project["marketing"]["lifetime"]["reason"], "no_record")
+        self.assertEqual(by_project["xspeed-wp"]["stack_slug"], "wp-test-stacks")
+        self.assertIsNone(by_project["marketing"]["stack_slug"])
+        rows = view["lifetimes"]
+        self.assertEqual([(row["name"], row["card"]) for row in rows], [
+            ("gone", False), ("demo", True), ("wp-test-stacks", True), ("marketing · production", True)])
+        self.assertEqual(rows[0]["owner"], "bob")
+        self.assertTrue(rows[0]["reap_eligible"])
+        self.assertFalse(rows[-1]["reap_eligible"])
+        self.assertEqual({row["source"] for row in rows}, {"this-server"})
+
+    def test_controller_lifetimes_are_per_remote(self):
+        stack_data = {"stacks": {"xspeed-dev/demo": {
+            "remote": "xspeed-dev", "slug": "demo", "project": "hub-demo", "environment": "sandbox",
+            "ref": "stack/demo", "ref_branch": "stack/demo", "commit": COMMIT, "hostnames": ["hub-demo.example.test"]}}}
+        records = pv.controller_records(stack_data, {"hosts": {}}, lambda record: {})
+        record = stack_record(expires=hs.to_rfc3339(NOW + 60))
+        view = pv.build_view([records], lifetimes={"xspeed-dev": self.listing(record)}, clock=lambda: NOW)
+        self.assertEqual(view["stacks"][0]["lifetime"]["owner"], "alice")
+        self.assertEqual(view["lifetimes"][0]["remote"], "xspeed-dev")
+        loading = pv.build_view([records], lifetimes={}, clock=lambda: NOW)
+        self.assertEqual((loading["stacks"][0]["lifetime"]["classification"],
+                          loading["stacks"][0]["lifetime"]["reason"]), ("unknown", "loading"))
+        down = pv.build_view([records], lifetimes={"xspeed-dev": pl.unavailable("lifetime_unavailable:xspeed-dev")},
+                             clock=lambda: NOW)
+        self.assertIn("lifetime_unavailable:xspeed-dev", down["partial_reasons"])
+        self.assertEqual(down["stacks"][0]["lifetime"]["reason"], "unavailable")
+
+    def test_no_lifetimes_wired_keeps_cards_unknown_never_reapable(self):
+        view = pv.build_view([server([summary()])])
+        self.assertEqual(view["stacks"][0]["lifetime"]["classification"], "unknown")
+        self.assertFalse(view["lifetimes"][0]["reap_eligible"])
+
+    def test_unverified_apply_is_carried_with_its_reason(self):
+        target = summary(status="succeeded")
+        target["last_apply"] = {**target["last_apply"], "status": "unverified", "reason": "required_evidence_missing"}
+        view = pv.build_view([server([target])])
+        self.assertEqual((view["stacks"][0]["last_apply"]["status"], view["stacks"][0]["last_apply"]["reason"]),
+                         ("unverified", "required_evidence_missing"))
+        self.assertEqual(view["stacks"][0]["servers"][0]["state"], "serving")
 
 
 class SiteRowsTest(unittest.TestCase):

@@ -88,3 +88,21 @@ T002 → T004/T005 → (T006–T011) → (T012–T017) → (T018–T020) → (T0
 ## Implementation strategy
 
 MVP is US1 plus the summary write, which already answers the owner's "find the servers" on the server. US2 adds the WordPress row. US3 to US5 complete the details. All of it ships in one release cycle (one phase).
+
+## Phase 10: Convergence
+
+Follow-up 2026-11-10 (US6-US8). Types first, then tests, then code. Stay off `sandbox/commands/host_stack.py`, `sandbox/commands/hosting.py`, `sandbox/resources/*`, `tests/test_lifecycle.py`, `tests/test_remote_hosting_images.py` and `tests/test_server_transport.py`.
+
+- [x] T033 Types: `LifetimeView`, `LifetimeRow` and the `ApplyStatus` value `unverified` plus `LastApply.reason` in sandbox/hosting/panel_lifetime.py and sandbox/hosting/panel_records.py, plus the mirror TS types in src/web/src/types.ts, per FR-017/FR-026 and plan data model (missing)
+- [x] T034 Tests: tests/test_panel_lifetime.py covers projection, unclassified-protected for missing, malformed, truncated, oversized and symlinked records, ordering, copies as separate rows, `Store.peek` writing nothing and taking no lock, and controller list parsing and cache bounds. Also tests/test_panel_view.py (lifetimes joined, a record with no card listed, stack fallback), per FR-017 to FR-021 and SC-006 (missing)
+- [x] T035 Tests: tests/test_panel_records.py covers apply outcome from delivery (unverified with reason; failed only when execution failed; legacy bool), and tests/test_host_inventory_hosted.py covers lifetime in rows, stack_slug fallback and last_apply_reason, per FR-022/FR-026 (missing)
+- [x] T036 Tests: src/web/tests/hostlabels.test.ts covers apply labels, time left, lifetime badges, bulk-action visibility and sidebar counts, run from tests/test_web_poller.py, per FR-023/FR-024/FR-027 (missing)
+- [x] T037 `Store.peek(now)` in sandbox/hosting/lifetime/hoststore.py: lock-free, no writes, no symlinks, bounded, Python 3.8 stdlib, per FR-019 and plan R8 (missing)
+- [x] T038 sandbox/hosting/panel_lifetime.py: projection through `hoststore.parse_record` and `view`, ordering, the server reader, and `LifetimeCache` for `sb host stack list --remote R --json`, per FR-018 to FR-021 and plan R9 (missing)
+- [x] T039 sandbox/hosting/panel_view.py and sandbox/commands/ui_dash.py: per-card `lifetime`, `compose_project`, `stack_slug` and the top-level `lifetimes`, wired for both sources, per FR-017/FR-021 (missing)
+- [x] T040 sandbox/hosting/panel_records.py `SummaryRecorder` outcome from `result["delivery"]` (plan R10), and sandbox/remote_runtime/host_inventory.py rows with lifetime, stack fallback and reason, per FR-022/FR-026 (missing)
+- [x] T041 Web: hosting.ts (Lifetimes list, card lifetime line, hosted-targets columns, apply labels, CPU label), hosts.ts (landing page), remote.ts (Sandbox dev instances), render.ts and main.ts (sidebar counts, bulk buttons, local-host signature), ui/hostlabels.ts, plus the sidebar slot in sandbox/core/_paths.py and src/web/index.html, per FR-022 to FR-025 and FR-027 (missing)
+- [x] T042 Rebuild config/sandbox-web.js and config/sandbox-web.css with scripts/build-web-js.sh and scripts/build-web-css.sh, per plan (missing)
+- [x] T043 Docs: the panel section in docs/remote-hosting.md and README, per FR-016 (missing)
+- [x] T044 Run the new and touched test modules on xspeed-dev in Haiku helpers and compare failures with an origin/latest baseline; visual check against a fixture SANDBOX_HOME with downscaled screenshots of /hosting, /host/local and a host resource page under /Users/alim/Sites/git/.scratch/sandbox/panel-lifetime/, per SC-006 to SC-008 (missing)
+- [x] T045 Luna review of the final head; fix or answer every finding, per FR-013/FR-028 (missing)

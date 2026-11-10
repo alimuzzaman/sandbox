@@ -95,3 +95,53 @@ tests/test_web_hosting_api.py, tests/test_deploy_stack_link.py
 ## Complexity Tracking
 
 None. No principle is violated.
+
+## Follow-up 2026-11-10: lifetimes and owner screenshots (User Stories 6-8, FR-017 to FR-028)
+
+Branch `feat/panel-lifetime`. Same read-only panel, three additions:
+
+- **Lifetimes (US6).** Each stack and hosted target carries a `lifetime` view built from spec 077's record. On a server the panel reads the records through a new lock-free, bounded `Store.peek(now)` in `hoststore.py`. On a controller it runs `sb host stack list --remote R --json` per remote in a background cache. Both sources go through `hoststore.parse_record` and `hoststore.view`, so validation and eligibility stay in one place (CLAUDE.md gotcha 35). A new `panel_lifetime.py` only projects the parsed record onto the panel's allow-list and orders the rows. `GET /api/hosting` gains a top-level `lifetimes` list in that order. Host inventory rows gain the same `lifetime` view, read by the remote itself, so host pages show it on a server and on a controller.
+- **Landing page and sidebar (US7).** These are TypeScript only. `localHostView` leads with hosted apps when the host reports them, and its sections are labelled "Sandbox dev instances" and "Hosted apps (sb host apply / stacks)". The empty-state "New instance" prompt and the footer "Start all"/"Stop all" are hidden when there are no dev instances. The sidebar adds a hosted app count. The decisions sit in an import-free `src/web/src/ui/hostlabels.ts`, so `node --test` covers them.
+- **Hosted targets table (US8).**
+  - `SummaryRecorder` takes the outcome from the delivery record the apply returns. `LastApply` gains the status `unverified` and a `reason`.
+  - Rows without a summary read "applied before tracking".
+  - The inventory's `stack_slug` falls back to the lifetime record's slug.
+  - The remote page's instance table is retitled "Sandbox dev instances".
+  - CPU is labelled a point-in-time sample.
+
+### Technical context (delta)
+
+- No new dependency.
+- The controller's lifetime fetch is a subprocess of the checkout's own `sb` entry, with a 90 s timeout, a 60 s cache, one fetch per remote in flight, at most 16 remotes and 2 workers. The page never waits for it.
+- The server read is bounded: 500 files, 256 KiB each, no symlinks, no lock, no write.
+
+### Constitution check (delta)
+
+| Principle | Gate | Status |
+|---|---|---|
+| II. Registry is the source of truth | The lifetime records are read through the store module that owns them. The panel never reads registry JSON directly. | Pass |
+| III. Modular package | New logic is in `sandbox/hosting/panel_lifetime.py`. `ui_dash.py` only wires the cache. | Pass |
+| IV. Live-stack proof | Unit tests plus the panel against a fixture `SANDBOX_HOME`, with screenshots. The xspeed-dev deploy is the orchestrator's. | Pass, with the same stated limit |
+| V. Docs with code | `docs/remote-hosting.md` (panel section) and README change in the same commit. | Pass |
+| VI. Parity before removal | Nothing removed. The "Hosted instances" table is retitled, not removed. | Pass |
+
+### Source code (delta)
+
+```text
+sandbox/hosting/lifetime/hoststore.py   # Store.peek(now): read-only bounded listing (new method)
+sandbox/hosting/panel_lifetime.py       # LifetimeView, projection, ordering, server read, controller cache (new)
+sandbox/hosting/panel_records.py        # LastApply status "unverified" + reason; SummaryRecorder outcome from delivery
+sandbox/hosting/panel_view.py           # lifetime per stack/target, top-level lifetimes, stack fallback
+sandbox/remote_runtime/host_inventory.py # hosted rows: lifetime, stack_slug fallback, last_apply_reason
+sandbox/commands/ui_dash.py             # wire server lifetimes and the controller cache into _hosting_view
+sandbox/core/_paths.py, src/web/index.html # sidebar hosted count slot
+src/web/src/{types,render,main}.ts, pages/{hosting,hosts,remote}.ts, ui/hostlabels.ts
+config/sandbox-web.js, config/sandbox-web.css (rebuilt)
+tests/test_panel_lifetime.py (new), tests/test_panel_records.py, tests/test_panel_view.py,
+tests/test_host_inventory_hosted.py, tests/test_web_hosting_api.py, tests/test_web_poller.py,
+src/web/tests/hostlabels.test.ts (new)
+```
+
+### Files this branch stays off
+
+These are owned by parallel threads: `sandbox/commands/host_stack.py`, the stack and hosting job paths (`sandbox/commands/hosting.py` included), `sandbox/resources/*`, `tests/test_lifecycle.py`, `tests/test_remote_hosting_images.py` and `tests/test_server_transport.py`. That is why the apply outcome is derived inside `SummaryRecorder.run()` from the result the apply already returns, and the call at `hosting.py` that passes a bool is left alone. `host_stack.py` is only invoked as the `sb host stack list` command, never imported for this.

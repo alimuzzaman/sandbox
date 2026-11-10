@@ -6,7 +6,10 @@ import { esc } from "../dom";
 import { store } from "../state";
 import { theme } from "../theme";
 import { hostingAnchor, hostingTargetPath } from "../router";
-import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget } from "../types";
+import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget, LifetimeRow, LifetimeView } from "../types";
+import {
+  applyLabel, compareLifetimes, expiryTone, lifetimeLabel, reapLabel, timeLeft, CPU_LABEL, CPU_TITLE, type Tone,
+} from "../ui/hostlabels";
 
 const when = (epoch: number | null | undefined): string =>
   epoch ? new Date(epoch * 1000).toLocaleString() : "unknown";
@@ -32,11 +35,19 @@ const ORIGIN: Record<HostingServer["origin"], string> = {
   route: "route", linked: "WordPress · linked", matched_by_name: "WordPress · matched by name",
 };
 
-const APPLY_CLASS: Record<string, string> = {
-  succeeded: "text-emerald-700 dark:text-emerald-300",
-  failed: "text-rose-700 dark:text-rose-300",
-  applying: "text-amber-700 dark:text-amber-300",
+const TONE_TEXT: Record<Tone, string> = {
+  good: "text-emerald-700 dark:text-emerald-300",
+  warn: "text-amber-700 dark:text-amber-300",
+  bad: "text-rose-700 dark:text-rose-300",
+  quiet: "text-neutral-500 dark:text-neutral-400",
 };
+const TONE_BADGE: Record<Tone, string> = {
+  good: "bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
+  warn: "bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-100",
+  bad: "bg-rose-50 text-rose-800 dark:bg-rose-950 dark:text-rose-200",
+  quiet: "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300",
+};
+const nowSeconds = (): number => Math.floor(Date.now() / 1000);
 
 function badge(text: string, cls: string, title = ""): string {
   return `<span ${title ? `title="${esc(title)}"` : ""} class="inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] font-medium ${cls}">${esc(text)}</span>`;
@@ -76,12 +87,78 @@ function serversTable(rows: HostingServer[], empty: string): string {
     .map(label => `<th scope="col" class="px-3 pb-2 pt-1 ${theme.label}">${label}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
-function applyLine(apply: HostingApply | null): string {
-  if (!apply) return `<span class="${theme.quiet}">not recorded</span>`;
+function applyLine(apply: HostingApply | null, commit: string | null = null): string {
+  if (!apply) {
+    const label = applyLabel(null, null, false);
+    return `<span class="${TONE_TEXT[label.tone]}">${esc(label.text)}</span>${commit
+      ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">commit <code title="${esc(commit)}">${esc(short(commit))}</code></div>` : ""}`;
+  }
+  const label = applyLabel(apply.status, apply.reason, true);
   const time = apply.finished_at || apply.started_at;
-  return `<span class="font-semibold ${APPLY_CLASS[apply.status] || ""}">${esc(apply.status)}</span>
+  return `<span class="font-semibold ${TONE_TEXT[label.tone]}">${esc(label.text)}</span>
     <span class="${theme.quiet}"> · ${esc(when(time))}</span>${apply.request_id
       ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">request <code>${esc(apply.request_id)}</code></div>` : ""}`;
+}
+
+// ---- lifetimes (spec 077, read-only) ----
+
+function lifetimeBadge(view: LifetimeView | undefined): string {
+  const tone: Tone = !view || view.classification !== "recorded" ? "quiet"
+    : view.lifetime === "temporary" ? expiryTone(view, nowSeconds()) === "quiet" ? "warn" : expiryTone(view, nowSeconds())
+    : "good";
+  const title = view?.classification === "unclassified"
+    ? (view.reason === "invalid" ? "The lifetime record could not be read or is invalid; server cleanup never removes it."
+      : "No lifetime record; server cleanup never removes it.")
+    : view?.classification === "unknown" ? "This source's lifetime records could not be read yet." : "";
+  return badge(lifetimeLabel(view), TONE_BADGE[tone], title);
+}
+
+function expiryCell(view: LifetimeView | undefined): string {
+  if (!view || view.classification !== "recorded" || view.expires_at == null)
+    return `<span class="${theme.quiet}">—</span>`;
+  const tone = expiryTone(view, nowSeconds());
+  return `<span title="${esc(when(view.expires_at))}" class="${TONE_TEXT[tone]}">${esc(timeLeft(view.expires_at, nowSeconds()))}</span>
+    <div class="mt-0.5 text-[11px] ${theme.quiet}">${esc(when(view.expires_at))}</div>`;
+}
+
+function reapCell(view: LifetimeView | undefined): string {
+  const text = reapLabel(view);
+  return text.startsWith("reapable") ? badge(text, TONE_BADGE.bad) : `<span class="${theme.quiet}">${esc(text)}</span>`;
+}
+
+function lifetimeLine(view: LifetimeView): string {
+  const parts = [view.owner ? `owner ${view.owner}` : "", view.state && view.state !== "active" ? view.state : "",
+    view.extended_count ? `extended ${view.extended_count}×` : ""].filter(Boolean).join(" · ");
+  const left = view.classification === "recorded" && view.expires_at != null
+    ? ` <span class="${TONE_TEXT[expiryTone(view, nowSeconds())]}">${esc(timeLeft(view.expires_at, nowSeconds()))}</span>` : "";
+  return `<div class="mt-1.5 flex flex-wrap items-center gap-1.5 sm:justify-end">${lifetimeBadge(view)}${left}${
+    view.reap_eligible && view.classification === "recorded" ? reapCell(view) : ""}</div>${parts
+    ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">${esc(parts)}</div>` : ""}`;
+}
+
+function lifetimesSection(rows: LifetimeRow[]): string {
+  if (!rows.length) return "";
+  const body = rows.map(row => {
+    const anchor = hostingAnchor(row.source === "this-server" ? "this-server" : row.remote, row.project, row.environment);
+    const name = row.card
+      ? `<a href="#${esc(encodeURIComponent(anchor))}" class="font-medium text-blue-700 hover:underline dark:text-blue-300">${esc(row.name)}</a>`
+      : `<span class="font-medium">${esc(row.name)}</span>`;
+    const sub = [row.ref_branch || "", row.source === "this-server" ? "" : row.remote, row.card ? "" : "no card"]
+      .filter(Boolean).join(" · ");
+    return `<tr class="border-t border-neutral-200 align-top dark:border-neutral-800">
+      <td class="break-words p-3 text-[12px]">${name}${sub ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">${esc(sub)}</div>` : ""}</td>
+      <td class="break-words p-3 text-[12px]">${row.owner ? esc(row.owner) : `<span class="${theme.quiet}">—</span>`}</td>
+      <td class="p-3 text-[12px]">${lifetimeBadge(row)}</td>
+      <td class="p-3 text-[12px]">${expiryCell(row)}</td>
+      <td class="p-3 text-[12px]">${reapCell(row)}</td>
+      <td class="p-3 text-[12px]">${row.state ? esc(row.state) : `<span class="${theme.quiet}">—</span>`}</td>
+      <td class="p-3 text-[12px] tabular-nums">${row.classification === "recorded" ? esc(String(row.extended_count)) : `<span class="${theme.quiet}">—</span>`}</td></tr>`;
+  }).join("");
+  return `<section class="space-y-3"><div class="flex flex-wrap items-end justify-between gap-2"><h2 class="text-[14px] font-semibold">Lifetimes</h2>
+    <span class="text-[11px] ${theme.quiet}">temporary copies nearest expiry first · read-only; cleanup runs on the server</span></div>
+    <div class="overflow-x-auto ${theme.panel}"><table class="w-full min-w-[760px] text-left"><thead><tr>${
+      ["Copy", "Owner", "Lifetime", "Expires", "Cleanup", "State", "Extended"]
+        .map(label => `<th scope="col" class="p-3 ${theme.label}">${label}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div></section>`;
 }
 
 function field(label: string, value: string): string {
@@ -108,21 +185,30 @@ const usageBytes = (value: number): string => {
 // host pages. `remote` is the inventory's name ("this-server" on a server).
 // `hosted` is undefined when that host's inventory predates hosted targets.
 export function hostedTargetsSection(remote: string, hosted: HostedTargets | undefined, loading = false): string {
-  const head = `<div class="mb-3 flex items-center justify-between gap-3"><h2 class="text-[14px] font-semibold">Hosted targets</h2><span class="text-[11px] ${theme.quiet}">projects run with <code>sb host apply</code>; separate from Sandbox instances</span></div>`;
+  const head = `<div class="mb-3 flex items-center justify-between gap-3"><h2 class="text-[14px] font-semibold">Hosted apps (sb host apply / stacks)</h2><span class="text-[11px] ${theme.quiet}">separate from Sandbox dev instances · read-only</span></div>`;
   if (!hosted) {
     const text = loading ? "Loading this host's inventory…" : "This host's inventory does not report hosted targets yet (its control service needs an update).";
     return `<section>${head}<div class="${theme.panel} p-4 text-[12px] ${theme.quiet}">${esc(text)}</div></section>`;
   }
-  const rows = hosted.rows.map(row => `<tr class="border-t border-neutral-200 dark:border-neutral-800">
+  const sorted = [...hosted.rows].sort((a, b) => compareLifetimes(a.lifetime, b.lifetime) || a.key.localeCompare(b.key));
+  const rows = sorted.map(row => {
+    const apply = applyLabel(row.last_apply_status, row.last_apply_reason, row.recorded);
+    const owner = row.lifetime?.owner ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">${esc(row.lifetime.owner)}</div>` : "";
+    return `<tr class="border-t border-neutral-200 align-top dark:border-neutral-800">
     <td class="p-3 text-[12px] font-medium"><a data-link class="text-blue-700 hover:underline dark:text-blue-300" href="${esc(hostingTargetPath(remote, row.project, row.environment))}">${esc(row.project)} <span class="font-normal ${theme.quiet}">· ${esc(row.environment)}</span></a></td>
     <td class="p-3 text-[12px]">${row.stack_slug ? esc(row.stack_slug) : `<span class="${theme.quiet}">—</span>`}</td>
+    <td class="p-3 text-[12px]">${row.lifetime ? `${lifetimeBadge(row.lifetime)}${owner}` : `<span class="${theme.quiet}" title="This host's runtime predates lifetimes in its inventory.">not reported</span>`}</td>
+    <td class="p-3 text-[12px]">${expiryCell(row.lifetime)}</td>
     <td class="p-3 text-[12px]">${row.running ? "running" : `<span class="${theme.quiet}">no running containers</span>`}</td>
     <td class="p-3 text-[12px] tabular-nums">${esc(String(row.container_count))}</td>
     <td class="p-3 text-[12px] tabular-nums">${esc(usageBytes(row.memory_used_bytes))}</td>
-    <td class="p-3 text-[12px] tabular-nums">${esc(String(row.cpu_percent))}%</td>
-    <td class="p-3 text-[12px] ${theme.quiet}">${esc(row.last_apply_status || (row.recorded ? "unknown" : "not recorded"))}</td></tr>`).join("");
-  const body = rows || `<tr><td colspan="7" class="p-4 text-[12px] ${theme.quiet}">No hosted targets on this host.</td></tr>`;
-  return `<section>${head}<div class="overflow-x-auto ${theme.panel}"><table class="w-full min-w-[640px] text-left"><thead><tr>${["Target", "Stack", "State", "Containers", "RAM", "CPU", "Last apply"].map(label => `<th scope="col" class="p-3 ${theme.label}">${label}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div></section>`;
+    <td class="p-3 text-[12px] tabular-nums" title="${esc(CPU_TITLE)}">${esc(String(row.cpu_percent))}%</td>
+    <td class="p-3 text-[12px] ${TONE_TEXT[apply.tone]}">${esc(apply.text)}</td></tr>`;
+  }).join("");
+  const body = rows || `<tr><td colspan="9" class="p-4 text-[12px] ${theme.quiet}">No hosted targets on this host.</td></tr>`;
+  const labels: Array<[string, string]> = [["Target", ""], ["Stack", ""], ["Lifetime", ""], ["Expires", ""], ["State", ""],
+    ["Containers", ""], ["RAM", ""], [CPU_LABEL, CPU_TITLE], ["Last apply", ""]];
+  return `<section>${head}<div class="overflow-x-auto ${theme.panel}"><table class="w-full min-w-[880px] text-left"><thead><tr>${labels.map(([label, title]) => `<th scope="col" ${title ? `title="${esc(title)}"` : ""} class="p-3 ${theme.label}">${esc(label)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div><p class="mt-2 text-[11px] ${theme.quiet}">${esc(CPU_TITLE)}</p></section>`;
 }
 
 function stackCard(stack: HostingStack): string {
@@ -133,7 +219,7 @@ function stackCard(stack: HostingStack): string {
       <div class="min-w-0"><div class="${theme.label}">Stack</div>
         <h2 id="stack-${esc(stack.key)}" class="mt-1 truncate text-[18px] font-semibold">${esc(stack.slug)}</h2>
         <p class="mt-0.5 text-[12px] ${theme.quiet}">${esc(stack.project)} · ${esc(stack.environment)} · ${esc(sourceNote(stack.source, stack.remote))}</p></div>
-      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}</div>
+      <div class="text-[12px] sm:text-right">${applyLine(stack.last_apply)}${lifetimeLine(stack.lifetime)}</div>
     </header>
     <div class="px-2 pb-2 pt-3">${serversTable(stack.servers, "No servers recorded for this stack yet.")}</div>
     <dl class="grid gap-4 border-t border-neutral-200 bg-neutral-50 px-5 py-4 dark:border-neutral-800 dark:bg-neutral-950 sm:grid-cols-2 lg:grid-cols-4">
@@ -147,13 +233,13 @@ function stackCard(stack: HostingStack): string {
 }
 
 function targetRow(target: HostingTarget): string {
-  const note = target.recorded ? "" : `<p class="px-5 pb-4 text-[12px] ${theme.quiet}">Applied before this panel recorded details; its hostnames appear after its next <code>sb host apply</code>.</p>`;
+  const note = target.recorded ? "" : `<p class="px-5 pb-4 text-[12px] ${theme.quiet}">Applied before tracking: its hostnames and apply outcome appear after its next <code>sb host apply</code>.</p>`;
   return `<section id="${esc(cardAnchor(target))}" class="${theme.panel} scroll-mt-4 overflow-hidden">
     <header class="flex flex-col gap-2 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0"><div class="${theme.label}">Hosted site</div>
         <h3 class="mt-1 truncate text-[15px] font-semibold">${esc(target.project)} <span class="font-normal ${theme.quiet}">· ${esc(target.environment)}</span></h3>
-        <p class="mt-0.5 text-[12px] ${theme.quiet}">${esc(sourceNote(target.source, target.remote))}${target.commit ? ` · <code title="${esc(target.commit)}">${esc(short(target.commit))}</code>` : ""}</p></div>
-      <div class="text-[12px] sm:text-right">${applyLine(target.last_apply)}</div>
+        <p class="mt-0.5 text-[12px] ${theme.quiet}">${esc(sourceNote(target.source, target.remote))}${target.stack_slug ? ` · stack <span class="font-medium">${esc(target.stack_slug)}</span>` : ""}${target.commit && target.recorded ? ` · <code title="${esc(target.commit)}">${esc(short(target.commit))}</code>` : ""}</p></div>
+      <div class="text-[12px] sm:text-right">${applyLine(target.last_apply, target.recorded ? null : target.commit)}${lifetimeLine(target.lifetime)}</div>
     </header>
     ${target.recorded ? `<div class="px-2 pb-2">${serversTable(target.servers, "No hostnames recorded.")}</div>` : note}
   </section>`;
@@ -174,7 +260,8 @@ export function hostingView(): string {
     ? `<div class="${theme.panel} p-8 text-center text-[13px] ${theme.quiet}">No stacks or hosted sites yet. Create one with <code>sb host stack up</code> or <code>sb host apply</code>.</div>` : "";
   const stacks = data.stacks.length ? `<section class="space-y-4"><div class="flex items-center justify-between"><h2 class="text-[14px] font-semibold">Stacks</h2><span class="text-[11px] ${theme.quiet}">${data.stacks.length} stack${data.stacks.length === 1 ? "" : "s"}</span></div>${data.stacks.map(stackCard).join("")}</section>` : "";
   const targets = data.targets.length ? `<section class="space-y-4"><div class="flex items-center justify-between"><h2 class="text-[14px] font-semibold">Hosted sites</h2><span class="text-[11px] ${theme.quiet}">projects hosted with <code>sb host apply</code>, without a stack</span></div>${data.targets.map(targetRow).join("")}</section>` : "";
-  return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">${header}${partial}${empty}${stacks}${targets}</div></div>`;
+  const lifetimes = lifetimesSection(data.lifetimes || []);
+  return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">${header}${partial}${empty}${lifetimes}${stacks}${targets}</div></div>`;
 }
 
 export function hostingStillChecking(): boolean {

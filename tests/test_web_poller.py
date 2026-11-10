@@ -18,7 +18,7 @@ class WebPollerTests(unittest.TestCase):
         if not match or int(match.group(1)) < 24:
             self.skipTest("node 24 or newer runs TypeScript tests directly")
         result = subprocess.run(
-            [node, "--test", "src/web/tests/poller.test.ts"],
+            [node, "--test", "src/web/tests/poller.test.ts", "src/web/tests/hostlabels.test.ts"],
             cwd=ROOT, capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stdout[-4000:] + result.stderr[-1000:])
@@ -28,6 +28,12 @@ class WebPollerTests(unittest.TestCase):
         self.assertIn("Lost contact with this job", bundle)
         self.assertIn("Lost contact with this command", bundle)
         self.assertIn("is busy:", bundle)
+
+    def test_vendored_bundle_contains_the_lifetime_follow_up(self):
+        bundle = (ROOT / "config" / "sandbox-web.js").read_text(encoding="utf-8")
+        for text in ("unclassified, protected", "applied before tracking", "delivery unverified",
+                     "Hosted apps (sb host apply / stacks)", "Sandbox dev instances", "point-in-time"):
+            self.assertIn(text, bundle)
 
 
 if __name__ == "__main__":

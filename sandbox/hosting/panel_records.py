@@ -22,7 +22,10 @@ import re
 import shlex
 import time
 from pathlib import Path, PurePosixPath
-from typing import Callable, Literal, TypedDict
+from typing import TYPE_CHECKING, Callable, Literal, TypedDict
+
+if TYPE_CHECKING:
+    from typing import NotRequired
 
 from sandbox.hosting.names import TARGET_PART_RE
 
@@ -34,8 +37,11 @@ MAX_TARGETS = 200
 MAX_SITE_LINKS = 500
 MAX_ROUTES = 64
 
-ApplyStatus = Literal["applying", "succeeded", "failed"]
-APPLY_STATUSES: frozenset[str] = frozenset({"applying", "succeeded", "failed"})
+# "unverified": the apply executed, but its delivery could not be verified
+# (the delivery record stays incomplete, with a reason). "failed" is kept for
+# an apply whose execution failed.
+ApplyStatus = Literal["applying", "succeeded", "unverified", "failed"]
+APPLY_STATUSES: frozenset[str] = frozenset({"applying", "succeeded", "unverified", "failed"})
 
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -43,6 +49,7 @@ _ENV_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 _HOST_RE = re.compile(r"(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\Z")
 _PORT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _TEXT_LIMIT = 200
+_REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 
 class Route(TypedDict, total=False):
@@ -57,6 +64,7 @@ class LastApply(TypedDict):
     started_at: int
     finished_at: int | None
     request_id: str | None
+    reason: NotRequired[str | None]  # the delivery reason (``required_evidence_missing``, ...), when known
 
 
 class StackFacts(TypedDict, total=False):
@@ -209,10 +217,37 @@ def _last_apply(value: object) -> LastApply:
     if not isinstance(value, dict) or value.get("status") not in APPLY_STATUSES:
         raise RecordError("last_apply.status is invalid")
     request_id = value.get("request_id")
-    return {"status": value["status"],
-            "started_at": _epoch(value.get("started_at"), "last_apply.started_at"),  # type: ignore[typeddict-item]
-            "finished_at": _epoch(value.get("finished_at"), "last_apply.finished_at", optional=True),
-            "request_id": _text(request_id, "last_apply.request_id") if request_id is not None else None}
+    parsed: LastApply = {
+        "status": value["status"],
+        "started_at": _epoch(value.get("started_at"), "last_apply.started_at"),  # type: ignore[typeddict-item]
+        "finished_at": _epoch(value.get("finished_at"), "last_apply.finished_at", optional=True),
+        "request_id": _text(request_id, "last_apply.request_id") if request_id is not None else None}
+    reason = value.get("reason")
+    if reason is not None:
+        if not isinstance(reason, str) or not _REASON_RE.fullmatch(reason):
+            raise RecordError("last_apply.reason is invalid")
+        parsed["reason"] = reason
+    return parsed
+
+
+def apply_outcome(ok: bool, delivery: object) -> tuple[ApplyStatus, str | None]:
+    """The panel's apply status from the apply's delivery record (spec 076 follow-up).
+
+    ``failed`` only when execution failed or delivery itself failed;
+    ``unverified`` when execution succeeded but delivery stayed incomplete
+    or unknown (for example ``required_evidence_missing``); ``succeeded``
+    when delivery is complete. Without a delivery record, ``ok`` decides.
+    """
+    if not isinstance(delivery, dict):
+        return ("succeeded" if ok else "failed"), None
+    reason = delivery.get("reason")
+    reason = reason if isinstance(reason, str) and _REASON_RE.fullmatch(reason) and reason != "none" else None
+    execution, state = delivery.get("execution_state"), delivery.get("delivery_state")
+    if execution != "succeeded" or state == "failed":
+        return "failed", reason
+    if state == "succeeded":
+        return "succeeded", None
+    return "unverified", reason
 
 
 def _stack_facts(value: object) -> StackFacts:
@@ -386,6 +421,8 @@ class SummaryRecorder:
         self._path: str | None = None
         self._commit: str | None = None
         self._last: LastApply | None = None
+        self._running = False
+        self._pending: tuple[bool, object] | None = None
         self.errors: list[str] = []
 
     @property
@@ -409,19 +446,38 @@ class SummaryRecorder:
                       "request_id": request_id if isinstance(request_id, str) and request_id else None}
         self._write()
 
-    def finished(self, ok: bool) -> None:
+    def finished(self, ok: bool, delivery: object = None) -> None:
+        """Record the end of the apply. Inside ``run`` the write waits for the
+        apply's result, whose ``delivery`` record says what really happened."""
         if self._last is None or self._last["status"] != "applying":
             return
-        self._last = {**self._last, "status": "succeeded" if ok else "failed",
-                      "finished_at": int(self._clock())}
+        if self._running:
+            self._pending = (ok, delivery)
+            return
+        status, reason = apply_outcome(ok, delivery)
+        last: LastApply = {**self._last, "status": status, "finished_at": int(self._clock())}
+        if reason:
+            last["reason"] = reason
+        self._last = last
         self._write()
 
     def run(self, apply: Callable[[], object]):
-        try:
+        if self._running:  # nested: the outermost run owns the deferred finish
             return apply()
+        self._running, self._pending = True, None
+        try:
+            result = apply()
         except Exception:
+            self._running = False
             self.finished(False)
             raise
+        self._running = False
+        if self._pending is not None:
+            ok, delivery = self._pending
+            if delivery is None and isinstance(result, dict):
+                delivery = result.get("delivery")
+            self.finished(ok, delivery)
+        return result
 
 
 # ----------------------------------------------------------------- readers

@@ -2,7 +2,7 @@
 // the current Route (URL), not by stored selection state.
 
 import { $, esc } from "./dom";
-import { localHostName, store } from "./state";
+import { localHostName, store, thisServer } from "./state";
 import { currentRoute, hostContext, instancePath, remoteInstancePath, type Route } from "./router";
 import { instanceView } from "./pages/instance";
 import { usageView } from "./pages/usage";
@@ -11,6 +11,7 @@ import { createView } from "./pages/create";
 import { remoteView } from "./pages/remote";
 import { hostingView } from "./pages/hosting";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
+import { hostedCountText, showBulkActions } from "./ui/hostlabels";
 import type { Instance } from "./types";
 
 // The instance whose row is highlighted / whose console the term targets.
@@ -98,6 +99,10 @@ function setLocalActionState(local: boolean): void {
     button.classList.toggle("opacity-40", !local);
     button.classList.toggle("cursor-not-allowed", !local);
   }
+  // "Start all" / "Stop all" act on Sandbox dev instances only, never on hosted
+  // apps; with no dev instances there is nothing for them to do.
+  const bulk = showBulkActions(store.data.instances.length);
+  for (const id of ["startAll", "stopAll"]) $(id).classList.toggle("hidden", !bulk);
   const usage = $("usageBtn") as HTMLAnchorElement;
   usage.setAttribute("aria-disabled", String(!local));
   usage.title = local ? "" : reason;
@@ -143,6 +148,15 @@ export function renderSidebar(forceHost = false): void {
     }
   }
   $("list").innerHTML = markup;
+  // Hosted apps (`sb host apply` / stacks) are counted apart from dev instances.
+  const hostedHost = context.kind === "remote" ? context.name : thisServer()?.name;
+  const hosted = hostedHost ? store.remote[hostedHost]?.hosted_targets : undefined;
+  const hostedCount = document.getElementById("hostedcount");
+  if (hostedCount) {
+    const text = hostedCountText(hosted?.total, hosted?.running);
+    hostedCount.textContent = text;
+    hostedCount.classList.toggle("hidden", !text);
+  }
   if (context.kind === "remote" && !store.remote[context.name]) {
     $("runcount").textContent = store.remoteBusy[context.name] ? "…" : "—";
     $("footstat").textContent = store.remoteBusy[context.name]
@@ -167,7 +181,13 @@ function detailSignature(route: Route): string {
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
   if (route.page === "hosting") return "hosting:" + store.hostingError + ":" + JSON.stringify(store.hosting);
-  if (route.page === "local-host") return "local-host:" + JSON.stringify(store.data.instances);
+  if (route.page === "local-host") {
+    const server = thisServer();
+    // The server row arrives after the first render; its presence alone must
+    // re-render the page, or it keeps saying "This machine" until the next change.
+    return "local-host:" + JSON.stringify(store.data.instances) + ":" + (server ? server.name : "-") + ":" +
+      !!(server && store.remoteBusy[server.name]) + ":" + JSON.stringify(server ? store.remote[server.name] || null : null);
+  }
   if (route.page === "remote" || route.page === "remote-instance") return route.page + ":" + route.name + ":" + (route.page === "remote-instance" ? route.instance : "") + ":" + !!store.remoteBusy[route.name] + ":" + JSON.stringify(store.remote[route.name] || null);
   if (route.page === "home") return "home:" + store.sync.refreshing + ":" + store.sync.lastCompleted + ":" + store.sync.error + ":" + JSON.stringify(store.data.remotes) + ":" + JSON.stringify(store.remote);
   return route.page;

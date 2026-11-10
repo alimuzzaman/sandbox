@@ -34,3 +34,4 @@
 
 - The spec names CLI commands (`sb deploy --stack`, `sb host apply`) because they are the user-facing surface in this CLI product, not implementation choices.
 - Validation pass 1: all items pass.
+- Follow-up 2026-11-10 (User Stories 6-8, FR-017 to FR-028, SC-006 to SC-008): validation pass 1, all items pass. The follow-up names `sb host stack list --remote R --json` as the controller's lifetime source because the brief fixes it as the agreed contract; no [NEEDS CLARIFICATION] markers.

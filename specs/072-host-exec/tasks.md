@@ -48,7 +48,7 @@ the `xspeed-dev` remote.
 - [x] T013 [P] Document `host exec` and `--target`/`--name` resolution in `docs/remote-hosting.md`; update the stack note in `docs/sandbox-config-reference.md`
 - [x] T014 [P] Update `skills/sandbox-cli/SKILL.md` and `.agents/skills/sandbox-cli/SKILL.md`
 - [x] T015 Run the new and touched test modules plus baseline comparison through Haiku helpers on `xspeed-dev`
-- [ ] T016 Luna review of the head; fix and re-review
+- [x] T016 Luna review of the head; fix and re-review
 - [x] T017 Live check on `xspeed-dev` target `xspeed-hub-test-stacks/sandbox` service `hub` with a stdin canary; grep job records and audit
 
 ## Dependencies

@@ -1496,8 +1496,13 @@ registered SSH target alone and then tries a non-interactive login. Tailscale's 
 rule uses `check`, which waits for a browser and so cannot work for automation; `login:
 denied` means the tailnet policy needs an `accept` rule for this user and no `check` rule
 matching the server. With `accept`, any device signed in as that Tailscale user gets a
-shell with that account's full rights, so this does not replace restricted SSH keys. Avoid
-running `enable` while a session to the Tailscale address is open, as it may hang.
+shell with that account's full rights, so this does not replace restricted SSH keys. `login:
+unknown` means the check could not reach a conclusion, usually a network problem, and no rule
+change is implied. Avoid running `enable` while a session to the Tailscale address is open, as
+it may hang. If the remote's registered SSH target is a Tailscale address or `.ts.net` name,
+`enable` and `disable` refuse with `tailscale_ssh_target_on_tailnet`, because the change would
+disturb the connection carrying it. A target that is an SSH config alias for such an address is
+not detected.
 
 ## 8. CLI + MCP surface
 

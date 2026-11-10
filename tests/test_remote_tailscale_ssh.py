@@ -9,11 +9,13 @@ from unittest import mock
 from sandbox.commands import remote as remote_command
 
 ENTRY = {"ssh": "user@203.0.113.10", "provisioned": True}
+DENIED = SimpleNamespace(returncode=255, stderr="user@100.64.0.9: Permission denied (publickey).\n")
 
 
 class RemoteHost:
-    def __init__(self, enabled=False, prefs_rc=0, set_rc=0, stuck=False):
+    def __init__(self, enabled=False, prefs_rc=0, set_rc=0, stuck=False, ip_rc=0, ip_out="100.64.0.9\n"):
         self.enabled, self.prefs_rc, self.set_rc, self.stuck = enabled, prefs_rc, set_rc, stuck
+        self.ip_rc, self.ip_out = ip_rc, ip_out
         self.commands = []
 
     def __call__(self, _entry, command, timeout=30, **_kwargs):
@@ -21,7 +23,7 @@ class RemoteHost:
         if command == "tailscale debug prefs":
             return SimpleNamespace(returncode=self.prefs_rc, stdout=json.dumps({"RunSSH": self.enabled}), stderr="")
         if command == "tailscale ip -4":
-            return SimpleNamespace(returncode=0, stdout="100.64.0.9\n", stderr="")
+            return SimpleNamespace(returncode=self.ip_rc, stdout=self.ip_out, stderr="")
         if command.startswith("sudo -n tailscale set --ssh="):
             if self.set_rc == 0 and not self.stuck:
                 self.enabled = command.endswith("=true")
@@ -75,8 +77,7 @@ class TailscaleSshTest(unittest.TestCase):
 
     def test_a_denied_login_reports_the_rule_to_add(self):
         host = RemoteHost()
-        code, result = self.run_command(
-            "enable", host, confirm=True, login=mock.Mock(return_value=SimpleNamespace(returncode=255)))
+        code, result = self.run_command("enable", host, confirm=True, login=mock.Mock(return_value=DENIED))
         self.assertEqual((code, result["status"], result["login"]), (0, "enabled", "denied"))
         self.assertEqual(result["required_rule"]["action"], "accept")
         self.assertEqual(result["required_rule"]["users"], ["user"])
@@ -86,8 +87,7 @@ class TailscaleSshTest(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(remote_command.sr, "get_remote", return_value=ENTRY), \
                 mock.patch.object(remote_command.sr, "ssh_run", side_effect=RemoteHost()), \
-                mock.patch.object(remote_command.subprocess, "run",
-                                  mock.Mock(return_value=SimpleNamespace(returncode=255))), \
+                mock.patch.object(remote_command.subprocess, "run", mock.Mock(return_value=DENIED)), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             remote_command._cmd_tailscale_ssh(args, False)
         self.assertIn("could not log in", out.getvalue())
@@ -98,6 +98,50 @@ class TailscaleSshTest(unittest.TestCase):
             "enable", host, confirm=True,
             login=mock.Mock(side_effect=subprocess.TimeoutExpired("ssh", 30)))
         self.assertEqual(result["login"], "denied")
+
+    def test_a_tailnet_policy_refusal_counts_as_denied(self):
+        refused = SimpleNamespace(returncode=255, stderr="tailscale: tailnet policy does not permit you to SSH\n")
+        _, result = self.run_command("enable", RemoteHost(), confirm=True, login=mock.Mock(return_value=refused))
+        self.assertEqual(result["login"], "denied")
+
+    def test_a_network_failure_is_unknown_and_suggests_no_rule(self):
+        unreachable = SimpleNamespace(returncode=255, stderr="ssh: connect to host port 22: Operation timed out\n")
+        code, result = self.run_command("enable", RemoteHost(), confirm=True, login=mock.Mock(return_value=unreachable))
+        self.assertEqual((code, result["status"], result["login"]), (0, "enabled", "unknown"))
+        self.assertNotIn("required_rule", result)
+
+    def test_a_missing_ssh_program_is_unknown(self):
+        _, result = self.run_command("enable", RemoteHost(), confirm=True, login=mock.Mock(side_effect=OSError("ssh")))
+        self.assertEqual(result["login"], "unknown")
+
+    def test_a_failed_address_lookup_is_unknown_and_tries_no_login(self):
+        _, result = self.run_command("enable", RemoteHost(ip_rc=1, ip_out=""), confirm=True)
+        self.assertEqual(result["login"], "unknown")
+        self.login.assert_not_called()
+
+    def test_an_address_outside_tailscale_is_never_probed(self):
+        for output in ("203.0.113.50\n", "warning: update available\n100.64.0.9\n", "not-an-address\n"):
+            with self.subTest(output=output):
+                _, result = self.run_command("enable", RemoteHost(ip_out=output), confirm=True)
+                self.assertEqual(result["login"], "unknown")
+                self.login.assert_not_called()
+
+    def test_changing_it_over_the_tailnet_is_refused_in_both_directions(self):
+        for target in ("user@100.64.0.9", "user@box.example.ts.net"):
+            for operation, enabled in (("enable", False), ("disable", True)):
+                for confirm in (False, True):
+                    with self.subTest(target=target, operation=operation, confirm=confirm):
+                        host = RemoteHost(enabled=enabled)
+                        code, _ = self.run_command(operation, host, confirm=confirm,
+                                                   entry={**ENTRY, "ssh": target})
+                        self.assertNotEqual(code, 0)
+                        self.assertEqual(self.changes(host), [])
+
+    def test_status_and_no_op_requests_still_work_over_the_tailnet(self):
+        entry = {**ENTRY, "ssh": "user@100.64.0.9"}
+        self.assertEqual(self.run_command("status", RemoteHost(), entry=entry)[0], 0)
+        code, result = self.run_command("disable", RemoteHost(), confirm=True, entry=entry)
+        self.assertEqual((code, result["status"]), (0, "already_disabled"))
 
     def test_disable_turns_it_off_without_a_login_check(self):
         host = RemoteHost(enabled=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import hashlib
+import ipaddress
 import os
 import re
 import shlex
@@ -1270,6 +1271,10 @@ def _cmd_rebind_host(args, as_json: bool) -> None:
         ok(f"'{name}' is bound to its recorded host identity ({status})")
 
 
+_TAILNET_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+_TAILSCALE_SSH_REFUSALS = ("permission denied", "tailnet policy", "requires an additional check")
+
+
 def _tailscale_ssh_enabled(entry: dict) -> bool:
     result = sr.ssh_run(entry, "tailscale debug prefs", timeout=15)
     if result.returncode != 0:
@@ -1280,12 +1285,25 @@ def _tailscale_ssh_enabled(entry: dict) -> bool:
         die("tailscale_unavailable: could not read Tailscale settings on the remote")
 
 
-def _tailscale_ssh_login_works(entry: dict, user: str) -> bool:
-    """Try the non-interactive login that Sandbox's own SSH would make."""
-    result = sr.ssh_run(entry, "tailscale ip -4", timeout=15)
-    address = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    if result.returncode != 0 or not address:
+def _is_tailnet_ip(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
         return False
+    return any(address in network for network in _TAILNET_NETWORKS)
+
+
+def _target_is_on_tailnet(entry: dict) -> bool:
+    host = sr.remote_ssh_parts(entry)["target"].rpartition("@")[2].strip("[]").rstrip(".").lower()
+    return host.endswith(".ts.net") or _is_tailnet_ip(host)
+
+
+def _tailscale_ssh_login(entry: dict, user: str) -> str:
+    """Try Sandbox's own kind of login: `ok`, `denied` by policy, or `unknown`."""
+    result = sr.ssh_run(entry, "tailscale ip -4", timeout=15)
+    address = result.stdout.strip()
+    if result.returncode != 0 or not _is_tailnet_ip(address):
+        return "unknown"
     # A throwaway file: Tailscale SSH answers with its own host key on this address.
     with tempfile.TemporaryDirectory() as directory:
         try:
@@ -1294,10 +1312,16 @@ def _tailscale_ssh_login_works(entry: dict, user: str) -> bool:
                  "-o", "StrictHostKeyChecking=accept-new",
                  "-o", f"UserKnownHostsFile={directory}/known_hosts",
                  f"{user}@{address}", "true"],
-                capture_output=True, timeout=30, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-    return login.returncode == 0
+                capture_output=True, text=True, timeout=30, check=False)
+        except subprocess.TimeoutExpired:
+            # ConnectTimeout covers an unreachable host; past that, a `check` rule is waiting.
+            return "denied"
+        except OSError:
+            return "unknown"
+    if login.returncode == 0:
+        return "ok"
+    refusal = login.stderr.lower()
+    return "denied" if any(text in refusal for text in _TAILSCALE_SSH_REFUSALS) else "unknown"
 
 
 def _cmd_tailscale_ssh(args, as_json: bool) -> None:
@@ -1318,6 +1342,9 @@ def _cmd_tailscale_ssh(args, as_json: bool) -> None:
         result["status"] = "observed"
     else:
         wanted = operation == "enable"
+        if enabled is not wanted and _target_is_on_tailnet(entry):
+            die(f"tailscale_ssh_target_on_tailnet: '{name}' is reached over the tailnet, so this "
+                "change would disturb its own connection; register a non-Tailscale SSH target first")
         if not _arg_true(args, "confirm"):
             result["status"] = f"already_{operation}d" if enabled is wanted else "planned"
         else:
@@ -1330,7 +1357,7 @@ def _cmd_tailscale_ssh(args, as_json: bool) -> None:
                           status=f"{operation}d" if enabled is not wanted else f"already_{operation}d")
             if wanted:
                 user = sr.remote_ssh_parts(entry)["target"].partition("@")[0]
-                result["login"] = "ok" if _tailscale_ssh_login_works(entry, user) else "denied"
+                result["login"] = _tailscale_ssh_login(entry, user)
                 if result["login"] == "denied":
                     result["required_rule"] = {"action": "accept", "src": ["YOUR_TAILSCALE_LOGIN"],
                                                "dst": ["autogroup:self"], "users": [user]}
@@ -1341,6 +1368,8 @@ def _cmd_tailscale_ssh(args, as_json: bool) -> None:
         if result.get("login") == "denied":
             info("this controller could not log in; add the tailnet rule shown by --json "
                  "and stop any `check` rule from matching this server")
+        elif result.get("login") == "unknown":
+            info("could not tell whether this controller can log in; check its route to the tailnet")
 
 
 def _cmd_remove(args, as_json: bool) -> None:

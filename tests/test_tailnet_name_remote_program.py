@@ -986,22 +986,76 @@ class RoundFiveTests(Base):
     def journal_state(self):
         return json.loads((self.name_dir / "activation.json").read_text())["state"]
 
-    def test_unload_needs_a_complete_answer_without_a_marker(self):
+    def test_an_unload_is_proven_only_by_a_foreign_certificate_or_no_listener(self):
+        """Re-review 6: the response body never proves an unload."""
+        chain = self.publish()
+        ours = rp._leaf_sha(chain.encode())
+        self.conf.unlink()
         conf_fd = os.open(self.paths["conf_dir"], os.O_RDONLY | os.O_DIRECTORY)
+        name_fd = os.open(str(self.name_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             for served, proven in ((("refused", None, None), True),
                                    (("handshake", "e" * 64, b""), True),
-                                   (("handshake", "e" * 64, b"<html>not found</html>"), True),
-                                   (("handshake", "e" * 64, b"0123456789abcdef0123456789abcdef"),
-                                    False),
-                                   (("handshake", "e" * 64, None), False),
+                                   (("handshake", "e" * 64, None), True),
+                                   (("handshake", ours, b""), False),
+                                   (("handshake", ours, b"01234567"), False),
+                                   (("handshake", ours, b"<html>not found</html>"), False),
+                                   (("handshake", None, b""), False),
                                    (("error", None, None), False)):
                 with self.subTest(served=served):
                     paths = dict(self.paths, served=lambda ip, fqdn, s=served: s)
-                    self.assertEqual(rp._disk_proof(conf_fd, None, FQDN, paths, IP)(), proven)
+                    self.assertEqual(rp._disk_proof(conf_fd, name_fd, FQDN, paths, IP)(),
+                                     proven)
+                    # Without any known certificate, only "nothing listens" proves it.
+                    self.assertEqual(rp._disk_proof(conf_fd, None, FQDN, paths, IP)(),
+                                     served[0] == "refused")
         finally:
             os.close(conf_fd)
+            os.close(name_fd)
 
+    def test_a_truncated_answer_from_the_old_block_never_allows_cleanup(self):
+        chain = self.publish()
+        ours = rp._leaf_sha(chain.encode())
+        self.paths["served"] = lambda ip, fqdn: ("handshake", ours, b"0123")
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertTrue(self.name_dir.exists())
+
+    def test_every_installed_leaf_is_remembered(self):
+        first = self.publish()
+        second = self.sign(self.csr(), days=60)
+        self.assertTrue(self.commit(block=block(), chain=second)["ok"])
+        leaves = set(json.loads((self.name_dir / "leaves.json").read_text()))
+        self.assertEqual(leaves, {rp._leaf_sha(first.encode()), rp._leaf_sha(second.encode())})
+
+    def test_the_block_unlink_is_durable_before_the_certificates_go(self):
+        """Re-review 6 NEW-2: conf.d is fsynced after the unlink, before the
+        certificate directory is renamed away."""
+        self.publish()
+        conf_ino = os.stat(self.paths["conf_dir"]).st_ino
+        events = []
+        real_unlink, real_fsync, real_rename = rp._unlink, os.fsync, os.rename
+
+        def unlink(dir_fd, name):
+            events.append(("unlink", name))
+            return real_unlink(dir_fd, name)
+
+        def fsync(fd):
+            events.append(("fsync", os.fstat(fd).st_ino))
+            return real_fsync(fd)
+
+        def rename(src, dst, **kwargs):
+            events.append(("rename", dst))
+            return real_rename(src, dst, **kwargs)
+        with mock.patch.object(rp, "_unlink", unlink), \
+                mock.patch.object(rp.os, "fsync", fsync), mock.patch.object(rp.os, "rename", rename):
+            result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertTrue(result["ok"], result)
+        block_unlink = events.index(("unlink", f"sandbox-tailnet-{FQDN}.conf"))
+        conf_sync = events.index(("fsync", conf_ino), block_unlink)
+        tomb = next(i for i, e in enumerate(events) if e[0] == "rename" and ".removed-" in e[1])
+        self.assertLess(block_unlink, conf_sync)
+        self.assertLess(conf_sync, tomb)
 
 if __name__ == "__main__":
     unittest.main()

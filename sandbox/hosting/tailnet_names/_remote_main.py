@@ -60,11 +60,12 @@ DEFAULT_PATHS = {
 FILE_PREFIX = "sandbox-tailnet-"
 HEADER_PREFIX = "# sandbox-tailnet-name "
 MARKER = "managed.json"
+LEAVES = "leaves.json"
 JOURNAL = "activation.json"
 LEASES = ".leases"
 OWNER = "sandbox-tailnet-name"
 KNOWN_FILES = ("privkey.pem", "fullchain.pem", "request.csr", JOURNAL, "block.prev",
-               "fullchain.prev.pem", MARKER)
+               "fullchain.prev.pem", MARKER, LEAVES)
 LOCK_WAIT_SECONDS = 30
 LEASE_SECONDS_MAX = 3600
 COMMAND_TIMEOUT_SECONDS = 30
@@ -268,6 +269,14 @@ def _unlink(dir_fd, name):
         return True
     except FileNotFoundError:
         return False
+
+
+def _unlink_durably(dir_fd, name):
+    """Unlink and fsync the directory, so the removal survives a power loss
+    before anything that depends on it (deleting the certificates it uses)."""
+    removed = _unlink(dir_fd, name)
+    os.fsync(dir_fd)
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +644,7 @@ _MARKER = re.compile(r'location = /\.well-known/sandbox-tailnet-activation \{ de
                      r'text/plain; return 200 "([0-9a-f]{32})"; \}')
 
 
-_MARKER_BODY = re.compile(rb"[0-9a-f]{32}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 def _marker_of(block):
@@ -708,15 +717,56 @@ def _served(ip, fqdn, *, timeout=3):
         raw.close()
 
 
+def _known_leaves(name_fd, paths):
+    """Every leaf this name has ever had installed (recorded before each chain
+    write), plus whatever chains are on disk now."""
+    leaves = set()
+    if name_fd is None:
+        return leaves
+    raw = _read(name_fd, LEAVES, paths, mode=0o600)
+    try:
+        recorded = json.loads(raw) if raw else []
+    except ValueError:
+        recorded = []
+    if isinstance(recorded, list):
+        leaves.update(item for item in recorded if isinstance(item, str) and _HEX64.fullmatch(item))
+    for name in ("fullchain.pem", "fullchain.prev.pem"):
+        chain = _read(name_fd, name, paths, mode=0o644)
+        leaf = _leaf_sha(chain) if chain else None
+        if leaf:
+            leaves.add(leaf)
+    return leaves
+
+
+def _remember_leaf(name_fd, chain, paths):
+    leaf = _leaf_sha(chain)
+    if leaf is None:
+        return
+    raw = _read(name_fd, LEAVES, paths, mode=0o600)
+    try:
+        recorded = json.loads(raw) if raw else []
+    except ValueError:
+        recorded = []
+    recorded = [item for item in recorded if isinstance(item, str) and item != leaf][-63:] \
+        if isinstance(recorded, list) else []
+    for name in ("fullchain.pem", "fullchain.prev.pem"):
+        existing = _read(name_fd, name, paths, mode=0o644)
+        existing_leaf = _leaf_sha(existing) if existing else None
+        if existing_leaf and existing_leaf not in recorded:
+            recorded.append(existing_leaf)
+    _write(name_fd, LEAVES, json.dumps(recorded + [leaf]).encode(), 0o600)
+
+
 def _disk_proof(conf_fd, name_fd, fqdn, paths, ip):
     """A check that nginx now serves exactly what is on disk for the name.
 
     With a block on disk: the block's own marker and the chain's leaf. With
-    no block: no version of a managed block for the name answers at all,
-    i.e. nothing listens, or the answer to the marker path is complete and
-    is not a marker. Every managed block serves its marker, so an older
-    block still loaded (after an interrupted renewal, say) fails the check
-    whatever certificate it presents.
+    no block: nothing listens, or the TLS handshake for the name presents a
+    certificate this name never had. Every managed block for the name uses
+    one of the name's own certificates, so an older block still loaded
+    (after an interrupted renewal, say) fails the check. The response body
+    plays no part in proving an unload, so a truncated, empty or reset
+    answer can never prove one.
     """
     served = paths.get("served", _served)
 
@@ -731,7 +781,8 @@ def _disk_proof(conf_fd, name_fd, fqdn, paths, ip):
                     and leaf == ours and body == marker.encode())
         if kind == "refused":
             return True
-        return kind == "handshake" and body is not None and not _MARKER_BODY.fullmatch(body)
+        known = _known_leaves(name_fd, paths)
+        return kind == "handshake" and bool(known) and leaf is not None and leaf not in known
     return check
 
 
@@ -795,13 +846,13 @@ def _restore(conf_fd, name_fd, fqdn, journal, paths):
             raise Refusal("restore_failed", "the previous block backup is missing")
         _write(conf_fd, name, previous_block, 0o600)
     else:
-        _unlink(conf_fd, name)
+        _unlink_durably(conf_fd, name)
     if journal.get("had_chain"):
         if previous_chain is None:
             raise Refusal("restore_failed", "the previous chain backup is missing")
         _write(name_fd, "fullchain.pem", previous_chain, 0o644)
     elif journal.get("chain_changed"):
-        _unlink(name_fd, "fullchain.pem")
+        _unlink_durably(name_fd, "fullchain.pem")
 
 
 def _settle(conf_fd, name_fd, fqdn, paths, runner, fence, proof):
@@ -1064,6 +1115,7 @@ def commit(payload, paths, runner, lock_wait):
                       "chain_changed": desired_chain != current_chain}
             _set_journal(name_fd, record)
             if desired_chain != current_chain:
+                _remember_leaf(name_fd, desired_chain, paths)
                 _write(name_fd, "fullchain.pem", desired_chain, 0o644)
             if desired_block != current_block:
                 _write(conf_fd, FILE_PREFIX + fqdn + ".conf", desired_block, 0o600)
@@ -1159,7 +1211,7 @@ def remove(payload, paths, runner, lock_wait):
                     if content is not None:
                         _write(name_fd, "block.prev", content, 0o600)
                     _set_journal(name_fd, {"state": "removing"})
-                    _unlink(conf_fd, FILE_PREFIX + fqdn + ".conf")
+                    _unlink_durably(conf_fd, FILE_PREFIX + fqdn + ".conf")
                     failure = None
                     try:
                         ok, stage, out = _apply(runner, paths, fence, proof)

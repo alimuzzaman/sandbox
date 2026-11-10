@@ -39,15 +39,17 @@ CONTROL_ROUTE = "control_route"        # HTTPS MCP control endpoint (provision/u
 INSTANCE_ROUTES = "instance_routes"    # sb deploy --expose (+ aliases)
 PREVIEW_ROUTES = "preview_routes"      # sb preview
 ZONE_COVERAGE = "zone_coverage"        # sb remote coverage / wildcard subdomain hosting
+TAILNET_NAMES = "tailnet_names"        # sb host tailnet-name (spec 078)
 
-CAPABILITIES = (HOST_ROUTES, CONTROL_ROUTE, INSTANCE_ROUTES, PREVIEW_ROUTES, ZONE_COVERAGE)
+CAPABILITIES = (HOST_ROUTES, CONTROL_ROUTE, INSTANCE_ROUTES, PREVIEW_ROUTES, ZONE_COVERAGE,
+                TAILNET_NAMES)
 
 FRONT_DOOR_MANIFEST: tuple[FrontDoorDeclaration, ...] = (
     FrontDoorDeclaration(
         "caddy", True, frozenset({HOST_ROUTES, CONTROL_ROUTE, INSTANCE_ROUTES, PREVIEW_ROUTES}),
         "Sandbox installs Caddy and Caddy owns public 80/443"),
     FrontDoorDeclaration(
-        "nginx", False, frozenset({HOST_ROUTES, CONTROL_ROUTE, ZONE_COVERAGE}),
+        "nginx", False, frozenset({HOST_ROUTES, CONTROL_ROUTE, ZONE_COVERAGE, TAILNET_NAMES}),
         "a host-incumbent nginx owns 80/443; Sandbox manages only its own "
         "/etc/nginx/conf.d/sandbox-*.conf files"),
 )
@@ -88,8 +90,10 @@ def require_capability(entry: dict | None, capability: str) -> str:
         raise FrontDoorError(
             "front_door_capability_unavailable",
             f"this remote's {mode} front door does not support {capability} yet; "
-            "use a Caddy remote for this surface (see docs/remote-hosting.md, "
-            "nginx front door)")
+            f"use a remote whose front door is "
+            + " or ".join(item.mode for item in FRONT_DOOR_MANIFEST
+                          if capability in item.capabilities)
+            + " for this surface (see docs/remote-hosting.md, nginx front door)")
     return mode
 
 

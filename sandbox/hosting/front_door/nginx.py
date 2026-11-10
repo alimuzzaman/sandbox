@@ -569,7 +569,9 @@ for name in sorted(os.listdir(CONF_DIR)) if os.path.isdir(CONF_DIR) else []:
                 rc5, _ = run(["openssl", "x509", "-checkend", "0", "-noout", "-in", cert])
                 row["expired"] = rc5 != 0
                 row["renewal_overdue"] = rc4 != 0
-                row["issuer"] = "public" if cert.startswith("/etc/letsencrypt/") else "origin-ca"
+                row["issuer"] = ("public" if cert.startswith("/etc/letsencrypt/") else
+                                 "tailnet-acme" if cert.startswith("/etc/nginx/sandbox-tailnet/") else
+                                 "origin-ca")
         cert_rows.append(row)
     other = [(p, n) for p, n in pairs if p != path]
     if is_coverage_fallback_file(path):
@@ -769,12 +771,20 @@ def _probe_host(content: str) -> str | None:
 
 
 def apply_route(entry: dict, name: str, content: str, *, operation: str = "apply",
-                log: Callable[[str], None] | None = None) -> dict:
+                log: Callable[[str], None] | None = None,
+                loopback_probe: bool = True) -> dict:
+    """Install one route under the edge lock, with test, reload and restore.
+
+    ``loopback_probe=False`` skips the post-reload marker check over
+    127.0.0.1:80, for a route that does not listen on loopback (a tailnet-only
+    block, spec 078); the transaction is otherwise unchanged.
+    """
     path = route_file(name)
     digest = hashlib.sha256(content.encode()).hexdigest()
     staged = _stage(entry, name, content, digest)
     command = transaction_command(path, staged, digest, operation=operation, remove=False,
-                                  probe_host=_probe_host(content), marker=route_marker(content))
+                                  probe_host=_probe_host(content) if loopback_probe else None,
+                                  marker=route_marker(content) if loopback_probe else None)
     result = _ssh(entry, command, timeout=TRANSACTION_TIMEOUT_SECONDS)
     output = (result.stdout or "")
     if log:
@@ -991,6 +1001,8 @@ def summarize(facts: dict) -> dict:
                     action = "renewing a fallback certificate is not available yet"
                 else:
                     action = ("renewal has not succeeded" if cert.get("issuer") == "public"
+                              else "run `sb host tailnet-name renew`"
+                              if cert.get("issuer") == "tailnet-acme"
                               else "re-apply to reissue the Origin CA certificate")
                 problems.append(f"{row['file']}: certificate expires {cert.get('not_after')}; {action}")
     return {

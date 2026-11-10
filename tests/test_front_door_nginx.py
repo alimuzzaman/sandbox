@@ -64,13 +64,16 @@ class FrontDoorManifestTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "front_door_unknown")
 
     def test_caddy_keeps_every_surface(self):
+        nginx_only = (front_door.ZONE_COVERAGE, front_door.TAILNET_NAMES)
         for capability in front_door.CAPABILITIES:
-            if capability == front_door.ZONE_COVERAGE:
+            if capability in nginx_only:
                 continue
             self.assertEqual(front_door.require_capability({}, capability), "caddy")
-        with self.assertRaises(front_door.FrontDoorError) as ctx:
-            front_door.require_capability({}, front_door.ZONE_COVERAGE)
-        self.assertEqual(ctx.exception.code, "front_door_capability_unavailable")
+        for capability in nginx_only:
+            with self.assertRaises(front_door.FrontDoorError) as ctx:
+                front_door.require_capability({}, capability)
+            self.assertEqual(ctx.exception.code, "front_door_capability_unavailable")
+            self.assertIn("front door is nginx", str(ctx.exception))
 
     def test_nginx_refuses_unbuilt_surfaces_before_side_effects(self):
         entry = {"front_door": "nginx"}

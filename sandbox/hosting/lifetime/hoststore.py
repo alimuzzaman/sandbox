@@ -732,7 +732,8 @@ class Store:
         """
         records, invalid, truncated = [], [], False
         try:
-            entries = sorted(os.scandir(str(self.root)), key=lambda entry: entry.name)
+            with os.scandir(str(self.root)) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name)
         except OSError:
             return {"records": records, "invalid": invalid, "truncated": truncated}
         seen = 0

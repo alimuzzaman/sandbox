@@ -149,7 +149,7 @@ export function localHostView(): string {
   const hostedSection = server ? hostedTargetsSection(server.name, hosted, !inventory) : "";
   const title = server ? "This server" : "This machine";
   const subtitle = server
-    ? hostsApps ? `${hostedCountText(hosted!.total, hosted!.running)}, plus Sandbox dev instances. Hosted apps are read-only here.`
+    ? hostsApps ? `${hostedCountText(hosted!.total, hosted!.running)}; ${devEmpty ? "no Sandbox dev instances" : `${instances.length} Sandbox dev instance${instances.length === 1 ? "" : "s"}`}. Hosted apps are read-only here.`
       : "Sandbox dev instances and any hosted apps on this server."
     : "Local Sandbox instances and lifecycle controls.";
   const lead = hostsApps ? `<div class="flex items-center justify-between gap-3"><span class="text-[12px] ${theme.muted}">Every hosted app links to its row on <a data-link href="${hostingPath()}" class="text-blue-700 hover:underline dark:text-blue-300">Stacks and hosted sites</a>.</span></div>` : "";

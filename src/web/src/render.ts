@@ -183,8 +183,10 @@ function detailSignature(route: Route): string {
   if (route.page === "hosting") return "hosting:" + store.hostingError + ":" + JSON.stringify(store.hosting);
   if (route.page === "local-host") {
     const server = thisServer();
-    return "local-host:" + JSON.stringify(store.data.instances) + ":" +
-      JSON.stringify(server ? store.remote[server.name] || null : null);
+    // The server row arrives after the first render; its presence alone must
+    // re-render the page, or it keeps saying "This machine" until the next change.
+    return "local-host:" + JSON.stringify(store.data.instances) + ":" + (server ? server.name : "-") + ":" +
+      !!(server && store.remoteBusy[server.name]) + ":" + JSON.stringify(server ? store.remote[server.name] || null : null);
   }
   if (route.page === "remote" || route.page === "remote-instance") return route.page + ":" + route.name + ":" + (route.page === "remote-instance" ? route.instance : "") + ":" + !!store.remoteBusy[route.name] + ":" + JSON.stringify(store.remote[route.name] || null);
   if (route.page === "home") return "home:" + store.sync.refreshing + ":" + store.sync.lastCompleted + ":" + store.sync.error + ":" + JSON.stringify(store.data.remotes) + ":" + JSON.stringify(store.remote);

@@ -32,6 +32,7 @@
 - Q: May the periodic drain apply every existing reconciliation outcome, including `missing_supervisor_identity` for a running row with no durable supervisor identity? → A: Yes. The drain reuses startup reconciliation unchanged; that rule already runs on every job command today, so only its frequency changes.
 - Q: May read commands (status, list, MCP job tools) reconcile and drain? → A: Yes. They already reconcile on start; they now also start queued jobs oldest-first. A read never starts a job out of order.
 - Q: When does a job waiting on a dependency become a candidate? → A: Once a drain or status read has observed its dependencies complete. Every drain pass re-checks and records the reason of each queued job it visits.
+- Q: Must both the supervisor and the child be proved gone before the drain ends a running job? → A: No. The drain keeps today's reconciliation rule exactly (FR-010): a proved-gone supervisor is enough, as it already is on every job command. Requiring the child to be gone too would change existing reconciliation and is out of scope.
 - Q: Does the 2026-11-10 slot-holding incident get fixed by this feature? → A: No. Those jobs were live but silent, not process-gone (see Background). The default for `cancel_on_stall` stays an open decision for the repository owner; the feature description's "supervisor process was gone" is corrected by the recorded evidence.
 
 ## User Scenarios & Testing *(mandatory)*
@@ -188,10 +189,12 @@ acceptance order across projects, and they start in that order.
   separate processes on the same host.
 - **FR-009**: A drain MUST be safe to re-run at any time, and a drain interrupted part
   way MUST leave every job in a valid state.
-- **FR-010**: The periodic drain MUST also run today's startup reconciliation unchanged,
-  which ends running jobs whose supervisor or child is proved gone, or whose running row
-  has no durable supervisor identity, and releases their slots. A stale heartbeat alone
-  MUST NOT end a job.
+- **FR-010**: The periodic drain MUST also run today's startup reconciliation unchanged.
+  That rule ends a running job, and releases its slot, when its recorded supervisor is
+  proved gone (identity mismatch or proved absence), when its running row has no durable
+  supervisor identity, or when its recorded child PID now belongs to a different live
+  process. A child that is merely absent while its verified supervisor lives is left to
+  that supervisor. A stale heartbeat alone MUST NOT end a job.
 - **FR-011**: A queued job's reported position MUST count only older queued jobs that
   could start right now, host-wide, so it matches the order in which jobs start.
 - **FR-012**: When no slot is free, the drain MUST leave queued jobs queued with their

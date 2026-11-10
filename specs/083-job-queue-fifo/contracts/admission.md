@@ -41,9 +41,10 @@ Inside one immediate transaction, in this order. Each refusal raises `WorkspaceB
 `queue_reason` values are unchanged: refusals 2-7 keep `workspace_or_capacity_busy`, or
 the policy code for 3.
 
-## `JobScheduler.queued_in_order(limit=500)`
+## `JobScheduler.queued_in_order(after=None, limit=500)`
 
-Ids of queued, non-aggregate jobs ordered by `(accepted_at, job_id)`.
+One page of ids of queued, non-aggregate jobs ordered by `(accepted_at, job_id)`,
+starting after the `(accepted_at, job_id)` key `after`.
 
 ## `JobScheduler.free_slots()`
 
@@ -54,11 +55,13 @@ first, so a fresh scheduler is never read with a stale limit.
 
 Updates `queue_reason` of a job that is still `queued`, nothing else; a no-op otherwise.
 
-## `JobService.drain_queue(limit=500) -> list[str]`
+## `JobService.drain_queue() -> list[str]`
 
 - Returns the ids of jobs that left `queued` during this pass.
 - No-op (returns `[]`) without a scheduler, or when already draining in this thread.
-- Walks `queued_in_order(limit)`. Before each job: stop if `free_slots() == 0`. Calls
+- Walks every queued job, page by page through `queued_in_order`, so blocked older jobs
+  never hide a later startable one (FR-003). Before each job: stop if
+  `free_slots() == 0`, then clear this thread's `last_refusal`. Calls
   the admission path of `get(id, reconcile=False)`, suppressing per-job errors. After
   it: stop if this thread's `last_refusal` is `capacity`, `floor` or `policy`;
   otherwise continue (`workspace`, `order`, `admitted`, dependency waits, launch

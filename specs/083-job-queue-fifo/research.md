@@ -30,7 +30,7 @@
 
 ## R3. What drives admission
 
-- **Decision**: `JobService.drain_queue(limit=500)` walks queued jobs oldest-first
+- **Decision**: `JobService.drain_queue()` walks queued jobs oldest-first
   (`queued_in_order`) and calls `get(job_id, reconcile=False)` for each, which runs the
   existing admission and launch path. It stops when the scheduler records a host-wide
   refusal (slots, floor, policy) or no slot is free. The refusal kind and the

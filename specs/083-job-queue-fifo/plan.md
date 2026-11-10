@@ -47,8 +47,8 @@ runs via `controller-44bcdba/sb job-start --remote xspeed-dev --cancel-on-stall`
 **Project Type**: CLI plus a long-lived control service
 
 **Performance Goals**: a freed slot is taken within 30 s with the service running
-(SC-002); one drain pass visits at most 500 queued jobs and stops at the first
-host-wide refusal
+(SC-002); one drain pass pages through the queue (500 per page) and stops at the
+first host-wide refusal
 
 **Constraints**: admission stays serialized by the immediate transaction; no new lock
 file; no change to `sandbox/resources/*`, hosting job paths or the other files the brief

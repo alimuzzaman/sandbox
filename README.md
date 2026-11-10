@@ -948,6 +948,7 @@ You can view and drive instances with:
 ./sb dashboard            # full-screen TUI: start/stop/restart/open/focus/delete
 ./sb web                  # the same dashboard in the browser (127.0.0.1:8765)
 ./sb web --host tailscale # serve it to your tailnet, with full control (docs/remote-hosting.md)
+                          # its Stacks & sites page (/hosting) lists every stack's servers, read-only
 ./sb instance suspend <name>  # graceful stop; idle_stop is the resolved default
 ./sb instance resume <name>   # start a provisioned instance and wait for readiness
 ./sb instance delete <name>   # tear one down (containers, volume, files, registry)

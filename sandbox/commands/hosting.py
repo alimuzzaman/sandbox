@@ -5111,7 +5111,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     if progress is not None:
         result["apply_log"] = apply_log
     if summary_recorder is not None:
-        summary_recorder.finished(True)
+        summary_recorder.finished((delivery or {}).get("delivery_succeeded") is not False)
     return result
 
 

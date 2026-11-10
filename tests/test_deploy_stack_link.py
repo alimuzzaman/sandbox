@@ -141,7 +141,8 @@ class RecordLinkTest(unittest.TestCase):
         self.assertFalse(outcome["recorded"])
         self.assertEqual(outcome["error_code"], "stack_link_RuntimeError")
         record = stack_registry.read()["stacks"]["xspeed-dev/demo"]
-        self.assertEqual(record["sites"][1]["instance"], "old")
+        sites = {site["hostname"]: site["instance"] for site in record["sites"]}
+        self.assertEqual(sites["wp-demo.example.test"], "old")
 
     def test_unreachable_remote_is_reported(self):
         outcome, commands = self.record(home_error=RuntimeError("ssh down"))

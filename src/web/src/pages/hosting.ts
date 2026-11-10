@@ -65,13 +65,13 @@ function refCell(row: HostingServer): string {
 
 function serversTable(rows: HostingServer[], empty: string): string {
   const body = rows.length ? rows.map(row => `<tr class="border-t border-neutral-200 align-top dark:border-neutral-800">
-      <td class="p-3 text-[12px]">${hostCell(row)}</td>
+      <td class="break-words p-3 text-[12px]">${hostCell(row)}</td>
       <td class="p-3 text-[12px] ${theme.muted}">${esc(ORIGIN[row.origin])}</td>
       <td class="p-3 text-[12px]">${esc(STATE[row.state] || row.state)}</td>
       <td class="p-3 text-[12px]">${healthBadge(row.health)}</td>
-      <td class="p-3 text-[12px]">${refCell(row)}</td></tr>`).join("")
+      <td class="break-words p-3 text-[12px]">${refCell(row)}</td></tr>`).join("")
     : `<tr><td colspan="5" class="p-4 text-[12px] ${theme.quiet}">${esc(empty)}</td></tr>`;
-  return `<div class="overflow-x-auto"><table class="w-full text-left"><thead><tr>${["Server", "Kind", "State", "Health", "Built from"]
+  return `<div class="overflow-x-auto"><table class="w-full min-w-[640px] table-fixed text-left"><colgroup><col class="w-[34%]"><col class="w-[17%]"><col class="w-[13%]"><col class="w-[14%]"><col class="w-[22%]"></colgroup><thead><tr>${["Server", "Kind", "State", "Health", "Built from"]
     .map(label => `<th scope="col" class="px-3 pb-2 pt-1 ${theme.label}">${label}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
@@ -103,7 +103,7 @@ function stackCard(stack: HostingStack): string {
     </header>
     <div class="px-2 pb-2 pt-3">${serversTable(stack.servers, "No servers recorded for this stack yet.")}</div>
     <dl class="grid gap-4 border-t border-neutral-200 bg-neutral-50 px-5 py-4 dark:border-neutral-800 dark:bg-neutral-950 sm:grid-cols-2 lg:grid-cols-4">
-      ${field("Ref", `${esc(stack.ref_branch || stack.ref || "detached")}<div class="mt-0.5"><code class="text-[11px]" title="${esc(stack.commit)}">${esc(stack.commit || "unknown")}</code></div>`)}
+      ${field("Ref", `${esc(stack.ref_branch || stack.ref || "detached")}<div class="mt-0.5"><code class="text-[11px]" title="${esc(stack.commit)}">${esc(short(stack.commit))}</code></div>`)}
       ${field("Template", stack.template ? `<code class="text-[11px]">${esc(stack.template)}</code>` : `<span class="${theme.quiet}">unknown</span>`)}
       ${field("Mailpit", stack.mailpit_port ? `<code>127.0.0.1:${esc(stack.mailpit_port)}</code><div class="mt-0.5 text-[11px] ${theme.quiet}">loopback only, on the server</div>` : `<span class="${theme.quiet}">no mailpit port</span>`)}
       ${field("Created", `${esc(when(stack.created_at))}${stack.ttl_expires_at ? `<div class="mt-0.5 text-[11px] ${theme.quiet}">expires ${esc(when(stack.ttl_expires_at))}</div>` : ""}`)}

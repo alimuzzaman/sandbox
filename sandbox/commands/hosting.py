@@ -7396,6 +7396,12 @@ def cmd_host(cfg, args) -> None:
         from sandbox.commands.host_exec import cmd_host_exec
         cmd_host_exec(args)
         return
+    if args.action == "tailnet-name":
+        from sandbox.commands.host_tailnet_name import cmd_host_tailnet_name
+        cmd_host_tailnet_name(args)
+        return
+    if getattr(args, "tailnet_hostname", None) is not None:
+        die("a hostname argument is only accepted by `host tailnet-name`")
     if getattr(args, "exec_argv", None) is not None:
         die("arguments after -- are only accepted by `host exec`")
     if getattr(args, "initializer", None) is not None and args.action != "diagnose":

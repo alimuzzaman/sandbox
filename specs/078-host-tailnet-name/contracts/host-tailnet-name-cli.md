@@ -58,6 +58,9 @@ any result is not ok.
 
 | Code | When |
 |---|---|
+| `tailnet_name_usage` | Missing or misplaced arguments for the action (exit 1, before any other check). |
+| `tailnet_name_public_address_invalid` | `--public-address` is not a public IPv4 address. |
+| `tailnet_name_remote_failed` | The remote program could not run or returned no result. |
 | `tailnet_name_invalid` | FQDN fails hostname rules, is a wildcard or a zone apex. |
 | `tailnet_name_zone_not_allowed` | FQDN is under no configured zone. |
 | `tailnet_name_upstream_invalid` | Upstream is not `IPV4:PORT` or `localhost:PORT`, or not loopback/private/tailnet. |

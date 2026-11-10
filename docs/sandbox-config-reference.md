@@ -14,6 +14,28 @@ auto-update off for the machine; `SANDBOX_AUTO_UPDATE=0|1` overrides it per
 process. This is machine config, not a `sandbox.config.*` project key. See
 [controller-auto-update.md](controller-auto-update.md).
 
+## Tailnet names (machine config)
+
+`sb host tailnet-name` (spec 078) reads one block from
+`$SANDBOX_HOME/sandbox.local.yml`. It holds names only, never a token:
+
+```yaml
+tailnet_names:
+  zones: [example.test]            # required: names must be under one of these
+  cloudflare_token:                # required: a broker file source and key name
+    source: personal
+    key: EXAMPLE_CF_API_TOKEN
+  acme_email: ops@example.test     # required: ACME account contact
+  acme_server: letsencrypt         # optional: letsencrypt | letsencrypt-staging | https URL
+  lego: /opt/homebrew/bin/lego     # optional: default is `lego` on PATH
+```
+
+A name's zone is the longest listed zone it falls under; its Cloudflare id is
+looked up at run time. `--acme-server` overrides `acme_server` for one call.
+A missing block is `tailnet_name_config_missing`; a malformed one (including a
+token value instead of a key name) is `tailnet_name_config_invalid`. See
+[remote-hosting.md](remote-hosting.md#tailnet-only-hostnames-sb-host-tailnet-name-spec-078).
+
 A plugin repo becomes a **sandbox project** by carrying a `sandbox.config.json`
 (or `.yml`) at its root. This is the per-project source of truth in the
 MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /

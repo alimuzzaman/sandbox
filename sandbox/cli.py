@@ -1042,11 +1042,24 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, or run one command in a hosted service (`host exec ... -- ARGV`)")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec"])
+    host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, run one command in a hosted service (`host exec ... -- ARGV`), or publish an app under a tailnet-only HTTPS name (`host tailnet-name add|list|renew|remove`)")
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "tailnet-name"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down"],
-        help="immutable image action, or `host stack up|list|down`; `host image recover` is distinct from failed-apply `host recover`")
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "add", "renew", "remove"],
+        help="immutable image action, `host stack up|list|down`, or `host tailnet-name add|list|renew|remove`; `host image recover` is distinct from failed-apply `host recover`")
+    host_p.add_argument("tailnet_hostname", nargs="?", default=None, metavar="FQDN",
+        help="host tailnet-name add|renew|remove: the full hostname (refused for other host actions)")
+    host_p.add_argument("--upstream", default=None, metavar="HOST:PORT",
+        help="host tailnet-name add: loopback, private or tailnet IPv4 and port the name proxies to")
+    host_p.add_argument("--replace-upstream", dest="replace_upstream", action="store_true",
+        help="host tailnet-name add: change the upstream of an already published name")
+    host_p.add_argument("--public-address", dest="public_address", default=None, metavar="IPV4",
+        help="host tailnet-name add/renew: public IPv4 the exposure check probes (default: the remote's SSH host)")
+    host_p.add_argument("--acme-server", dest="acme_server", default=None,
+        metavar="letsencrypt|letsencrypt-staging|URL",
+        help="host tailnet-name add/renew: ACME directory for this call (default: tailnet_names.acme_server)")
+    host_p.add_argument("--force", action="store_true",
+        help="host tailnet-name renew: reissue even when the certificate is not due")
     host_p.add_argument("--template", default=None, metavar="PATH",
         help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
     host_p.add_argument("--name", default=None, metavar="SLUG",
@@ -1509,6 +1522,14 @@ Per-project (each plugin carries its own sandbox.config.json):
             args.exec_argv = host_exec_argv
         else:
             args = p.parse_args(raw_argv)
+    if getattr(args, "cmd", None) == "host" and getattr(args, "action", None) != "tailnet-name":
+        # Spec 078 added an optional FQDN positional and three sub-actions;
+        # every other host action keeps refusing them as argparse did.
+        if getattr(args, "tailnet_hostname", None) is not None:
+            host_p.error(f"unrecognized arguments: {args.tailnet_hostname} "
+                         "(a hostname argument is only accepted by `host tailnet-name`)")
+        if getattr(args, "image_action", None) in {"add", "renew", "remove"}:
+            host_p.error(f"{args.image_action} is only available with `host tailnet-name`")
     if getattr(args, "mode", None) == _TEST_MODE_OMITTED_SENTINEL:
         args.mode = None
     pre_command_label = _global_label_before_subcommand(raw_argv)

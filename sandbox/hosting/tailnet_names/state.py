@@ -27,6 +27,14 @@ _REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 VERSION = 1
 
 
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def default_root() -> Path:
     from sandbox.core._paths import BASE
     return Path(BASE) / "runtime" / "tailnet-names"
@@ -43,6 +51,9 @@ class StateStore:
     def _ensure_root(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
+        # Every write, not only a fresh mkdir: a run that died before this
+        # fsync left an entry the retry finds already there.
+        _fsync_dir(self.root.parent)
 
     def load(self) -> dict[str, TailnetNameRecord]:
         """All records; a missing file is empty, an unreadable one is STATE_CORRUPT.
@@ -92,6 +103,8 @@ class StateStore:
             if os.path.exists(staged):
                 os.unlink(staged)
             raise
+        # The rename is durable only once the directory holding it is synced.
+        _fsync_dir(self.root)
 
     def put(self, record: TailnetNameRecord) -> None:
         records = self.load()

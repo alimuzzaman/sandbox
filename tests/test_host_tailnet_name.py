@@ -478,6 +478,34 @@ class StateTests(unittest.TestCase):
                         store.load()
                     self.assertEqual(caught.exception.code, m.STATE_CORRUPT)
 
+    def test_a_write_is_durable_in_its_directory(self):
+        """Re-review 11 NEW-2: temp fsync, then rename, then directory fsync."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = state.StateStore(Path(tmp) / "tailnet-names", "box")
+            store._ensure_root()
+            root_ino = os.stat(store.root).st_ino
+            events = []
+            real_fsync, real_replace = os.fsync, os.replace
+
+            def fsync(fd):
+                events.append(("fsync", os.fstat(fd).st_ino))
+                return real_fsync(fd)
+
+            def replace(src, dst, **kwargs):
+                events.append(("replace", os.path.basename(dst)))
+                return real_replace(src, dst, **kwargs)
+            with mock.patch.object(state.os, "fsync", fsync), \
+                    mock.patch.object(state.os, "replace", replace):
+                store._write({})
+            renamed = events.index(("replace", "box.json"))
+            dirs = {root_ino, os.stat(tmp).st_ino}
+            self.assertTrue(any(kind == "fsync" and ino not in dirs
+                                for kind, ino in events[:renamed]),
+                            "the temp file is fsynced before the rename")
+            self.assertIn(("fsync", root_ino), events[renamed:])
+            self.assertIn(("fsync", os.stat(tmp).st_ino), events[:renamed],
+                          "the state directory's own entry is synced too")
+
     def test_lock_is_exclusive_and_non_blocking(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = state.StateStore(Path(tmp), "r1")

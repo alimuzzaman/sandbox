@@ -1737,7 +1737,8 @@ published name changes nothing.
    an activation (no certificate, history, journal or backup) needs no
    proof, since nginx cannot have loaded a block without its certificate;
    such a partial add can always be removed. Every directory the remote program
-   creates is fsynced, with its parent, before anything is written below it.
+   creates or opens for writing is fsynced, with its parent, before anything is
+   written below it, so a retry also settles one left by an interrupted run.
    Every block unlink is fsynced before
    anything that depends on it, such as deleting the certificates. `systemctl reload`
    succeeding is not proof, because nginx keeps its old configuration when
@@ -1832,8 +1833,9 @@ token, must report lego 5 or later. Anything else is
 `tailnet_name_acme_client_untrusted`. Install `lego` on the controller
 yourself (for example `brew install lego`). Controller state lives in
 `$SANDBOX_HOME/runtime/tailnet-names/<remote>.json` (names, addresses, the
-record id, the certificate expiry and the lease token only), and `lego`'s
-account in `$SANDBOX_HOME/runtime/tailnet-names/acme/` (0700).
+record id, the certificate expiry and the lease token only; each write is a
+fsynced rename followed by a directory fsync, so a recorded DNS record id
+survives power loss), and `lego`'s account in `$SANDBOX_HOME/runtime/tailnet-names/acme/` (0700).
 
 **Apps that check the Host header.** nginx forwards `Host: <fqdn>`. An app
 behind the name that validates Host has to allow the name itself. The Sandbox

@@ -150,21 +150,27 @@ def _trusted(st, paths, *, allow_sticky=False):
 
 
 def _make_dir(parent_fd, name, mode):
-    """Create ``name`` under ``parent_fd`` and make the new entry durable.
-
-    The new directory and its parent are both fsynced before the fd is
-    returned, so nothing written below it can outlive the entry on power loss.
-    """
+    """Create ``name`` under ``parent_fd`` and return its fd (not yet durable:
+    the caller runs _make_durable once the directory is trusted)."""
     os.mkdir(name, mode, dir_fd=parent_fd)
     fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
     try:
         os.fchmod(fd, mode)
-        os.fsync(fd)
-        os.fsync(parent_fd)
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+def _make_durable(fd, parent_fd):
+    """fsync a directory and its parent, so its entry survives power loss.
+
+    Run on every mutating open, not only right after mkdir: a run that died
+    between mkdir and the parent fsync left an entry that is not yet durable,
+    and the retry finds it already there.
+    """
+    os.fsync(fd)
+    os.fsync(parent_fd)
 
 
 def _open_dir(path, paths, *, create_mode=None, sticky_last=False):
@@ -191,12 +197,16 @@ def _open_dir(path, paths, *, create_mode=None, sticky_last=False):
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise Refusal("path_unsafe", f"{path} is not a plain directory") from None
                 raise
-            os.close(fd)
-            fd = child
-            # A root-owned sticky ancestor (like /tmp) is safe to pass through:
-            # nobody else can replace the trusted child below it.
-            if not _trusted(os.fstat(fd), paths, allow_sticky=sticky_last or not last):
-                raise Refusal("path_unsafe", f"{path} has an untrusted owner or mode")
+            parent, fd = fd, child
+            try:
+                # A root-owned sticky ancestor (like /tmp) is safe to pass through:
+                # nobody else can replace the trusted child below it.
+                if not _trusted(os.fstat(fd), paths, allow_sticky=sticky_last or not last):
+                    raise Refusal("path_unsafe", f"{path} has an untrusted owner or mode")
+                if last and create_mode is not None:
+                    _make_durable(fd, parent)
+            finally:
+                os.close(parent)
         return fd
     except BaseException:
         os.close(fd)
@@ -214,9 +224,14 @@ def _child_dir(parent_fd, name, paths, *, create_mode=None):
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             raise Refusal("path_unsafe", f"{name} is not a plain directory") from None
         raise
-    if not _trusted(os.fstat(fd), paths):
+    try:
+        if not _trusted(os.fstat(fd), paths):
+            raise Refusal("path_unsafe", f"{name} has an untrusted owner or mode")
+        if create_mode is not None:
+            _make_durable(fd, parent_fd)
+    except BaseException:
         os.close(fd)
-        raise Refusal("path_unsafe", f"{name} has an untrusted owner or mode")
+        raise
     return fd
 
 

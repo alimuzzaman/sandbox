@@ -1199,5 +1199,35 @@ class RoundSevenTests(Base):
                 self.assertIn(("fsync", created.stat().st_ino), events[made:])
                 self.assertIn(("fsync", parent.stat().st_ino), events[made:])
 
+    def test_a_retry_makes_a_directory_left_by_a_crash_durable(self):
+        """Re-review 11 NEW-1: the run died after mkdir, before the parent
+        fsync; the retry finds the directory and still syncs it in."""
+        real_make = rp._make_dir
+
+        def make_then_die(parent_fd, name, mode):
+            os.close(real_make(parent_fd, name, mode))
+            raise _Crash()
+        with mock.patch.object(rp, "_make_dir", make_then_die):
+            with self.assertRaises(_Crash):
+                self.reserve()
+        root = Path(self.paths["cert_root"])
+        self.assertTrue(root.is_dir())
+        events = []
+        real_fsync = os.fsync
+
+        def fsync(fd):
+            events.append(os.fstat(fd).st_ino)
+            return real_fsync(fd)
+
+        def lease_written(*args, **kwargs):
+            events.append("lease")
+            return real_write(*args, **kwargs)
+        real_write = rp._write
+        with mock.patch.object(rp.os, "fsync", fsync), mock.patch.object(rp, "_write", lease_written):
+            self.assertTrue(self.reserve()["ok"])
+        first_write = events.index("lease")
+        self.assertIn(root.stat().st_ino, events[:first_write])
+        self.assertIn(self.base.stat().st_ino, events[:first_write])
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from .delivery import delivery_config_provider
 from .domains import normalize_domain_policy
 from .instance_lifecycle import normalize_instance_lifecycle
-from .job_scheduler import machine_job_scheduler_provider
+from .job_scheduler import JobSchedulerConfigError, machine_job_scheduler_provider
 from .hosting_images import (
     HostingImageConfigError,
     machine_image_policy_provider,
@@ -143,7 +143,13 @@ def apply_machine_config(result: dict) -> dict:
             # built-in defaults without a materialized block.
             if "jobs" not in resolved:
                 continue
-            policy = provider(resolved)
+            try:
+                policy = provider(resolved)
+            except JobSchedulerConfigError:
+                # The scheduler is the only consumer and refuses admission
+                # with the code itself; a jobs typo must not also refuse
+                # unrelated machine consumers such as the storage monitor.
+                continue
             jobs = dict(resolved["jobs"])
             jobs["scheduler"] = policy.as_mapping()
             resolved["jobs"] = jobs

@@ -58,8 +58,11 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(resolved["jobs"]["scheduler"],
                          {"max_parallel": 4, "min_free_memory_mb": 512, "min_free_disk_mb": 2048})
         self.assertEqual(raw, {"jobs": {"scheduler": {"max_parallel": 4}}})
-        with self.assertRaises(JobSchedulerConfigError):
-            apply_machine_config({"jobs": {"scheduler": {"max_parallel": 99}}})
+        # An invalid jobs block is left for the scheduler to refuse; it does
+        # not refuse unrelated machine consumers such as the storage monitor.
+        invalid = apply_machine_config({"jobs": {"scheduler": {"max_parallel": 99}}})
+        self.assertEqual(invalid["jobs"], {"scheduler": {"max_parallel": 99}})
+        self.assertIn("monitor", invalid["resources"])
 
     def test_host_policy_reads_the_local_machine_config(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -132,6 +135,12 @@ class SchedulerPolicyTests(unittest.TestCase):
         stored = self.repo.get(row["job_id"])
         self.assertEqual((stored["lifecycle"], stored["queue_reason"]),
                          ("queued", "job_policy_unknown_key"))
+
+    def test_queue_details_name_no_slot_holders_under_an_invalid_policy(self):
+        first, second = self.accept("a"), self.accept("b")
+        self.scheduler.acquire(first)
+        self.policy = JobSchedulerConfigError("bad", "job_policy_invalid_floor")
+        self.assertEqual(self.scheduler.queue_details(second)["blocking_jobs"], [])
 
     def test_capacity_reports_limit_floors_and_usage(self):
         self.policy = JobSchedulerPolicy(4, 1024, 4096)
@@ -317,6 +326,15 @@ class JobPolicyCommandTests(unittest.TestCase):
         self.assertEqual(payload["policy"], {"max_parallel": 4, "min_free_memory_mb": 512,
                                              "min_free_disk_mb": 2048})
         self.assertEqual(payload["slots"]["in_use"], 1)
+
+    def test_a_malformed_remote_reply_is_refused(self):
+        for reply in (["not", "an", "object"], {"ok": True, "policy": "x"},
+                      {"ok": True, "policy": {"max_parallel": 0}}):
+            with mock.patch("sandbox.transports.remote_jobs.RemoteJobTransport.control",
+                            return_value=reply):
+                code, payload = self.run_command(remote="example-remote")
+            self.assertEqual((code, payload["code"]),
+                             (1, "remote_job_policy_invalid_response"), reply)
 
     def test_remote_bad_value_never_contacts_the_host(self):
         with mock.patch("sandbox.transports.remote_jobs.RemoteJobTransport.control") as control:

@@ -38,10 +38,10 @@ class SchedulerPolicyInvalid(WorkspaceBusy):
 def host_scheduler_policy() -> JobSchedulerPolicy:
     """Read ``jobs.scheduler`` from this host's own machine config."""
     from sandbox.config.job_scheduler import machine_job_scheduler_provider
-    from sandbox.core._config import load_config
+    from sandbox.core._config import ConfigParseError, load_config
     try:
         raw = load_config()
-    except (Exception, SystemExit):  # load_config die()s on a missing sandbox.yml.
+    except (SystemExit, OSError, ConfigParseError):  # die() exits on a missing sandbox.yml.
         raise JobSchedulerConfigError(
             "host machine config is unreadable", "job_policy_config_unreadable") from None
     return machine_job_scheduler_provider(raw)
@@ -229,7 +229,10 @@ class JobScheduler:
         seen = set()
         candidates = (
             *workspace_rows,
-            *(active_slots if len(active_slots) >= self.max_parallel else ()),
+            # Under an invalid policy the limit is unknown; the queue reason
+            # carries the config error instead of naming slot holders.
+            *(active_slots if self.policy_error is None
+              and len(active_slots) >= self.max_parallel else ()),
         )
         for blocker in candidates:
             job_id = blocker[0]

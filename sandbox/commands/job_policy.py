@@ -124,9 +124,10 @@ def _remote(name: str, requested: dict[str, int], confirm: bool) -> dict:
         payload = transport.control(name, argv)
     except RemoteJobTransportError as exc:
         return {"ok": False, "code": "remote_job_policy_failed", "error": str(exc), "remote": name}
-    policy = payload.get("policy")
     try:
-        policy = normalize_job_scheduler(policy).as_mapping()
+        if not isinstance(payload, dict) or not isinstance(payload.get("policy"), dict):
+            raise JobSchedulerConfigError("not an object", "job_policy_invalid")
+        policy = normalize_job_scheduler(payload["policy"]).as_mapping()
     except JobSchedulerConfigError:
         return {"ok": False, "code": "remote_job_policy_invalid_response",
                 "error": "remote returned an invalid job policy", "remote": name}

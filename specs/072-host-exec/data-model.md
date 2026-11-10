@@ -26,8 +26,8 @@
 
 | Field | Type | Rule |
 |---|---|---|
-| exit_code | int | child status; 124 timeout; 255 transport |
-| code | str | `ok`, `host_exec_failed`, `host_exec_timeout`, `host_exec_transport_failed` |
+| exit_code | int | remote status unchanged; 255 transport or watchdog |
+| code | str | `ok`, `host_exec_failed`, `host_exec_timeout`, `host_exec_transport_failed`, `host_exec_watchdog_expired`, `host_exec_interrupted` |
 | duration_ms | int | wall time of the run |
 | stdout, stderr | bytes | captured only when `capture`; at most 1 MiB each |
 | stdout_truncated, stderr_truncated | bool | |

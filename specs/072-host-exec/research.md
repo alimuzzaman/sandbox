@@ -24,8 +24,10 @@
 
 ## R3. Timeout
 
-- **Decision**: remote `timeout --kill-after=10 N`, plus a local deadline of
-  `N + 30` s that kills `ssh`.
+- **Decision**: remote `timeout --kill-after=10 N`, plus a local watchdog at
+  `N + 40` s that kills `ssh` and reports `host_exec_watchdog_expired`; the
+  remote status (124, or 137 after the kill) is passed through, never
+  rewritten (review finding).
 - **Rationale**: the remote wrapper ends the Compose exec client; the local
   deadline covers a hung connection. Docker does not signal a process started
   by `exec` when the client goes away, so a command ignoring end of input can

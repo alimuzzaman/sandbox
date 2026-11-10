@@ -16,7 +16,8 @@ only when no stack matches.
 - stdin: the caller's stdin, unchanged, closed at end of input; `/dev/null`
   when stdin is a terminal.
 - stdout/stderr: the command's own streams, live.
-- Exit status: the command's; 1 refusal; 2 usage; 124 timeout; 255 transport.
+- Exit status: the command's, unchanged (a server-side timeout is 124 or 137);
+  1 refusal; 2 usage; 255 transport or local watchdog.
 - Refusals print `error: <code>: <message>` on stderr.
 
 ## `--json` mode

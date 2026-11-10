@@ -149,11 +149,12 @@ class RequestAndCommandTests(unittest.TestCase):
         self.assertEqual(host_exec.classify(3, 1, 300), (3, "host_exec_failed"))
         self.assertEqual(host_exec.classify(124, 1, 300), (124, "host_exec_failed"))
         self.assertEqual(host_exec.classify(124, 300, 300), (124, "host_exec_timeout"))
-        self.assertEqual(host_exec.classify(137, 311, 300), (124, "host_exec_timeout"))
+        self.assertEqual(host_exec.classify(137, 311, 300), (137, "host_exec_timeout"))
+        self.assertEqual(host_exec.classify(137, 5, 300), (137, "host_exec_failed"))
         self.assertEqual(host_exec.classify(255, 1, 300), (255, "host_exec_transport_failed"))
         self.assertEqual(host_exec.classify(-9, 1, 300), (137, "host_exec_failed"))
         self.assertEqual(host_exec.classify(0, 1, 300, locally_killed=True),
-                         (124, "host_exec_timeout"))
+                         (255, "host_exec_watchdog_expired"))
 
     def test_envelope_ok_only_on_exit_zero(self):
         request = _request(capture=True)
@@ -207,14 +208,30 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(outcome.stderr_truncated)
         self.assertEqual(outcome.exit_code, 0)
 
-    def test_local_deadline_kills_and_reports_timeout(self):
+    def test_local_watchdog_kills_and_reports_unconfirmed_deadline(self):
         sleeper = [sys.executable, "-c", "import time; time.sleep(30)"]
         with patch.object(host_exec, "KILL_AFTER_SECONDS", 0), \
                 patch.object(host_exec, "LOCAL_GRACE_SECONDS", 0):
             outcome = host_exec.run(sleeper, _request(timeout_seconds=1, capture=True),
                                     stdin=subprocess.DEVNULL)
-        self.assertEqual((outcome.exit_code, outcome.code), (124, "host_exec_timeout"))
+        self.assertEqual((outcome.exit_code, outcome.code), (255, "host_exec_watchdog_expired"))
         self.assertFalse(outcome.ok)
+
+    def test_ssh_that_cannot_start_is_a_transport_failure(self):
+        outcome = host_exec.run([str(self.out / "no-such-ssh")], _request(capture=True),
+                                stdin=subprocess.DEVNULL)
+        self.assertEqual((outcome.exit_code, outcome.code), (255, "host_exec_transport_failed"))
+        self.assertIn(b"could not start ssh", outcome.stderr)
+
+    def test_audit_log_closes_once_and_refuses_writes_after_close(self):
+        path = self.out / "audit" / "audit.jsonl"
+        outcome = ExecOutcome(exit_code=0, code="ok", duration_ms=1)
+        with host_exec.AuditLog(path) as audit:
+            audit.write(_request(), outcome)
+        audit.close()
+        with self.assertRaises(OSError):
+            audit.write(_request(), outcome)
+        self.assertEqual(len(path.read_text().splitlines()), 1)
 
     def test_tty_or_closed_stdin_becomes_devnull(self):
         class Closed:
@@ -358,6 +375,15 @@ class CommandTests(unittest.TestCase):
         self.assertIn("host_exec_transport_failed", err)
         record = json.loads((self.runtime / "host-exec" / "audit.jsonl").read_text())
         self.assertEqual(record["code"], "host_exec_transport_failed")
+
+    def test_ssh_launch_failure_is_audited_and_exits_255(self):
+        with patch("sandbox.core._remote.ssh_command_args",
+                   return_value=[str(self.out / "no-such-ssh")]):
+            code, out, _err = self._run(_exec_args())
+        self.assertEqual(code, 255)
+        self.assertEqual(json.loads(out)["code"], "host_exec_transport_failed")
+        record = json.loads((self.runtime / "host-exec" / "audit.jsonl").read_text())
+        self.assertEqual((record["exit_code"], record["code"]), (255, "host_exec_transport_failed"))
 
     def test_unknown_service_is_refused_before_running(self):
         code, out, _err = self._run(_exec_args(service="db"))

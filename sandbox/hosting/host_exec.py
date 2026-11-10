@@ -34,6 +34,7 @@ OK = "ok"
 FAILED = "host_exec_failed"
 TIMED_OUT = "host_exec_timeout"
 TRANSPORT_FAILED = "host_exec_transport_failed"
+WATCHDOG_EXPIRED = "host_exec_watchdog_expired"
 INTERRUPTED = "host_exec_interrupted"
 
 USAGE = "host_exec_usage"
@@ -224,10 +225,18 @@ class _BoundedBuffer:
 
 def classify(returncode: int, elapsed: float, timeout_seconds: int, *,
              locally_killed: bool = False) -> tuple[int, str]:
+    """Map the SSH child's status to (exit status, result code).
+
+    The remote status is passed through unchanged. ``timeout`` exits 124, or
+    137 after ``--kill-after``; a command that itself exits 124 or 137 after
+    the deadline reads the same, so the timeout label is inferred, never the
+    status. The local watchdog firing means the remote deadline could not be
+    confirmed and the command may still be running there.
+    """
     if locally_killed:
-        return EXIT_TIMEOUT, TIMED_OUT
+        return EXIT_TRANSPORT, WATCHDOG_EXPIRED
     if returncode in (124, 137) and elapsed >= timeout_seconds:
-        return EXIT_TIMEOUT, TIMED_OUT
+        return returncode, TIMED_OUT
     if returncode == 255:
         return EXIT_TRANSPORT, TRANSPORT_FAILED
     if returncode < 0:
@@ -239,11 +248,17 @@ def run(ssh_argv: list[str], request: ExecRequest, *, stdin, clock=time.monotoni
     """Run one SSH child; stream or capture its output; never read stdin."""
     capture = request.capture
     started = clock()
-    proc = subprocess.Popen(
-        ssh_argv, stdin=stdin,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-    )
+    try:
+        proc = subprocess.Popen(
+            ssh_argv, stdin=stdin,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+        )
+    except OSError as exc:
+        message = f"could not start ssh: {exc.strerror or exc}\n".encode()
+        return ExecOutcome(exit_code=EXIT_TRANSPORT, code=TRANSPORT_FAILED,
+                           duration_ms=int((clock() - started) * 1000),
+                           stderr=message if capture else b"")
     buffers = []
     threads = []
     if capture:
@@ -286,7 +301,10 @@ def audit_path() -> Path:
 
 
 class AuditLog:
-    """Append-only audit, opened before the run so a run is never unaudited."""
+    """Append-only audit, opened before the run so a run is never unaudited.
+
+    Use it as a context manager; the descriptor is closed exactly once.
+    """
 
     def __init__(self, path: Path | None = None):
         path = path or audit_path()
@@ -298,6 +316,17 @@ class AuditLog:
                               f"cannot open the host exec audit log: {exc.strerror}") from None
         self.path = path
 
+    def __enter__(self) -> "AuditLog":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
+
     def write(self, request: ExecRequest, outcome: ExecOutcome, *, now=None) -> None:
         from sandbox.services.redaction import redact_text
         at = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -308,9 +337,10 @@ class AuditLog:
             "duration_ms": outcome.duration_ms,
         }
         line = (json.dumps(record, sort_keys=True) + "\n").encode()
+        if self._fd is None:
+            raise OSError("audit log is closed")
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
         try:
-            fcntl.flock(self._fd, fcntl.LOCK_EX)
             os.write(self._fd, line)
         finally:
             fcntl.flock(self._fd, fcntl.LOCK_UN)
-            os.close(self._fd)

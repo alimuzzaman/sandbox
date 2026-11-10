@@ -154,6 +154,24 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(TargetRefusal):
             target_resolution.resolve(None, target="hub-demo/sandbox", state=state, registry=registry)
 
+    def test_stack_record_under_a_foreign_key_or_remote_is_not_trusted(self):
+        registry = self.fx.stack()
+        record = registry["stacks"].pop("myvps/demo")
+        registry["stacks"]["myvps/other"] = record
+        state = _state("myvps/hub-demo/sandbox")
+        with self.assertRaises(TargetRefusal) as caught:
+            target_resolution.resolve("myvps", name="demo", state=state, registry=registry)
+        self.assertEqual(caught.exception.code, "host_target_invalid")
+        registry = self.fx_other_remote()
+        with self.assertRaises(TargetRefusal) as caught:
+            target_resolution.resolve("myvps", name="demo", state=state, registry=registry)
+        self.assertEqual(caught.exception.code, "host_target_unknown")
+
+    def fx_other_remote(self) -> dict:
+        record = {"remote": "elsewhere", "slug": "demo", "project": "hub-demo",
+                  "environment": "sandbox", "manifest": "/x/sandbox.hosting.yml"}
+        return {"version": 1, "stacks": {"elsewhere/demo": record}}
+
     def test_stack_manifest_outside_its_runtime_dir_is_refused(self):
         registry = self.fx.stack()
         record = registry["stacks"]["myvps/demo"]

@@ -126,11 +126,13 @@ and only dispatch lines in the large shared `hosting.py` and `cli.py`.
 6. **Runner**: `subprocess.Popen(ssh_command_args(entry, cmd, multiplex=False),
    stdin=<controller stdin fd, or DEVNULL for a TTY/closed stdin>)`. Plain
    mode inherits stdout/stderr; `--json` drains both pipes in threads into
-   1 MiB buffers. A local deadline of `N + 30` s kills `ssh`. Exit 124/137
-   after at least `N` s, or the local kill, is `host_exec_timeout`; 255 is
-   `host_exec_transport_failed` (the command may also have exited 255).
-7. **Exit status**: the child's code; refusals exit 1, usage errors 2,
-   timeout 124, transport 255. `ok` is true only for exit 0.
+   1 MiB buffers. A local watchdog at `N + 40` s kills `ssh` and reports
+   `host_exec_watchdog_expired` (exit 255, remote state unconfirmed). Exit
+   124/137 after at least `N` s is labelled `host_exec_timeout` with the status
+   passed through; 255 or an `ssh` that cannot start is
+   `host_exec_transport_failed`.
+7. **Exit status**: the remote status unchanged; refusals exit 1, usage
+   errors 2, transport and watchdog 255. `ok` is true only for exit 0.
 8. **Audit**: one JSON line in `runtime/host-exec/audit.jsonl` (dir 0700,
    file 0600, `flock`, `O_APPEND`) with `at`, `remote`, `target`, `service`,
    redacted `argv`, `exit_code`, `code`, `duration_ms`. Written for every run

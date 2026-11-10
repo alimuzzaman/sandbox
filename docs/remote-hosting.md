@@ -1526,9 +1526,9 @@ working-directory or environment option, and none is added.
   the command itself prints. A terminal stdin is replaced by `/dev/null`; no TTY is
   allocated. The SSH session does not share a ControlMaster.
 - **Output and exit status.** stdout and stderr stream back; `sb` exits with the
-  command's status. Refusals exit 1, usage errors 2, a timeout 124 and an SSH
-  failure 255 (`host_exec_transport_failed`; a command that itself exits 255 reads
-  the same). `--json` prints one object with `ok`, `code`, `exit_code`, `remote`,
+  command's status, passed through unchanged. Refusals exit 1 and usage errors 2.
+  An SSH failure, or an `ssh` that cannot start, is 255
+  (`host_exec_transport_failed`; a command that itself exits 255 reads the same). `--json` prints one object with `ok`, `code`, `exit_code`, `remote`,
   `target`, `service`, `duration_ms` and the captured `stdout`/`stderr` (1 MiB each,
   with `stdout_truncated`/`stderr_truncated`); `ok` is true only for exit 0.
 - **Busy targets are refused, never waited for.** `host_target_busy` when the
@@ -1536,10 +1536,16 @@ working-directory or environment option, and none is added.
   record holds an active apply, recovery, destroy or image activation, or when the
   target's apply lock is held at that moment. The check is made once at start; an
   apply started later may restart the service under a running command.
-- **Timeout.** `--timeout` is 1-3600 seconds, default 300. At the limit the Compose
-  exec client on the server is stopped and the run reports `host_exec_timeout`;
-  Docker does not signal a process started by `exec` when its client goes away, so
-  a command that ignores end of input can keep running in the container.
+- **Timeout.** `--timeout` is 1-3600 seconds, default 300. At the limit the server's
+  `timeout` stops the Compose exec client (TERM, then KILL 10 seconds later) and
+  `sb` exits with that status, 124 or 137, labelled `host_exec_timeout`. A command
+  that itself exits 124 or 137 after the deadline gets the same label, so the label
+  is inferred; the status is never rewritten. Docker does not signal a process
+  started by `exec` when its client goes away, so a command that ignores end of
+  input can keep running in the container. If `ssh` is still running 40 seconds
+  after the deadline, a local watchdog kills it and the run is
+  `host_exec_watchdog_expired` (exit 255): the remote deadline was not confirmed and
+  the command may still be running there.
 - **Audit.** Each run that reached the remote appends one line to
   `$SANDBOX_HOME/runtime/host-exec/audit.jsonl` (0600): `at`, `remote`, `target`,
   `service`, redacted `argv`, `exit_code`, `code`, `duration_ms`. Nothing else.

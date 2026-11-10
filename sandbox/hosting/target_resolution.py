@@ -8,6 +8,7 @@ recorded for that remote in this controller's hosting state.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -16,6 +17,8 @@ import sandbox.core._hosting as hosting
 from sandbox.core._hosting import HostingRefusal
 from sandbox.hosting import stack_registry, stack_template
 from sandbox.hosting.names import TARGET_PART_RE
+
+_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 
 TARGET_INVALID = "host_target_invalid"
 TARGET_UNKNOWN = "host_target_unknown"
@@ -55,10 +58,17 @@ def parse_target(value: object) -> tuple[str, str]:
 def _stack_record(registry: dict, remote_name: str, *, slug: str | None = None,
                   project: str | None = None, environment: str | None = None) -> dict | None:
     matches = [
-        record for record in stack_registry.records_for_remote(registry, remote_name)
-        if (record.get("slug") == slug if slug is not None else
-            record.get("project") == project and record.get("environment") == environment)
+        record for key, record in (registry.get("stacks") or {}).items()
+        if isinstance(record, dict) and record.get("remote") == remote_name
+        and (record.get("slug") == slug if slug is not None else
+             record.get("project") == project and record.get("environment") == environment)
     ]
+    for record in matches:
+        # A record is trusted only under its own key and with a path-safe slug.
+        record_slug = record.get("slug")
+        if not isinstance(record_slug, str) or not _SLUG_RE.fullmatch(record_slug) \
+                or registry["stacks"].get(stack_registry.record_key(remote_name, record_slug)) is not record:
+            raise TargetRefusal(TARGET_INVALID, "the stack registry holds a malformed stack record")
     if len(matches) > 1:
         raise TargetRefusal(TARGET_INVALID, "more than one recorded stack matches; use --name")
     return matches[0] if matches else None

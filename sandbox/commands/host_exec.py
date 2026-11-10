@@ -96,6 +96,8 @@ def cmd_host_exec(args) -> None:
     as_json = bool(getattr(args, "json", False))
     try:
         request, entry, prefix = _prepare(args)
+        command = host_exec.remote_command(prefix, request)
+        ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
         audit = host_exec.AuditLog()
     except ExecRefusal as exc:
         _refuse(exc.code, exc.detail, as_json=as_json, exit_code=exc.exit_code)
@@ -103,26 +105,29 @@ def cmd_host_exec(args) -> None:
         _refuse(getattr(exc, "code", None) or "host_exec_refused",
                 getattr(exc, "detail", None) or str(exc), as_json=as_json,
                 exit_code=host_exec.EXIT_REFUSAL)
-    command = host_exec.remote_command(prefix, request)
-    ssh_argv = remote.ssh_command_args(entry, command, multiplex=False)
-    outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source())
     audit_failed = False
-    try:
-        audit.write(request, outcome)
-    except OSError as exc:
-        # The command already ran; keep its status and say the record is missing.
-        audit_failed = True
-        print(f"sb host exec: warning: audit record not written: {exc.strerror}", file=sys.stderr)
+    with audit:
+        outcome = host_exec.run(ssh_argv, request, stdin=host_exec.stdin_source())
+        try:
+            audit.write(request, outcome)
+        except OSError as exc:
+            # The command already ran; keep its status and say the record is missing.
+            audit_failed = True
+            print(f"sb host exec: warning: audit record not written: {exc.strerror or exc}",
+                  file=sys.stderr)
     if as_json:
         envelope = outcome.envelope(request)
         if audit_failed:
             envelope["audit"] = "failed"
         print(json.dumps(envelope, sort_keys=True))
     elif outcome.code in {host_exec.TIMED_OUT, host_exec.TRANSPORT_FAILED,
-                          host_exec.INTERRUPTED}:
+                          host_exec.WATCHDOG_EXPIRED, host_exec.INTERRUPTED}:
         note = {
-            host_exec.TIMED_OUT: f"timed out after {request.timeout_seconds}s",
+            host_exec.TIMED_OUT: f"timed out after {request.timeout_seconds}s "
+                                 f"(exit {outcome.exit_code})",
             host_exec.TRANSPORT_FAILED: "exit 255: the SSH connection failed, or the command exited 255",
+            host_exec.WATCHDOG_EXPIRED: "the local watchdog stopped ssh; the remote deadline was "
+                                        "not confirmed and the command may still be running",
             host_exec.INTERRUPTED: "interrupted",
         }[outcome.code]
         print(f"sb host exec: {outcome.code}: {note}", file=sys.stderr)

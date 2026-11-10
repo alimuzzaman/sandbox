@@ -1019,6 +1019,9 @@ class SiteNoAccessTests(_SiteBase):
 
 
 class SiteOperatorTests(_SiteBase):
+    def assert_no_upstream_hits(self):
+        self.assertEqual(self.upstream_store["requests"], [])
+
     def test_listing_shows_ids_and_counts_only(self):
         first, first_id = self.mint(uses=2)
         second, _ = self.mint()
@@ -1075,6 +1078,39 @@ class SiteOperatorTests(_SiteBase):
         (store.links / f"{record['token_sha256']}.json").unlink()
         self.assertIsNone(store.start_session(record, 3600, self.config["enabled_until_epoch"]))
         self.assertEqual(list(store.sessions.glob("*.json")), [])
+
+    def test_a_revoke_between_session_write_and_link_check_leaves_no_session(self):
+        token, link_id = self.mint()
+        store = self.public.gate.sites["mockup"]
+        write = runtime._write_private
+
+        def write_then_revoke(path, text):
+            write(path, text)
+            if path.parent == store.sessions:
+                self.manage("revoke", "mockup", link_id)
+
+        with patch.object(runtime, "_write_private", write_then_revoke):
+            response, _ = self.open_link(token)
+        self.assertEqual(response.status, 404)
+        self.assertEqual(list(store.sessions.glob("*.json")), [])
+
+    def test_a_revoke_after_the_link_check_still_kills_the_new_session(self):
+        token, link_id = self.mint()
+        store = self.public.gate.sites["mockup"]
+        start = store.start_session
+
+        def start_then_revoke(*args):
+            started = start(*args)
+            self.manage("revoke", "mockup", link_id)
+            return started
+
+        with patch.object(store, "start_session", start_then_revoke):
+            response, _ = self.open_link(token)
+        self.assertEqual(response.status, 303)
+        cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+        self.assertEqual(list(store.sessions.glob("*.json")), [])
+        self.assert_no_upstream_hits()
 
     def test_mint_refusals(self):
         def record(**fields):

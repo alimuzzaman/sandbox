@@ -33,7 +33,7 @@ class ThisServerInventoryTest(unittest.TestCase):
         with mock.patch.object(ui_dash, "_hosts_control_service", return_value=hosts_control), \
                 mock.patch.object(remote_core, "get_remote", side_effect=(registered or {}).get), \
                 mock.patch.object(remote_core, "remote_inventory", return_value=dict(SNAPSHOT)) as remote, \
-                mock.patch("sandbox.resources.host_inventory._hosted_inventory_snapshot",
+                mock.patch("sandbox.remote_runtime.host_inventory._hosted_inventory_snapshot",
                            return_value=dict(SNAPSHOT, secret_url="https://u:p@example.test/")) as local:
             code, payload = ui_dash._remote_view(name, deep)
         return code, payload, remote, local
@@ -62,7 +62,7 @@ class ThisServerInventoryTest(unittest.TestCase):
     def test_a_failed_local_build_is_reported_unavailable(self):
         with mock.patch.object(ui_dash, "_hosts_control_service", return_value=True), \
                 mock.patch.object(remote_core, "get_remote", return_value=None), \
-                mock.patch("sandbox.resources.host_inventory._hosted_inventory_snapshot",
+                mock.patch("sandbox.remote_runtime.host_inventory._hosted_inventory_snapshot",
                            side_effect=RuntimeError("boom")):
             code, payload = ui_dash._remote_view("this-server", False)
         self.assertEqual((code, payload["evidence_status"]), (503, "unavailable"))

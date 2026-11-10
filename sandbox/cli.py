@@ -1108,6 +1108,12 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host login-url: sign in as this address for this link only")
     host_p.add_argument("--save-email", action="store_true",
         help="host login-url: also make --email this target's saved default")
+    host_p.add_argument("--uses", type=int, default=None, metavar="N",
+        help="host login-url (site_gate): sessions one share link may start (1-20, default 1)")
+    host_p.add_argument("--list", dest="list_links", action="store_true",
+        help="host login-url (site_gate): list live share links and sessions (ids only)")
+    host_p.add_argument("--revoke", default=None, metavar="ID|all",
+        help="host login-url (site_gate): revoke a share link (l-...) with its sessions, a session (s-...), or all")
     host_p.add_argument("--lines", "--tail", dest="lines", type=int, default=200,
         help="bounded number of recent hosted-service log lines (1-1000; --tail is an alias)")
     host_p.add_argument("--apply-log", action="store_true",

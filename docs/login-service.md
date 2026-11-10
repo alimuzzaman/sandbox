@@ -1,7 +1,8 @@
 # Login service: one-time links for a hosted project
 
 A hosted Compose project can give someone a short-lived, single-use link into a
-private inbox or into its own sign-in flow. Sandbox renders one small service,
+private inbox, into its own sign-in flow, or into a private site such as a mockup
+(see [Sharing a private site](#sharing-a-private-site-site_gate)). Sandbox renders one small service,
 `sandbox-login`, into the target's Compose override. Nothing for it lives in the
 project's repository except the declaration in its hosting manifest.
 
@@ -166,8 +167,166 @@ On a consumed link the service:
 A token is consumed before the exchange starts, so it cannot trigger a second mail. It
 stays consumed if a later step fails: issue a new link.
 
+## Sharing a private site (`site_gate`)
+
+A `site_gate` entry shares one background service of the project, such as a static
+mockup, with someone who has no tailnet access and no account. The owner mints a
+link and sends it. Opening the link starts a session on a public gate hostname,
+and the gate forwards that browser's requests, websockets included, to the declared
+upstream until the session ends. Without a session the gate hostname answers 404 to
+everything.
+
+Every hosted hostname, the primary included, gets a public DNS record. Keeping the
+site private is the project edge's job: it answers the primary with 404 and sends
+only the gate hostname to `sandbox-login:8080`. The owner views the site through
+the upstream's loopback-only port, for example with a tailnet proxy on the server.
+
+### Example: a static mockup
+
+`sandbox.hosting.yml` (placeholder hosts):
+
+```yaml
+version: 1
+project: mockups
+environments:
+  dev:
+    compose:
+      files: [compose.yml]
+      service: edge                        # Sandbox routes every served hostname here
+      container_port: 8080
+      background_services: [web]
+    healthcheck: {path: /, statuses: [404]}   # the edge's default answer
+    deploy: {allowed_branches: [main], require_clean: true}
+    host:
+      primary: mockups.dev.example.test    # public DNS; the edge answers it with 404
+      aliases:
+        - {hostname: share.dev.example.test, mode: serve}
+    cloudflare: {proxied: false, tls: acme}
+    autologin:
+      login_service:
+        image: python:3.13-alpine@sha256:<digest>
+        enabled_until: 2026-12-01
+        session_ttl_seconds: 172800        # 48 hours per session
+        allowed_host_suffixes: [dev.example.test]
+      entries:
+        mockup:
+          mode: site_gate
+          hostname: share.dev.example.test
+          upstream: http://web:80
+          ttl_seconds: 900                 # an unopened link dies after 15 minutes
+```
+
+`compose.yml`:
+
+```yaml
+services:
+  edge:
+    image: nginx:1.27-alpine@sha256:<digest>
+    volumes: ["./edge.conf:/etc/nginx/conf.d/default.conf:ro"]
+  web:
+    image: nginx:1.27-alpine@sha256:<digest>
+    volumes: ["./site:/usr/share/nginx/html:ro"]
+    ports: ["127.0.0.1:8090:80"]           # the owner's private view; loopback only
+```
+
+`edge.conf`:
+
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+server {
+    listen 8080 default_server;
+    return 404;                            # the primary and anything unknown
+}
+server {
+    listen 8080;
+    server_name share.dev.example.test;
+    resolver 127.0.0.11 valid=10s;         # starts even before sandbox-login exists
+    set $gate sandbox-login:8080;
+    location / {
+        proxy_pass http://$gate;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+To view the site yourself, run `tailscale serve --bg http://127.0.0.1:8090` (or an SSH
+port forward) on the server. Sandbox does not manage that step.
+
+### Declaration rules
+
+- `hostname` is a served alias, never the primary. It fronts no other entry, because
+  the gate answers every path on it.
+- `upstream` is `http://<service>:<port>`, where the service is one of
+  `compose.background_services`, and has no path, query or credentials. The gate
+  connects to nowhere else.
+- `path` is where links land. It defaults to `/__sandbox/share/<entry>`. `landing_path`
+  is where a new session goes, and defaults to `/`. `ttl_seconds` (60 to 3600, default
+  900) is the life of an unopened link. `requires_email` is false or omitted.
+- `login_service.capture` is optional when every entry is a `site_gate`.
+- `basic_auth` on the same environment is refused, because it would put a password
+  prompt in front of the gate hostname.
+- Apply preflight refuses an upstream that publishes a port beyond `127.0.0.1` or `::1`
+  (`upstream_port_published`) or is missing from the project (`upstream_not_in_project`).
+
+### Minting, listing and revoking
+
+```bash
+./sb host login-url --project-dir . --environment dev --remote myvps \
+  --service mockup --confirm [--uses 3] [--ttl-seconds 600] [--json]
+./sb host login-url ... --service mockup --list [--json]
+./sb host login-url ... --service mockup --revoke l-1a2b3c4d5e6f --confirm   # or s-..., or all
+```
+
+- **The link is shown once, on your terminal.** The command writes it to the controlling
+  terminal. Stdout and `--json` carry only the link id, expiry and uses. With no
+  terminal (a background job, an agent's shell, a pipe) it refuses with
+  `terminal_required` and mints nothing, so the link never lands in job output, logs
+  or a transcript.
+- `--uses N` (1 to 20, default 1) is how many browsers the link may start a session in.
+- `--list` needs no `--confirm`. It shows ids, times, uses spent and sessions, never a
+  link or a hash.
+- Revoking a link also ends the sessions it started. Revoking ends an open websocket
+  within 30 seconds.
+
+Refusal codes: `terminal_required`, `uses_out_of_range`, `site_options_conflict`,
+`site_gate_only` (site options on another entry), `site_link_limit` (32 live links),
+`site_link_unknown`, and `site_entry_unknown` (the running service predates the entry:
+run `host apply`).
+
+### Gate contract
+
+- **Link.** `https://<hostname><path>#sandbox_autologin=<token>`, a 256-bit token in the
+  fragment. The page at `path` clears the fragment and posts the token by itself.
+  Previews that do not run scripts never use the link.
+  `path` answers that page only while at least one link is live, and 404 otherwise. So
+  a prober who knows `path` can tell that a share is open, but never which link or its
+  token. Serving the page at all times would instead show that a gate exists at all
+  times.
+- **Records.** Links, spent-use markers and sessions are files under
+  `/run/sandbox-login/sites/<entry>/` on the service tmpfs, named by SHA-256 hash. The
+  gate never stores a token or a session secret. They survive a process restart and
+  end when the container is recreated.
+- **Opening.** A live link and a claimed use set `__Host-sandbox_site_<entry>`. The
+  cookie is host-only, `Path=/`, `Secure`, `HttpOnly` and `SameSite=Lax`, with
+  `Max-Age` set to the session's remaining time. The response is a 303 to
+  `landing_path` with `Referrer-Policy: no-referrer`.
+- **Refusals.** Expired, spent, revoked, malformed and unknown links, and an `Origin`
+  other than the gate's (or `null`, which browsers send from a `no-referrer` page), all
+  get the same 404. More than 30 link attempts per entry in 60 seconds
+  get 429.
+- **Forwarding.** Only origin-form targets with exactly one `Host` header equal to the
+  gate hostname are forwarded. The gate sends `Host: <hostname>`, drops hop-by-hop
+  headers and its own cookies, and passes everything else.
+- **Lifetime.** A session ends at `session_ttl_seconds`, at revoke, or at
+  `enabled_until`, whichever comes first. After `enabled_until` the gate answers 404
+  to everything.
+
 ## What it cannot do
 
-It cannot identify who used a link. Anyone with Sandbox access can mint one, and is
+It cannot identify who used a link: a forwarded share link works for whoever opens it
+first, and `--list` shows only that a use was spent. Anyone with Sandbox access can mint one, and is
 effectively root on that server. Whoever holds an unused link has that access. The clock
 that sets a token's expiry is the issuing machine's, compared against the service's.

@@ -518,6 +518,13 @@ before protected effects.
 - `sb host exec --remote R --target <project>/<env> | --name <slug> --service S [--timeout 1..3600] [--json] -- ARGV`: one argv in a running service of a target this controller recorded (`docker compose exec -T` with apply's own Compose files, as the service's user; no user flag). stdin passes straight through and is never logged, audited or echoed; `sb` exits with the command's status (`--json`: `ok` only on exit 0). Busy targets (apply, recovery, stack job in flight) are refused with `host_target_busy`, never waited for. Default timeout 300 s. Audit: `$SANDBOX_HOME/runtime/host-exec/audit.jsonl`.
 - `sb host logs|status|diagnose --remote R --target <project>/<env>` (or `--name <slug>`) reads a recorded stack's rendered manifest, so it works from a template checkout.
 
+## Sharing a private hosted site (spec 075)
+
+- A login-service entry with `mode: site_gate`, `hostname` (a served alias), `upstream: http://<background service>:<port>` and `ttl_seconds` puts a link-only gate in front of that service. See `docs/login-service.md#sharing-a-private-site-site_gate`.
+- Mint: `sb host login-url --service <entry> --remote R --confirm [--uses N] [--json]`. The link goes to the controlling terminal only; stdout and `--json` carry `link_id`, `expires_at` and `uses`. Agents and jobs have no terminal and get `terminal_required`: ask the owner to run it themselves, and never try to capture the link.
+- `sb host login-url --service <entry> --remote R --list [--json]` shows ids and counts. `--revoke <l-...|s-...|all> --confirm` revokes; revoking a link ends its sessions.
+- Without a session the gate hostname answers 404. The project edge must forward only that hostname to `sandbox-login:8080`, and the upstream must publish only on loopback.
+
 When the owner exited before recording anything, recovery cannot observe its way out:
 it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.
 Close that attempt explicitly, then apply again.

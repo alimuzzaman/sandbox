@@ -1719,10 +1719,12 @@ def _assert_login_service_applicable(validated: dict) -> None:
 def _preflight_login_service(entry: dict, prefix: str, validated: dict) -> None:
     """Refuse an apply when the capture service or login service publishes a port."""
     from sandbox.hosting import login_service as login
-    capture = validated["login_service"]["capture"]["service"]
+    declaration = validated["login_service"]
+    capture = (declaration.get("capture") or {}).get("service")
     try:
         login.check_preflight(_remote_checked(
-            entry, login.preflight_command(prefix, capture), timeout=75))
+            entry, login.preflight_command(prefix, capture, login.site_upstream_services(declaration)),
+            timeout=75))
     except login.LoginServiceError as exc:
         raise hosting.HostingError(str(exc)) from None
     except (RuntimeError, subprocess.SubprocessError, OSError):
@@ -4024,6 +4026,129 @@ def _issue_host_login_link(validated: dict, entry: dict, remote_name: str, state
     return result
 
 
+def _operator_terminal():
+    """The controlling terminal, for a value that must reach the operator's eyes only.
+
+    No terminal (a job, an agent's shell, a pipe, MCP) means None, so the caller refuses
+    before minting anything.
+    """
+    try:
+        return open("/dev/tty", "w", encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _site_remote(validated: dict, entry: dict, name: str, verb: str, *extra: str,
+                 input_data: str | None = None) -> dict:
+    """Run one site verb inside the running login service and read its one-line reply."""
+    from sandbox.hosting import login_service as login
+    home = remote.resolve_sandbox_home(entry)
+    runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+    prefix = _compose_prefix(validated, f"{home}/deploy-src/hosts/{validated['project']}",
+                             f"{runtime_dir}/compose.override.yml", f"{runtime_dir}/environment.env")
+    output = _remote_checked(entry, login.site_command(prefix, verb, name, *extra), timeout=60,
+                             **({"input_data": input_data} if input_data is not None else {}))
+    return login.parse_site_reply(output)
+
+
+def _mint_site_link(validated: dict, entry: dict, remote_name: str, state: dict, name: str,
+                    ttl: int, uses: int) -> dict:
+    """Store one share-link record in the service; the token itself goes nowhere but the result."""
+    from sandbox.hosting import login_service as login
+    config = validated["login_service"]["entries"][name]
+    if not isinstance(state.get("hosts", {}).get(hosting.state_key(remote_name, validated)), dict):
+        raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
+    token = secrets.token_urlsafe(32)
+    link_id = f"l-{secrets.token_hex(6)}"
+    issued_at = int(time.time())
+    record = login.render_site_link_record(
+        name, link_id, hashlib.sha256(token.encode()).hexdigest(), issued_at, issued_at + ttl, uses)
+    # Over stdin, and the hash only: argv is visible to process listings.
+    reply = _site_remote(validated, entry, name, "mint", input_data=record)
+    if reply.get("id") != link_id:
+        raise login.LoginServiceError("login_link_failed", "the login service did not confirm the link")
+    return {"link": login.login_link(config, token), "link_id": link_id, "expires_at": issued_at + ttl,
+            "uses": uses, "service": name, "hostname": config["hostname"]}
+
+
+def _cmd_host_site_link(validated: dict, entry: dict, args, declaration: dict, refuse) -> None:
+    """Mint, list or revoke share links of a site_gate entry.
+
+    A minted link is written once to the controlling terminal and nowhere else: not to
+    stdout, ``--json``, logs, host state or the remote command line.
+    """
+    from sandbox.hosting import login_service as login
+    name = args.service
+    listing = bool(getattr(args, "list_links", False))
+    revoke = getattr(args, "revoke", None)
+    uses = getattr(args, "uses", None)
+    ttl_seconds = getattr(args, "ttl_seconds", None)
+    if getattr(args, "email", None) is not None or getattr(args, "save_email", False):
+        raise login.LoginServiceError("site_options_conflict", "--email does not apply to a site_gate entry")
+    if (listing and revoke is not None) or ((listing or revoke is not None)
+                                            and (uses is not None or ttl_seconds is not None)):
+        raise login.LoginServiceError("site_options_conflict", "choose one of: mint, --list, or --revoke")
+
+    def emit(payload: dict, line: str) -> None:
+        if args.json:
+            print(json.dumps({"ok": True, "service": name, **payload}, sort_keys=True))
+        else:
+            print(line)
+
+    if listing:
+        reply = _site_remote(validated, entry, name, "list")
+        links, sessions = list(reply.get("links") or []), list(reply.get("sessions") or [])
+        emit({"links": links, "sessions": sessions},
+             "\n".join([f"{len(links)} live link(s), {len(sessions)} session(s) for {name}"]
+                       + [f"  {item.get('id')} used {item.get('used')}/{item.get('uses')}, expires "
+                          f"{_utc(item.get('expires_at'))}" for item in links]
+                       + [f"  {item.get('id')} from {item.get('link')}, expires {_utc(item.get('expires_at'))}"
+                          for item in sessions]))
+        return
+    if revoke is not None:
+        if not login.valid_revoke_target(revoke):
+            raise login.LoginServiceError("site_link_unknown", "pass a link id (l-...), a session id (s-...), or all")
+        reply = _with_host_writer_lock(
+            validated, args.remote, lambda current, _save: _site_remote(validated, entry, name, "revoke", revoke))
+        counts = {"revoked_links": reply.get("revoked_links"), "revoked_sessions": reply.get("revoked_sessions")}
+        emit(counts, f"Revoked {counts['revoked_links']} link(s) and {counts['revoked_sessions']} session(s)")
+        return
+    uses = login.SITE_DEFAULT_USES if uses is None else uses
+    if isinstance(uses, bool) or not isinstance(uses, int) or not 1 <= uses <= login.SITE_MAX_USES:
+        raise login.LoginServiceError("uses_out_of_range", f"--uses must be from 1 to {login.SITE_MAX_USES}")
+    ttl = declaration["entries"][name]["ttl_seconds"] if ttl_seconds is None else ttl_seconds
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or not 60 <= ttl <= 3600:
+        raise login.LoginServiceError("login_link_failed", "--ttl-seconds must be between 60 and 3600")
+    login.assert_applicable(declaration, now=time.time())
+    terminal = _operator_terminal()
+    if terminal is None:
+        raise login.LoginServiceError(
+            "terminal_required",
+            "a share link is shown only on the operator's terminal; run this command in an interactive terminal")
+    with terminal:
+        result = _with_host_writer_lock(
+            validated, args.remote,
+            lambda current, _save: _mint_site_link(validated, entry, args.remote, current, name, ttl, uses))
+        link = result.pop("link")
+        try:
+            terminal.write(f"{link}\n")
+            terminal.flush()
+        except OSError:
+            refuse("login_link_failed",
+                   f"the terminal could not be written; revoke {result['link_id']} and mint a new link")
+        del link
+    emit({**result, "link_shown_on": "terminal"},
+         f"Share link {result['link_id']} for {result['hostname']}, {uses} use(s), expires "
+         f"{_utc(result['expires_at'])}; shown on the terminal above")
+
+
+def _utc(epoch: object) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(int(epoch)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "unknown"
+
+
 def _cmd_host_login_link(validated: dict, entry: dict, args) -> None:
     """Issue a link for a named login-service entry and report it."""
     from sandbox.hosting import login_service as login
@@ -4048,6 +4173,17 @@ def _cmd_host_login_link(validated: dict, entry: dict, args) -> None:
             raise login.LoginServiceError(
                 "login_entry_unknown",
                 "declared entries are: " + ", ".join(sorted(declaration["entries"])))
+        if config["mode"] == "site_gate":
+            try:
+                return _cmd_host_site_link(validated, entry, args, declaration, refuse)
+            except TimeoutError:
+                refuse("login_link_failed", "another host apply or recovery owns this target")
+            except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+                refuse("login_link_failed", remote.redact_text(str(exc))[:500])
+        if (getattr(args, "uses", None) is not None or getattr(args, "list_links", False)
+                or getattr(args, "revoke", None) is not None):
+            raise login.LoginServiceError(
+                "site_gate_only", "--uses, --list and --revoke apply only to site_gate entries")
         login.assert_applicable(declaration, now=time.time())
         # Resolved before the writer lock, so a person typing an address never
         # holds up an apply. The lock re-reads the saved default before writing.
@@ -7716,7 +7852,8 @@ def cmd_host(cfg, args) -> None:
             print(output, end="" if output.endswith("\n") or not output else "\n")
         return
     if args.action == "login-url":
-        if not args.confirm:
+        # Listing share links is read-only; minting and revoking stay protected.
+        if not args.confirm and not getattr(args, "list_links", False):
             die("host login-url is protected; pass --confirm to issue a one-time admin link")
         if not entry.get("provisioned"):
             die(f"remote '{args.remote}' is not provisioned")

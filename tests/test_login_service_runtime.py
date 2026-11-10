@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import http.client
+import io
 import http.server
 import json
 import os
@@ -19,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sandbox.hosting import login_service as login  # noqa: E402
 from sandbox.hosting.login_service import runtime  # noqa: E402
 
 CREDENTIAL = "capture-password-sentinel"
@@ -736,6 +738,434 @@ class StartupTests(_Base):
         self.health.shutdown()
         self._start()
         self.assertEqual(self.request("GET", "/mail/", headers={"Cookie": cookie})[0].status, 404)
+
+
+
+SITE = "share.example.test"
+SITE_PATH = "/__sandbox/share/mockup"
+
+
+class _Upstream(http.server.BaseHTTPRequestHandler):
+    """A static site that records every request reaching it, plus a websocket echo."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args):
+        pass
+
+    def _handle(self):
+        store = self.server.store
+        store["requests"].append({"method": self.command, "path": self.path,
+                                  "headers": self.headers.items()})
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.end_headers()
+            self.wfile.flush()
+            self.close_connection = True
+            while True:
+                data = self.connection.recv(1024)
+                if not data:
+                    return
+                self.connection.sendall(b"echo:" + data)
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        body = f"site:{self.path}".encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_OPTIONS = do_PATCH = _handle
+
+
+class _SiteBase(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.state_dir = Path(self.directory.name)
+        self.upstream_store = {"requests": []}
+        self.upstream = _Fake(("127.0.0.1", 0), _Upstream)
+        self.upstream.store = self.upstream_store
+        _serve(self.upstream)
+        self.addCleanup(self.upstream.shutdown)
+        self.logs = []
+        self.now = time.time()
+        self.config = {
+            "enabled_until_epoch": int(self.now) + 86400,
+            "session_ttl_seconds": 3600,
+            "capture": None,
+            "entries": {"mockup": {
+                "mode": "site_gate", "requires_email": False, "hostname": SITE, "path": SITE_PATH,
+                "ttl_seconds": 900, "upstream": f"http://127.0.0.1:{self.upstream.server_address[1]}",
+                "landing_path": "/"}},
+        }
+        self.public, self.health = runtime.create_servers(
+            self.config, "", self.state_dir, clock=lambda: self.now, log=self.logs.append,
+            public_address=("127.0.0.1", 0), health_address=("127.0.0.1", 0))
+        _serve(self.public)
+        self.addCleanup(self.public.shutdown)
+        self.addCleanup(self.health.server_close)
+
+    def manage(self, *argv, stdin=""):
+        out = io.StringIO()
+        code = runtime.manage(self.config, list(argv), self.state_dir, stdin=io.StringIO(stdin),
+                              stdout=out, clock=lambda: self.now)
+        self.assertEqual(code, 0)
+        return json.loads(out.getvalue())
+
+    def mint(self, token=None, *, uses=1, ttl=600, link_id=None):
+        token = token or secrets_token()
+        issued = int(self.now)
+        record = login.render_site_link_record(
+            "mockup", link_id or f"l-{os.urandom(6).hex()}", hashlib.sha256(token.encode()).hexdigest(),
+            issued, issued + ttl, uses)
+        reply = self.manage("mint", "mockup", stdin=record)
+        self.assertTrue(reply["ok"], reply)
+        return token, reply["id"]
+
+    def request(self, method, path, *, body=None, headers=None, host=SITE):
+        connection = http.client.HTTPConnection("127.0.0.1", self.public.server_address[1], timeout=5)
+        connection.request(method, path, body=body, headers={"Host": host, **(headers or {})})
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        return response, data
+
+    def open_link(self, token, **headers):
+        body = urllib.parse.urlencode({"token": token})
+        return self.request("POST", SITE_PATH, body=body, headers={
+            "Content-Type": "application/x-www-form-urlencoded", **headers})
+
+    def session(self, token=None):
+        if token is None:
+            token, _ = self.mint()
+        response, _ = self.open_link(token)
+        self.assertEqual(response.status, 303)
+        return response.getheader("Set-Cookie").split(";", 1)[0]
+
+    def raw(self, data):
+        sock = socket.create_connection(("127.0.0.1", self.public.server_address[1]), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall(data)
+        return sock, sock.recv(4096)
+
+
+def secrets_token():
+    return base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+
+
+class SiteLinkTests(_SiteBase):
+    def test_link_page_needs_a_live_link_and_never_holds_the_token(self):
+        self.assertEqual(self.request("GET", SITE_PATH)[0].status, 404)
+        token, _ = self.mint()
+        response, body = self.request("GET", SITE_PATH)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        self.assertIn("script-src 'sha256-", response.getheader("Content-Security-Policy"))
+        self.assertIn("form-action 'self'", response.getheader("Content-Security-Policy"))
+        self.assertNotIn(token.encode(), body)
+        self.assertEqual(self.upstream_store["requests"], [])
+
+    def test_link_starts_a_scoped_session_and_redirects_clean(self):
+        token, _ = self.mint()
+        response, _ = self.open_link(token)
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.getheader("Location"), "/")
+        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        cookie = response.getheader("Set-Cookie")
+        name, _, rest = cookie.partition("=")
+        self.assertEqual(name, "__Host-sandbox_site_mockup")
+        attributes = [part.strip() for part in rest.split(";")[1:]]
+        self.assertEqual({item.split("=")[0] for item in attributes},
+                         {"Path", "Max-Age", "Secure", "HttpOnly", "SameSite"})
+        self.assertIn("Path=/", attributes)
+        self.assertIn("SameSite=Lax", attributes)
+        self.assertEqual(int(next(item for item in attributes if item.startswith("Max-Age=")).split("=")[1]),
+                         3600)
+        self.assertNotIn(token, cookie)
+
+    def test_session_reaches_only_the_upstream_with_a_fixed_host(self):
+        cookie = self.session()
+        response, body = self.request("GET", "/index.html", headers={"Cookie": f"theme=dark; {cookie}"})
+        self.assertEqual((response.status, body), (200, b"site:/index.html"))
+        seen = dict(self.upstream_store["requests"][-1]["headers"])
+        self.assertEqual(seen["Host"], SITE)
+        self.assertEqual(seen["Cookie"], "theme=dark")
+        posted, _ = self.request("POST", "/form", body=b"a=1", headers={
+            "Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(posted.status, 200)
+
+    def test_websocket_is_tunnelled_with_a_session(self):
+        cookie = self.session()
+        sock, head = self.raw((f"GET /ws HTTP/1.1\r\nHost: {SITE}\r\nCookie: {cookie}\r\n"
+                               "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n").encode())
+        self.assertIn(b" 101 ", head)
+        sock.sendall(b"ping")
+        self.assertEqual(sock.recv(1024), b"echo:ping")
+
+    def test_multi_use_link_starts_that_many_sessions(self):
+        token, _ = self.mint(uses=3)
+        statuses = [self.open_link(token)[0].status for _ in range(4)]
+        self.assertEqual(statuses, [303, 303, 303, 404])
+        self.assertEqual(len(self.manage("list", "mockup")["sessions"]), 3)
+
+    def test_concurrent_openers_of_a_single_use_link_get_one_session(self):
+        token, _ = self.mint()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            statuses = list(pool.map(lambda _: self.open_link(token)[0].status, range(8)))
+        self.assertEqual(sorted(statuses), [303] + [404] * 7)
+
+
+class SiteNoAccessTests(_SiteBase):
+    def assert_upstream_untouched(self):
+        self.assertEqual(self.upstream_store["requests"], [])
+
+    def test_without_a_session_everything_is_404(self):
+        for method in ("GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"):
+            for path in ("/", "/index.html", "/__sandbox/share/other"):
+                with self.subTest(method=method, path=path):
+                    self.assertEqual(self.request(method, path)[0].status, 404)
+        for cookie in ("__Host-sandbox_site_mockup=" + "x" * 43, "__Host-sandbox_site_mockup=",
+                       "__Host-sandbox_site_mockup=../../links/x"):
+            self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+        self.assert_upstream_untouched()
+
+    def test_websocket_without_a_session_gets_nothing(self):
+        self.mint()
+        _, head = self.raw((f"GET /ws HTTP/1.1\r\nHost: {SITE}\r\n"
+                            "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n").encode())
+        self.assertIn(b" 404 ", head)
+        self.assert_upstream_untouched()
+
+    def _answer(self, token):
+        response, body = self.open_link(token)
+        headers = sorted((name, value) for name, value in response.getheaders() if name != "Date")
+        return response.status, headers, body
+
+    def test_every_failed_link_gets_the_same_404(self):
+        unknown = self._answer(secrets_token())
+        self.assertEqual(unknown[0], 404)
+        used, _ = self.mint()
+        self.session(used)
+        expired, _ = self.mint(ttl=60)
+        revoked, revoked_id = self.mint()
+        self.manage("revoke", "mockup", revoked_id)
+        self.now += 61
+        for token in ("short", used, expired, revoked, "x" * 200):
+            with self.subTest(token=token[:8]):
+                self.assertEqual(self._answer(token), unknown)
+        self.assert_upstream_untouched()
+
+    def test_foreign_origin_is_refused_without_spending(self):
+        token, _ = self.mint()
+        self.assertEqual(self.open_link(token, Origin="https://evil.example.test")[0].status, 404)
+        self.assertEqual(self.open_link(token, Origin=f"https://{SITE}")[0].status, 303)
+
+    def test_the_null_origin_of_a_no_referrer_page_is_accepted(self):
+        token, _ = self.mint()
+        self.assertEqual(self.open_link(token, Origin="null")[0].status, 303)
+
+    def test_host_and_target_tricks_never_reach_another_server(self):
+        other_store = {"requests": []}
+        other = _Fake(("127.0.0.1", 0), _Upstream)
+        other.store = other_store
+        _serve(other)
+        self.addCleanup(other.shutdown)
+        cookie = self.session()
+        port = other.server_address[1]
+        refused = (
+            f"GET http://127.0.0.1:{port}/ HTTP/1.1\r\nHost: {SITE}\r\nCookie: {cookie}\r\n\r\n",
+            f"GET / HTTP/1.1\r\nHost: {SITE}\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}\r\n\r\n",
+            f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}\r\n\r\n",
+            f"GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n",
+        )
+        for trick in refused:
+            with self.subTest(trick=trick.split("\r\n", 2)[:2]):
+                _, head = self.raw(trick.encode())
+                self.assertIn(b" 404 ", head.split(b"\r\n", 1)[0] + b" ")
+        self.assert_upstream_untouched()
+        # http.server folds a leading "//" into "/", so this is an ordinary path on
+        # the declared upstream, never an authority.
+        self.raw(f"GET //127.0.0.1:{port}/x HTTP/1.1\r\nHost: {SITE}\r\nCookie: {cookie}\r\n\r\n".encode())
+        self.assertTrue(all(not item["path"].startswith("//") for item in self.upstream_store["requests"]))
+        self.assertEqual(other_store["requests"], [])
+
+    def test_after_enabled_until_everything_is_404(self):
+        cookie = self.session()
+        token, _ = self.mint()
+        self.now = self.config["enabled_until_epoch"] + 1
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+        self.assertEqual(self.open_link(token)[0].status, 404)
+        self.assertEqual(self.request("GET", SITE_PATH)[0].status, 404)
+        self.assert_upstream_untouched()
+
+    def test_session_expires_on_time(self):
+        cookie = self.session()
+        self.now += 3600
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+
+    def test_link_attempts_are_rate_limited(self):
+        statuses = [self.open_link(secrets_token())[0] for _ in range(31)]
+        self.assertEqual({item.status for item in statuses[:30]}, {404})
+        self.assertEqual(statuses[30].status, 429)
+        self.assertEqual(statuses[30].getheader("Referrer-Policy"), "no-referrer")
+        self.now += 61
+        self.assertEqual(self.open_link(secrets_token())[0].status, 404)
+
+
+class SiteOperatorTests(_SiteBase):
+    def assert_no_upstream_hits(self):
+        self.assertEqual(self.upstream_store["requests"], [])
+
+    def test_listing_shows_ids_and_counts_only(self):
+        first, first_id = self.mint(uses=2)
+        second, _ = self.mint()
+        cookie = self.session(first)
+        listing = self.manage("list", "mockup")
+        self.assertEqual(len(listing["links"]), 2)
+        by_id = {item["id"]: item for item in listing["links"]}
+        self.assertEqual((by_id[first_id]["used"], by_id[first_id]["uses"]), (1, 2))
+        self.assertEqual(len(listing["sessions"]), 1)
+        self.assertEqual(listing["sessions"][0]["link"], first_id)
+        blob = json.dumps(listing)
+        secret = cookie.split("=", 1)[1]
+        for value in (first, second, secret, hashlib.sha256(first.encode()).hexdigest(),
+                      hashlib.sha256(secret.encode()).hexdigest()):
+            self.assertNotIn(value, blob)
+
+    def test_revoking_a_session(self):
+        cookie = self.session()
+        session_id = self.manage("list", "mockup")["sessions"][0]["id"]
+        self.assertEqual(self.manage("revoke", "mockup", session_id),
+                         {"ok": True, "revoked_links": 0, "revoked_sessions": 1})
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+
+    def test_revoking_a_link_ends_its_sessions(self):
+        token, link_id = self.mint(uses=2)
+        other = self.session()
+        cookie = self.session(token)
+        self.assertEqual(self.manage("revoke", "mockup", link_id),
+                         {"ok": True, "revoked_links": 1, "revoked_sessions": 1})
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+        self.assertEqual(self.open_link(token)[0].status, 404)
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": other})[0].status, 200)
+
+    def test_revoking_all(self):
+        cookie = self.session()
+        token, _ = self.mint()
+        reply = self.manage("revoke", "mockup", "all")
+        self.assertEqual((reply["revoked_links"], reply["revoked_sessions"]), (2, 1))
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+        self.assertEqual(self.open_link(token)[0].status, 404)
+        self.assertEqual(self.manage("list", "mockup"), {"ok": True, "links": [], "sessions": []})
+
+    def test_unknown_ids_and_entries_are_refused(self):
+        self.assertEqual(self.manage("revoke", "mockup", "l-000000000000")["code"], "site_link_unknown")
+        self.assertEqual(self.manage("revoke", "mockup", "../x")["code"], "site_link_unknown")
+        self.assertEqual(self.manage("list", "other")["code"], "site_entry_unknown")
+        self.assertEqual(self.manage("drop", "mockup")["code"], "site_usage")
+
+    def test_a_revoke_racing_a_use_leaves_no_session(self):
+        token, _ = self.mint()
+        store = self.public.gate.sites["mockup"]
+        record = store.link(hashlib.sha256(token.encode()).hexdigest())
+        self.assertTrue(store.claim(record))
+        (store.links / f"{record['token_sha256']}.json").unlink()
+        self.assertIsNone(store.start_session(record, 3600, self.config["enabled_until_epoch"]))
+        self.assertEqual(list(store.sessions.glob("*.json")), [])
+
+    def test_a_revoke_between_session_write_and_link_check_leaves_no_session(self):
+        token, link_id = self.mint()
+        store = self.public.gate.sites["mockup"]
+        write = runtime._write_private
+
+        def write_then_revoke(path, text):
+            write(path, text)
+            if path.parent == store.sessions:
+                self.manage("revoke", "mockup", link_id)
+
+        with patch.object(runtime, "_write_private", write_then_revoke):
+            response, _ = self.open_link(token)
+        self.assertEqual(response.status, 404)
+        self.assertEqual(list(store.sessions.glob("*.json")), [])
+
+    def test_a_revoke_after_the_link_check_still_kills_the_new_session(self):
+        token, link_id = self.mint()
+        store = self.public.gate.sites["mockup"]
+        start = store.start_session
+
+        def start_then_revoke(*args):
+            started = start(*args)
+            self.manage("revoke", "mockup", link_id)
+            return started
+
+        with patch.object(store, "start_session", start_then_revoke):
+            response, _ = self.open_link(token)
+        self.assertEqual(response.status, 303)
+        cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+        self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
+        self.assertEqual(list(store.sessions.glob("*.json")), [])
+        self.assert_no_upstream_hits()
+
+    def test_mint_refusals(self):
+        def record(**fields):
+            base = json.loads(login.render_site_link_record(
+                "mockup", "l-0123456789ab", "a" * 64, int(self.now), int(self.now) + 600, 1))
+            return json.dumps({**base, **fields})
+        for fields in ({"uses": 21}, {"uses": 0}, {"expires_at": int(self.now) + 7200},
+                       {"entry": "other"}, {"id": "l-x"}, {"extra": 1}, {"token_sha256": "zz"}):
+            with self.subTest(fields=fields):
+                self.assertEqual(self.manage("mint", "mockup", stdin=record(**fields))["code"],
+                                 "site_record_invalid")
+        self.assertEqual(self.manage("mint", "mockup", stdin="not json")["code"], "site_record_invalid")
+        for _ in range(runtime.SITE_MAX_LINKS):
+            self.mint()
+        self.assertEqual(self.manage("mint", "mockup", stdin=record())["code"], "site_link_limit")
+        self.now = self.config["enabled_until_epoch"]
+        self.assertEqual(self.manage("mint", "mockup", stdin=record())["code"], "login_service_expired")
+
+    def test_an_open_tunnel_closes_after_a_revoke(self):
+        cookie = self.session()
+        with patch.object(runtime, "SITE_RECHECK_SECONDS", 0.2):
+            sock, head = self.raw((f"GET /ws HTTP/1.1\r\nHost: {SITE}\r\nCookie: {cookie}\r\n"
+                                   "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n").encode())
+            self.assertIn(b" 101 ", head)
+            self.manage("revoke", "mockup", "all")
+            sock.settimeout(5)
+            self.assertEqual(sock.recv(1024), b"")
+
+    def test_records_are_private_files(self):
+        self.session()
+        store = self.public.gate.sites["mockup"]
+        for path in [*store.links.glob("*.json"), *store.sessions.glob("*.json")]:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_logs_never_hold_a_token_secret_or_hash(self):
+        token, _ = self.mint()
+        cookie = self.session(token)
+        secret = cookie.split("=", 1)[1]
+        joined = " ".join(self.logs)
+        for value in (token, secret, hashlib.sha256(token.encode()).hexdigest(),
+                      hashlib.sha256(secret.encode()).hexdigest()):
+            self.assertNotIn(value, joined)
+        self.assertIn("site_link_used entry=mockup", joined)
+
+    def test_main_runs_operator_verbs_inside_the_service(self):
+        config = base64.b64encode(json.dumps(self.config).encode()).decode()
+        out = io.StringIO()
+        with patch.dict(os.environ, {"SANDBOX_LOGIN_CONFIG": config}), \
+             patch.object(runtime, "STATE_DIRECTORY", str(self.state_dir)), \
+             patch.object(runtime.sys, "argv", ["-c", "source", "site", "list", "mockup"]), \
+             patch.object(runtime.sys, "stdout", out):
+            with self.assertRaises(SystemExit) as stopped:
+                runtime.main()
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertEqual(json.loads(out.getvalue()), {"ok": True, "links": [], "sessions": []})
 
 
 if __name__ == "__main__":

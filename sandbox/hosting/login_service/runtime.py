@@ -10,9 +10,12 @@ Security properties worth keeping in mind when changing this file:
 * The token travels in the URL fragment and the POST body, never a request line.
 * Logs are fixed codes. A token, email address, credential, or URL never reaches one.
 * With no live token and no session, every public route answers 404.
+* A site_gate hostname forwards only to its declared upstream, and only with a session
+  held as a hash on the tmpfs, so the operator can list and revoke it.
 """
 import base64
 import calendar
+import collections
 import hashlib
 import hmac
 import html
@@ -25,6 +28,7 @@ import secrets
 import select
 import socket
 import sys
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -41,11 +45,25 @@ TUNNEL_IDLE_SECONDS = 3600
 POLL_INTERVAL_SECONDS = 0.25
 MAIL_CLOCK_TOLERANCE_SECONDS = 2
 UPSTREAM_TIMEOUT_SECONDS = 10
+SITE_LINK_SCHEMA = "sandbox.site-link.v1"
+SITE_SESSION_SCHEMA = "sandbox.site-session.v1"
+SITE_COOKIE_PREFIX = "__Host-sandbox_site_"
+SITE_MAX_USES = 20
+SITE_MAX_LINKS = 32
+SITE_MAX_SESSIONS = 512
+SITE_ATTEMPTS = 30
+SITE_ATTEMPT_WINDOW_SECONDS = 60
+# How often an open tunnel re-reads its session, so a revoke ends it.
+SITE_RECHECK_SECONDS = 30
+MAX_RECORD_BYTES = 4096
 
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _HASH = re.compile(r"[0-9a-f]{64}")
 _ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _SESSION_EXPIRY = re.compile(r"[0-9]{1,12}")
+_LINK_ID = re.compile(r"l-[0-9a-f]{12}")
+_SITE_SESSION_ID = re.compile(r"s-[0-9a-f]{12}")
+_SITE_SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _AUTHORITY = re.compile(r"([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::[0-9]{1,5})?")
 _MAIL_TIME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})")
 _HOP_BY_HOP = {
@@ -69,6 +87,23 @@ _CONFIRM_PAGE = (
     f"<script>{_CONFIRM_SCRIPT}</script></main></body></html>"
 ).encode()
 _SCRIPT_HASH = base64.b64encode(hashlib.sha256(_CONFIRM_SCRIPT.encode()).digest()).decode()
+# A share link submits itself: link previews never run it, and the token stays in the fragment.
+_SITE_SCRIPT = (
+    "(function(){var m=location.hash.match(/^#sandbox_autologin=([A-Za-z0-9_-]+)$/);"
+    "var f=document.forms[0];history.replaceState(null,'',location.pathname);"
+    "if(m){f.elements.token.value=m[1];f.submit();}else{f.hidden=true;"
+    "document.getElementById('incomplete').hidden=false;}})();"
+)
+_SITE_PAGE = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    "<title>Opening shared site</title></head><body><main><h1>Opening shared site</h1>"
+    '<form method="post"><input type="hidden" name="token">'
+    "<button>Continue</button></form>"
+    '<p id="incomplete" hidden>This link is incomplete. Open the full link you were sent.</p>'
+    f"<script>{_SITE_SCRIPT}</script></main></body></html>"
+).encode()
+_SITE_SCRIPT_HASH = base64.b64encode(hashlib.sha256(_SITE_SCRIPT.encode()).digest()).decode()
 
 
 class CaptureUnavailable(RuntimeError):
@@ -84,6 +119,219 @@ class SignInFailure(Exception):
         self.status = status
 
 
+def _write_private(path, text):
+    """Write a small record so no reader ever sees part of it."""
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _unlink(path):
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+class SiteStore:
+    """Share links and sessions of one site_gate entry, as files on the tmpfs.
+
+    Files are named by the SHA-256 of their secret, so nothing here stores a token
+    or a session secret. Every record also carries a public id for list and revoke.
+    """
+
+    def __init__(self, root, name, clock):
+        self.name = name
+        self.clock = clock
+        base = Path(root) / "sites" / name
+        self.links, self.used, self.sessions = base / "links", base / "used", base / "sessions"
+
+    def ensure(self):
+        for directory in (self.links, self.used, self.sessions):
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    @staticmethod
+    def _load(path, schema):
+        try:
+            with open(path, "rb") as handle:
+                raw = json.loads(handle.read(MAX_RECORD_BYTES + 1)[:MAX_RECORD_BYTES])
+        except (OSError, ValueError):
+            return None
+        return raw if isinstance(raw, dict) and raw.get("schema") == schema else None
+
+    def _valid_link(self, raw, digest=None):
+        if raw is None or raw.get("entry") != self.name:
+            return None
+        found, link_id = raw.get("token_sha256"), raw.get("id")
+        issued, expires, uses = raw.get("issued_at"), raw.get("expires_at"), raw.get("uses")
+        if not isinstance(found, str) or not _HASH.fullmatch(found) or (digest and found != digest):
+            return None
+        if not isinstance(link_id, str) or not _LINK_ID.fullmatch(link_id):
+            return None
+        if type(issued) is not int or type(expires) is not int or type(uses) is not int:
+            return None
+        if not MIN_LINK_SECONDS <= expires - issued <= MAX_LINK_SECONDS or not 1 <= uses <= SITE_MAX_USES:
+            return None
+        return raw
+
+    def link(self, digest):
+        """The well-formed link record for a token hash, or None."""
+        if not _HASH.fullmatch(digest):
+            return None
+        return self._valid_link(self._load(self.links / f"{digest}.json", SITE_LINK_SCHEMA), digest)
+
+    def _links(self):
+        for path in sorted(self.links.glob("*.json")):
+            record = self._valid_link(self._load(path, SITE_LINK_SCHEMA), path.stem)
+            if record is not None:
+                yield path, record
+
+    def spent(self, record):
+        return sum(1 for slot in range(record["uses"])
+                   if (self.used / f"{record['token_sha256']}.{slot}").exists())
+
+    def is_live(self, record):
+        return self.clock() < record["expires_at"] and self.spent(record) < record["uses"]
+
+    def any_live(self):
+        return any(self.is_live(record) for _, record in self._links())
+
+    def claim(self, record):
+        """Spend one use; of any number of concurrent callers, one gets each slot."""
+        for slot in range(record["uses"]):
+            marker = self.used / f"{record['token_sha256']}.{slot}"
+            try:
+                os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            except FileExistsError:
+                continue
+            return True
+        return False
+
+    def _valid_session(self, raw):
+        if raw is None or raw.get("entry") != self.name:
+            return None
+        session_id, link_id = raw.get("id"), raw.get("link")
+        created, expires = raw.get("created_at"), raw.get("expires_at")
+        if (not isinstance(session_id, str) or not _SITE_SESSION_ID.fullmatch(session_id)
+                or not isinstance(link_id, str) or not _LINK_ID.fullmatch(link_id)
+                or type(created) is not int or type(expires) is not int):
+            return None
+        return raw
+
+    def _sessions(self):
+        for path in sorted(self.sessions.glob("*.json")):
+            record = self._valid_session(self._load(path, SITE_SESSION_SCHEMA))
+            if record is not None:
+                yield path, record
+
+    def start_session(self, record, session_seconds, service_ends_at):
+        """Create a session for a claimed link; returns (secret, expires_at) or None."""
+        self.prune()
+        if sum(1 for _ in self.sessions.glob("*.json")) >= SITE_MAX_SESSIONS:
+            return None
+        secret = secrets.token_urlsafe(32)
+        now = int(self.clock())
+        expires = min(now + session_seconds, service_ends_at)
+        path = self.sessions / f"{hashlib.sha256(secret.encode()).hexdigest()}.json"
+        _write_private(path, json.dumps({
+            "schema": SITE_SESSION_SCHEMA, "entry": self.name, "id": f"s-{secrets.token_hex(6)}",
+            "link": record["id"], "created_at": now, "expires_at": expires}, sort_keys=True))
+        # A revoke deletes the link before its sessions, so whichever order the two
+        # take, a session from a revoked link never survives.
+        if not (self.links / f"{record['token_sha256']}.json").exists():
+            _unlink(path)
+            return None
+        return secret, expires
+
+    def session(self, secret):
+        """The live session record for a cookie value, or None."""
+        if not isinstance(secret, str) or not _SITE_SECRET.fullmatch(secret):
+            return None
+        digest = hashlib.sha256(secret.encode()).hexdigest()
+        record = self._valid_session(self._load(self.sessions / f"{digest}.json", SITE_SESSION_SCHEMA))
+        if record is None or self.clock() >= record["expires_at"]:
+            return None
+        return dict(record, digest=digest)
+
+    def session_alive(self, digest):
+        record = self._valid_session(self._load(self.sessions / f"{digest}.json", SITE_SESSION_SCHEMA))
+        return record is not None and self.clock() < record["expires_at"]
+
+    def prune(self):
+        """Drop expired links, their spent markers, and expired sessions."""
+        now = self.clock()
+        for path, record in list(self._links()):
+            if now >= record["expires_at"]:
+                self._drop_link(path, record)
+        for path, record in list(self._sessions()):
+            if now >= record["expires_at"]:
+                _unlink(path)
+
+    def _drop_link(self, path, record):
+        removed = _unlink(path)
+        for slot in range(record["uses"]):
+            _unlink(self.used / f"{record['token_sha256']}.{slot}")
+        return removed
+
+    def mint(self, text, *, service_ends_at):
+        """Store a link record sent by the operator's controller."""
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            return {"ok": False, "code": "site_record_invalid"}
+        record = self._valid_link(raw if isinstance(raw, dict) and raw.get("schema") == SITE_LINK_SCHEMA else None)
+        if record is None or set(record) != {"schema", "entry", "id", "token_sha256", "issued_at",
+                                              "expires_at", "uses"}:
+            return {"ok": False, "code": "site_record_invalid"}
+        if self.clock() >= service_ends_at:
+            return {"ok": False, "code": "login_service_expired"}
+        self.prune()
+        if sum(1 for _, item in self._links() if self.is_live(item)) >= SITE_MAX_LINKS:
+            return {"ok": False, "code": "site_link_limit"}
+        target = self.links / f"{record['token_sha256']}.json"
+        if target.exists() or any(item["id"] == record["id"] for _, item in self._links()):
+            return {"ok": False, "code": "site_record_invalid"}
+        _write_private(target, json.dumps(record, sort_keys=True))
+        return {"ok": True, "id": record["id"], "expires_at": record["expires_at"], "uses": record["uses"]}
+
+    def listing(self):
+        """Ids, times and counts only: never a token, a secret, or a hash."""
+        self.prune()
+        links = [{"id": record["id"], "issued_at": record["issued_at"], "expires_at": record["expires_at"],
+                  "uses": record["uses"], "used": self.spent(record)}
+                 for _, record in self._links() if self.is_live(record)]
+        sessions = [{"id": record["id"], "link": record["link"], "created_at": record["created_at"],
+                     "expires_at": record["expires_at"]}
+                    for _, record in self._sessions() if self.clock() < record["expires_at"]]
+        return {"ok": True, "links": sorted(links, key=lambda item: item["issued_at"]),
+                "sessions": sorted(sessions, key=lambda item: item["created_at"])}
+
+    def revoke(self, target):
+        """Revoke one link (and its sessions), one session, or everything."""
+        links = sessions = 0
+        if target == "all" or _LINK_ID.fullmatch(target or ""):
+            for path, record in list(self._links()):
+                if target == "all" or record["id"] == target:
+                    links += self._drop_link(path, record)
+            for path, record in list(self._sessions()):
+                if target == "all" or record["link"] == target:
+                    sessions += _unlink(path)
+        elif _SITE_SESSION_ID.fullmatch(target or ""):
+            for path, record in list(self._sessions()):
+                if record["id"] == target:
+                    sessions += _unlink(path)
+        if target != "all" and not links and not sessions:
+            return {"ok": False, "code": "site_link_unknown"}
+        return {"ok": True, "revoked_links": links, "revoked_sessions": sessions}
+
+
 class Gate:
     """Token, session, and sign-in state shared by the request handlers."""
 
@@ -96,6 +344,32 @@ class Gate:
         # Process-local on purpose: restarting the service ends every session.
         self.session_key = secrets.token_bytes(32)
         (self.state_dir / "used").mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.sites = {}
+        for name, entry in config["entries"].items():
+            if entry["mode"] == "site_gate":
+                self.sites[name] = SiteStore(self.state_dir, name, clock)
+                self.sites[name].ensure()
+        self._attempts = collections.defaultdict(collections.deque)
+        self._attempts_lock = threading.Lock()
+
+    def site_for_host(self, host):
+        for name, entry in self.config["entries"].items():
+            if entry["mode"] == "site_gate" and entry["hostname"] == host:
+                return name, entry
+        return None
+
+    def allow_attempt(self, name):
+        """A sliding window per entry. Every request arrives from the project's edge,
+        so a per-address limit could only key on a header the client controls."""
+        with self._attempts_lock:
+            now = self.clock()
+            window = self._attempts[name]
+            while window and window[0] <= now - SITE_ATTEMPT_WINDOW_SECONDS:
+                window.popleft()
+            if len(window) >= SITE_ATTEMPTS:
+                return False
+            window.append(now)
+            return True
 
     def enabled(self):
         return self.clock() < self.config["enabled_until_epoch"]
@@ -329,6 +603,9 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if not gate.enabled() or not self.path.startswith("/") or self.path.startswith("//"):
             return self._not_found()
         host = self._host()
+        site = gate.site_for_host(host)
+        if site is not None:
+            return self._site(*site)
         path = urllib.parse.urlsplit(self.path).path
         entries = gate.config["entries"]
         for name, entry in entries.items():
@@ -346,6 +623,80 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         return self._not_found()
 
     do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _dispatch
+
+    def _site(self, name, entry):
+        """A site_gate hostname: the link path, or the upstream behind a session."""
+        # One Host header, so the upstream cannot pick a different one than was checked.
+        if len(self.headers.get_all("Host") or []) != 1:
+            return self._not_found()
+        store = self.gate.sites[name]
+        if urllib.parse.urlsplit(self.path).path == entry["path"]:
+            return self._site_link(name, entry, store)
+        session = store.session(self._cookie(f"{SITE_COOKIE_PREFIX}{name}"))
+        if session is None:
+            return self._not_found()
+        upstream = urllib.parse.urlsplit(entry["upstream"])
+        return self._forward((upstream.hostname, upstream.port), self._site_headers(entry),
+                             session["expires_at"], lambda: store.session_alive(session["digest"]))
+
+    def _site_link(self, name, entry, store):
+        gate = self.gate
+        if self.command in ("GET", "HEAD"):
+            if not store.any_live():
+                return self._not_found()
+            return self._reply(200, _SITE_PAGE, self._site_page_headers())
+        if self.command != "POST":
+            return self._not_found()
+        if not gate.allow_attempt(name):
+            self._drain()
+            return self._fail(429, "rate_limited")
+        token = self._read_token()
+        # Every refusal past this point is the same 404, so a probe learns nothing.
+        if token is None or not _TOKEN.fullmatch(token):
+            return self._answer_not_found()
+        # Under Referrer-Policy: no-referrer a browser sends "Origin: null" on its own
+        # form POST. A cross-site post still needs the token, and would only spend it.
+        origin = self.headers.get("Origin")
+        if origin not in (None, "null", f"https://{entry['hostname']}"):
+            return self._answer_not_found()
+        record = store.link(hashlib.sha256(token.encode()).hexdigest())
+        if record is None or not store.is_live(record) or not gate.enabled() or not store.claim(record):
+            return self._answer_not_found()
+        started = store.start_session(record, gate.config["session_ttl_seconds"],
+                                      gate.config["enabled_until_epoch"])
+        if started is None:
+            gate.log(f"site_session_refused entry={name}")
+            return self._answer_not_found()
+        secret, expires = started
+        gate.log(f"site_link_used entry={name} link={record['id']}")
+        cookie = (f"{SITE_COOKIE_PREFIX}{name}={secret}; Path=/; "
+                  f"Max-Age={max(1, expires - int(gate.clock()))}; Secure; HttpOnly; SameSite=Lax")
+        return self._reply(303, b"", [("Location", entry["landing_path"]), ("Set-Cookie", cookie)])
+
+    @staticmethod
+    def _site_page_headers():
+        policy = ("default-src 'none'; "
+                  f"script-src 'sha256-{_SITE_SCRIPT_HASH}'; "
+                  "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+        return [("Content-Type", "text/html; charset=utf-8"), ("Content-Security-Policy", policy),
+                ("X-Content-Type-Options", "nosniff")]
+
+    def _site_headers(self, entry):
+        """The visitor's headers for the upstream, with Host fixed and the gate's cookies removed."""
+        headers = [("Host", entry["hostname"])]
+        for name, value in self.headers.items():
+            lowered = name.lower()
+            if lowered in _HOP_BY_HOP or lowered == "host" or "\r" in value or "\n" in value:
+                continue
+            if lowered == "cookie":
+                kept = [part.strip() for part in value.split(";")
+                        if part.strip() and not part.strip().startswith(
+                            (SITE_COOKIE_PREFIX, "__Host-sandbox_login_"))]
+                if kept:
+                    headers.append((name, "; ".join(kept)))
+                continue
+            headers.append((name, value))
+        return headers
 
     def _cookie(self, wanted):
         for part in self.headers.get("Cookie", "").split(";"):
@@ -456,8 +807,14 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         return headers
 
     def _proxy(self, authenticated, session_expires=None):
+        target = urllib.parse.urlsplit(self.gate.config["capture"]["api_url"])
+        return self._forward((target.hostname, target.port), self._upstream_headers(authenticated),
+                             session_expires)
+
+    def _forward(self, address, headers, session_expires, still_allowed=None):
+        """Send this request to a fixed address; nothing in it chooses where."""
         if self.headers.get("Upgrade", "").lower() == "websocket":
-            return self._tunnel(authenticated, session_expires)
+            return self._tunnel(address, headers, session_expires, still_allowed)
         length = self._content_length()
         if length is None or "Transfer-Encoding" in self.headers:
             self.close_connection = True
@@ -465,12 +822,11 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if length > MAX_PROXY_BODY:
             self.close_connection = True
             return self._fail(413, "too_large")
-        target = urllib.parse.urlsplit(self.gate.config["capture"]["api_url"])
-        connection = http.client.HTTPConnection(target.hostname, target.port, timeout=30)
+        connection = http.client.HTTPConnection(*address, timeout=30)
         try:
             body = self.rfile.read(length) if length else None
             connection.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
-            for name, value in self._upstream_headers(authenticated):
+            for name, value in headers:
                 connection.putheader(name, value)
             if body is not None:
                 connection.putheader("Content-Length", str(len(body)))
@@ -516,42 +872,59 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
             self.connection.setblocking(True)
         return self.rfile.read(len(pending)) if pending else b""
 
-    def _tunnel(self, authenticated, session_expires):
-        target = urllib.parse.urlsplit(self.gate.config["capture"]["api_url"])
+    def _tunnel(self, address, headers, session_expires, still_allowed=None):
         try:
-            upstream = socket.create_connection((target.hostname, target.port), timeout=10)
+            upstream = socket.create_connection(address, timeout=10)
         except OSError:
             self.close_connection = True
             return self._fail(502, "upstream_unavailable")
         self.close_connection = True
         try:
             lines = [f"{self.command} {self.path} HTTP/1.1"]
-            lines += [f"{name}: {value}" for name, value in self._upstream_headers(authenticated)]
+            lines += [f"{name}: {value}" for name, value in headers]
             lines += ["Upgrade: websocket", "Connection: Upgrade", "", ""]
             upstream.sendall("\r\n".join(lines).encode("latin-1", "replace"))
             upstream.sendall(self._buffered_client_bytes())
             self.wfile.flush()
-            self._pump(self.connection, upstream, session_expires)
+            self._pump(self.connection, upstream, session_expires, still_allowed)
         except OSError:
             pass
         finally:
             upstream.close()
         return None
 
-    def _pump(self, client, upstream, session_expires):
-        """Copy bytes both ways until a side closes, the link idles out, or access ends."""
+    def _pump(self, client, upstream, session_expires, still_allowed=None):
+        """Copy bytes both ways until a side closes, the link idles out, or access ends.
+
+        With ``still_allowed`` the session is re-read at least every SITE_RECHECK_SECONDS,
+        so a revoked session loses its tunnel too.
+        """
         gate = self.gate
         ends_at = gate.config["enabled_until_epoch"]
         if session_expires is not None:
             ends_at = min(ends_at, session_expires)
         peers = {client: upstream, upstream: client}
+        idle_since = checked_at = time.monotonic()
         while True:
             remaining = ends_at - gate.clock()
             if remaining <= 0:
                 return
-            readable, _, _ = select.select(list(peers), [], [], min(TUNNEL_IDLE_SECONDS, remaining))
-            if not readable or gate.clock() >= ends_at:
+            wait = min(TUNNEL_IDLE_SECONDS, remaining)
+            if still_allowed is not None:
+                wait = min(wait, SITE_RECHECK_SECONDS)
+            readable, _, _ = select.select(list(peers), [], [], wait)
+            if gate.clock() >= ends_at:
                 return
+            if still_allowed is not None and (
+                    not readable or time.monotonic() - checked_at >= SITE_RECHECK_SECONDS):
+                if not still_allowed():
+                    return
+                checked_at = time.monotonic()
+            if not readable:
+                if still_allowed is None or time.monotonic() - idle_since >= TUNNEL_IDLE_SECONDS:
+                    return
+                continue
+            idle_since = time.monotonic()
             for source in readable:
                 data = source.recv(65536)
                 if not data:
@@ -611,19 +984,49 @@ def _log(line):
     print(line, file=sys.stderr, flush=True)
 
 
+def manage(config, argv, state_dir, *, stdin, stdout, clock=time.time):
+    """``site mint|list|revoke <entry> [id]``, run by the operator inside the service.
+
+    Prints one JSON line of ids, times and counts. A refusal is ``ok: false`` with a code.
+    """
+    def emit(payload):
+        stdout.write(json.dumps(payload, sort_keys=True) + "\n")
+        return 0
+
+    if len(argv) < 2:
+        return emit({"ok": False, "code": "site_usage"})
+    verb, name, extra = argv[0], argv[1], argv[2:]
+    entry = config["entries"].get(name)
+    if not isinstance(entry, dict) or entry.get("mode") != "site_gate":
+        return emit({"ok": False, "code": "site_entry_unknown"})
+    store = SiteStore(state_dir, name, clock)
+    store.ensure()
+    if verb == "mint" and not extra:
+        return emit(store.mint(stdin.read(MAX_RECORD_BYTES), service_ends_at=config["enabled_until_epoch"]))
+    if verb == "list" and not extra:
+        return emit(store.listing())
+    if verb == "revoke" and len(extra) == 1:
+        return emit(store.revoke(extra[0]))
+    return emit({"ok": False, "code": "site_usage"})
+
+
 def main():
     config = json.loads(base64.b64decode(os.environ["SANDBOX_LOGIN_CONFIG"]))
+    # Under ``python3 -c``, argv[1] is this source; operator verbs follow it.
+    if sys.argv[2:3] == ["site"]:
+        raise SystemExit(manage(config, sys.argv[3:], STATE_DIRECTORY, stdin=sys.stdin, stdout=sys.stdout))
     credential = os.environ.get("SANDBOX_LOGIN_CAPTURE_CREDENTIAL", "")
-    if config["capture"].get("username") and not credential:
+    capture = config.get("capture")
+    if capture and capture.get("username") and not credential:
         _log("refused code=capture_credential_missing")
         raise SystemExit(1)
-    try:
-        wait_for_capture(config, attempts=30, delay=2)
-    except CaptureUnavailable:
-        _log("refused code=capture_unreachable")
-        raise SystemExit(1) from None
+    if capture:
+        try:
+            wait_for_capture(config, attempts=30, delay=2)
+        except CaptureUnavailable:
+            _log("refused code=capture_unreachable")
+            raise SystemExit(1) from None
     public, health = create_servers(config, credential, STATE_DIRECTORY)
-    import threading
     threading.Thread(target=health.serve_forever, daemon=True).start()
     _log("started")
     public.serve_forever()

@@ -17,8 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from sandbox.controller_update import engine, state  # noqa: E402
+from sandbox.controller_update import gitops  # noqa: E402
 from sandbox.controller_update.models import (  # noqa: E402
-    AlreadyMoved, NoAction, Policy, RolledBack, Skip, SkipReason, Stranded, Updated,
+    AlreadyMoved, NoAction, Policy, Recovered, RolledBack, Skip, SkipReason, Stranded, Updated,
 )
 from tests.controller_update_support import GITHUB_URL, Repos  # noqa: E402
 
@@ -399,6 +400,104 @@ class RollbackTests(EngineCase):
         self.assertEqual(decision.head, moved["sha"])
         self.assertEqual(self.repos.git(self.repos.ctl, "status", "--porcelain"), "")
         self.assertTrue((self.repos.ctl / "b.txt").exists())
+
+
+class InterruptedRollbackTests(EngineCase):
+    """A crash between the rollback's ref and tree steps is finished next run."""
+
+    def updated_to_c2(self):
+        c2 = self.repos.publish()
+        self.repos.fetch_ctl()
+        self.repos.git(self.repos.ctl, "merge", "-q", "--ff-only", c2)
+        return c2
+
+    def journal(self, old, new, branch="main"):
+        path = engine.journal_path(self.repos.ctl, self.lock_dir)
+        engine._write_journal(path, branch, old, new)
+        return path
+
+    def test_crash_after_the_ref_step_is_finished(self):
+        c2 = self.updated_to_c2()
+        journal = self.journal(self.repos.c1, c2)
+        # Simulate the kill: the ref moved back, the files did not.
+        self.repos.git(self.repos.ctl, "update-ref", "refs/heads/main", self.repos.c1, c2)
+        decision = self.run_engine()
+        self.assertIsInstance(decision, Recovered)
+        self.assertEqual(self.repos.head(), self.repos.c1)
+        self.assertEqual(self.repos.git(self.repos.ctl, "status", "--porcelain"), "")
+        self.assertFalse((self.repos.ctl / "b.txt").exists())
+        self.assertFalse(journal.exists())
+
+    def test_crash_before_the_ref_step_runs_the_whole_rollback(self):
+        c2 = self.updated_to_c2()
+        journal = self.journal(self.repos.c1, c2)
+        decision = self.run_engine()
+        self.assertIsInstance(decision, Recovered)
+        self.assertEqual(self.repos.head(), self.repos.c1)
+        self.assertEqual(self.repos.git(self.repos.ctl, "status", "--porcelain"), "")
+        self.assertFalse(journal.exists())
+
+    def test_finished_rollback_with_a_leftover_journal_is_cleared(self):
+        c2 = self.updated_to_c2()
+        self.repos.git(self.repos.ctl, "merge", "-q", "--ff-only", c2)
+        journal = self.journal(self.repos.c1, c2)
+        self.repos.git(self.repos.ctl, "update-ref", "refs/heads/main", self.repos.c1, c2)
+        self.repos.git(self.repos.ctl, "read-tree", "-m", "-u", c2, self.repos.c1)
+        decision = self.run_engine()
+        self.assertIsInstance(decision, Recovered)
+        self.assertFalse(journal.exists())
+
+    def test_branch_moved_since_the_crash_drops_the_journal(self):
+        c2 = self.updated_to_c2()
+        journal = self.journal(self.repos.c1, c2)
+        later = self.repos.commit(self.repos.ctl, "mine.txt", "x\n", "someone else")
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.head(), later)
+
+    def test_unreconcilable_checkout_is_stranded_and_keeps_the_journal(self):
+        c2 = self.updated_to_c2()
+        journal = self.journal(self.repos.c1, c2)
+        self.repos.git(self.repos.ctl, "update-ref", "refs/heads/main", self.repos.c1, c2)
+        (self.repos.ctl / "a.txt").write_text("edited after the crash\n", encoding="utf-8")
+        self.repos.git(self.repos.ctl, "add", "a.txt")
+        decision = self.run_engine()
+        self.assertIsInstance(decision, Stranded)
+        self.assertIn("interrupted controller rollback", decision.notice)
+        self.assertTrue(journal.exists())
+
+    def test_malformed_journal_is_dropped(self):
+        path = engine.journal_path(self.repos.ctl, self.lock_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"schema_version":1,"branch":"--evil","old":"x","new":"y"}',
+                        encoding="utf-8")
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(path.exists())
+
+    def test_successful_rollback_removes_its_journal(self):
+        c2 = self.repos.publish()
+        self.hint(c2)
+        decision = self.run_engine(refresher=lambda root, policy: "boom")
+        self.assertIsInstance(decision, RolledBack)
+        self.assertFalse(engine.journal_path(self.repos.ctl, self.lock_dir).exists())
+
+    def test_failed_undo_is_reported(self):
+        c2 = self.updated_to_c2()
+        real_run = gitops.run
+
+        def fake_run(root, *args, timeout):
+            if args[0] == "read-tree":
+                return real_run(root, "read-tree", "--bogus-option-to-fail", timeout=timeout)
+            if args[:3] == ("update-ref", "-m", "sb: controller rollback undone"):
+                # A compare-and-swap against a wrong old value always refuses.
+                return real_run(root, "update-ref", "refs/heads/main", c2, "f" * 40,
+                                timeout=timeout)
+            return real_run(root, *args, timeout=timeout)
+
+        with patch.object(gitops, "run", fake_run):
+            with self.assertRaises(gitops.GitError) as raised:
+                gitops.rollback(self.repos.ctl, "main", self.repos.c1, c2, timeout=10)
+        self.assertIn("could not be restored", str(raised.exception))
 
 
 if __name__ == "__main__":

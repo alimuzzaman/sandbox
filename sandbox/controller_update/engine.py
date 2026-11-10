@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -20,8 +21,8 @@ from typing import Callable, Iterator
 from sandbox.controller_update import gitops, state
 from sandbox.controller_update.gitops import GitError
 from sandbox.controller_update.models import (
-    AlreadyMoved, CheckoutState, Decision, Hint, NoAction, Policy, RolledBack, Skip,
-    SkipReason, Stranded, Updated,
+    AlreadyMoved, CheckoutState, Decision, Hint, NoAction, Policy, Recovered, RolledBack,
+    Skip, SkipReason, Stranded, Updated, parse_revision,
 )
 
 Refresher = Callable[[Path, Policy], "str | None"]
@@ -37,6 +38,69 @@ def short(revision: str | None) -> str:
 def lock_path(root: Path, lock_dir: Path) -> Path:
     digest = hashlib.sha256(str(Path(root).resolve()).encode("utf-8")).hexdigest()[:16]
     return Path(lock_dir) / f"controller-update-{digest}.lock"
+
+
+def journal_path(root: Path, lock_dir: Path) -> Path:
+    """Rollback journal beside the lock: present only while a rollback runs."""
+    return lock_path(root, lock_dir).with_suffix(".rollback.json")
+
+
+def _write_journal(path: Path, branch: str, old: str, new: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"schema_version": 1, "branch": branch, "old": old,
+                                     "new": new}), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _read_journal(path: Path) -> tuple[str, str, str] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        return None
+    branch, old, new = raw.get("branch"), parse_revision(raw.get("old")), parse_revision(raw.get("new"))
+    if not isinstance(branch, str) or not branch or branch.startswith("-") or not old or not new:
+        return None
+    return branch, old, new
+
+
+def _drop_journal(path: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+
+
+def _recover(root: Path, lock_dir: Path, policy: Policy) -> Decision | None:
+    """Finish a rollback a crash interrupted. ``None`` means nothing to do."""
+    journal = journal_path(root, lock_dir)
+    if not journal.exists():
+        return None
+    with _exclusive(lock_path(root, lock_dir), policy.lock_wait) as held:
+        if not held:
+            return None  # the holder owns the journal right now
+        entry = _read_journal(journal)
+        if entry is None:
+            _drop_journal(journal)
+            return None
+        branch, old, new = entry
+        resolved = Path(root).resolve()
+        try:
+            finished = gitops.finish_rollback(resolved, branch, old, new,
+                                              timeout=policy.git_timeout)
+        except GitError as exc:
+            head = gitops.read_head(resolved, timeout=policy.git_timeout)
+            return Stranded(head, (
+                f"sb: an interrupted controller rollback to {short(old)} could not be "
+                f"finished ({exc}); {resolved} is at {short(head)}. "
+                f"Recover with: git -C {resolved} status"))
+        _drop_journal(journal)
+        if not finished:
+            return None
+        return Recovered(old, (
+            f"sb: finished an interrupted controller rollback to {short(old)}; "
+            "re-running the command."))
 
 
 def default_lock_dir() -> Path:
@@ -179,7 +243,12 @@ def run(root: Path, *, state_path: Path | None = None, lock_dir: Path | None = N
 
     Cost grows only with need: no state file means no git call; a hint equal
     to ``HEAD`` costs one; only a possibly newer hint reads the full state.
+    A leftover rollback journal is finished first, before anything else.
     """
+    lock_dir = lock_dir or default_lock_dir()
+    recovered = _recover(Path(root), lock_dir, policy)
+    if recovered is not None:
+        return recovered
     current = state.load(state_path, now=now)
     if not current.hints:
         return NoAction(SkipReason.NO_HINT)
@@ -210,16 +279,16 @@ def run(root: Path, *, state_path: Path | None = None, lock_dir: Path | None = N
     if not candidates:
         return NoAction(SkipReason.MEMOIZED)
 
-    with _exclusive(lock_path(checkout.root, lock_dir or default_lock_dir()),
-                    policy.lock_wait) as held:
+    with _exclusive(lock_path(checkout.root, lock_dir), policy.lock_wait) as held:
         if not held:
             return Skip(SkipReason.LOCKED, _notice(SkipReason.LOCKED, checkout, candidates[0]))
-        return _apply_locked(checkout, candidates, policy, refresher, state_path, now)
+        return _apply_locked(checkout, candidates, policy, refresher, state_path, now,
+                             journal_path(checkout.root, lock_dir))
 
 
 def _apply_locked(started: CheckoutState, candidates: list[Hint], policy: Policy,
                   refresher: Refresher, state_path: Path | None,
-                  now: float | None) -> Decision:
+                  now: float | None, journal: Path) -> Decision:
     checkout = gitops.read_checkout(started.root, timeout=policy.git_timeout)
     if checkout is None:
         return NoAction(SkipReason.NOT_GIT)
@@ -282,8 +351,12 @@ def _apply_locked(started: CheckoutState, candidates: list[Hint], policy: Policy
     if failure is None:
         return Updated(old, new, upstream, notices)
     try:
+        # The journal outlives a crash between the ref and tree steps, so the
+        # next run can finish the rollback (see _recover).
+        _write_journal(journal, checkout.branch, old, new)
         gitops.rollback(root, checkout.branch, old, new, timeout=policy.git_timeout)
-    except GitError as exc:
+        _drop_journal(journal)
+    except (GitError, OSError) as exc:
         head = gitops.read_head(root, timeout=policy.git_timeout)
         return Stranded(head, (
             f"sb: controller update to {short(new)} failed ({failure}) and could not be "

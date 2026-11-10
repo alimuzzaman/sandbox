@@ -68,6 +68,7 @@ NoAction(reason: SkipReason)                       # silent
 Skip(reason: SkipReason, hint: Hint, notice: str)  # one stderr line
 Updated(old: Revision, new: Revision, upstream: str, notices: tuple[str, ...])
 RolledBack(old: Revision, attempted: Revision, notice: str)
+Recovered(head: Revision, notice: str)              # interrupted rollback finished; re-exec
 Stranded(head: Revision, notice: str)              # rollback failed; exit 1
 AlreadyMoved(new: Revision)                        # another process updated; re-exec
 ```

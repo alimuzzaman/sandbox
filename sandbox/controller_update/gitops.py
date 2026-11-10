@@ -159,17 +159,60 @@ def rollback(root: Path, branch: str, old: str, new: str, *, timeout: float) -> 
 
     The ref moves first with a compare-and-swap, so a branch someone else
     moved is never touched. ``read-tree -m -u`` then refuses to overwrite
-    local edits; if it does, the ref is swapped back to ``new``, leaving the
-    checkout consistent at ``new``. Either way index, work tree and branch
-    always agree.
+    local edits; if it does, the ref is swapped back to ``new``. A crash
+    between the two steps leaves the ref at ``old`` and the files at ``new``;
+    the engine's rollback journal makes the next run finish it
+    (:func:`finish_rollback`). Raises GitError on any failure.
     """
     ref_name = f"refs/heads/{branch}"
     ref = run(root, "update-ref", "-m", "sb: controller update rolled back",
               ref_name, old, new, timeout=timeout)
     if ref.returncode != 0:
         raise GitError("branch moved during the update: " + short_detail(ref.stderr))
+    _tree_to_old(root, ref_name, old, new, timeout=timeout)
+
+
+def _tree_to_old(root: Path, ref_name: str, old: str, new: str, *, timeout: float) -> None:
     tree = run(root, "read-tree", "-m", "-u", new, old, timeout=timeout)
-    if tree.returncode != 0:
-        run(root, "update-ref", "-m", "sb: controller rollback undone",
-            ref_name, new, old, timeout=timeout)
-        raise GitError(short_detail(tree.stderr))
+    if tree.returncode == 0:
+        return
+    detail = short_detail(tree.stderr)
+    undo = run(root, "update-ref", "-m", "sb: controller rollback undone",
+               ref_name, new, old, timeout=timeout)
+    if undo.returncode != 0:
+        raise GitError(f"{detail}; the branch could not be restored either")
+    raise GitError(detail)
+
+
+def ref_value(root: Path, ref_name: str, *, timeout: float) -> str | None:
+    return parse_revision(_value(root, "rev-parse", "--verify", "-q", ref_name, timeout=timeout))
+
+
+def tree_matches(root: Path, revision: str, *, timeout: float) -> bool:
+    """True when both the index and the work tree equal ``revision``."""
+    cached = run(root, "diff", "--cached", "--quiet", revision, "--", timeout=timeout)
+    files = run(root, "diff", "--quiet", "--", timeout=timeout)
+    return cached.returncode == 0 and files.returncode == 0
+
+
+def finish_rollback(root: Path, branch: str, old: str, new: str, *, timeout: float) -> bool:
+    """Complete a rollback that a crash interrupted.
+
+    Returns ``True`` when the checkout is now consistently at ``old``, and
+    ``False`` when someone else has since moved the branch (nothing of ours
+    is left to finish). Raises GitError when the checkout cannot be
+    reconciled automatically.
+    """
+    ref_name = f"refs/heads/{branch}"
+    current = ref_value(root, ref_name, timeout=timeout)
+    if current == new:
+        rollback(root, branch, old, new, timeout=timeout)
+        return True
+    if current != old:
+        return False
+    if tree_matches(root, old, timeout=timeout):
+        return True
+    if run(root, "diff", "--cached", "--quiet", new, "--", timeout=timeout).returncode != 0:
+        raise GitError("the checkout changed after an interrupted rollback")
+    _tree_to_old(root, ref_name, old, new, timeout=timeout)
+    return True

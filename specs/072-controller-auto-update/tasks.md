@@ -70,8 +70,8 @@
 - [x] T026 [P] Cross-link from `docs/remote-service-cli.md` and `docs/sandbox-config-reference.md` (`defaults.controller_auto_update`, `SANDBOX_AUTO_UPDATE`)
 - [x] T027 [P] Add a short controller auto-update section to `skills/sandbox-cli/SKILL.md` and `.agents/skills/sandbox-cli/SKILL.md`
 - [x] T028 Add gotcha 34 to `CLAUDE.md` for the hook placement and receipt contract
-- [ ] T029 Haiku helper runs the new tests plus the remote/CLI suites they touch; fix failures
-- [ ] T030 Luna review of the head; fix or answer each finding
+- [x] T029 Haiku helper runs the new tests plus the remote/CLI suites they touch; fix failures
+- [x] T030 Luna review of the head; fix or answer each finding
 
 ## Dependencies
 

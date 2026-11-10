@@ -89,7 +89,9 @@
   `git update-ref refs/heads/<b> <old> <new>` (compare-and-swap, so a branch
   moved by someone else is never touched) then `git read-tree -m -u <new> <old>`;
   if the tree step refuses, the ref is swapped back to `<new>` so branch, index
-  and files agree (review finding, 2026-11-10).
+  and files agree (review finding, 2026-11-10). A journal written before the
+  ref step and removed after the tree step lets the next run finish a rollback
+  a crash interrupted (re-check finding, 2026-11-10).
 - **Rationale**: reuses the existing venv convergence path and its digest stamp;
   the refresh runs the new revision's code. The two-step rollback refuses to
   overwrite local edits and refuses if the branch moved meanwhile.

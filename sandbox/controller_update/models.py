@@ -138,6 +138,15 @@ class AlreadyMoved:
 
 
 @dataclass(frozen=True)
+class Recovered:
+    """An interrupted rollback was finished; HEAD is ``head``. Re-execute,
+    because this process loaded the files that were on disk before."""
+
+    head: str
+    notice: str
+
+
+@dataclass(frozen=True)
 class RolledBack:
     """The refresh failed and HEAD is back at ``old``."""
 
@@ -154,7 +163,7 @@ class Stranded:
     notice: str
 
 
-Decision = Union[NoAction, Skip, Updated, AlreadyMoved, RolledBack, Stranded]
+Decision = Union[NoAction, Skip, Updated, AlreadyMoved, Recovered, RolledBack, Stranded]
 
 
 @dataclass(frozen=True)

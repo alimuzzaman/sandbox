@@ -81,9 +81,18 @@ If the refresh fails, the checkout goes back to the previous revision and the
 command runs on the old code. The branch moves first with a compare-and-swap
 `git update-ref` (so a branch someone else moved meanwhile is left alone),
 then `git read-tree -m -u` moves the files; if that refuses because of local
-edits, the ref is swapped back so branch, index and files agree. If the
-rollback cannot complete, `sb` prints where the checkout is and
-`git -C <root> status`, and exits 1 without running the command.
+edits, the ref is swapped back so branch, index and files agree. A rollback
+journal (`controller-update-<digest>.rollback.json` beside the lock) exists
+while the rollback runs. If the process dies between the two steps, the next
+remote-capable command finishes the rollback under the lock before anything
+else and re-runs itself; if someone has moved the branch since, the journal is
+dropped. If the rollback cannot complete, `sb` prints where the checkout is and
+`git -C <root> status`, and exits 1 without running the command (set
+`SANDBOX_AUTO_UPDATE=0` to run commands while you repair it).
+
+A kill during the forward `git merge --ff-only` can leave a partly updated
+work tree, as with any interrupted git checkout. The next run sees it as
+uncommitted changes and refuses to update until `git status` is clean.
 
 ## Notices
 

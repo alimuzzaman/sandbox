@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence, TextIO
 
 from sandbox.controller_update.models import (
-    AlreadyMoved, Decision, NoAction, RolledBack, Skip, Stranded, Updated,
+    AlreadyMoved, Decision, NoAction, Recovered, RolledBack, Skip, Stranded, Updated,
 )
 
 ENV_SWITCH = "SANDBOX_AUTO_UPDATE"
@@ -167,6 +167,8 @@ def maybe_auto_update(args, argv: Sequence[str] | None = None, *,
             _say(stderr, line)
         _say(stderr, f"sb: controller updated {decision.old[:7]} -> {decision.new[:7]} "
                      f"from {decision.upstream}; re-running the command.")
+    elif isinstance(decision, Recovered):
+        _say(stderr, decision.notice)
     elif isinstance(decision, AlreadyMoved):
         _say(stderr, f"sb: controller moved to {decision.new[:7]} by another process; "
                      "re-running the command.")

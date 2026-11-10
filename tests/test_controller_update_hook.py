@@ -108,21 +108,41 @@ class GatingTests(HookCase):
         self.assertFalse(hook.is_machine_output(ns("remote", format="text")))
 
     def test_every_machine_output_option_is_covered(self):
-        """A new output-format option on any parser must extend is_machine_output."""
-        import re
+        """A new output-format option on any parser must extend is_machine_output.
+
+        Parses every ``add_argument`` call with literal option names in
+        ``sandbox/cli.py`` and ``sandbox/commands/*.py``. Options built from
+        variables or helpers are outside what a static scan can see.
+        """
+        import ast
+        machine_words = {"json", "jsonl", "ndjson", "porcelain", "machine"}
         sources = [ROOT / "sandbox" / "cli.py",
                    *sorted((ROOT / "sandbox" / "commands").glob("*.py"))]
-        option = re.compile(r'add_argument\(\s*"(--[a-z][a-z-]*)"(.*?)\)\s*$', re.S | re.M)
-        output_flag = re.compile(r"--(?:json|jsonl|ndjson|porcelain|machine)(?:-output)?$")
-        format_choice = re.compile(r'choices=[^\n]*["\'](?:json|jsonl|ndjson)["\']')
         found = set()
         for path in sources:
-            for name, rest in option.findall(path.read_text(encoding="utf-8")):
-                # Output switches only; "--spec-json FILE" style options take input.
-                if output_flag.match(name) and "store_true" in rest:
-                    found.add(name)
-                elif format_choice.search(rest):
-                    found.add(name)
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "add_argument"):
+                    continue
+                names = [a.value for a in node.args
+                         if isinstance(a, ast.Constant) and isinstance(a.value, str)
+                         and a.value.startswith("--")]
+                keywords = {k.arg: k.value for k in node.keywords if k.arg}
+                action = keywords.get("action")
+                is_flag = isinstance(action, ast.Constant) and action.value in {
+                    "store_true", "store_false", "store_const"}
+                choices = keywords.get("choices")
+                choice_values = set()
+                if isinstance(choices, (ast.Tuple, ast.List, ast.Set)):
+                    choice_values = {e.value for e in choices.elts
+                                     if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+                for name in names:
+                    stem = name[2:].split("-")
+                    if is_flag and set(stem) & machine_words and len(stem) <= 2:
+                        found.add(name)
+                    elif choice_values & machine_words:
+                        found.add(name)
         self.assertIn("--json", found)
         self.assertLessEqual(found, {"--json", "--format"}, sorted(found))
 
@@ -214,6 +234,12 @@ class OutcomeTests(HookCase):
         _, err, _ = self.call(ns("remote"), decision=decision)
         self.assertEqual(err.splitlines()[0], "sb: MCP note.")
         self.assertTrue(err.splitlines()[1].startswith("sb: controller updated"))
+
+    def test_recovered_prints_and_reexecs(self):
+        from sandbox.controller_update.models import Recovered
+        recorder, err, _ = self.call(ns("remote"), decision=Recovered(OLD, "sb: finished."))
+        self.assertEqual(err, "sb: finished.\n")
+        self.assertEqual(len(recorder.execs), 1)
 
     def test_already_moved_reexecs(self):
         recorder, err, _ = self.call(ns("remote"), decision=AlreadyMoved(OLD, NEW))

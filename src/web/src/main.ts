@@ -84,6 +84,9 @@ async function performRefresh(): Promise<void> {
   store.sync.refreshing = true;
   store.sync.error = null;
   renderDetail(false);
+  // The hosting view reads local files only; never hold it behind the slower
+  // instance inventory.
+  if (currentRoute().page === "hosting") void loadHosting();
   try {
     // Remote summaries are registry-local and cheap; local instance rows may
     // require one Compose probe per registered project. Fetch them separately
@@ -116,7 +119,6 @@ async function performRefresh(): Promise<void> {
     if (route.page === "remote" || route.page === "remote-instance") {
       await loadRemote(route.name);
     }
-    if (route.page === "hosting") await loadHosting();
     store.sync.lastCompleted = Date.now();
   } catch (error) {
     store.sync.error = error instanceof Error ? error.message : "Refresh failed";
@@ -260,6 +262,7 @@ function boot(): void {
   // Initial paint from current URL, then start polling.
   render();
   if (currentRoute().page === "create") initCreateView();
+  if (currentRoute().page === "hosting") refreshHosting();
   const r0 = currentRoute();
   if (r0.page === "instance" && r0.console) openTerminal(r0.name);
   startPolling();

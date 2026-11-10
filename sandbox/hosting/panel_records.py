@@ -441,12 +441,27 @@ def _read_json(path: Path) -> object:
     return json.loads(data)
 
 
-def _dirs(path: Path) -> list[Path]:
+SCAN_LIMIT = 2000  # directory entries looked at per directory, matching or not
+MAX_PARTIAL_REASONS = 50
+
+
+def _children(path: Path, *, directories: bool, suffix: str = "") -> tuple[list[Path], bool]:
+    """Up to SCAN_LIMIT entries of ``path`` (no symlinked directories), and whether more were left."""
+    found: list[Path] = []
     try:
-        return sorted(child for child in path.iterdir()
-                      if child.is_dir() and not child.is_symlink())
+        with os.scandir(path) as entries:
+            for scanned, entry in enumerate(entries):
+                if scanned >= SCAN_LIMIT:
+                    return sorted(found), True
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if (is_dir if directories else (not is_dir and entry.name.endswith(suffix))):
+                    found.append(Path(entry.path))
     except OSError:
-        return []
+        return [], False
+    return sorted(found), False
 
 
 def read_server_records(runtime_dir: Path) -> ServerRecords:
@@ -454,18 +469,39 @@ def read_server_records(runtime_dir: Path) -> ServerRecords:
 
     Only files named ``summary.json`` and ``<hostname>.json`` are opened. A
     target directory without a summary is listed as legacy when it holds the
-    Compose override an apply writes; nothing else in it is read.
+    Compose override an apply writes; nothing else in it is read. Every
+    directory scan, record list and reason list is bounded; truncation is
+    reported, never silent.
     """
     records: ServerRecords = {"targets": [], "legacy": [], "links": [], "partial_reasons": []}
-    for project_dir in _dirs(runtime_dir / "hosts"):
+    reasons = records["partial_reasons"]
+
+    def note(reason: str) -> None:
+        if len(reasons) < MAX_PARTIAL_REASONS:
+            reasons.append(reason)
+        elif reasons[-1] != "partial_reasons_truncated":
+            reasons.append("partial_reasons_truncated")
+
+    def targets_full() -> bool:
+        return len(records["targets"]) + len(records["legacy"]) >= MAX_TARGETS
+
+    projects, more = _children(runtime_dir / "hosts", directories=True)
+    if more:
+        note("hosted_targets_truncated")
+    for project_dir in projects:
+        if targets_full():
+            note("hosted_targets_truncated")
+            break
         if not TARGET_PART_RE.fullmatch(project_dir.name):
             continue
-        for env_dir in _dirs(project_dir):
+        environments, more = _children(project_dir, directories=True)
+        if more:
+            note(f"hosted_targets_truncated:{project_dir.name}")
+        for env_dir in environments:
+            if targets_full():
+                break
             if not _ENV_NAME_RE.fullmatch(env_dir.name):
                 continue
-            if len(records["targets"]) + len(records["legacy"]) >= MAX_TARGETS:
-                records["partial_reasons"].append("hosted_targets_truncated")
-                break
             summary = env_dir / SUMMARY_NAME
             label = f"{project_dir.name}/{env_dir.name}"
             if summary.is_file() or summary.is_symlink():
@@ -475,20 +511,21 @@ def read_server_records(runtime_dir: Path) -> ServerRecords:
                         raise RecordError("summary names another target")
                     records["targets"].append(target)
                 except (OSError, ValueError) as exc:
-                    records["partial_reasons"].append(
-                        f"target_summary_unreadable:{label}:{type(exc).__name__}")
+                    note(f"target_summary_unreadable:{label}:{type(exc).__name__}")
             elif (env_dir / "compose.override.yml").exists():
                 records["legacy"].append({"project": project_dir.name, "environment": env_dir.name})
-    for slug_dir in _dirs(runtime_dir / SITES_DIR):
+    slugs, more = _children(runtime_dir / SITES_DIR, directories=True)
+    if more:
+        note("site_links_truncated")
+    for slug_dir in slugs:
         if not SLUG_RE.fullmatch(slug_dir.name):
             continue
-        try:
-            files = sorted(slug_dir.glob("*.json"))
-        except OSError:
-            files = []
+        files, more = _children(slug_dir, directories=False, suffix=".json")
+        if more:
+            note(f"site_links_truncated:{slug_dir.name}")
         for path in files:
             if len(records["links"]) >= MAX_SITE_LINKS:
-                records["partial_reasons"].append("site_links_truncated")
+                note("site_links_truncated")
                 return records
             try:
                 link = parse_site_link(_read_json(path))
@@ -496,6 +533,5 @@ def read_server_records(runtime_dir: Path) -> ServerRecords:
                     raise RecordError("site link names another site")
                 records["links"].append(link)
             except (OSError, ValueError) as exc:
-                records["partial_reasons"].append(
-                    f"site_link_unreadable:{slug_dir.name}/{path.name}:{type(exc).__name__}")
+                note(f"site_link_unreadable:{slug_dir.name}/{path.name}:{type(exc).__name__}")
     return records

@@ -24,6 +24,8 @@ Source = Literal["this-server", "controller"]
 Origin = Literal["route", "linked", "matched_by_name"]
 RowState = Literal["serving", "redirecting", "applying", "failed", "instance_not_found", "unknown"]
 
+MAX_KNOWN_SITES = 1000
+
 HealthLookup = Callable[[list[tuple[str, str]]], dict[str, HealthResult]]
 
 
@@ -150,14 +152,31 @@ def controller_records(stack_data: dict, host_state: dict,
     hosts = hosts if isinstance(hosts, dict) else {}
     stacks = stack_data.get("stacks") if isinstance(stack_data, dict) else None
     stacks = stacks if isinstance(stacks, dict) else {}
-    claimed: set[str] = set()
+    def key_of(record: dict) -> str:
+        return f"{record.get('remote')}/{record.get('project')}/{record.get('environment')}"
+
+    def full() -> bool:
+        if len(out["targets"]) < pr.MAX_TARGETS:
+            return False
+        if "controller_records_truncated" not in out["partial_reasons"]:
+            out["partial_reasons"].append("controller_records_truncated")
+        return True
+
+    def bounded_hosts(values: object) -> list[str]:
+        hostnames = sorted({str(value) for value in values}) if isinstance(values, list) else []
+        if len(hostnames) > pr.MAX_ROUTES:
+            out["partial_reasons"].append("controller_hostnames_truncated")
+        return hostnames[:pr.MAX_ROUTES]
+
+    claimed = {key_of(record) for record in stacks.values() if isinstance(record, dict)}
     for record in stacks.values():
         if not isinstance(record, dict):
             continue
-        key = f"{record.get('remote')}/{record.get('project')}/{record.get('environment')}"
-        claimed.add(key)
+        if full():
+            break
+        key = key_of(record)
         entry = hosts.get(key) if isinstance(hosts.get(key), dict) else {}
-        hostnames = sorted(set(record.get("hostnames") or entry.get("hostnames") or []))
+        hostnames = bounded_hosts(record.get("hostnames") or entry.get("hostnames") or [])
         try:
             last = _controller_apply(last_apply_view(record), None) or {
                 "status": "applying", "started_at": 0, "finished_at": None, "request_id": None}
@@ -176,7 +195,11 @@ def controller_records(stack_data: dict, host_state: dict,
         except (ValueError, TypeError, AttributeError) as exc:
             out["partial_reasons"].append(f"stack_record_unreadable:{record.get('slug')}:{type(exc).__name__}")
             continue
-        for site in record.get("sites") or []:
+        sites = record.get("sites") if isinstance(record.get("sites"), list) else []
+        for site in sites:
+            if len(out["links"]) >= pr.MAX_SITE_LINKS:
+                out["partial_reasons"].append("site_links_truncated")
+                break
             try:
                 out["links"].append(pr.build_site_link(
                     remote=str(record.get("remote")), slug=str(record.get("slug")),
@@ -188,9 +211,11 @@ def controller_records(stack_data: dict, host_state: dict,
     for key, entry in sorted(hosts.items()):
         if key in claimed or not isinstance(entry, dict):
             continue
+        if full():
+            break
         remote, _, rest = str(key).partition("/")
         project, _, environment = rest.partition("/")
-        hostnames = sorted(set(entry.get("hostnames") or []))
+        hostnames = bounded_hosts(entry.get("hostnames") or [])
         if not hostnames:
             continue
         try:
@@ -215,7 +240,9 @@ def server_source(records: pr.ServerRecords) -> SourceRecords:
 def known_sites(registry_rows: Iterable[dict], route_file_names: Iterable[str]) -> list[KnownSite]:
     """Hostnames this machine serves for instances: registry URLs and Caddy instance route file names."""
     sites: dict[str, KnownSite] = {}
-    for row in registry_rows:
+    for index, row in enumerate(registry_rows):
+        if index >= MAX_KNOWN_SITES:
+            break
         if not isinstance(row, dict):
             continue
         try:
@@ -224,7 +251,9 @@ def known_sites(registry_rows: Iterable[dict], route_file_names: Iterable[str]) 
             continue
         if "." in host and not host.endswith((".tst", ".test.local")) and host != "localhost":
             sites[host] = {"hostname": host, "instance": str(row.get("instance") or "") or None}
-    for name in route_file_names:
+    for index, name in enumerate(route_file_names):
+        if index >= MAX_KNOWN_SITES:
+            break
         match = re.fullmatch(r"sandbox-instance-(.+)\.caddy", name)
         if match and match.group(1) not in sites:
             sites[match.group(1)] = {"hostname": match.group(1), "instance": None}

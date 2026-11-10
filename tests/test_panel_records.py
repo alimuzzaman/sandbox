@@ -227,6 +227,41 @@ class ReadServerRecordsTest(unittest.TestCase):
         self.assertEqual(records["targets"], [])
         self.assertEqual(len(records["partial_reasons"]), 1)
 
+    def link_file(self, host: str) -> None:
+        self.write(f"stack-sites/demo/{host}.json",
+                   pr.build_site_link(remote="r", slug="demo", hostname=host, instance="i",
+                                      label="default", commit=None, recorded_at=1))
+
+    def test_site_links_are_bounded(self):
+        for index in range(5):
+            self.link_file(f"wp{index}-demo.example.test")
+        with unittest.mock.patch.object(pr, "MAX_SITE_LINKS", 2):
+            records = pr.read_server_records(self.runtime)
+        self.assertEqual(len(records["links"]), 2)
+        self.assertEqual(records["partial_reasons"], ["site_links_truncated"])
+
+    def test_directory_scans_are_bounded(self):
+        for index in range(5):
+            self.link_file(f"wp{index}-demo.example.test")
+        with unittest.mock.patch.object(pr, "SCAN_LIMIT", 3):
+            records = pr.read_server_records(self.runtime)
+        self.assertLessEqual(len(records["links"]), 3)
+        self.assertIn("site_links_truncated:demo", records["partial_reasons"])
+
+    def test_targets_and_reasons_are_bounded(self):
+        self.write("hosts/xspeed-hub-demo/staging/summary.json", self.summary())
+        self.write("hosts/zz-legacy/production/compose.override.yml", "services: {}")
+        with unittest.mock.patch.object(pr, "MAX_TARGETS", 1):
+            records = pr.read_server_records(self.runtime)
+        self.assertEqual(len(records["targets"]) + len(records["legacy"]), 1)
+        self.assertEqual(records["partial_reasons"], ["hosted_targets_truncated"])
+        for index in range(4):
+            self.write(f"hosts/bad{index}/production/summary.json", "{")
+        with unittest.mock.patch.object(pr, "MAX_PARTIAL_REASONS", 2):
+            records = pr.read_server_records(self.runtime)
+        self.assertEqual(len(records["partial_reasons"]), 3)
+        self.assertEqual(records["partial_reasons"][-1], "partial_reasons_truncated")
+
     def test_missing_runtime_is_empty(self):
         self.assertEqual(pr.read_server_records(self.runtime),
                          {"targets": [], "legacy": [], "links": [], "partial_reasons": []})

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 
 from sandbox.hosting import panel_records as pr
 from sandbox.hosting import panel_view as pv
@@ -206,6 +207,31 @@ class ControllerSourceTest(unittest.TestCase):
         encoded = json.dumps(view)
         self.assertNotIn(SECRET, encoded)
         self.assertNotIn("/home/u", encoded)
+
+    def test_controller_records_are_bounded(self):
+        hosts = {f"r/site{index}/production": {"hostnames": [f"h{n}.site{index}.example.test" for n in range(3)],
+                                               "runtime": {"state": "ready"}, "edge": {"state": "ready"}}
+                 for index in range(3)}
+        with mock.patch.object(pv.pr, "MAX_TARGETS", 2), mock.patch.object(pv.pr, "MAX_ROUTES", 2):
+            records = pv.controller_records({}, {"hosts": hosts}, lambda record: {})
+        self.assertEqual(len(records["targets"]), 2)
+        self.assertTrue(all(len(target["routes"]) == 2 for target in records["targets"]))
+        self.assertIn("controller_records_truncated", records["partial_reasons"])
+        self.assertIn("controller_hostnames_truncated", records["partial_reasons"])
+
+    def test_stack_claims_survive_the_cap(self):
+        stacks = {f"r/s{index}": {"remote": "r", "slug": f"s{index}", "project": f"p{index}",
+                                  "environment": "staging", "hostnames": [f"hub-s{index}.example.test"]}
+                  for index in range(2)}
+        hosts = {"r/p1/staging": {"hostnames": ["hub-s1.example.test"]}}
+        with mock.patch.object(pv.pr, "MAX_TARGETS", 1):
+            records = pv.controller_records({"stacks": stacks}, {"hosts": hosts}, lambda record: {})
+        self.assertEqual([target["project"] for target in records["targets"]], ["p0"])
+
+    def test_known_sites_are_bounded(self):
+        rows = [{"instance": f"i{n}", "url": f"https://wp{n}.example.test"} for n in range(5)]
+        with mock.patch.object(pv, "MAX_KNOWN_SITES", 2):
+            self.assertEqual(len(pv.known_sites(rows, [f"sandbox-instance-x{n}.example.test.caddy" for n in range(5)])), 4)
 
     def test_empty_inputs(self):
         records = pv.controller_records({}, {}, lambda record: {})

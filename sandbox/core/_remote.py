@@ -683,6 +683,24 @@ def list_remotes() -> dict:
     return _remote_block()
 
 
+def control_auth_headers(remote: dict) -> dict | None:
+    """Authorization for a remote's control service, or None when this registration has none.
+
+    A registration made with `sb remote join` has no token: the control
+    service admits it as a node of its tailnet once the owner allows that.
+    """
+    token = remote.get("bearer_token")
+    if isinstance(token, str) and token:
+        return {"Authorization": f"Bearer {token}"}
+    if remote.get("control_access") == "tailnet" and remote.get("control_transport") == "tailscale":
+        return {}
+    return None
+
+
+def control_ready(remote: dict) -> bool:
+    return bool(remote.get("control_url")) and control_auth_headers(remote) is not None
+
+
 def mint_bearer_token() -> str:
     """A fresh, cryptographically random token -- never user-supplied, never
     echoed back once stored (CLAUDE.md secrets rule)."""
@@ -1146,19 +1164,21 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
     transport = remote.get("control_transport")
     control_url = remote.get("control_url")
     token = remote.get("bearer_token")
+    authorized = control_auth_headers(remote) is not None
     transport_ok = transport in {"https", "tailscale"}
     checks.extend([
         {"label": "control transport configured", "ok": transport_ok,
          "hint": "re-provision it to record a supported control transport"},
         {"label": "control URL configured", "ok": isinstance(control_url, str) and bool(control_url),
          "hint": "re-provision it to record the control URL"},
-        {"label": "bearer token recorded", "ok": isinstance(token, str) and bool(token),
+        {"label": "bearer token recorded" if token or remote.get("control_access") != "tailnet"
+         else "tailnet member access recorded", "ok": authorized,
          "hint": "re-provision it to mint a replacement bearer token"},
     ])
     reachable = check_reachable(remote)
     checks.append({"label": "SSH reachable", "ok": reachable,
                    "hint": "check the VPS network path and SSH service"})
-    if not (transport_ok and isinstance(control_url, str) and control_url and token and reachable):
+    if not (transport_ok and isinstance(control_url, str) and control_url and authorized and reachable):
         return checks
 
     parsed = urlsplit(control_url)
@@ -2745,7 +2765,6 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10,
     path when a VPS accepts TCP but its SSH daemon is overloaded or unavailable.
     """
     base = remote.get("control_url")
-    token = remote.get("bearer_token")
     parsed_base = urlsplit(base) if isinstance(base, str) else None
     tailscale_http = bool(
         parsed_base
@@ -2755,12 +2774,13 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10,
     )
     if not isinstance(base, str) or not (base.startswith("https://") or tailscale_http):
         raise RuntimeError("remote diagnostics require an HTTPS control URL")
-    if not isinstance(token, str) or not token:
+    headers = control_auth_headers(remote)
+    if headers is None:
         raise RuntimeError("remote diagnostics require a provisioned bearer token")
     url = base.rstrip("/") + "/diagnostics"
     if include_processes:
         url += "?processes=1"
-    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    request = urllib.request.Request(url, headers=headers)
     try:
         with _control_urlopen(remote, request, timeout=timeout) as response:
             if response.status != 200:
@@ -2871,7 +2891,6 @@ def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
                             payload: dict | None = None) -> dict:
     """Call one authenticated, bounded remote-control HTTP endpoint."""
     base = remote.get("control_url")
-    token = remote.get("bearer_token")
     parsed_base = urlsplit(base) if isinstance(base, str) else None
     tailscale_http = bool(
         parsed_base
@@ -2881,10 +2900,10 @@ def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
     )
     if not isinstance(base, str) or not (base.startswith("https://") or tailscale_http):
         raise RuntimeError("remote control requires an HTTPS control URL")
-    if not isinstance(token, str) or not token:
+    headers = control_auth_headers(remote)
+    if headers is None:
         raise RuntimeError("remote control requires a provisioned bearer token")
     data = None
-    headers = {"Authorization": f"Bearer {token}"}
     if payload is not None:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -2898,6 +2917,9 @@ def _remote_control_request(remote: dict, path: str, *, timeout: int = 10,
             if len(raw) > 4 * 1024 * 1024:
                 raise RuntimeError("remote control response is too large")
             result = json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # The service answered: say what it said rather than "unreachable".
+        raise RuntimeError(f"remote control returned HTTP {exc.code}") from exc
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         raise RuntimeError("remote control endpoint is unreachable" + _dns_detail(exc)) from exc
     if not isinstance(result, dict):
@@ -4503,10 +4525,10 @@ def verify_remote(remote: dict, *, name: str | None = None, timeout: int = 10) -
     if not isinstance(remote, dict):
         raise ValueError("remote verification target is invalid")
     base = remote.get("control_url")
-    token = remote.get("bearer_token")
     if not isinstance(base, str) or not base.strip():
         raise RuntimeError("auth_verification_unavailable: control endpoint is unavailable")
-    if not isinstance(token, str) or not token:
+    auth = control_auth_headers(remote)
+    if auth is None:
         raise RuntimeError("auth_verification_unavailable: stored authentication is unavailable")
     parsed = urlsplit(base.strip())
     if (parsed.scheme not in {"https", "http"} or not parsed.hostname
@@ -4520,7 +4542,7 @@ def verify_remote(remote: dict, *, name: str | None = None, timeout: int = 10) -
     request = urllib.request.Request(
         endpoint,
         method="GET",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"},
+        headers={**auth, "Accept": "application/json, text/event-stream"},
     )
     started = time.monotonic()
     status = None

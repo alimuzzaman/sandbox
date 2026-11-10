@@ -1,15 +1,20 @@
-"""Record which Tailscale user made each control request.
+"""Who may call the control service, and a record of who did.
 
-Attribution only: the bearer token decides access. Nothing here can refuse or
-fail a request, and no token, header, body or tool argument is ever written.
+Access is the bearer token, or, once the owner turns it on, any node that
+Tailscale resolves on this tailnet (`ControlGate`, `MemberAccess`).
+Attribution never refuses or fails a request, and no token, header, body or
+tool argument is ever written.
 """
 from __future__ import annotations
 
+import asyncio
+import hmac
 import ipaddress
 import json
 import os
 import queue
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -68,19 +73,22 @@ class Whois:
     def __init__(self, run=subprocess.run, clock=time.monotonic, ttl_seconds=60, max_entries=1024):
         self.run, self.clock, self.ttl_seconds, self.max_entries = run, clock, ttl_seconds, max_entries
         self.entries: dict[str, tuple[float, dict]] = {}
+        self.lock = threading.Lock()  # The log worker and request threads share the cache.
 
     def lookup(self, address) -> dict:
         if not is_tailnet_address(address):
             return _unknown("invalid_address")
         key = str(ipaddress.ip_address(address))
         now = self.clock()
-        cached = self.entries.get(key)
+        with self.lock:
+            cached = self.entries.get(key)
         if cached is not None and now < cached[0]:
             return cached[1]
         result = self._resolve(key)
-        if key not in self.entries and len(self.entries) >= self.max_entries:
-            self.entries.pop(next(iter(self.entries)))
-        self.entries[key] = (now + self.ttl_seconds, result)
+        with self.lock:
+            if key not in self.entries and len(self.entries) >= self.max_entries:
+                self.entries.pop(next(iter(self.entries)))
+            self.entries[key] = (now + self.ttl_seconds, result)
         return result
 
     def _resolve(self, address: str) -> dict:
@@ -103,6 +111,68 @@ class Whois:
         except (ValueError, KeyError, TypeError, AttributeError):
             return _unknown("bad_response")
         return {"login": login, "node": node, "reason": None} if login else _unknown("bad_response")
+
+
+class MemberAccess:
+    """The owner's switch for tailnet member access, in `runtime/control-access.json`.
+
+    `sb remote tailnet-access` writes it over SSH. It is re-read whenever it
+    changes, so no restart is needed. Anything unexpected (missing,
+    malformed, a symlink, someone else's file, writable by others) means off.
+    """
+
+    def __init__(self, home):
+        self.path = Path(home) / "runtime" / "control-access.json"
+        self.lock = threading.Lock()
+        self.seen, self.value = None, False
+
+    def enabled(self) -> bool:
+        try:
+            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return False
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_mode & 0o022):
+                return False
+            key = (info.st_ino, info.st_mtime_ns, info.st_size)
+            with self.lock:
+                if key == self.seen:
+                    return self.value
+            data = os.read(descriptor, 4096)
+        except OSError:
+            return False
+        finally:
+            os.close(descriptor)
+        try:
+            document = json.loads(data)
+            value = isinstance(document, dict) and document.get("tailnet_members") is True
+        except (ValueError, UnicodeDecodeError):
+            value = False
+        with self.lock:
+            self.seen, self.value = key, value
+        return value
+
+
+class ControlGate:
+    """Admit the bearer token, or a tailnet node Tailscale resolves when members are allowed."""
+
+    def __init__(self, token: str, members: MemberAccess | None, whois: Whois | None):
+        self.expected = f"Bearer {token}".encode()
+        self.members, self.whois = members, whois
+
+    async def admit(self, authorization, peer) -> dict | None:
+        supplied = (authorization or "").encode("utf-8", "surrogateescape")
+        if hmac.compare_digest(supplied, self.expected):
+            return {"via": "token"}
+        if (self.members is None or self.whois is None or not is_tailnet_address(peer)
+                or not self.members.enabled()):
+            return None
+        identity = await asyncio.to_thread(self.whois.lookup, peer)
+        if identity["reason"] is not None:
+            return None
+        return {"via": "tailnet", "login": identity["login"], "node": identity["node"]}
 
 
 class AccessLog:

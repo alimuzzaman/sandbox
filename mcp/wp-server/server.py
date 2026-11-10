@@ -945,12 +945,18 @@ def _run_streamable_http(bind: str, port: int, token: str,
                                 status_code=400)
         return JSONResponse(result)
 
-    from tailnet_access import build_attribution
-    attribution = build_attribution(bind, os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
+    from tailnet_access import ControlGate, MemberAccess, build_attribution
+    home = os.environ.get("SANDBOX_HOME", Path.home() / "sandbox")
+    attribution = build_attribution(bind, home)
+    # Tailnet member access exists only on a tailnet bind, where the client
+    # address is the real peer; behind a public proxy only the token works.
+    gate = ControlGate(token, MemberAccess(home) if attribution is not None else None,
+                       attribution.whois if attribution is not None else None)
 
     class _BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            if request.headers.get("authorization") != f"Bearer {token}":
+            peer = request.client.host if request.client else None
+            if await gate.admit(request.headers.get("authorization"), peer) is None:
                 return PlainTextResponse("Unauthorized", status_code=401)
             if attribution is not None:
                 return await attribution.observe(request, call_next)

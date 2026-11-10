@@ -935,7 +935,7 @@ def _remote_disk_free_mb(entry: dict, home: str) -> int:
     still failing closed if neither read-only observation path works.
     """
     diagnostics_error = None
-    if entry.get("control_url") and entry.get("bearer_token"):
+    if remote.control_ready(entry):
         try:
             diagnostics = remote.remote_diagnostics(entry)
             free = _disk_free_mb(diagnostics.get("disk_free_mb"))
@@ -974,7 +974,7 @@ def _prepare_host_apply(entry: dict, home: str, validated: dict) -> str | None:
     """
     # Empty entries are used by offline unit tests and fail later on their first
     # real remote operation. Every registered remote has one of these identities.
-    if not entry or not (entry.get("ssh") or (entry.get("control_url") and entry.get("bearer_token"))):
+    if not entry or not (entry.get("ssh") or remote.control_ready(entry)):
         return None
     minimum = int(validated["deploy"].get("min_free_disk_mb", 1024))
     free = _remote_disk_free_mb(entry, home)

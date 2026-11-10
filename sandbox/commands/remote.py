@@ -5,6 +5,7 @@ import ipaddress
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,8 @@ def cmd_remote(cfg, args) -> None:
         "set-origin": _cmd_set_origin,
         "set-storage-floor": _cmd_set_storage_floor,
         "rebind-host": _cmd_rebind_host,
+        "join": _cmd_join,
+        "tailnet-access": _cmd_tailnet_access,
         "tailscale-ssh": _cmd_tailscale_ssh,
         "docker-pool": _cmd_docker_pool,
         "domains": _cmd_domains,
@@ -1372,6 +1375,173 @@ def _cmd_tailscale_ssh(args, as_json: bool) -> None:
             info("could not tell whether this controller can log in; check its route to the tailnet")
 
 
+_MEMBER_ACCESS_FILE = "runtime/control-access.json"
+
+
+def _member_access_setting(entry: dict, home: str) -> bool | None:
+    """The owner's switch on the server: True, False, or None when it can't be read."""
+    path = shlex.quote(f"{home}/{_MEMBER_ACCESS_FILE}")
+    result = sr.ssh_run(entry, f"cat {path} 2>/dev/null || true", timeout=15)
+    if result.returncode != 0:
+        return None
+    if not (result.stdout or "").strip():
+        return False
+    try:
+        document = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return isinstance(document, dict) and document.get("tailnet_members") is True
+
+
+def _member_access_probe(entry: dict) -> str:
+    """What the live control service does with a tailnet node that sends no token."""
+    probe = {key: value for key, value in entry.items() if key != "bearer_token"}
+    probe["control_access"] = "tailnet"
+    try:
+        result = sr._remote_control_request(probe, "/inventory", timeout=15)
+    except RuntimeError as exc:
+        return "refused" if "HTTP 401" in str(exc) else "unknown"
+    return "admitted" if result.get("inventory_schema") == 1 else "unknown"
+
+
+def _cmd_tailnet_access(args, as_json: bool) -> None:
+    """`sb remote tailnet-access <status|enable|disable> <name> [--confirm]`.
+
+    When enabled, the control service admits any node Tailscale resolves on its
+    tailnet without the token, so `sb remote join` works for every member.
+    """
+    operation, name = getattr(args, "name", None), getattr(args, "ssh_url", None)
+    if operation not in {"status", "enable", "disable"} or not name:
+        die("usage: ./sb remote tailnet-access <status|enable|disable> <name> [--confirm] [--json]")
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    if entry.get("control_transport") != "tailscale":
+        die(f"tailnet member access needs a Tailscale control connection; '{name}' uses "
+            f"{entry.get('control_transport') or 'none'}")
+    if not entry.get("bearer_token"):
+        die(f"only the controller that provisioned '{name}' can change who may use it")
+    home = sr.resolve_sandbox_home(entry)
+    setting = _member_access_setting(entry, home)
+    result = {"ok": True, "name": name, "setting": setting, "error": None}
+    if operation == "status":
+        result["status"] = "observed"
+    else:
+        wanted = operation == "enable"
+        if not _arg_true(args, "confirm"):
+            result["status"] = f"already_{operation}d" if setting is wanted else "planned"
+        elif setting is wanted:
+            result["status"] = f"already_{operation}d"
+        else:
+            target = shlex.quote(f"{home}/{_MEMBER_ACCESS_FILE}")
+            runtime = shlex.quote(f"{home}/runtime")
+            document = shlex.quote(json.dumps({"tailnet_members": wanted}))
+            change = sr.ssh_run(entry, (
+                f"umask 077 && mkdir -p {runtime} && tmp=$(mktemp {runtime}/.control-access.XXXXXX) "
+                f"&& printf '%s\\n' {document} > \"$tmp\" && chmod 600 \"$tmp\" "
+                f"&& mv -f \"$tmp\" {target}"), timeout=30)
+            if change.returncode != 0 or _member_access_setting(entry, home) is not wanted:
+                die(f"tailnet_access_change_failed: could not {operation} tailnet member access")
+            result.update(setting=wanted, status=f"{operation}d")
+    result["members"] = _member_access_probe(entry)
+    if result["setting"] is True and result["members"] == "refused":
+        result["next_step"] = (f"the control service on '{name}' predates tailnet member access; "
+                               f"run `./sb remote service migrate {name} --confirm`")
+    if as_json:
+        print(json.dumps(result))
+        return
+    ok(f"tailnet member access on '{name}': {result['status']} "
+       f"(setting {result['setting']}, members {result['members']})")
+    if result.get("next_step"):
+        info(result["next_step"])
+
+
+def _tailnet_address(host: str) -> str:
+    """A tailnet IP for a Tailscale IP or MagicDNS name; anything else is refused."""
+    host = host.strip("[]")
+    if _is_tailnet_ip(host):
+        return host
+    try:
+        ipaddress.ip_address(host)
+        literal = True
+    except ValueError:
+        literal = False
+    if not literal:
+        try:
+            for *_rest, address in socket.getaddrinfo(host, None, socket.AF_INET):
+                if _is_tailnet_ip(address[0]):
+                    return address[0]
+        except OSError:
+            die(f"join_target_unresolved: could not resolve '{host}'; is Tailscale connected?")
+    die(f"join_target_not_tailnet: '{host}' is not a Tailscale address; use the server's "
+        "Tailscale IP or MagicDNS name")
+
+
+def _first_ssh_login(target: str, port) -> str:
+    """Log in once without prompting, recording the host key: ok, denied or unknown."""
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new"]
+    if port:
+        argv += ["-p", str(port)]
+    try:
+        login = subprocess.run(argv + [target, "true"], capture_output=True, text=True,
+                               timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        return "denied"  # Past ConnectTimeout, a Tailscale `check` rule is waiting for a browser.
+    except OSError:
+        return "unknown"
+    if login.returncode == 0:
+        return "ok"
+    refusal = (login.stderr or "").lower()
+    return "denied" if any(text in refusal for text in _TAILSCALE_SSH_REFUSALS) else "unknown"
+
+
+def _cmd_join(args, as_json: bool) -> None:
+    """`sb remote join <name> <user>@<tailnet address or name>`: use a server someone else provisioned.
+
+    Access comes from tailnet membership, so nothing secret is exchanged. The
+    server's owner must have run `sb remote tailnet-access enable`.
+    """
+    name, target = getattr(args, "name", None), getattr(args, "ssh_url", None)
+    if not name or not target:
+        die("usage: ./sb remote join <name> <user>@<tailnet address or MagicDNS name>")
+    try:
+        name = sr.validate_remote_name(name)
+        parts = sr.remote_ssh_parts(target)
+    except ValueError as exc:
+        die(str(exc))
+    user, separator, host = parts["target"].rpartition("@")
+    if not separator or not user:
+        die("join needs the server account too, for example alim@server.tailnet.ts.net")
+    if sr.get_remote(name):
+        die(f"remote_exists: '{name}' is already registered here; pick another name or run "
+            f"`./sb remote remove {name}` first")
+    address = _tailnet_address(host)
+    port = sr.DEFAULT_MCP_PORT
+    ssh = f"{user}@{address}" + (f":{parts['port']}" if parts.get("port") else "")
+    entry = {"ssh": ssh, "control_transport": "tailscale", "control_url": f"http://{address}:{port}",
+             "tailscale_host": address, "mcp_port": port, "control_access": "tailnet",
+             "provisioned": True, "joined": True}
+    try:
+        inventory = sr._remote_control_request(entry, "/inventory", timeout=15)
+    except RuntimeError as exc:
+        die(f"join_refused: the control service on {address} did not admit this machine ({exc}). "
+            f"Ask the owner to run `./sb remote tailnet-access enable <their name for it> --confirm`.")
+    if inventory.get("inventory_schema") != 1:
+        die(f"join_refused: {address} did not answer as a Sandbox control service")
+    ssh_login = _first_ssh_login(f"{user}@{address}", parts.get("port"))
+    sr.put_remote(name, **entry)
+    result = {"ok": True, "name": name, "status": "joined", "ssh": ssh,
+              "control_url": entry["control_url"], "ssh_login": ssh_login, "error": None}
+    if as_json:
+        print(json.dumps(result))
+        return
+    ok(f"joined '{name}' at {address}; jobs and status work now")
+    if ssh_login != "ok":
+        info("deploys also need SSH: ask the owner to enable Tailscale SSH and add a tailnet "
+             f"rule that lets you log in as {user} ({'refused' if ssh_login == 'denied' else 'no answer'})")
+
+
 def _cmd_remove(args, as_json: bool) -> None:
     name = _require_name(args)
     if getattr(args, "dry_run", False) is True:
@@ -1801,6 +1971,10 @@ def _cmd_provision(args, as_json: bool) -> None:
     if not entry:
         die(f"no remote named '{name}' — register it first with "
             f"`./sb remote add {name} <ssh-connection>`")
+    if entry.get("joined") and not _arg_true(args, "force"):
+        die(f"remote_joined: '{name}' was added with `sb remote join`. Provisioning would "
+            "reinstall its control service and lock out every other controller; ask its "
+            "owner, or pass --force only if you are taking the server over")
     ssh_target = entry.get("ssh") or ""
     if not ssh_target:
         die(f"remote '{name}' has no ssh connection string configured")

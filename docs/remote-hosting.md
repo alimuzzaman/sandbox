@@ -1504,6 +1504,47 @@ it may hang. If the remote's registered SSH target is a Tailscale address or `.t
 disturb the connection carrying it. A target that is an SSH config alias for such an address is
 not detected.
 
+### Sharing a remote with everyone on the tailnet
+
+For a remote whose control connection is Tailscale, the owner can let every node on
+the tailnet use it, with no token to hand out. Removing someone from the tailnet removes
+their access.
+
+```bash
+# Owner, on the controller that provisioned the remote:
+./sb remote tailnet-access enable myvps --confirm --json
+./sb remote tailscale-ssh enable myvps --confirm --json   # deploys use Tailscale SSH
+
+# Each teammate, on a machine signed in to the same tailnet:
+./sb remote join myvps alim@myvps.tailnet-name.ts.net --json
+```
+
+`tailnet-access` writes `$SANDBOX_HOME/runtime/control-access.json` on the remote over
+SSH (mode 0600). The control service re-reads it when it changes, so no restart is
+needed, but a service older than this feature ignores it: `members: refused` after
+`enable` means `./sb remote service migrate myvps --confirm` is due. The service then
+admits a request without the token only when it arrives on its tailnet address and
+`tailscale whois` resolves the caller; the owner's token keeps working. Callers are
+recorded by Tailscale login in `runtime/logs/control-access.jsonl`. Public HTTPS
+remotes never admit tokenless requests.
+
+`join` refuses an address outside the tailnet, never overwrites an existing
+registration, checks that the control service admits this machine, and makes one
+non-interactive SSH login that records the server's Tailscale SSH host key. It then
+registers the remote with no token. A joined remote cannot be provisioned without
+`--force`, because provisioning reinstalls the control service and locks out every other
+controller. Migrate and service start or stop stay with the owner, who holds the token.
+
+Deploys log in over Tailscale SSH as the server account, so the tailnet policy needs an
+`accept` rule for members, for example after tagging the server `tag:sandbox`:
+
+```json
+{"action": "accept", "src": ["autogroup:member"], "dst": ["tag:sandbox"], "users": ["alim"]}
+```
+
+No `check` rule may match the server. Every member then gets a shell with that account's
+full rights, the same access the token gives.
+
 ## 8. CLI + MCP surface
 
 See `specs/014-remote-vps-hosting/contracts/cli-and-mcp.md` for the full flag/JSON-shape

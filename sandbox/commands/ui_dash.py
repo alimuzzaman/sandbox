@@ -35,7 +35,7 @@ def _remote_summary_rows() -> list[dict]:
             "name": name,
             "provisioned": bool(entry.get("provisioned")),
             "control_ready": bool(
-                entry.get("control_url") and entry.get("bearer_token")
+                remote_core.control_ready(entry)
             ),
         }
         for name, entry in sorted(remote_core.list_remotes().items())

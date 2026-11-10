@@ -437,11 +437,17 @@ class LeaseAndGateTests(Base):
             calls.append(argv)
             return 0, b'{"ok": true, "jobs": []}\n', b""
 
-        self.assertFalse(rp._jobs_active(self.probe, runner))
+        mine = mock.Mock(pw_uid=os.getuid())
+        self.assertFalse(rp._jobs_active(self.probe, runner, environ={"SUDO_USER": "tester"},
+                                         getpwnam=lambda user: mine))
         argv = calls[-1]
-        self.assertEqual(argv[:4], ["runuser", "-u", pwd.getpwuid(os.getuid()).pw_name, "--"])
+        self.assertEqual(argv[:4], ["runuser", "-u", "tester", "--"])
         self.assertIn("SANDBOX_HOME=" + str(self.home), argv)
         self.assertIn(str(self.home) + "/sb-src/sb", argv)
+        # Run directly as root (no sudo): no runuser.
+        self.assertFalse(rp._jobs_active(self.probe, runner, environ={},
+                                         getpwnam=lambda user: mine))
+        self.assertEqual(calls[-1][0], "env")
         other = mock.Mock(pw_uid=os.getuid() + 1)
         with self.assertRaises(rp.Refusal) as caught:
             rp._jobs_active(self.probe, runner, getpwnam=lambda user: other)
@@ -1056,6 +1062,29 @@ class RoundFiveTests(Base):
         tomb = next(i for i, e in enumerate(events) if e[0] == "rename" and ".removed-" in e[1])
         self.assertLess(block_unlink, conf_sync)
         self.assertLess(conf_sync, tomb)
+
+    def test_a_partial_add_that_never_got_a_certificate_can_be_removed(self):
+        """Re-review 7: nothing was ever installed, so nothing can be loaded."""
+        self.host.loaded = {"other.example.test": (b"server {}", b"")}
+        self.reserve()
+        self.csr()  # issuance then failed: key and CSR only
+        reloads = len(self.host.ran("systemctl", "reload", "nginx"))
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(self.name_dir.exists())
+        self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), reloads)
+
+    def test_any_trace_of_an_activation_keeps_removal_fail_closed(self):
+        self.host.loaded = {"other.example.test": (b"server {}", b"")}
+        self.reserve()
+        self.csr()
+        (self.name_dir / "leaves.json").write_text(json.dumps(["e" * 64]))
+        os.chmod(self.name_dir / "leaves.json", 0o600)
+        self.host.reload_accepted = False
+        self.paths["served"] = lambda ip, fqdn: ("handshake", "e" * 64, b"")
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertTrue(self.name_dir.exists())
 
 if __name__ == "__main__":
     unittest.main()

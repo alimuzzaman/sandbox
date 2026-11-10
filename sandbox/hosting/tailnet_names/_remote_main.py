@@ -1204,6 +1204,15 @@ def remove(payload, paths, runner, lock_wait):
                 chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
                 proven = (journal.get("state") == "loaded"
                           and journal.get("generation") == _generation(content, chain))
+                # A directory that never reached an activation write (no
+                # chain, no certificate history, no journal, no backup, no
+                # block) cannot be loaded by nginx: a block needs the chain,
+                # and the history is written before the first chain.
+                never_activated = (content is None and not journal and chain is None and all(
+                    _lstat(name_fd, entry) is None
+                    for entry in (LEAVES, "fullchain.prev.pem", "block.prev")))
+                if never_activated:
+                    proven = True
                 # A block on disk is taken down; a block already gone from
                 # disk is not proof that nginx unloaded it, so anything short
                 # of a proven loaded state is tested and reloaded first.

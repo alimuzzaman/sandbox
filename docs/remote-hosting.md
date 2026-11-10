@@ -1729,7 +1729,10 @@ published name changes nothing.
    removal or a rollback to no block, nothing may listen, or the handshake
    for the name must present a certificate the name never had (every leaf
    ever installed for it is recorded in its directory). The response body
-   never counts as proof of an unload. Every block unlink is fsynced before
+   never counts as proof of an unload. A name directory that never reached
+   an activation (no certificate, history, journal or backup) needs no
+   proof, since nginx cannot have loaded a block without its certificate;
+   such a partial add can always be removed. Every block unlink is fsynced before
    anything that depends on it, such as deleting the certificates. `systemctl reload`
    succeeding is not proof, because nginx keeps its old configuration when
    it rejects a reload (a socket it cannot bind, for example), and a worker

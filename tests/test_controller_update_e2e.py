@@ -8,7 +8,6 @@ C1 on a local ``installed`` branch tracking ``origin/main`` runs
 temporary directory: the GitHub origin URL is mapped to the local bare repo.
 """
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -21,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tests.controller_update_support import GITHUB_URL, git_env  # noqa: E402
+from tests.subprocess_support import synthetic_environment  # noqa: E402
 
 _COPIED = ("sb", "sandbox", "sandbox.yml", "requirements-cli.txt", "VERSION", "config", ".gitignore")
 _IGNORED = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
@@ -81,8 +81,7 @@ class EndToEndTests(unittest.TestCase):
             "refusals": []}), encoding="utf-8")
 
     def sb(self, *args, extra_env=None):
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith(("SANDBOX_", "GIT_"))}
+        env = dict(synthetic_environment())
         env.update({"SANDBOX_HOME": str(self.home), "HOME": str(self.case),
                     "GIT_CONFIG_GLOBAL": self.env["GIT_CONFIG_GLOBAL"],
                     "GIT_CONFIG_NOSYSTEM": "1"})

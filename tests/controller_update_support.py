@@ -13,16 +13,17 @@ rewrite settings cannot leak into the fixture.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from pathlib import Path
+
+from tests.subprocess_support import synthetic_environment
 
 GITHUB_URL = "https://github.com/example/sandbox.git"
 
 
 def git_env(home: Path) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env = dict(synthetic_environment())
     config = home / "gitconfig"
     if not config.exists():
         config.write_text(

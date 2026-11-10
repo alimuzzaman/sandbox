@@ -978,6 +978,10 @@ def _cmd_service(args, as_json: bool) -> None:
             raise SystemExit(1)
     elif payload["ok"]:
         print(f"remote service {name}: {payload['status']}")
+        slots = (payload.get("data") or {}).get("job_slots") if operation == "diagnostics" else None
+        if isinstance(slots, dict):
+            from sandbox.jobs.scheduler import capacity_line
+            print(capacity_line(slots))
     else:
         die(f"{payload['error']['code']}: {payload['error']['message']}")
 

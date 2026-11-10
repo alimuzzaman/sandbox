@@ -731,7 +731,10 @@ def cmd_job_list(_cfg, args) -> None:
     # Repository rows remain internal. Public list responses carry compact
     # summaries and a cursor, with full details available through job-status.
     has_more = None
+    slots = None
     if isinstance(result, dict):
+        # A remote runtime reports its own scheduler; older runtimes omit it.
+        slots = result.get("slots") if isinstance(result.get("slots"), dict) else None
         if result.get("ok") is False:
             _die(str(result.get("error") or result.get("code") or "job list failed"))
         page = result.get("page")
@@ -752,6 +755,12 @@ def cmd_job_list(_cfg, args) -> None:
             has_more = bool(dependencies["job_service"].list(following))
     from sandbox.jobs.listing import job_page
     envelope = job_page(result, limit=limit, has_more=has_more)
+    if not remote_name:
+        scheduler = getattr(dependencies["job_service"], "scheduler", None)
+        slots = scheduler.capacity() if scheduler is not None else None
+    if slots is not None:
+        from sandbox.jobs.listing import job_slots
+        envelope["slots"] = job_slots(slots)
     if getattr(args, "json", False):
         print(json.dumps(envelope, sort_keys=True))
     else:
@@ -759,6 +768,9 @@ def cmd_job_list(_cfg, args) -> None:
             print(f"{item['job_id']} {item['lifecycle']} {item['workspace_label']}")
         if envelope["page"]["next_cursor"]:
             print("Next: --cursor-job-id " + envelope["page"]["next_cursor"])
+        if envelope.get("slots") is not None:
+            from sandbox.jobs.scheduler import capacity_line
+            print(capacity_line(envelope["slots"]))
 
 
 def cmd_job_cancel(_cfg, args) -> None:

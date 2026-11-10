@@ -41,6 +41,27 @@ def _job_counts() -> dict:
     return result
 
 
+def _job_slots() -> dict | None:
+    """Effective ``jobs.scheduler`` limit and slots in use; None when unreadable."""
+    from sandbox.config.job_scheduler import DEFAULT_POLICY, JobSchedulerConfigError
+    from sandbox.jobs.scheduler import capacity_view, host_scheduler_policy
+
+    try:
+        policy, error = host_scheduler_policy(), None
+    except JobSchedulerConfigError as exc:
+        policy, error = DEFAULT_POLICY, exc
+    home = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
+    path = home / "runtime" / "jobs" / "registry.sqlite3"
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return capacity_view(connection, policy, error)
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error):
+        return None
+
+
 def _diagnostic_process_snapshot() -> dict:
     """Collect bounded process evidence with fixed argv and no shell or SSH."""
     from sandbox.core import _remote as remote_core

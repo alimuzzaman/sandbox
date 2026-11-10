@@ -63,7 +63,7 @@ _REMOTE_CODES = {
     "unmanaged": UNMANAGED, "path_unsafe": REMOTE_PATH_UNSAFE,
     "nginx_rejected": NGINX_REJECTED, "reload_failed": RELOAD_FAILED,
     "recovery_failed": RELOAD_FAILED, "restore_failed": RELOAD_FAILED,
-    "certificate_mismatch": INSTALL_FAILED, "key_missing": INSTALL_FAILED,
+    "certificate_mismatch": CERTIFICATE_FAILED, "key_missing": INSTALL_FAILED,
     "key_failed": CERTIFICATE_FAILED, "csr_failed": CERTIFICATE_FAILED,
 }
 _TIME = "%Y-%m-%dT%H:%M:%SZ"
@@ -454,7 +454,8 @@ def _verify(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: TailnetNa
     removal = "remove_failed"
     try:
         data = deps.remote_call(target.entry, "remove", {
-            "fqdn": name.fqdn, "token": token, "keep_directory": True, "jobs_probe": jobs})
+            "fqdn": name.fqdn, "token": token, "keep_directory": True, "jobs_probe": jobs,
+            "tailnet_ip": target.tailnet_ip})
         if data.get("ok"):
             removal = "removed"
     except Exception:
@@ -552,7 +553,7 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                     name, upstream, target.tailnet_ip,
                     http2_directive=nginx.features(facts)["http2_directive"])
                 payload = {"fqdn": name.fqdn, "token": token, "block": block, "chain": chain,
-                           "jobs_probe": jobs}
+                           "jobs_probe": jobs, "tailnet_ip": target.tailnet_ip}
                 data = _activate(ctx, deps, run, rec, name, lego, token, payload, cached)
                 rec.save(upstream=str(upstream))
 
@@ -653,7 +654,7 @@ def _renew_one(ctx: Context, deps: Deps, name: TailnetName, store: StateStore, l
                 chain, cached = _obtain_chain(ctx, deps, run, rec, name, lego, token,
                                               allow_cached=not force)
             payload = {"fqdn": name.fqdn, "token": token, "block": None, "chain": chain,
-                       "jobs_probe": jobs}
+                       "jobs_probe": jobs, "tailnet_ip": ctx.target.tailnet_ip}
             data = _activate(ctx, deps, run, rec, name, lego, token, payload, cached)
             _verify(ctx, deps, run, rec, name, token, jobs, data.get("sha256"))
             _verified(run, rec, data)
@@ -728,7 +729,8 @@ def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
                 present = bool(row and (row.block_present or row.dir_present))
                 if present:
                     data = _remote(run, "remove_block", deps, ctx, "remove",
-                                   {"fqdn": name.fqdn, "token": token, "jobs_probe": jobs},
+                                   {"fqdn": name.fqdn, "token": token, "jobs_probe": jobs,
+                                    "tailnet_ip": target.tailnet_ip},
                                    on_fail=rec.failing("remove_block"))
                     rec.save("remove_block", "done")
                     if data.get("block_removed"):

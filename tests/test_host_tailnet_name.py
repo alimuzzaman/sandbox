@@ -166,6 +166,19 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"ssl_certificate_key /etc/nginx/sandbox-tailnet/{FQDN}/privkey.pem;", text)
         self.assertEqual(text.count(f'if ($host != "{FQDN}") {{ return 444; }}'), 2)
 
+    def test_the_block_serves_a_marker_derived_from_its_own_text(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tn_remote", REPO / "sandbox/hosting/tailnet_names/_remote_main.py")
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        text = self.block()
+        self.assertEqual(text.count(render.MARKER_PATH), 1)
+        marker = remote._marker_of(text.encode())
+        self.assertIsNotNone(marker)
+        self.assertNotEqual(marker, remote._marker_of(self.block(http2=False).encode()))
+        self.assertIsNone(remote._marker_of(text.replace("8025", "8026").encode()))
+
     def test_old_nginx_uses_listen_http2(self):
         text = self.block(http2=False)
         self.assertIn(f"listen {TAILNET_IP}:443 ssl http2;", text)

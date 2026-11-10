@@ -47,7 +47,8 @@ On refusal or failure: `"ok": false`, plus top-level `"code"` and `"error"`
 Steps, in order: `add` runs `preflight`, `gate`, `dns`, `certificate`,
 `activate`, `verify_tailnet`, `verify_public`; `renew` runs `certificate`
 (skipped with `tailnet_name_not_due` when not due and the activation is
-proven loaded), `activate`, `verify_tailnet`, `verify_public`; `remove` runs
+proven loaded and verified) or, when it has work to do, `gate`,
+`certificate`, `activate`, `verify_tailnet`, `verify_public`; `remove` runs
 `preflight`, `gate`, `remove_block`, `remove_certificate`, `remove_dns`.
 `activate` installs the block and chain together under the edge lock with an
 activation journal (hardening, 2026-11-10).
@@ -70,7 +71,7 @@ any result is not ok.
 |---|---|
 | `tailnet_name_usage` | Missing or misplaced arguments for the action (exit 1, before any other check). |
 | `tailnet_name_public_address_invalid` | `--public-address` is not a public IPv4 address. |
-| `tailnet_name_remote_failed` | The remote program could not run or returned no result. |
+| `tailnet_name_remote_failed` | The remote program could not run, returned no result, or failed unexpectedly (for example a write error); any interrupted activation is settled by the next run. |
 | `tailnet_name_invalid` | FQDN fails hostname rules, is a wildcard or a zone apex. |
 | `tailnet_name_zone_not_allowed` | FQDN is under no configured zone, or its stored record names another zone; checked before any DNS or ACME call or remote change. |
 | `tailnet_name_upstream_invalid` | Upstream is not `IPV4:PORT` or `localhost:PORT`, or not loopback/private/tailnet. |
@@ -93,10 +94,10 @@ any result is not ok.
 | `tailnet_name_dns_failed` | The DNS provider call failed. |
 | `tailnet_name_dns_not_owned` | `remove`: the name's complete record set is not exactly the recorded record (id, type A, address, no proxy). |
 | `tailnet_name_upstream_differs` | `add`: published with another upstream and no `--replace-upstream`. |
-| `tailnet_name_certificate_failed` | `lego` failed, or the issued chain does not match the key or the name. |
-| `tailnet_name_install_failed` | Writing the certificate or the renewal transaction failed (previous chain restored). |
+| `tailnet_name_certificate_failed` | `lego` failed, the remote could not make the key or signing request, or the chain does not match the key or the name (the remote refused it before installing anything). |
+| `tailnet_name_install_failed` | The remote has no private key for the name to install a chain against; rerun `add`. |
 | `tailnet_name_nginx_rejected` | `nginx -t` failed; the previous block and chain were restored, nginx not reloaded (on `remove`, a block already off disk stays recorded as an unproven removal). |
-| `tailnet_name_reload_failed` | The reload failed, or an interrupted activation could not be settled; previous state restored where possible. |
+| `tailnet_name_reload_failed` | The reload failed or nginx did not start serving the new configuration (the name's activation marker and certificate were not observed), or an interrupted activation could not be settled; previous state restored where possible. |
 | `tailnet_name_tailnet_probe_failed` | The tailnet HTTPS check failed. |
 | `tailnet_name_public_exposed` | The public address presented a certificate valid for the name (ours or another); the block was removed and the detail says whether the name is still served. |
 | `tailnet_name_public_probe_unavailable` | No public address is known for the check. |

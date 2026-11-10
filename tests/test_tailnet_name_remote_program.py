@@ -30,12 +30,13 @@ FQDN = "app.example.test"
 IP = "100.64.0.10"
 TOKEN = "a" * 32
 OTHER = "b" * 32
-HEADER = ('# sandbox-tailnet-name {"fqdn": "%s", "tailnet_ip": "%s", '
-          '"upstream": "127.0.0.1:%d", "version": 1}\n')
-
-
-def block(fqdn=FQDN, port=8025, body="server {}\n"):
-    return HEADER % (fqdn, IP, port) + body
+def block(fqdn=FQDN, port=8025, body=""):
+    """A block as the controller renders it (header, marker); ``body`` is
+    appended to make a corrupt variant."""
+    from sandbox.hosting.tailnet_names import models, render
+    return render.render_block(models.TailnetName(fqdn, "example.test"),
+                               models.Upstream("127.0.0.1", port), IP,
+                               http2_directive=True) + body
 
 
 def openssl(argv, *, input=None, check=False):
@@ -53,8 +54,8 @@ class FakeHost:
         self.nginx_ok = True
         self.reload_ok = True
         self.reload_accepted = True  # False: reload acknowledged, old config kept
-        self.workers = {"101", "102"}
-        self.generation = 0
+        self.loaded = {}  # fqdn -> (block bytes | None, chain bytes | None) nginx serves
+        self.paths = None
         self.jobs = []
         self.jobs_seq = None  # per-query answers, to admit a job mid-commit
         self.jobs_rc = 0
@@ -72,20 +73,38 @@ class FakeHost:
         if tool == "nginx":
             return (0, b"ok", b"") if self.nginx_ok else (1, b"", b"emerg: bad cert")
         if tool == "systemctl":
-            if argv[1] == "show":
-                return 0, b"100\n", b""
             if argv[1] == "reload":
                 if not self.reload_ok:
                     return 1, b"", b"failed"
                 if self.reload_accepted:
-                    self.generation += 1
-                    self.workers = {f"{self.generation}01", f"{self.generation}02"}
+                    self.snapshot()
             return 0, b"", b""
-        if tool == "ps":
-            return 0, ("\n".join(sorted(self.workers)) + "\n").encode(), b""
         if tool == "ip":
             return 0, self.addresses.encode(), b""
         return openssl(argv, input=input)
+
+    def snapshot(self):
+        """An accepted reload: nginx now serves exactly what is on disk."""
+        conf, certs = Path(self.paths["conf_dir"]), Path(self.paths["cert_root"])
+        self.loaded = {}
+        names = {p.name[len("sandbox-tailnet-"):-len(".conf")] for p in conf.glob("sandbox-tailnet-*.conf")}
+        if certs.is_dir():
+            names |= {p.name for p in certs.iterdir() if not p.name.startswith(".")}
+        for name in names:
+            block_path = conf / f"sandbox-tailnet-{name}.conf"
+            chain_path = certs / name / "fullchain.pem"
+            self.loaded[name] = (block_path.read_bytes() if block_path.exists() else None,
+                                 chain_path.read_bytes() if chain_path.exists() else None)
+
+    def served(self, ip, fqdn):
+        """What the fake nginx presents for SNI ``fqdn`` on the tailnet address."""
+        entry = self.loaded.get(fqdn)
+        if entry and entry[0] is not None:
+            return ("handshake", rp._leaf_sha(entry[1]) if entry[1] else None,
+                    (rp._marker_of(entry[0]) or "").encode())
+        if any(other[0] is not None for name, other in self.loaded.items() if name != fqdn):
+            return "handshake", "e" * 64, b""
+        return "refused", None, None
 
     def ran(self, *prefix):
         return [call for call in self.calls if call[:len(prefix)] == list(prefix)]
@@ -113,6 +132,8 @@ class Base(unittest.TestCase):
         (self.home / "runtime" / "jobs" / "registry.sqlite3").write_bytes(b"")
         self.probe = {"home": str(self.home)}
         self.host = FakeHost()
+        self.host.paths = self.paths
+        self.paths["served"] = self.host.served
         env = mock.patch.dict(os.environ, {"SUDO_USER": pwd.getpwuid(uid).pw_name})
         env.start()
         self.addCleanup(env.stop)
@@ -132,6 +153,8 @@ class Base(unittest.TestCase):
         return Path(self.paths["conf_dir"]) / f"sandbox-tailnet-{FQDN}.conf"
 
     def call(self, action, lock_wait=2, **payload):
+        if action in ("commit", "remove"):
+            payload.setdefault("tailnet_ip", IP)
         return rp.main({"action": action, **payload}, paths=self.paths, runner=self.host,
                        lock_wait=lock_wait)
 
@@ -497,7 +520,7 @@ class ActivationTests(Base):
             return real(argv, **kwargs)
 
         result = rp.main({"action": "commit", "fqdn": FQDN, "token": TOKEN, "block": block(),
-                          "chain": chain, "jobs_probe": self.probe},
+                          "chain": chain, "jobs_probe": self.probe, "tailnet_ip": IP},
                          paths=self.paths, runner=nginx_fails_once)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["settled"], "restored")
@@ -799,7 +822,10 @@ class RoundFourTests(Base):
         result = self.commit(block=block(port=9000), chain=chain)
         self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
         self.assertEqual(self.conf.read_text(), block(), "the previous block is back")
-        self.assertNotEqual(self.journal()["state"], "loaded")
+        # nginx kept serving the previous block, and the files are that block
+        # again, so the rollback is provably loaded.
+        [row] = self.call("inspect", tailnet_ip=IP)["inventory"]
+        self.assertEqual(row["activation"], "loaded")
         self.host.reload_accepted = True
         result = self.commit(block=block(port=9000), chain=chain)
         self.assertEqual((result["ok"], result["changed"]), (True, True))
@@ -813,15 +839,82 @@ class RoundFourTests(Base):
         self.assertTrue(self.name_dir.exists())
         self.assertEqual(self.conf.read_text(), block())
 
-    def test_an_unknown_master_is_not_a_proven_reload(self):
-        calls = []
+    def test_an_acknowledged_reload_without_the_new_marker_is_not_proof(self):
+        """Re-review 4 NEW-A: only what nginx serves proves a reload, never
+        the reload command's exit status or process churn."""
+        self.publish()
+        conf_fd = os.open(self.paths["conf_dir"], os.O_RDONLY | os.O_DIRECTORY)
+        name_fd = os.open(str(self.name_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            self.conf.write_text(block(port=9000))
+            proof = rp._disk_proof(conf_fd, name_fd, FQDN, self.paths, IP)
+            self.assertFalse(proof(), "nginx still serves the previous block")
+            self.host.reload_accepted = False
+            ok, _out = rp._reload(self.host, self.paths, proof)
+            self.assertFalse(ok)
+            self.host.reload_accepted = True
+            ok, _out = rp._reload(self.host, self.paths, proof)
+            self.assertTrue(ok)
+            self.conf.unlink()
+            self.assertFalse(proof(), "our certificate is still presented")
+            self.host.snapshot()
+            self.assertTrue(proof())
+        finally:
+            os.close(conf_fd)
+            os.close(name_fd)
 
-        def runner(argv, *, timeout=30, input=None):
-            calls.append(argv)
-            return 0, b"0\n", b""
-        ok, _out = rp._reload(runner, self.paths)
-        self.assertFalse(ok)
-        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "reload"]])
+    def test_an_unaccepted_reload_never_settles_a_crash(self):
+        """A crash left a new block on disk; nginx rejects every reload. The
+        new block is never recorded as loaded: the previous one is restored,
+        and only it is proven served."""
+        self.publish()
+        os.chmod(self.name_dir / "activation.json", 0o600)
+        (self.name_dir / "block.prev").write_text(block())
+        os.chmod(self.name_dir / "block.prev", 0o600)
+        self.conf.write_text(block(port=9000))
+        (self.name_dir / "activation.json").write_text(json.dumps(
+            {"state": "written", "generation": "0" * 64, "had_block": True, "had_chain": False,
+             "chain_changed": False}))
+        self.host.reload_accepted = False
+        result = self.commit(block=block(port=9000), chain=None)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertEqual(self.conf.read_text(), block())
+        [row] = self.call("inspect", tailnet_ip=IP)["inventory"]
+        self.assertEqual(row["activation"], "loaded")
+        self.assertEqual(row["header"]["upstream"], "127.0.0.1:8025")
+
+    def test_blocks_must_carry_a_valid_marker_and_the_tailnet_address(self):
+        self.reserve()
+        chain = self.sign(self.csr())
+        good = block()
+        tampered = good.replace("8025", "8026", 1)  # marker no longer matches
+        unmarked = good.replace("location = /.well-known/sandbox-tailnet-activation", "# x", 1)
+        for bad in (tampered, unmarked):
+            result = self.commit(block=bad, chain=chain)
+            self.assertEqual((result["ok"], result["code"]), (False, "request_invalid"))
+        result = self.commit(block=good, chain=chain, tailnet_ip="100.64.0.99")
+        self.assertEqual((result["ok"], result["code"]), (False, "request_invalid"))
+        self.assertFalse(self.conf.exists())
+
+    def test_a_foreign_edge_lock_inode_is_refused(self):
+        """Re-review 4 NEW-B."""
+        self.reserve()
+        chain = self.sign(self.csr())
+        edge = self.paths["edge_lock"]
+        fd = os.open(edge, os.O_RDWR | os.O_CREAT, 0o666)
+        os.close(fd)
+        os.chmod(edge, 0o666)
+        self.assertTrue(rp._held(edge, self.paths), "a replaceable lock proves nothing")
+        result = self.commit(block=block(), chain=chain)
+        self.assertEqual((result["ok"], result["code"]), (False, "path_unsafe"))
+        os.unlink(edge)
+        os.symlink(self.base / "elsewhere", edge)
+        result = self.commit(block=block(), chain=chain)
+        self.assertEqual((result["ok"], result["code"]), (False, "path_unsafe"))
+        self.assertFalse((self.base / "elsewhere").exists())
+        os.unlink(edge)
+        self.assertTrue(self.commit(block=block(), chain=chain)["ok"])
+        self.assertEqual(stat.S_IMODE(os.stat(edge).st_mode) & 0o022, 0)
 
     def test_a_rollback_reload_rechecks_the_gate(self):
         chain = self.publish()

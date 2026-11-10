@@ -145,7 +145,7 @@ def _trusted(st, paths, *, allow_sticky=False):
     return True
 
 
-def _open_dir(path, paths, *, create_mode=None):
+def _open_dir(path, paths, *, create_mode=None, sticky_last=False):
     """Open an absolute directory through trusted, non-symlink components.
 
     With ``create_mode`` the last component is created when missing. Returns a
@@ -175,7 +175,7 @@ def _open_dir(path, paths, *, create_mode=None):
             fd = child
             # A root-owned sticky ancestor (like /tmp) is safe to pass through:
             # nobody else can replace the trusted child below it.
-            if not _trusted(os.fstat(fd), paths, allow_sticky=not last):
+            if not _trusted(os.fstat(fd), paths, allow_sticky=sticky_last or not last):
                 raise Refusal("path_unsafe", f"{path} has an untrusted owner or mode")
         return fd
     except BaseException:
@@ -273,11 +273,46 @@ def _unlink(dir_fd, name):
 # ---------------------------------------------------------------------------
 # Locks and leases
 
-def _flock(dir_fd, name, wait, *, absolute=None):
+def _lock_inode_ok(st, paths):
+    """A shared host lock file must be a regular file only root (or the root
+    group) can write, so nobody else can swap the inode under its holder."""
+    if not stat.S_ISREG(st.st_mode) or st.st_uid not in paths["trusted_uids"]:
+        return False
+    if st.st_mode & 0o002:
+        return False
+    return not (st.st_mode & 0o020 and st.st_gid != 0)
+
+
+def _open_host_lock(absolute, paths):
+    """Open a shared host lock through its trusted (sticky) parent, creating
+    it exclusively when absent; a foreign inode is refused, never repaired."""
+    parent = _open_dir(os.path.dirname(absolute), paths, sticky_last=True)
+    name = os.path.basename(absolute)
+    try:
+        try:
+            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=parent)
+        except FileNotFoundError:
+            try:
+                fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+                             dir_fd=parent)
+            except FileExistsError:
+                fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=parent)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise Refusal("path_unsafe", f"{absolute} is a symlink") from None
+            raise
+    finally:
+        os.close(parent)
+    if not _lock_inode_ok(os.fstat(fd), paths):
+        os.close(fd)
+        raise Refusal("path_unsafe", f"{absolute} has an untrusted owner, type or mode")
+    return fd
+
+
+def _flock(dir_fd, name, wait, *, absolute=None, paths=None):
     """Exclusive flock on a lock file; ``absolute`` for the shared host locks."""
     if absolute is not None:
-        os.makedirs(os.path.dirname(absolute), exist_ok=True)
-        fd = os.open(absolute, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        fd = _open_host_lock(absolute, paths)
     else:
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
     deadline = time.monotonic() + wait
@@ -292,7 +327,7 @@ def _flock(dir_fd, name, wait, *, absolute=None):
             time.sleep(0.1)
 
 
-def _held(path):
+def _held(path, paths):
     """True when the lock is held, or when it cannot be probed (fail closed)."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -301,6 +336,8 @@ def _held(path):
     except OSError:
         return True
     try:
+        if not _lock_inode_ok(os.fstat(fd), paths):
+            return True  # a lock anyone could replace proves nothing: fail closed
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         fcntl.flock(fd, fcntl.LOCK_UN)
         return False
@@ -353,7 +390,7 @@ class _NameScope:
 # Host gate (re-checked inside the edge flock)
 
 def _check_locks(paths, *, holding_edge):
-    held = [p for p in paths["locks"] if not (holding_edge and p == paths["edge_lock"]) and _held(p)]
+    held = [p for p in paths["locks"] if not (holding_edge and p == paths["edge_lock"]) and _held(p, paths)]
     if held:
         raise Refusal("busy", "a Sandbox host transaction holds " + ", ".join(
             os.path.basename(p) for p in held))
@@ -593,43 +630,117 @@ def _nginx_test(runner):
     return rc == 0, out + err
 
 
-def _workers(runner):
-    """(master pid, frozenset of its child pids), or None when unknown."""
-    rc, out, _ = runner(["systemctl", "show", "-p", "MainPID", "--value", "nginx"])
-    master = _text(out).strip()
-    if rc != 0 or not master.isdigit() or master == "0":
-        return None
-    rc, out, _ = runner(["ps", "-o", "pid=", "--ppid", master])
-    if rc not in (0, 1):  # ps exits 1 when the master has no children
-        return None
-    return master, frozenset(pid for pid in _text(out).split() if pid.isdigit())
+MARKER_PATH = "/.well-known/sandbox-tailnet-activation"
+_MARKER = re.compile(r'location = /\.well-known/sandbox-tailnet-activation \{ default_type '
+                     r'text/plain; return 200 "([0-9a-f]{32})"; \}')
 
 
-def _reload(runner, paths, *, sleep=time.sleep):
-    """Reload nginx and wait for proof that the master ACCEPTED the new
-    configuration: on success nginx starts a new set of worker processes;
-    when it rejects a reload (a socket it cannot bind, for example) it keeps
-    the old workers and the old configuration, even though `systemctl
-    reload` itself succeeded. No new workers within the wait is a failure.
+def _marker_of(block):
+    """The activation marker a block serves, or None when it has no valid one.
+
+    Valid means the marker is the digest of the block with the marker zeroed,
+    so two different blocks never share one.
     """
-    before = _workers(runner)
-    if before is None:
-        return False, b"the nginx master process could not be found"
+    found = _MARKER.findall(_text(block)) if block else []
+    if len(found) != 1:
+        return None
+    zeroed = block.replace(found[0].encode(), b"0" * 32, 1)
+    return found[0] if hashlib.sha256(zeroed).hexdigest()[:32] == found[0] else None
+
+
+def _leaf_sha(chain):
+    import ssl
+    text = _text(chain)
+    begin, end = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
+    start, stop = text.find(begin), text.find(end)
+    if start < 0 or stop < 0:
+        return None
+    try:
+        der = ssl.PEM_cert_to_DER_cert(text[start:stop + len(end)] + "\n")
+    except ValueError:
+        return None
+    return hashlib.sha256(der).hexdigest()
+
+
+def _served(ip, fqdn, *, timeout=3):
+    """What nginx serves for the name on the tailnet address right now:
+    ("handshake", leaf sha256, marker body) | ("refused", None, None) |
+    ("error", None, None)."""
+    import socket
+    import ssl
+    try:
+        raw = socket.create_connection((ip, 443), timeout=timeout)
+    except ConnectionRefusedError:
+        return "refused", None, None
+    except OSError:
+        return "error", None, None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with context.wrap_socket(raw, server_hostname=fqdn) as tls:
+            der = tls.getpeercert(binary_form=True) or b""
+            tls.sendall((f"GET {MARKER_PATH} HTTP/1.1\r\nHost: {fqdn}\r\n"
+                         "Connection: close\r\n\r\n").encode())
+            data = b""
+            while len(data) < 8192:
+                chunk = tls.recv(2048)
+                if not chunk:
+                    break
+                data += chunk
+        body = data.split(b"\r\n\r\n", 1)[1].strip() if b"\r\n\r\n" in data else b""
+        return "handshake", hashlib.sha256(der).hexdigest() if der else None, body
+    except (ssl.SSLError, OSError):
+        return "error", None, None
+    finally:
+        raw.close()
+
+
+def _disk_proof(conf_fd, name_fd, fqdn, paths, ip):
+    """A check that nginx now serves exactly what is on disk for the name.
+
+    With a block on disk: the block's own marker and the chain's leaf. With
+    no block: our leaf is no longer presented (or nothing listens at all).
+    A respawned worker of an old configuration can never pass either check.
+    """
+    served = paths.get("served", _served)
+
+    def check():
+        block, managed = _block(conf_fd, fqdn, paths)
+        chain = _read(name_fd, "fullchain.pem", paths, mode=0o644) if name_fd is not None else None
+        ours = _leaf_sha(chain) if chain else None
+        kind, leaf, body = served(ip, fqdn)
+        if block is not None:
+            marker = _marker_of(block) if managed else None
+            return (kind == "handshake" and marker is not None and ours is not None
+                    and leaf == ours and body == marker.encode())
+        if kind == "refused":
+            return True
+        return kind == "handshake" and ours is not None and leaf is not None and leaf != ours
+    return check
+
+
+def _reload(runner, paths, proof, *, sleep=time.sleep):
+    """Reload nginx, then wait for proof that it serves what is on disk.
+
+    `systemctl reload` succeeding is not proof: nginx keeps its previous
+    configuration when it rejects a reload (a socket it cannot bind, for
+    example), and a worker it respawns runs that previous configuration.
+    """
     rc, out, err = runner(["systemctl", "reload", "nginx"])
     if rc != 0:
         return False, out + err
     deadline = time.monotonic() + paths.get("reload_wait", 10.0)
     while True:
-        now = _workers(runner)
-        if now is not None and now[1] and (now[0] != before[0] or now[1] - before[1]):
+        if proof():
             return True, b""
         if time.monotonic() >= deadline:
-            return False, (b"nginx kept its previous configuration: no new worker processes "
-                           b"started after the reload")
-        sleep(0.2)
+            return False, (b"nginx did not start serving the new configuration for this name "
+                           b"after the reload; it kept its previous one")
+        sleep(0.25)
 
 
-def _apply(runner, paths, fence):
+def _apply(runner, paths, fence, proof):
     """The host gate, nginx -t, the gate again, then a proven reload.
 
     Returns (ok, failed_stage, output); a gate refusal propagates.
@@ -639,7 +750,7 @@ def _apply(runner, paths, fence):
     if not ok:
         return False, "test", out
     fence()
-    ok, out = _reload(runner, paths)
+    ok, out = _reload(runner, paths, proof)
     return ok, None if ok else "reload", out
 
 
@@ -678,7 +789,7 @@ def _restore(conf_fd, name_fd, fqdn, journal, paths):
         _unlink(name_fd, "fullchain.pem")
 
 
-def _settle(conf_fd, name_fd, fqdn, paths, runner, fence):
+def _settle(conf_fd, name_fd, fqdn, paths, runner, fence, proof):
     """Finish an interrupted commit or remove before anything else (FR-019).
 
     ``fence`` re-checks the host gate before every reload.
@@ -687,7 +798,7 @@ def _settle(conf_fd, name_fd, fqdn, paths, runner, fence):
     if not journal or journal.get("state") == "loaded":
         return None
     state = journal.get("state")
-    ok, _stage, out = _apply(runner, paths, fence)
+    ok, _stage, out = _apply(runner, paths, fence, proof)
     if ok:
         block, _managed = _block(conf_fd, fqdn, paths)
         chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
@@ -696,7 +807,7 @@ def _settle(conf_fd, name_fd, fqdn, paths, runner, fence):
     if state in ("written", "tested"):
         _restore(conf_fd, name_fd, fqdn, journal, paths)
         _set_journal(name_fd, dict(journal, state="restored"))
-        ok, _stage, out = _apply(runner, paths, fence)
+        ok, _stage, out = _apply(runner, paths, fence, proof)
         if ok:
             block, _managed = _block(conf_fd, fqdn, paths)
             chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
@@ -742,7 +853,7 @@ def inspect(payload, paths, runner, lock_wait):
         if root is not None:
             os.close(root)
     return {"ok": True, "tailnet_ip_bound": bound,
-            "locks_held": [path for path in paths["locks"] if _held(path)],
+            "locks_held": [path for path in paths["locks"] if _held(path, paths)],
             "inventory": rows}
 
 
@@ -881,10 +992,13 @@ def commit(payload, paths, runner, lock_wait):
     fqdn, token = _fqdn(payload.get("fqdn")), _token(payload.get("token"))
     block = _bounded_text(payload["block"], "block").encode() if payload.get("block") else None
     chain = _bounded_text(payload["chain"], "chain").encode() if payload.get("chain") else None
+    ip = _tailnet_ip(payload.get("tailnet_ip"))
     if block is not None:
         header = _header(block)
-        if not header or header.get("fqdn") != fqdn:
+        if not header or header.get("fqdn") != fqdn or header.get("tailnet_ip") != ip:
             raise Refusal("request_invalid", "the block lacks this name's header")
+        if _marker_of(block) is None:
+            raise Refusal("request_invalid", "the block lacks a valid activation marker")
     scope = _NameScope(paths, fqdn, lock_wait, create=False)
     try:
         scope.require(token)
@@ -898,14 +1012,15 @@ def commit(payload, paths, runner, lock_wait):
             if key is None:
                 raise Refusal("key_missing", "no private key for this name; run add again")
             facts = _check_chain(chain, key, fqdn, runner) if chain is not None else None
-            edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"])
+            edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"], paths=paths)
             _gate(paths, payload, runner, holding_edge=True)
             current_block, managed = _block(conf_fd, fqdn, paths)
             if current_block is not None and not managed:
                 raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
             def fence():
                 _gate(paths, payload, runner, holding_edge=True)
-            settled = _settle(conf_fd, name_fd, fqdn, paths, runner, fence)
+            proof = _disk_proof(conf_fd, name_fd, fqdn, paths, ip)
+            settled = _settle(conf_fd, name_fd, fqdn, paths, runner, fence, proof)
             current_block, _managed = _block(conf_fd, fqdn, paths)
             current_chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
             desired_block = block if block is not None else current_block
@@ -958,12 +1073,12 @@ def commit(payload, paths, runner, lock_wait):
             except Refusal:
                 undo()
                 raise
-            ok, out = _reload(runner, paths)
+            ok, out = _reload(runner, paths, proof)
             if not ok:
                 _restore(conf_fd, name_fd, fqdn, record, paths)
                 _set_journal(name_fd, dict(record, state="restored"))
                 try:
-                    back = _apply(runner, paths, fence)[0]
+                    back = _apply(runner, paths, fence, proof)[0]
                 except Refusal:
                     back = False
                 if back:
@@ -990,6 +1105,7 @@ def remove(payload, paths, runner, lock_wait):
     The lease is left for the controller to release after its DNS step.
     """
     fqdn, token = _fqdn(payload.get("fqdn")), _token(payload.get("token"))
+    ip = _tailnet_ip(payload.get("tailnet_ip"))
     keep_directory = payload.get("keep_directory") is True
     scope = _NameScope(paths, fqdn, lock_wait, create=True)
     try:
@@ -999,11 +1115,12 @@ def remove(payload, paths, runner, lock_wait):
         conf_fd = _open_dir(paths["conf_dir"], paths)
         edge = None
         try:
-            edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"])
+            edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"], paths=paths)
 
             def fence():
                 _gate(paths, payload, runner, holding_edge=True)
             fence()
+            proof = _disk_proof(conf_fd, name_fd, fqdn, paths, ip)
             content, managed = _block(conf_fd, fqdn, paths)
             if content is not None and not managed:
                 raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
@@ -1030,7 +1147,7 @@ def remove(payload, paths, runner, lock_wait):
                     _unlink(conf_fd, FILE_PREFIX + fqdn + ".conf")
                     failure = None
                     try:
-                        ok, stage, out = _apply(runner, paths, fence)
+                        ok, stage, out = _apply(runner, paths, fence, proof)
                         if not ok:
                             failure = Refusal("nginx_rejected" if stage == "test"
                                               else "reload_failed", _tail(out))
@@ -1040,7 +1157,7 @@ def remove(payload, paths, runner, lock_wait):
                         if content is not None:
                             _write(conf_fd, FILE_PREFIX + fqdn + ".conf", content, 0o600)
                             try:
-                                back = _apply(runner, paths, fence)[0]
+                                back = _apply(runner, paths, fence, proof)[0]
                             except Refusal:
                                 back = False
                             _set_journal(name_fd, {"state": "loaded",

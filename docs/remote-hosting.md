@@ -1721,18 +1721,23 @@ published name changes nothing.
    recovery reloads),
    writes an activation journal (`written`, `tested`, `loaded`), installs
    both files through exclusive temp files and renames, runs `nginx -t` and
-   reloads. A reload counts only when nginx proves it took the new
-   configuration: the master (systemd's `MainPID` for `nginx`) must start a
-   new set of worker processes within a few seconds. `systemctl reload`
-   succeeding is not enough, because nginx keeps its old configuration when
-   it rejects a reload (a socket it cannot bind, for example). A failed test or reload restores the previous block and chain.
+   reloads. A reload counts only when nginx is seen serving what is on disk:
+   the remote program connects to `<tailnet-ip>:443` with the name as SNI and
+   must get the installed certificate and, from
+   `/.well-known/sandbox-tailnet-activation`, the block's own marker (a digest
+   of the block's text, so every version of the block has its own). After a
+   removal, our certificate must no longer be presented. `systemctl reload`
+   succeeding is not proof, because nginx keeps its old configuration when
+   it rejects a reload (a socket it cannot bind, for example), and a worker
+   it respawns runs that old configuration. A failed test or reload restores the previous block and chain.
    A rerun that finds an unfinished journal settles it first (test and
    reload, or restore); a file being on disk never counts as loaded.
    The block, `/etc/nginx/conf.d/sandbox-tailnet-<fqdn>.conf` (root, 0600),
    listens only on `<tailnet-ip>:80` (308 to HTTPS) and `<tailnet-ip>:443 ssl`
    with HTTP/2. It proxies to the upstream with websocket headers,
    `proxy_buffering off` and `proxy_read_timeout 600s`, and drops any other
-   Host with 444. It is never a `default_server`.
+   Host with 444, and answers the marker path above itself. It is never a
+   `default_server`.
 6. **Verify**: HTTPS to the tailnet address must present the installed
    certificate and answer HTTP (`tailnet_name_tailnet_probe_failed`
    otherwise, after a few tries; the name stays and a rerun repeats the

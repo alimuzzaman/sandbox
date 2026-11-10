@@ -1479,6 +1479,30 @@ load. Public HTTPS mode records nothing, because the client it sees is the proxy
 Whether someone reaching the machine through Tailscale machine sharing resolves to their
 own login has not been verified.
 
+### Web dashboard over Tailscale
+
+`./sb web` listens on `127.0.0.1` unless told otherwise. To use a server's own dashboard
+from your other devices, run it on that server with `--host tailscale`. It then listens on
+the server's tailnet IPv4 address only, so nothing is opened on the public address.
+
+```bash
+./sb web --host tailscale --port 8780 --exact-port
+# open http://<server>.<tailnet>.ts.net:8780 from any device on the tailnet
+```
+
+There is no login. Every device on the tailnet gets full control: a shell in any
+container, stop, reset and delete, and instance login links. Restrict who can reach the
+port with tailnet access rules. The dashboard accepts a request only when it comes from
+this machine or a tailnet address, uses an IP, `localhost` or `.ts.net` host name, and
+carries no `Origin` other than the dashboard itself or a loopback address. This stops a
+web page open in your browser from driving it. `--host` also takes any IP literal; with
+`0.0.0.0` the dashboard still serves only this machine, which is how the wp-admin snapshot
+bridge runs on port 8765. `sb up` starts that bridge itself; if you start `sb web` on 8765
+yourself first, pass `--host 0.0.0.0` or containers may not reach the bridge. Use another
+port for a tailnet dashboard on a host that also runs the bridge. Put it behind `tailscale serve` only if your setup keeps the browser's `Host`
+and `Origin` intact; listening on the tailnet address directly needs neither `sudo` nor
+`tailscale serve`.
+
 ## 8. CLI + MCP surface
 
 See `specs/014-remote-vps-hosting/contracts/cli-and-mcp.md` for the full flag/JSON-shape

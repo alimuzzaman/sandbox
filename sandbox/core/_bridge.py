@@ -74,7 +74,7 @@ def _ensure_bridge_server() -> None:
         return  # another start is already in flight
     try:
         subprocess.Popen(
-            [str(ENTRY), "web", "--port", str(BRIDGE_PORT), "--exact-port"],
+            [str(ENTRY), "web", "--host", "0.0.0.0", "--port", str(BRIDGE_PORT), "--exact-port"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True)
         for _ in range(20):           # hold the lock until it's accepting (≤~6s)

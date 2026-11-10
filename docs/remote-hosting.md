@@ -1453,7 +1453,8 @@ reads the template as committed at that commit, never the working file. With
 at that worktree, and submits the same durable `sb job-start --local ... -- sb host
 apply ... --confirm` an ordinary manifest uses, so the clean-source, recovery
 context, receipt and one-apply-per-target guards all apply. The rendered file is
-accepted only at that path; a copy elsewhere is refused. Stack applies publish the
+accepted only at that path and only with a `source_root` inside that stack's own
+worktrees; a copy elsewhere, or one pointing at another checkout, is refused. Stack applies publish the
 source to the immutable `sandbox-source-<sha>` ref on the remote, so a force-pushed
 PR branch never reads as diverged. The detached worktree passes the branch gate with
 the recorded `ref_branch`; a detached commit passes only `allowed_branches: ['*']`,

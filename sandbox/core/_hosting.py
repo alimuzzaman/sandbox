@@ -533,8 +533,8 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
     if kind == "template":
         raise stack_template.refuse_plain_use()
     stack = None
+    from sandbox.core import _paths
     if kind == "rendered":
-        from sandbox.core import _paths
         stack = stack_template.rendered_instance(
             manifest, manifest.get("_manifest_path", str(root / "sandbox.hosting.yml")),
             _paths.RUNTIME_DIR / "stacks")
@@ -559,8 +559,13 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
         # at the clean worktree `sb host stack up` created for its commit.
         source_root_path = Path(stack["source_root"]).resolve()
         checkout_root = _git_root(source_root_path) if source_root_path.is_dir() else None
-        if require_checkout and checkout_root is None:
-            raise HostingError("a rendered stack source_root must be inside a Git checkout")
+        if require_checkout:
+            worktrees = (_paths.RUNTIME_DIR / "stacks" / stack["slug"] / "source").resolve()
+            if worktrees not in source_root_path.parents:
+                raise HostingError(
+                    "a rendered stack source_root must be a worktree `sb host stack up` created")
+            if checkout_root is None:
+                raise HostingError("a rendered stack source_root must be inside a Git checkout")
     else:
         if Path(declared_source_root).is_absolute():
             raise HostingError("source_root must be a non-empty relative directory")

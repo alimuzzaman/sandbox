@@ -45,8 +45,8 @@ _ALLOWED_PATHS = (
     ("environments", "*", "secrets", "generated", "*"),
 )
 # Basic-auth route parameters (``/api/{id}``) are an existing brace syntax that
-# its own validator owns; the template scan leaves that subtree alone.
-_EXEMPT_PREFIXES = (("environments", "*", "basic_auth"),)
+# its own validator owns; the template scan leaves exactly that field alone.
+_EXEMPT_PREFIXES = (("environments", "*", "basic_auth", "bypass_routes", "*", "path_template"),)
 
 
 class StackTemplateError(HostingRefusal):

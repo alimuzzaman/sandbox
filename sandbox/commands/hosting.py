@@ -4255,13 +4255,12 @@ def _validate_apply_source(validated: dict) -> str:
     if stack:
         # `sb host stack up` checks the controller-resolved commit out detached;
         # the branch it was resolved from is recorded in the rendered manifest.
-        branch = remote.current_branch(validated["project_root"], allow_detached=True)
-        if branch is None:
-            if _resolve_host_source_commit(validated["project_root"]) != stack["commit"]:
-                raise hosting.HostingRefusal(
-                    "stack_source_mismatch",
-                    "the stack source checkout is not at the rendered stack commit")
-            branch = stack.get("ref_branch") or ""
+        # The source must still be exactly that commit, attached or not.
+        if _resolve_host_source_commit(validated["project_root"]) != stack["commit"]:
+            raise hosting.HostingRefusal(
+                "stack_source_mismatch",
+                "the stack source checkout is not at the rendered stack commit")
+        branch = stack.get("ref_branch") or ""
     else:
         branch = remote.current_branch(validated["project_root"])
     policy = validated["deploy"]

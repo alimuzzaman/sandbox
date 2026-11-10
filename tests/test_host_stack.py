@@ -137,8 +137,12 @@ class TemplateSchemaTests(unittest.TestCase):
 
     def test_basic_auth_subtree_keeps_its_own_brace_syntax(self):
         data = _yaml(TEMPLATE)
-        data["environments"]["sandbox"]["basic_auth"] = {"bypass_routes": ["/api/{id}"]}
+        data["environments"]["sandbox"]["basic_auth"] = {
+            "bypass_routes": [{"path_template": "/api/{id}", "methods": ["GET"]}]}
         stack_template.parse_template(data)
+        data["environments"]["sandbox"]["basic_auth"]["username"] = "{slug}"
+        with self.assertRaisesRegex(StackTemplateError, "basic_auth.username"):
+            stack_template.parse_template(data)
 
     def test_slug_must_match_template_pattern(self):
         template = stack_template.parse_template(_yaml(TEMPLATE))
@@ -199,11 +203,11 @@ class BranchPolicyTests(unittest.TestCase):
 
     def test_apply_source_uses_stack_ref_branch_on_detached_worktree(self):
         stack = {"commit": COMMIT, "ref_branch": "stack/demo"}
-        with patch.object(hosting_cmd.remote, "current_branch", return_value=None) as current, \
+        with patch.object(hosting_cmd.remote, "current_branch") as current, \
                 patch.object(hosting_cmd, "_resolve_host_source_commit", return_value=COMMIT):
             branch = hosting_cmd._validate_apply_source(self._validated(stack, ["stack/*"]))
         self.assertEqual(branch, "stack/demo")
-        current.assert_called_once_with("/src", allow_detached=True)
+        current.assert_not_called()
 
     def test_apply_source_refuses_detached_head_at_another_commit(self):
         stack = {"commit": COMMIT, "ref_branch": "stack/demo"}
@@ -330,6 +334,12 @@ class RenderedManifestTests(unittest.TestCase):
         return stack_template.render(self.template, slug="demo", ref=self.ref, ports={"mailpit": 18142},
                                      source_root=source_root, template_path=self.hub / "sandbox.hosting.yml")
 
+    def _worktree(self) -> Path:
+        path = self.runtime.runtime / "stacks" / "demo" / "source" / "wt"
+        path.parent.mkdir(parents=True)
+        _git(self.hub, "worktree", "add", "--detach", "--quiet", str(path), self.ref.commit)
+        return path
+
     def _write(self, rendered: dict, path: Path) -> Path:
         import yaml
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -337,27 +347,32 @@ class RenderedManifestTests(unittest.TestCase):
         return path
 
     def test_rendered_manifest_is_valid_only_at_its_runtime_path(self):
-        rendered = self._render(self.hub)
+        worktree = self._worktree()
+        rendered = self._render(worktree)
         target = self._write(rendered, self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml")
         validated = hosting.validate_manifest(target)
         self.assertEqual(validated["project"], "xspeed-hub-demo")
-        self.assertEqual(validated["source_root"], str(self.hub.resolve()))
+        self.assertEqual(validated["source_root"], str(worktree.resolve()))
         self.assertEqual(validated["stack"]["ref_branch"], "stack/demo")
         self.assertEqual(validated["secrets"]["values"]["MAILPIT_PORT"], "18142")
         copy = self._write(rendered, self.runtime.base / "copy" / "sandbox.hosting.yml")
         with self.assertRaisesRegex(hosting.HostingRefusal, "runtime path"):
             hosting.validate_manifest(copy)
 
-    def test_rendered_source_root_must_be_a_checkout(self):
-        loose = self.runtime.base / "loose"
-        loose.mkdir()
+    def test_rendered_source_root_must_be_a_stack_worktree_checkout(self):
+        loose = self.runtime.runtime / "stacks" / "demo" / "source" / "loose"
+        loose.mkdir(parents=True)
         (loose / "compose.yml").write_text(COMPOSE)
         target = self._write(self._render(loose), self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml")
         with self.assertRaisesRegex(hosting.HostingError, "Git checkout"):
             hosting.validate_manifest(target)
+        # Any other checkout, even a clean one, is not the stack's source.
+        self._write(self._render(self.hub), target)
+        with self.assertRaisesRegex(hosting.HostingError, "worktree"):
+            hosting.validate_manifest(target)
 
     def test_env_file_reaches_compose_ports(self):
-        target = self._write(self._render(self.hub), self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml")
+        target = self._write(self._render(self._worktree()), self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml")
         validated = hosting.validate_manifest(target)
         env_text = hosting.render_env_file(
             validated, {"XSPEED_HUB_SBX_DEMO_PG_PASSWORD": "synthetic-value"})

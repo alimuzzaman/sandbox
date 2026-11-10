@@ -66,7 +66,7 @@ def _refusal(exc: JobSchedulerConfigError, remote: str | None = None) -> dict:
 def _local(requested: dict[str, int], confirm: bool) -> dict:
     from sandbox.core._config import _local_yaml, _write_local_yaml
     from sandbox.jobs.listing import job_slots
-    from sandbox.jobs.scheduler import host_scheduler_policy
+    from sandbox.jobs.scheduler import check_host_policy_write, host_scheduler_policy
 
     try:
         current = host_scheduler_policy()
@@ -81,6 +81,7 @@ def _local(requested: dict[str, int], confirm: bool) -> dict:
     else:
         base = (current or JobSchedulerPolicy()).as_mapping()
         policy = normalize_job_scheduler({**base, **requested})
+        check_host_policy_write(policy)
         if policy == current:
             status = "unchanged"
         elif not confirm:

@@ -161,7 +161,9 @@ validated block. The scheduler re-reads the block at every admission, so a
 change applies to the next submitted or queued job; running jobs and the remote
 service keep running. If a hand-edited block is invalid, admission stops and
 queued jobs carry the error code as their `queue_reason`; `job-policy` with new
-values replaces the block and repairs it. Lowering `max_parallel` below the
+values replaces the local block and repairs it. A bad block in the checked-in
+`sandbox.yml` survives a local write, so the command refuses with
+`job_policy_invalid_base_config` before writing; fix it in that file. Lowering `max_parallel` below the
 slots in use admits nothing until enough running jobs finish.
 
 `job-list` (with or without `--remote`) carries a `slots` object with

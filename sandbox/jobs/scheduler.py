@@ -56,6 +56,23 @@ def matrix_workspace_label(*, project_identity: str, parent_job_id: str,
     return f"m-{prefix}-{digest}"[:21]
 
 
+def check_host_policy_write(policy: JobSchedulerPolicy) -> None:
+    """Refuse before a local write when the base config would keep the block invalid.
+
+    ``sandbox.local.yml`` is deep-merged over the checked-in ``sandbox.yml``,
+    so a bad key there survives a local write; only fixing that file repairs it.
+    """
+    from sandbox.config.job_scheduler import machine_job_scheduler_provider
+    from sandbox.core._config import CONFIG, deep_merge, load_config
+    merged = deep_merge(load_config(), {"jobs": {"scheduler": policy.as_mapping()}})
+    try:
+        machine_job_scheduler_provider(merged)
+    except JobSchedulerConfigError as exc:
+        raise JobSchedulerConfigError(
+            f"{CONFIG.name} keeps jobs.scheduler invalid ({exc.code}): {exc}; fix it there",
+            "job_policy_invalid_base_config") from None
+
+
 def capacity_view(connection, policy: JobSchedulerPolicy,
                   error: JobSchedulerConfigError | None = None) -> dict:
     """Slots held by active jobs against ``policy``; read-only.

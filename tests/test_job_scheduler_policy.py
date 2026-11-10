@@ -313,6 +313,17 @@ class JobPolicyCommandTests(unittest.TestCase):
         self.assertEqual(payload["status"], "updated")
         self.assertEqual(host_scheduler_policy().max_parallel, 3)
 
+    def test_an_invalid_base_block_is_refused_before_any_local_write(self):
+        base = Path(self.temp.name) / "sandbox.yml"
+        base.write_text(_config.CONFIG.read_text()
+                        + "\njobs:\n  scheduler:\n    max_paralel: 4\n")
+        before = self.local.read_text()
+        with mock.patch.object(_config, "CONFIG", base):
+            code, payload = self.run_command(max_parallel=3, confirm=True)
+        self.assertEqual((code, payload["code"]), (1, "job_policy_invalid_base_config"))
+        self.assertIn("sandbox.yml", payload["error"])
+        self.assertEqual(self.local.read_text(), before)
+
     def test_remote_runs_the_same_command_on_the_host(self):
         reply = {"ok": True, "status": "updated", "policy": {"max_parallel": 4},
                  "slots": {"max_parallel": 4, "in_use": 1}}

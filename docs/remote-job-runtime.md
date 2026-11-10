@@ -132,6 +132,43 @@ that belongs to the project. Unattributed legacy records are listed under
 every project and are not candidates. If more than one attributed record
 remains, the refusal lists `candidates` with status and source; rerun with
 `--workspace-id <id>`.
+## Job slots and resource floors
+
+The scheduler runs on the host that owns the job registry, so its limits are
+that host's own machine config, the `jobs.scheduler` block of its
+`sandbox.local.yml` (or `sandbox.yml`):
+
+```yaml
+jobs:
+  scheduler:
+    max_parallel: 4          # 1-32, default 2
+    min_free_memory_mb: 512  # at least 512 (the default)
+    min_free_disk_mb: 2048   # at least 2048 (the default)
+```
+
+Show or set it with `sb job-policy`, locally or on a remote:
+
+```bash
+./sb job-policy --remote <remote> --json                      # show
+./sb job-policy --remote <remote> --max-parallel 4 --json     # plan only
+./sb job-policy --remote <remote> --max-parallel 4 --confirm --json
+```
+
+Bad values are refused before anything is written or sent, with
+`job_policy_invalid_max_parallel`, `job_policy_invalid_floor`,
+`job_policy_unknown_key` or `job_policy_invalid`. The command writes the whole
+validated block. The scheduler re-reads the block at every admission, so a
+change applies to the next submitted or queued job; running jobs and the remote
+service keep running. If a hand-edited block is invalid, admission stops and
+queued jobs carry the error code as their `queue_reason`; `job-policy` with new
+values replaces the block and repairs it. Lowering `max_parallel` below the
+slots in use admits nothing until enough running jobs finish.
+
+`job-list` (with or without `--remote`) carries a `slots` object with
+`max_parallel`, `in_use`, `available`, `queued`, both floors and
+`policy_error`; `sb remote service diagnostics <remote>` reports the same as
+`data.job_slots`. Both need a runtime at control protocol 23 or later.
+
 ## Readiness before submission
 
 `./sb remote readiness [NAME] [--project-dir DIR] [--json]` (MCP

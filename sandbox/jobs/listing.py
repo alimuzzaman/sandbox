@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import math
 
 from sandbox.services.redaction import redact_structure
@@ -78,3 +79,19 @@ def job_page(rows: list[dict], *, limit: int, has_more: bool | None,
         "completeness": "unknown" if has_more is None else
                         "bounded" if has_more else "complete",
     }}
+
+
+_SLOT_COUNTS = ("max_parallel", "in_use", "available", "queued",
+                "min_free_memory_mb", "min_free_disk_mb")
+
+
+def job_slots(view: dict) -> dict:
+    """Project a scheduler capacity view (possibly remote-derived) to fixed keys."""
+    result = {}
+    for key in _SLOT_COUNTS:
+        value = view.get(key)
+        result[key] = value if type(value) is int and 0 <= value <= 1 << 40 else None
+    error = view.get("policy_error")
+    result["policy_error"] = (
+        error if isinstance(error, str) and re.fullmatch(r"[a-z_]{1,64}", error) else None)
+    return result

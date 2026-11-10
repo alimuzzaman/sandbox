@@ -25,6 +25,7 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.abilities",
     "sandbox.commands.jobs",
     "sandbox.commands.jobs_runtime",
+    "sandbox.commands.job_policy",
     "sandbox.commands.workspaces",
     "sandbox.commands.skill",
     "sandbox.commands.runtime",

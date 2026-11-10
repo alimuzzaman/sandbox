@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from .delivery import delivery_config_provider
 from .domains import normalize_domain_policy
 from .instance_lifecycle import normalize_instance_lifecycle
+from .job_scheduler import machine_job_scheduler_provider
 from .hosting_images import (
     HostingImageConfigError,
     machine_image_policy_provider,
@@ -66,6 +67,8 @@ MACHINE_CONFIG_PROVIDERS = (
      "sandbox.config.storage_monitor", 10),
     ("hosting.images.policies", machine_image_policy_provider,
      "sandbox.config.hosting_images", 20),
+    ("jobs.scheduler", machine_job_scheduler_provider,
+     "sandbox.config.job_scheduler", 30),
 )
 
 
@@ -135,6 +138,15 @@ def apply_machine_config(result: dict) -> dict:
             images["policies"] = policies
             hosting["images"] = images
             resolved["hosting"] = hosting
+        elif key == "jobs.scheduler":
+            # Inert when absent, like hosting images: the scheduler applies its
+            # built-in defaults without a materialized block.
+            if "jobs" not in resolved:
+                continue
+            policy = provider(resolved)
+            jobs = dict(resolved["jobs"])
+            jobs["scheduler"] = policy.as_mapping()
+            resolved["jobs"] = jobs
         else:
             resolved[key] = provider(resolved)
     return resolved

@@ -64,6 +64,16 @@ class StackRecord(TypedDict, total=False):
     updated_at: int
     last_apply: LastApply
     sites: list[SiteLinkRef]
+    # Spec 077: a mirror of the remote's lifetime record for this copy.
+    copy_id: str
+    owner: dict
+    lifetime: str
+    lifetime_source: str
+    ttl_seconds: int | None
+    expires_at: str | None
+    repo: str
+    dev_branch: str
+    canonical: bool
 
 
 def stacks_dir() -> Path:

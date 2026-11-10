@@ -337,7 +337,14 @@ def _remove_edge(entry: dict, name: str, front_door: str, route_present: bool) -
     if route_present:
         from sandbox.hosting.front_door import nginx as nginx_edge
         nginx_edge.remove_route(entry, nginx_edge_name(name))
-    certs = " ".join(shlex.quote(path) for path in _cert_dirs(name, front_door))
+    result = remote.ssh_run(entry, edge_cleanup_command(name, front_door), timeout=120)
+    if result.returncode != 0:
+        raise DestroyError("certificate removal failed; state kept", "edge_cleanup_failed")
+
+
+def edge_cleanup_command(name: str, front_door: str) -> str:
+    """Shell that removes the target's certificates and reloads the edge (spec 077 reuses it)."""
+    certs =" ".join(shlex.quote(path) for path in _cert_dirs(name, front_door))
     command = "set -u; if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; " \
               f"$SUDO rm -rf {certs} || exit 1; "
     if front_door == "nginx":
@@ -350,9 +357,7 @@ def _remove_edge(entry: dict, name: str, front_door: str, route_present: bool) -
         # A retry after an interrupted route removal finds the file gone while
         # nginx may still serve it; reload so the loaded config matches disk.
         command += "; $SUDO nginx -t >/dev/null 2>&1 && $SUDO systemctl reload nginx || exit 1"
-    result = remote.ssh_run(entry, command, timeout=120)
-    if result.returncode != 0:
-        raise DestroyError("certificate removal failed; state kept", "edge_cleanup_failed")
+    return command
 
 
 def nginx_edge_name(name: str) -> str:

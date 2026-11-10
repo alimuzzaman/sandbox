@@ -1495,6 +1495,109 @@ its existing `coverage_name_ineligible` refusal.
 **Branch globs.** `deploy.allowed_branches` entries are case-sensitive shell globs in
 every manifest: `feat/*` allows `feat/x`; exact names and `"*"` keep their meaning.
 
+### Stack lifetime and per-copy identity (spec 077)
+
+A stack is one copy, not one branch: several people, and one person several times,
+can run stacks of the same PR on one remote. The remote holds the authoritative
+record, one file per target at
+`$SANDBOX_HOME/runtime/target-lifetimes/sandbox-host-<project>-<env>.json` (0600,
+written under `.lock`, every change appended to `audit.jsonl`). The controller ships a
+stdlib-only program (`sandbox/hosting/lifetime/hoststore.py`) over SSH to read and
+write it, so records work on any remote with `python3`, before the runtime is
+migrated. The controller's stack registry mirrors its own copies.
+
+Every target has one lifetime:
+
+| Lifetime | For | Reaped |
+|---|---|---|
+| `temporary` | default for every stack (a PR or feature ref, or a personal copy of the dev branch) | once its TTL passes (default 14 days) or its commit is merged into the repo's dev branch |
+| `hosted` | the one canonical stack of a repo's dev branch on a remote, set with `--lifetime hosted` | never |
+| `permanent` | apps that are not tied to a PR (Agent Notes, mockups) | never |
+
+Record fields (flat, `schema_version` 1, agreed with the panel): `created_at`,
+`updated_at`, `lifetime`, `lifetime_source` (`default|flag|classified`), `ttl_seconds`,
+`expires_at`, `extended_count`, `owner`, `copy_id`, `slug`, `ref`, `ref_branch`,
+`commit`, `repo`, `canonical`, `state` (`active|reaping|reaped`), and `reap`
+(`{eligible, reason: expired|merged|null, merged_into, merged_at}`, recomputed when
+listed). A classified target has null stack fields, `commit`/`repo` when known, and
+`classified_by`/`classified_at`. `sb host stack list --remote R --json` returns the
+same fields per row. Records are written to a temp file, flushed and renamed; a
+malformed one reads as unclassified.
+
+**No record is not a delete signal.** A target with no record, or an unreadable or
+invalid one, is protected and listed as unclassified until someone classifies it.
+Replacing or clearing an invalid record needs `--force-owner`; the bad file is
+renamed to `<compose_project>.json.invalid-<epoch>` and kept, never overwritten.
+
+```bash
+./sb host stack up --template T --remote R --confirm                # generated name, temporary, 14d
+./sb host stack up --template T --name dev --ref dev --lifetime hosted --remote R --confirm
+./sb host stack up --template T --name pr-12 --ref stack/pr-12 --ttl 3d --remote R --confirm
+./sb host stack ttl  --name pr-12 --remote R --ttl 14d --confirm      # expiry = now + 14d
+./sb host stack list --remote R                                       # every owner's stacks
+./sb host stack sweep --remote R [--checkout ~/src/hub] [--confirm]   # record merge evidence
+./sb host stack reap  --remote R --plan | --confirm                   # server-side teardown now
+./sb host stack limits --remote R [--per-owner 5 --total 40 --min-free-gb 20 --confirm]
+./sb host classify --remote R --target agent-notes/production --lifetime permanent --confirm
+./sb host classify --remote R --target mockups/sandbox --unclassify --confirm
+```
+
+**Identity and owner.** `up` claims the stack's name and Compose project on the remote
+atomically before it creates a worktree or submits anything. The record names the
+owner (an opaque controller id and a label: `--owner`, or the template checkout's
+`git config user.name`; an email is refused with `stack_owner_invalid`, because the
+panel shows labels to every tester) and a copy id. A name or project another owner or another
+copy holds is refused with `stack_slug_taken` / `stack_project_taken`, naming the
+holder, and nothing changes; it is never taken over. Re-running `up` from the
+controller that made the copy updates it in place and keeps its lifetime and expiry;
+from another machine, the same owner names the copy with `--copy <id>` (shown by
+`list`). Ports and hostnames held by other records on the remote are refused too. With
+no `--name`, `up` generates `<branch>-<owner>-<n>` (the lowest free `n`, shortened to
+the template's slug rule), so every copy gets its own hostnames, ports, volumes,
+database and Mailpit. `down` and `ttl` refuse a stack another owner holds
+(`stack_not_owner`) unless `--force-owner` is given; the override is recorded.
+
+**Hosted.** `--lifetime hosted` needs the ref to be the template's `stack.dev_branch`
+(default `dev`), and only one hosted stack per repo exists on a remote
+(`stack_hosted_taken`). A hosted stack re-run at another ref is refused. After a
+confirmed `up` of the hosted stack, `up` runs the merge sweep for that repo.
+
+**Merges.** The server has no Git history, so a controller decides: `stack sweep`
+fetches `origin/<dev_branch>` in a local checkout of the record's repo (recorded
+stacks' checkouts, plus `--checkout`) and runs `git merge-base --is-ancestor`. With
+`--confirm`, merged stacks get merge evidence on their record, which makes them
+eligible. Squash- and rebase-merged branches are not reachable and wait for their TTL;
+a closed, unmerged branch also waits for its TTL. Every `up` clears earlier evidence.
+
+**Reaping.** The cleanup routine (`sb resources routine`) runs a hosted pass first on
+every run, holding the reclaim guard and skipping a busy host; `sb resources cleanup
+--tier safe|all --remote R --confirm` and `sb host stack reap --remote R --confirm` run
+the same pass through the remote's installed `sb` (`stack_reap_unavailable` until the
+remote runtime is migrated to a release with this feature). For each temporary record
+that is expired or merged, and not claimed in the last two hours, the pass re-reads the
+record under its lock, marks it `reaping`, lists the target's containers, volumes,
+networks, own image tags, route file, certificates and runtime directory, writes one
+intent line per item to `runtime/resources/deletions/hosted-<run>.jsonl`, then removes
+the route through the nginx transaction, the certificates, and the stack with `host
+destroy`'s own command; the source directory goes only once no environment of the
+project remains. The record becomes `reaped`; an interrupted pass leaves `reaping` and
+the next run finishes it. Only the nginx front door is supported (a Caddy target is
+skipped). Shared wildcard coverage and the fallback route are never touched.
+
+**After a reap.** The server cannot remove per-hostname DNS records or the
+controller's hosting state; the reaped record says `dns_left` when DNS may remain.
+`sb host stack down --name <slug> --remote R --confirm` from a controller finishes
+(destroy tolerates the absent remote parts) and removes the record.
+
+**Limits.** A new copy is refused with `stack_limit_reached` when its owner already
+holds `per_owner` active temporary stacks (default 5), when the remote holds `total`
+records (default 40), or when free disk (the lower of `$SANDBOX_HOME` and
+`/var/lib/docker`) is under `min_free_bytes` (default 20 GiB). Re-running a copy is not
+a new copy.
+
+Stacks created before this release have no record: they are unclassified and
+protected until their controller re-runs `up`, which claims them.
+
 ### Running a command in a hosted service (`sb host exec`, spec 074)
 
 ```bash

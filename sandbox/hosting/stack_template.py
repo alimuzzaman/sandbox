@@ -33,6 +33,8 @@ _BRACE_RE = re.compile(r"\{([^{}]*)\}")
 # Placeholder-shaped tokens; a plain manifest containing one is a template.
 _PLACEHOLDER_RE = re.compile(r"\{(?:slug|SLUG|ref_branch|port:[^{}]*)\}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+DEFAULT_DEV_BRANCH = "dev"
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 
 # Paths (relative to the manifest root) whose string values may hold
 # placeholders. ``*`` matches one mapping key or list index.
@@ -69,6 +71,7 @@ class StackTemplate:
     slug_pattern: re.Pattern
     ports: tuple[str, ...]
     raw: dict = field(repr=False)  # the manifest without ``stack:``
+    dev_branch: str = DEFAULT_DEV_BRANCH  # spec 077: the repo's dev branch
 
     def environment_names(self) -> tuple[str, ...]:
         environments = self.raw.get("environments")
@@ -178,7 +181,7 @@ def parse_template(manifest: dict) -> StackTemplate:
         raise StackTemplateError(TEMPLATE_INVALID, "a stack template needs a stack: mapping")
     if INSTANCE_KEY in manifest:
         raise StackTemplateError(TEMPLATE_INVALID, "a template cannot carry stack_instance")
-    unknown = set(block) - {"slug", "ports"}
+    unknown = set(block) - {"slug", "ports", "dev_branch"}
     if unknown:
         raise StackTemplateError(
             TEMPLATE_INVALID, "unknown stack keys: " + ", ".join(sorted(map(str, unknown))))
@@ -198,13 +201,17 @@ def parse_template(manifest: dict) -> StackTemplate:
         if not _PORT_NAME_RE.fullmatch(name):
             raise StackTemplateError(
                 TEMPLATE_INVALID, f"stack.ports name {name!r} must use lowercase letters, digits and hyphens")
+    dev_branch = block.get("dev_branch", DEFAULT_DEV_BRANCH)
+    if (not isinstance(dev_branch, str) or not _BRANCH_RE.fullmatch(dev_branch)
+            or ".." in dev_branch or dev_branch.endswith(("/", ".lock"))):
+        raise StackTemplateError(TEMPLATE_INVALID, "stack.dev_branch must be a branch name")
     raw = {key: value for key, value in manifest.items()
            if key != STACK_KEY and not str(key).startswith("_")}
     _scan(raw, (), tuple(ports))
     project = raw.get("project")
     if isinstance(project, str) and "{port:" in project:
         raise StackTemplateError(TEMPLATE_INVALID, "project cannot use {port:...}; ports belong to the project")
-    return StackTemplate(slug_pattern=compiled, ports=tuple(ports), raw=raw)
+    return StackTemplate(slug_pattern=compiled, ports=tuple(ports), raw=raw, dev_branch=dev_branch)
 
 
 def validate_slug(template: StackTemplate, slug: object) -> str:

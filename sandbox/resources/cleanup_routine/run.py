@@ -131,6 +131,18 @@ def run_routine(
         return close("skipped_busy", "host_reclaim_busy")
 
     store.write_run(record)
+    # Spec 077: expired or merged temporary hosted targets go first, under the
+    # guard; their removals count in this run, their record stays on the host.
+    hosted = _hosted_pass(runtime, record["run_id"], bound - (monotonic() - started))
+    record["hosted_targets"] = hosted
+    hosted_removed = sum(1 for item in hosted.get("outcomes") or () if item.get("status") == "reaped")
+    hosted_skipped = _skipped_counts(
+        {"reason": "hosted_" + str(item.get("reason") or "skipped")}
+        for item in hosted.get("outcomes") or () if item.get("status") in {"failed", "skipped"})
+    record["removed"] = hosted_removed
+    record["skipped_reasons"] = dict(hosted_skipped)
+    record["skipped"] = sum(hosted_skipped.values())
+    store.write_run(record)
     exclusions = effective_exclusions(
         routine, _host_config() if host_config is None else host_config,
     )
@@ -148,13 +160,13 @@ def run_routine(
         code = str(((planned.get("error") or {}).get("code")) or "plan_failed")[:64]
         return close("refused", code)
     data = planned.get("data") or {}
-    plan_skipped = _skipped_counts(data.get("skipped"))
+    plan_skipped = _merge_counts(hosted_skipped, _skipped_counts(data.get("skipped")))
     record["skipped_reasons"] = plan_skipped
     record["skipped"] = sum(plan_skipped.values())
     if data.get("inventory_status") != "complete" or data.get("truncated"):
         return close("refused", "inventory_incomplete")
     if not data.get("candidates"):
-        return close("nothing_to_do")
+        return close("reclaimed" if hosted_removed else "nothing_to_do")
 
     remaining = bound - (monotonic() - started)
     if remaining < _MIN_REMOVAL_BUDGET:
@@ -177,7 +189,7 @@ def run_routine(
     result = payload.get("data") or {}
     outcomes = [item for item in result.get("outcomes") or () if isinstance(item, Mapping)]
     removed = [item for item in outcomes if item.get("status") == "removed"]
-    record["removed"] = len(removed)
+    record["removed"] = hosted_removed + len(removed)
     record["bytes_reclaimed"] = int(result.get("observed_reclaimed_bytes") or 0)
     run_skipped = _skipped_counts(item for item in outcomes if item.get("status") == "skipped")
     record["skipped_reasons"] = _merge_counts(plan_skipped, run_skipped)
@@ -187,6 +199,20 @@ def run_routine(
     if payload.get("ok") is not True:
         return close("refused", str(error.get("code") or "cleanup_failed")[:64])
     return close("reclaimed", None if payload.get("status") == "completed" else "partial")
+
+
+def _hosted_pass(runtime: Path, run_id: str, remaining: float) -> dict[str, Any]:
+    """Reap expired or merged temporary hosted targets; never raises."""
+    try:
+        from sandbox.hosting.lifetime import reaper
+
+        with try_reclaim_guard(runtime=runtime) as acquired:
+            if not acquired:
+                return {"ok": True, "status": "skipped_busy", "outcomes": []}
+            return reaper.reap(runtime.parent, run_id=run_id, trigger=TRIGGER, confirm=True,
+                               budget_seconds=max(min(remaining / 2, 1500.0), 1.0))
+    except Exception as exc:  # the workspace pass must still run
+        return {"ok": False, "status": "failed", "error": type(exc).__name__, "outcomes": []}
 
 
 __all__ = ["TRIGGER", "effective_exclusions", "run_routine"]

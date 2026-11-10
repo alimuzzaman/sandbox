@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -15,7 +16,11 @@ from sandbox.commands import host_stack
 from sandbox.commands import hosting as hosting_cmd
 from sandbox.hosting import hostname_ownership, stack_registry, stack_template
 from sandbox.hosting.stack_template import StackRef, StackTemplateError
+from sandbox.hosting.lifetime import client as lifetime_client, hoststore
 from tests.subprocess_support import run_test_process
+
+OWNER_A = {"label": "alice", "controller": "a" * 32}
+OWNER_B = {"label": "bob", "controller": "b" * 32}
 
 COMMIT = "a" * 40
 
@@ -416,11 +421,41 @@ class StackCommandTests(unittest.TestCase):
                                       return_value=({"XSPEED_HUB_SBX_DEMO_PG_PASSWORD": "x"}, []))
         secrets_status.start()
         self.addCleanup(secrets_status.stop)
+        # Spec 077: the remote lifetime store runs in-process against a temp home.
+        self.remote_home = self.runtime.base / "remote-home"
+        self.owner = dict(OWNER_A)
+        store = patch.object(host_stack, "_store",
+                             side_effect=lambda entry, caller: lifetime_client.StoreClient(
+                                 self._store_runner, caller))
+        store.start()
+        self.addCleanup(store.stop)
+        owner = patch.object(host_stack, "_caller", side_effect=lambda checkout, args: dict(self.owner))
+        owner.start()
+        self.addCleanup(owner.stop)
+
+    def _store_runner(self, command, payload):
+        response = hoststore.handle(json.loads(payload), str(self.remote_home), free_paths=())
+        return SimpleNamespace(returncode=0, stdout=json.dumps(response) + "\n", stderr="")
+
+    def remote_records(self):
+        records, _invalid = hoststore.Store(self.remote_home).load()
+        return records
+
+    def second_controller(self):
+        """A fresh controller runtime against the same remote."""
+        runtime = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, runtime, True)
+        patcher = patch("sandbox.core._paths.RUNTIME_DIR", runtime)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.owner = dict(OWNER_B)
+        return runtime
 
     def args(self, action, **values):
         base = dict(stack_action=action, template=str(self.hub / "sandbox.hosting.yml"), name="demo",
                     ref="stack/demo", port=None, remote="r", plan=False, confirm=False, json=True,
-                    environment=None, request_id=None, generate_secrets=False, lock_wait=600)
+                    environment=None, request_id=None, generate_secrets=False, lock_wait=600,
+                    lifetime=None, ttl=None, owner=None, copy=None, force_owner=False)
         base.update(values)
         return SimpleNamespace(**base)
 
@@ -542,6 +577,113 @@ class StackCommandTests(unittest.TestCase):
         with self.assertRaises(host_stack.StackCommandError) as caught:
             host_stack._down(self.args("down", confirm=True))
         self.assertEqual(caught.exception.code, "stack_not_found")
+
+    def test_plan_checks_the_remote_without_claiming(self):
+        result = host_stack._up(self.args("up", plan=True))
+        self.assertEqual(result["lifetime"], "temporary")
+        self.assertEqual(result["ttl_seconds"], 14 * 86400)
+        self.assertEqual(result["owner"]["label"], "alice")
+        self.assertEqual(self.remote_records(), {})
+
+    def test_confirm_claims_the_remote_record_and_mirrors_it(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            result = host_stack._up(self.args("up", confirm=True))
+        self.assertRegex(result["copy_id"], r"^[0-9a-f]{8}$")
+        record = self.remote_records()["sandbox-host-xspeed-hub-demo-sandbox"]
+        self.assertEqual((record.stack.slug, record.stack.copy_id), ("demo", result["copy_id"]))
+        self.assertEqual(record.stack.ports, result["ports"])
+        self.assertEqual(sorted(record.hostnames), sorted(result["hostnames"]))
+        local = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual((local["copy_id"], local["lifetime"]), (result["copy_id"], "temporary"))
+        with patch.object(host_stack, "_submit", return_value="job-2"), \
+                patch.object(host_stack, "job_view", return_value={"lifecycle": "succeeded"}):
+            again = host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(again["copy_id"], result["copy_id"])
+        self.assertEqual(again["expires_at"], result["expires_at"])
+
+    def test_another_owner_cannot_take_the_name_over(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            host_stack._up(self.args("up", confirm=True))
+        before = self.remote_records()
+        other_runtime = self.second_controller()
+        with patch.object(host_stack, "_submit") as submit, \
+                self.assertRaises(host_stack.hosting.HostingRefusal) as caught:
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_slug_taken")
+        self.assertIn("alice", caught.exception.detail)
+        submit.assert_not_called()
+        self.assertFalse((other_runtime / "stacks" / "demo").exists())
+        self.assertEqual(self.remote_records(), before)
+
+    def test_unnamed_copies_get_distinct_names_and_ports(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            first = host_stack._up(self.args("up", confirm=True, name=None))
+            second = host_stack._up(self.args("up", confirm=True, name=None))
+        self.assertEqual((first["slug"], second["slug"]), ("demo-alice-1", "demo-alice-2"))
+        self.assertTrue(first["generated_name"])
+        self.assertNotEqual(first["ports"], second["ports"])
+        self.assertNotEqual(first["project"], second["project"])
+        self.assertFalse(set(first["hostnames"]) & set(second["hostnames"]))
+
+    def test_hosted_needs_the_dev_branch(self):
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", plan=True, lifetime="hosted"))
+        self.assertEqual(caught.exception.code, "stack_lifetime_invalid")
+        _git(self.hub, "branch", "dev")
+        result = host_stack._up(self.args("up", plan=True, lifetime="hosted", ref="dev", name="dev"))
+        self.assertTrue(result["canonical"])
+        self.assertIsNone(result["expires_at"])
+        with self.assertRaises(host_stack.StackCommandError) as caught:
+            host_stack._up(self.args("up", plan=True, lifetime="permanent", ttl="3d"))
+        self.assertEqual(caught.exception.code, "stack_ttl_invalid")
+
+    def test_ttl_and_owner_checks(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            host_stack._up(self.args("up", confirm=True))
+        changed = host_stack._ttl(self.args("ttl", ttl="1h", confirm=True))
+        self.assertEqual(changed["ttl_seconds"], 3600)
+        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["ttl_seconds"], 3600)
+        self.second_controller()
+        with self.assertRaises(host_stack.hosting.HostingRefusal) as caught:
+            host_stack._ttl(self.args("ttl", ttl="2d", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_not_owner")
+        forced = host_stack._ttl(self.args("ttl", ttl="2d", confirm=True, force_owner=True))
+        self.assertEqual(forced["ttl_seconds"], 2 * 86400)
+        record = self.remote_records()["sandbox-host-xspeed-hub-demo-sandbox"]
+        self.assertEqual(record.overrides[-1]["by"]["label"], "bob")
+        self.assertEqual(record.extended_count, 2)
+        from sandbox.hosting import destroy
+        with patch.object(destroy, "execute", return_value={"state": "destroyed"}) as execute, \
+                self.assertRaises(host_stack.hosting.HostingRefusal) as caught:
+            host_stack._down(self.args("down", confirm=True))
+        self.assertEqual(caught.exception.code, "stack_not_owner")
+        execute.assert_not_called()
+        with patch.object(destroy, "execute", return_value={"state": "destroyed"}) as execute:
+            down = host_stack._down(self.args("down", confirm=True, force_owner=True))
+        execute.assert_called_once()
+        self.assertTrue(down["forced_owner"])
+        self.assertEqual(self.remote_records(), {})
+
+    def test_list_shows_every_controllers_stacks(self):
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            host_stack._up(self.args("up", confirm=True))
+        self.second_controller()
+        with patch.object(host_stack, "_submit", return_value="job-1"):
+            host_stack._up(self.args("up", confirm=True, name="other"))
+        listed = host_stack._list(self.args("list"))
+        rows = {row["slug"]: row for row in listed["stacks"]}
+        self.assertEqual(set(rows), {"demo", "other"})
+        self.assertEqual(rows["demo"]["owner"]["label"], "alice")
+        self.assertEqual(rows["demo"]["schema_version"], 1)
+        self.assertFalse(rows["demo"]["mine"])
+        self.assertTrue(rows["other"]["mine"])
+        self.assertEqual(rows["demo"]["remote_record"], "present")
+
+    def test_failed_worktree_releases_a_fresh_claim(self):
+        with patch.object(host_stack, "_add_worktree", side_effect=RuntimeError("git worktree add failed")), \
+                self.assertRaises(RuntimeError):
+            host_stack._up(self.args("up", confirm=True))
+        self.assertEqual(self.remote_records(), {})
 
     def test_slug_on_another_remote_is_refused(self):
         with patch.object(host_stack, "_submit", return_value="job-1"):

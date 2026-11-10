@@ -1189,6 +1189,8 @@ Hosted targets are not indexed by default (spec 081). Under the default
   and `robots.txt`. Caddy applies it with `header { defer ... }`, so it replaces any
   value the application sends. nginx hides the application's value and adds its own
   with `always` on every server, location and if-block.
+- Tailnet-only names (`sb host tailnet-name`, spec 078) carry the same header on both of
+  their server blocks, always, and hide the application's own value.
 - `robots` defaults to `deny`: the front door answers `/robots.txt` with
   `User-agent: * / Disallow: /` ahead of the proxy (the proxy moves inside its own
   `handle` so the two are mutually exclusive routes).

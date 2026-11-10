@@ -13,6 +13,9 @@ HEADER_PREFIX = "# sandbox-tailnet-name "
 # text (with the marker zeroed), so any change to the block changes it.
 MARKER_PATH = "/.well-known/sandbox-tailnet-activation"
 _ZERO_MARKER = "0" * 32
+# Spec 081: no hosted route may answer without it. Server level, and no location
+# below declares its own add_header, so every answer inherits it.
+_NOINDEX = 'add_header X-Robots-Tag "noindex, nofollow, noarchive" always;'
 _TOKEN = re.compile(r"[a-z0-9.:-]+")
 
 
@@ -49,12 +52,14 @@ def _render(name: TailnetName, upstream: Upstream, tailnet_ip: str, *,
 server {{
     listen {ip}:80;
     server_name {fqdn};
+    {_NOINDEX}
     {guard}
     return 308 https://{fqdn}$request_uri;
 }}
 server {{
     {ssl_listen}
     server_name {fqdn};
+    {_NOINDEX}
     {guard}
     ssl_certificate     {cert_dir}/fullchain.pem;
     ssl_certificate_key {cert_dir}/privkey.pem;
@@ -69,6 +74,7 @@ server {{
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_hide_header X-Robots-Tag;
         proxy_buffering off;
         proxy_read_timeout 600s;
     }}

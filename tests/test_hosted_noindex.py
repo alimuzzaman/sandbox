@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import sandbox.core._hosting as hosting  # noqa: E402
 from sandbox.core import _remote  # noqa: E402
 from sandbox.hosting.front_door import nginx  # noqa: E402
+from sandbox.hosting.tailnet_names import models as tailnet_models, render as tailnet_render  # noqa: E402
 from tests.test_host_share import GATE, PRIMARY, _environment, _share  # noqa: E402
 
 TAG = "noindex, nofollow, noarchive"
@@ -170,6 +171,33 @@ class NginxCoverageTests(unittest.TestCase):
         self.assertNotEqual(broken, conf)
         self.assertEqual(self.uncovered(conf), [])
         self.assertEqual(len(self.uncovered(broken)), 1)
+
+
+class TailnetNameCoverageTests(unittest.TestCase):
+    """Spec 078 tailnet-only blocks: the header at server level, inherited everywhere."""
+
+    def block(self, http2):
+        return tailnet_render.render_block(
+            tailnet_models.TailnetName("mail.box.example.test", "example.test"),
+            tailnet_models.Upstream("127.0.0.1", 8025), "100.64.0.7", http2_directive=http2)
+
+    def test_both_servers_carry_it_and_no_location_overrides_it(self):
+        header = f'add_header X-Robots-Tag "{TAG}" always;'
+        for http2 in (True, False):
+            servers = _nginx_blocks(self.block(http2), r"server \{")
+            self.assertEqual(len(servers), 2)
+            for server in servers:
+                with self.subTest(http2=http2, server=server.splitlines()[1].strip()):
+                    self.assertIn(f"\n    {header}", server)
+                    # nginx drops inherited add_header in a level that declares its own,
+                    # so no location or if-block here may declare any.
+                    for location in _nginx_blocks(server, r"location "):
+                        self.assertNotIn("add_header", location)
+                        if "proxy_pass" in location:
+                            self.assertIn("proxy_hide_header X-Robots-Tag;", location)
+                    for block in _nginx_blocks(server, r"if \("):
+                        self.assertNotIn("add_header", block)
+                    self.assertNotIn("add_header", server.replace(f"\n    {header}", "", 1))
 
 
 if __name__ == "__main__":

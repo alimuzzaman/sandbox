@@ -231,7 +231,22 @@ class ControllerSourceTest(unittest.TestCase):
         sources = [server(partial=[f"r{n}" for n in range(4)]), server(partial=["x", "y"])]
         with mock.patch.object(pv.pr, "MAX_PARTIAL_REASONS", 3):
             view = pv.build_view(sources)
-        self.assertEqual(view["partial_reasons"], ["r0", "r1", "r2", "partial_reasons_truncated"])
+        self.assertEqual(view["partial_reasons"], ["r0", "r1", "partial_reasons_truncated"])
+
+    def test_hostname_input_cut_is_reported(self):
+        hosts = {"r/site/production": {"hostnames": ["a.example.test", "b.example.test", "c.example.test"]}}
+        with mock.patch.object(pv, "MAX_CONTROLLER_INPUT", 2):
+            records = pv.controller_records({}, {"hosts": hosts}, lambda record: {})
+        self.assertEqual(len(records["targets"][0]["routes"]), 2)
+        self.assertEqual(records["partial_reasons"], ["controller_hostnames_truncated:r/site/production"])
+
+    def test_controller_reasons_are_capped(self):
+        stacks = {f"r/s{n}": {"remote": "r", "slug": f"s{n}", "project": f"p{n}", "environment": "e",
+                              "hostnames": []} for n in range(5)}
+        with mock.patch.object(pv.pr, "MAX_PARTIAL_REASONS", 3):
+            records = pv.controller_records({"stacks": stacks}, {}, lambda record: {})
+        self.assertEqual(len(records["partial_reasons"]), 3)
+        self.assertEqual(records["partial_reasons"][-1], "partial_reasons_truncated")
 
     def test_stack_claims_survive_the_cap(self):
         stacks = {f"r/s{index}": {"remote": "r", "slug": f"s{index}", "project": f"p{index}",

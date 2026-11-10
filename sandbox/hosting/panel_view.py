@@ -161,14 +161,18 @@ def controller_records(stack_data: dict, host_state: dict,
         if len(out["targets"]) < pr.MAX_TARGETS:
             return False
         if "controller_records_truncated" not in out["partial_reasons"]:
-            out["partial_reasons"].append("controller_records_truncated")
+            note("controller_records_truncated")
         return True
 
+    def note(reason: str) -> None:
+        pr.add_reason(out["partial_reasons"], reason)
+
     def bounded_hosts(values: object, key: str) -> list[str]:
-        values = list(islice(values, MAX_CONTROLLER_INPUT)) if isinstance(values, list) else []
-        hostnames = sorted({str(value) for value in values})
-        if len(hostnames) > pr.MAX_ROUTES:
-            out["partial_reasons"].append(f"controller_hostnames_truncated:{key}")
+        if not isinstance(values, list):
+            return []
+        hostnames = sorted({str(value) for value in islice(values, MAX_CONTROLLER_INPUT)})
+        if len(values) > MAX_CONTROLLER_INPUT or len(hostnames) > pr.MAX_ROUTES:
+            note(f"controller_hostnames_truncated:{key}")
         return hostnames[:pr.MAX_ROUTES]
 
     # The controller's files are already parsed, but walk at most a fixed
@@ -176,7 +180,7 @@ def controller_records(stack_data: dict, host_state: dict,
     stack_records = list(islice(stacks.values(), MAX_CONTROLLER_INPUT))
     host_entries = list(islice(hosts.items(), MAX_CONTROLLER_INPUT))
     if len(stacks) > MAX_CONTROLLER_INPUT or len(hosts) > MAX_CONTROLLER_INPUT:
-        out["partial_reasons"].append("controller_records_truncated")
+        note("controller_records_truncated")
     claimed = {key_of(record) for record in stack_records if isinstance(record, dict)}
     for record in stack_records:
         if not isinstance(record, dict):
@@ -202,12 +206,14 @@ def controller_records(stack_data: dict, host_state: dict,
                 "commit": entry.get("commit") or record.get("commit"), "last_apply": last,
                 "stack": pr.build_stack_facts(stack, record)}))
         except (ValueError, TypeError, AttributeError) as exc:
-            out["partial_reasons"].append(f"stack_record_unreadable:{record.get('slug')}:{type(exc).__name__}")
+            note(f"stack_record_unreadable:{record.get('slug')}:{type(exc).__name__}")
             continue
         sites = record.get("sites") if isinstance(record.get("sites"), list) else []
-        for site in sites:
+        if len(sites) > MAX_CONTROLLER_INPUT:
+            note(f"site_links_truncated:{record.get('slug')}")
+        for site in islice(sites, MAX_CONTROLLER_INPUT):
             if len(out["links"]) >= pr.MAX_SITE_LINKS:
-                out["partial_reasons"].append("site_links_truncated")
+                note("site_links_truncated")
                 break
             try:
                 out["links"].append(pr.build_site_link(
@@ -216,7 +222,7 @@ def controller_records(stack_data: dict, host_state: dict,
                     label=site.get("label") or "default", commit=site.get("commit"),
                     recorded_at=site.get("recorded_at") or 0))
             except (ValueError, TypeError, AttributeError) as exc:
-                out["partial_reasons"].append(f"site_link_unreadable:{record.get('slug')}:{type(exc).__name__}")
+                note(f"site_link_unreadable:{record.get('slug')}:{type(exc).__name__}")
     for key, entry in sorted(host_entries, key=lambda item: str(item[0])):
         if key in claimed or not isinstance(entry, dict):
             continue
@@ -238,7 +244,7 @@ def controller_records(stack_data: dict, host_state: dict,
                     "status": "applying", "started_at": 0, "finished_at": None, "request_id": None},
                 "stack": None}))
         except (ValueError, TypeError) as exc:
-            out["partial_reasons"].append(f"host_entry_unreadable:{key}:{type(exc).__name__}")
+            note(f"host_entry_unreadable:{key}:{type(exc).__name__}")
     return out
 
 
@@ -314,10 +320,7 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
     links: list[tuple[Source, pr.SiteLink]] = []
     for source in sources:
         for reason in source["partial_reasons"]:
-            if len(partial) < pr.MAX_PARTIAL_REASONS:
-                partial.append(reason)
-            elif partial[-1] != "partial_reasons_truncated":
-                partial.append("partial_reasons_truncated")
+            pr.add_reason(partial, reason)
         for target in source["targets"]:
             key = (target["remote"], target["project"], target["environment"])
             if key not in chosen or (source["source"] == "this-server" and chosen[key][0] != "this-server"):

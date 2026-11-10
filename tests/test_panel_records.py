@@ -267,7 +267,7 @@ class ReadServerRecordsTest(unittest.TestCase):
             self.write(f"hosts/bad{index}/production/summary.json", "{")
         with unittest.mock.patch.object(pr, "MAX_PARTIAL_REASONS", 2):
             records = pr.read_server_records(self.runtime)
-        self.assertEqual(len(records["partial_reasons"]), 3)
+        self.assertEqual(len(records["partial_reasons"]), 2)  # never more than the cap
         self.assertEqual(records["partial_reasons"][-1], "partial_reasons_truncated")
 
     def test_missing_runtime_is_empty(self):

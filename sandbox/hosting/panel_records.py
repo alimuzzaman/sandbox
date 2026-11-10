@@ -446,6 +446,20 @@ TOTAL_SCAN_LIMIT = 20000  # directory entries looked at per read, across the who
 MAX_PARTIAL_REASONS = 50
 
 
+TRUNCATED_REASONS = "partial_reasons_truncated"
+
+
+def add_reason(reasons: list[str], reason: str) -> None:
+    """Append a partial-evidence reason; the list never exceeds MAX_PARTIAL_REASONS,
+    the last slot holding a truncation marker once it is full."""
+    if reasons and reasons[-1] == TRUNCATED_REASONS:
+        return
+    if len(reasons) < MAX_PARTIAL_REASONS - 1:
+        reasons.append(reason)
+    else:
+        reasons.append(TRUNCATED_REASONS)
+
+
 class _Budget:
     def __init__(self, total: int):
         self.left = total
@@ -490,10 +504,7 @@ def read_server_records(runtime_dir: Path) -> ServerRecords:
     reasons = records["partial_reasons"]
 
     def note(reason: str) -> None:
-        if len(reasons) < MAX_PARTIAL_REASONS:
-            reasons.append(reason)
-        elif reasons[-1] != "partial_reasons_truncated":
-            reasons.append("partial_reasons_truncated")
+        add_reason(reasons, reason)
 
     budget = _Budget(TOTAL_SCAN_LIMIT)
 

@@ -25,7 +25,7 @@ export interface AppData {
   remotes: RemoteSummary[];
 }
 
-export interface RemoteSummary { name: string; provisioned: boolean; control_ready: boolean }
+export interface RemoteSummary { name: string; provisioned: boolean; control_ready: boolean; local?: boolean }
 export interface ResourceRow { name?: string; pid?: number; cpu_percent?: number; rss_bytes?: number; memory_used_bytes?: number; memory_percent?: number; pids?: number; process_count?: number; container_count?: number; attribution_status?: string }
 export interface RemoteInventory {
   ok: boolean; name?: string; inventory_schema: number; transport: "control";

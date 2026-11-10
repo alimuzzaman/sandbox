@@ -2248,6 +2248,9 @@ def _instance_running(name: str) -> bool:
     # Inventory is observational.  A stopped/unreachable Docker daemon must
     # not hang registry-wide commands such as `sb instances`; report the
     # instance as not running and let the caller render the unavailable state.
+    # A remote-only controller (spec 082) has no engine to ask.
+    if local_runtime_remote_only():
+        return False
     try:
         ps = compose("ps", "--format", "json", instance=name,
                      check=False, capture=True, timeout=5.0)

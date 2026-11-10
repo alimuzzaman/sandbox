@@ -2271,10 +2271,10 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
                 continue
             source = str(mount.get("Source") or "")
             if source:
-                binds.setdefault(source, []).append({
+                binds.setdefault(source, []).append(({
                     "id": identity, "name": display, "running": running,
                     "project": owner(container.get("Config", {}).get("Labels")),
-                })
+                }, container))
     block = {
         "deployment_root": str(DEPLOY),
         "runtime_root": str(RUNTIME),
@@ -2327,9 +2327,20 @@ def reclaim_inventory(inventory, protected_paths, terminal_bindings, projection,
             continue
         path = str(child)
         containers = []
+        seen = set()
+        workspace_checkout = "-workspace-" in child.name
         for source, records in binds.items():
             if source == path or source.startswith(path + os.sep):
-                containers.extend(records)
+                for record, raw in records:
+                    key = record["id"] or id(raw)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if workspace_checkout and record["project"] is None:
+                        # Spec 080: the one ownership rule the cleanup
+                        # re-applies before it removes a stray container.
+                        record = dict(record, stray=assess_stray_container(raw, path))
+                    containers.append(record)
         try:
             canonical = str(child.resolve(strict=False))
         except OSError:
@@ -2717,15 +2728,20 @@ def reclaim_run():
                 # Spec 066: remove the workspace's whole compose project
                 # (containers that never bound the directory, its volumes and
                 # networks) before the source; keep the source on failure.
+                # Spec 080: a plan from a current controller names the
+                # strays it reviewed (possibly none); an older plan has no
+                # field and keeps the refusal of unlabeled containers.
                 teardown = teardown_workspace_stack(
                     run, Path(locator).name,
                     [c for c in candidate.get("stop_containers") or ()
                      if isinstance(c, str) and c],
-                    record=lambda resource_kind, resource_id: manifest_append(manifest, {
+                    record=lambda resource_kind, resource_id, **extra: manifest_append(manifest, dict({
                         "schema": 1, "run_id": run_id, "seq": seq, "phase": "intent",
                         "path": resource_id, "kind": resource_kind,
                         "workspace": locator, "at": now,
-                    }))
+                    }, **extra)),
+                    strays=candidate.get("remove_containers"),
+                    checkout=locator)
             # Worktree containers are handled exclusively by the ownership
             # checked helper. Never fall back to removing arbitrary bind users.
             if kind != "worktree":
@@ -3803,6 +3819,8 @@ def _program(request: dict) -> str:
     from . import workspace_teardown
     teardown_source = "\n\n".join((
         inspect.getsource(workspace_teardown.job_workspace_references),
+        inspect.getsource(workspace_teardown.owns_compose_project),
+        inspect.getsource(workspace_teardown.assess_stray_container),
         inspect.getsource(workspace_teardown.teardown_workspace_stack),
     ))
     return _REMOTE_PROGRAM.replace("__JOB_LIST_PARSER__", parser_source).replace(

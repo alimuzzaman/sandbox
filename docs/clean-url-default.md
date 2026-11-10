@@ -25,6 +25,62 @@ manifests.
 Spec anchors: 037 FR-007, FR-031, FR-032, FR-033, FR-034 · 038 FR-029 – FR-033 ·
 039 FR-041, FR-042 · constitution principle VI.
 
+## Why the proxy exists and when it runs
+
+Each local Docker instance publishes its own port (`http://localhost:8188`). The proxy
+(`sandbox-proxy`, one `caddy:2-alpine` container on `127.0.0.77:80/443`) is what lets a
+browser use `http://<instance>.<tld>` without a port: the helper points `*.<tld>` at
+`127.0.0.77`, and Caddy forwards each hostname to its instance's port. It routes nothing
+else, so it has work to do only while a local Docker instance runs (spec 082):
+
+- The container has `restart: "no"`. An engine restart (Docker Desktop, OrbStack, a
+  reboot) does not bring it back, the same as the instances themselves. Older installs
+  created it with `restart: unless-stopped`; the next proxy apply rewrites the compose
+  file and recreates the container with the new policy.
+- `sb up` starts a stopped proxy for an instance with a `.<tld>` domain, once the host
+  is already provisioned (loopback alias and resolver present). That needs no sudo and
+  never reloads a proxy that is already running. `sb ensure --create` and
+  `sb domains up|setup` start it as before.
+- `sb down` and `sb instance delete` then check demand and stop the proxy when no
+  `sandbox-*` Compose project has a running container and no idle-stopped instance has a
+  wake-on-request route. Anything the check cannot read (engine error, timeout, an
+  unreadable catalog) keeps the proxy running, and so does a start running at the same
+  time (a shared lock on `runtime/proxy/.on-demand.lock`). Rerunning the check is a
+  no-op. An adopted ingress is never stopped by it.
+- While the proxy is stopped, instance URLs fall back to `http://localhost:<port>`.
+- `domains.ingress: disabled` means no clean URLs: lifecycle never starts the proxy, and
+  the check treats it as having no demand.
+
+## Remote-only and Docker-less controllers
+
+A controller that only drives remote servers, or has no container engine, can say so:
+
+```yaml
+# $SANDBOX_HOME/sandbox.local.yml
+controller:
+  local_runtime: none     # docker (default) | none
+```
+
+`SANDBOX_LOCAL_RUNTIME=none|docker` overrides it for one process; an unknown value is an
+error, never a silent Docker. With `none`:
+
+- `sb ensure`, `sb up`, `sb down`, `sb wp` and every other local Docker instance command
+  refuse before running `docker`, with a message naming the switch.
+- Herd instances keep working, and the Docker proxy is never started.
+- `sb instances` and `sb web` list Docker instances as not running without asking the
+  engine.
+- `sb doctor` needs no local instance. It reports `local runtime: none (remote-only)`,
+  then remote targets and storage, and a missing engine is not a problem.
+- Remote work (`sb job-start --remote`, `sb host apply`, `sb host stack`, `sb remote`,
+  `sb resources --remote`) is unchanged. None of it needs local Docker, switch or not;
+  the exception is `sb host apply --local-images`, which builds images on the controller
+  by design.
+
+An old proxy started before the switch was set stops with `sb domains down` and then
+stays stopped. Without the switch, a machine with no `docker` binary gets a clean
+refusal from local instance commands, and doctor reports `Docker CLI available` failing
+instead of crashing.
+
 ## Switching provider
 
 ```bash

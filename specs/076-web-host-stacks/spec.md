@@ -18,6 +18,17 @@ No owner questions were needed. The brief says the agent picks and documents the
 - Q: In what order are a stack's server rows listed? → A: Primary route first, other routes by hostname, then linked sites, then name-matched sites.
 - Q: Is a stale "applying" status shown differently? → A: No. It shows its start time, and the viewer judges. A process that dies mid-apply leaves "applying" until the next apply.
 
+### Session 2026-11-10 (follow-up: lifetimes and owner screenshots)
+
+The owner approved this follow-up on 2026-11-10. The lifetime field contract is spec 077's and is final. These points were settled from the brief, the owner's screenshots of the live panel and the code:
+
+- Q: Where does the panel get a target's lifetime? → A: On a Sandbox server, from that server's own lifetime records, read only. On a controller, from the same fields `sb host stack list --remote R --json` returns, fetched in the background and cached, never on the page's request path.
+- Q: In what order are lifetimes listed? → A: Temporary copies first, soonest expiry first, so expired and reapable copies lead. Then hosted, then permanent, then unclassified.
+- Q: How is a malformed or partly written lifetime record shown? → A: As "unclassified, protected", exactly like a target with no record. It is never shown as reapable.
+- Q: What does "last apply" say when the apply ran but delivery could not be verified? → A: "applied · delivery unverified" with the reason. "Failed" is kept for an apply whose execution failed.
+- Q: What does a target applied before the panel kept records show? → A: "applied before tracking", plus the controller's recorded commit when it has one, instead of "not recorded".
+- Q: How is the CPU figure labelled? → A: As a point-in-time sample, so a momentary spike does not read as steady load.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Find every server of a stack (Priority: P1)
@@ -102,6 +113,59 @@ Projects hosted with `sb host apply` that are not stacks are listed in the same 
 
 ---
 
+### User Story 6 - See each copy's lifetime and owner (Priority: P1)
+
+A developer or the server owner opens "Stacks and hosted sites" and wants to know which copies will be cleaned up soon, who owns each one, and which are kept for good. Each stack and hosted target shows its lifetime (temporary, hosted or permanent), its owner, when it expires and how long is left, whether it is the canonical copy, whether server-side cleanup may remove it now and why, its state (active, reaping or reaped) and how many times its expiry was extended. Temporary copies near expiry are listed first. Two copies of the same branch made by two people show as two rows, each with its owner.
+
+**Why this priority**: Spec 077 lets the server remove temporary copies on its own. People need to see that coming without the CLI.
+
+**Independent Test**: With three lifetime records on a server (a temporary copy expiring in an hour, a hosted canonical stack, and one malformed file), open the view and check the order, the fields and that the malformed one reads "unclassified, protected".
+
+**Acceptance Scenarios**:
+
+1. **Given** a temporary copy that expires in 2 hours, **When** the view loads, **Then** its row shows "temporary", its owner, the expiry time with about 2 hours left, "not reapable" and its state.
+2. **Given** a temporary copy past its expiry, **When** the view loads, **Then** it is listed first and shows "reapable: expired".
+3. **Given** a target with no lifetime record, or with a record that cannot be read or validated, **When** the view loads, **Then** its row shows "unclassified, protected" and never "reapable".
+4. **Given** two copies of branch `feature/x` owned by two people, **When** the view loads, **Then** both are listed as separate rows, each naming its owner.
+5. **Given** the panel runs on a controller, **When** the view loads, **Then** lifetimes come from each remote's records as `sb host stack list --remote R --json` reports them, and a remote that cannot be reached is reported as partial while its stacks still show as "lifetime unknown".
+6. **Given** a host page for a server with hosted targets, **When** it loads, **Then** its hosted targets table shows each target's lifetime, owner and time left as well.
+
+---
+
+### User Story 7 - A hosting server's landing page leads with its hosted apps (Priority: P2)
+
+Someone opens the panel on a Sandbox server that hosts seven apps and no dev instances. Today the landing page says "This machine", shows zero instances everywhere, offers "New instance" and "Start all"/"Stop all", and the sidebar says "Instances 0/0", as if nothing ran there. The landing page instead leads with the hosted apps: how many there are, how many run, and a list linking to each one's row on the hosting view. The two kinds are labelled "Sandbox dev instances" and "Hosted apps (sb host apply / stacks)". When there are no dev instances, "Start all", "Stop all" and the empty-state "New instance" prompt are not shown. The sidebar shows both counts.
+
+**Why this priority**: The owner's screenshot shows the landing page telling viewers the server is empty.
+
+**Independent Test**: Render the landing page for a server inventory with seven hosted targets and no instances; check the hosted apps lead, the bulk buttons and empty-state prompt are absent, and the sidebar shows both counts.
+
+**Acceptance Scenarios**:
+
+1. **Given** a server with hosted targets and no dev instances, **When** the landing page loads, **Then** it shows the hosted apps count and list first, each linking to its hosting row, and no "Start all", "Stop all" or "New instance" empty-state prompt.
+2. **Given** a server with both kinds, **When** the landing page loads, **Then** both sections show, each with its label, and "Start all"/"Stop all" act on dev instances only.
+3. **Given** any page, **When** the sidebar renders on such a server, **Then** it shows the dev instance count and the hosted app count separately.
+
+---
+
+### User Story 8 - Trust the hosted targets table (Priority: P2)
+
+The owner reads a host's resource page and its hosted targets table. Today two tables both say "hosted" and disagree, working apps say "Last apply: failed", most targets say "not recorded", a stack-built target shows no stack, and a momentary CPU spike reads as steady load. After this change there is one hosted targets table next to a table named for what it is (Sandbox dev instances on that host); an apply that ran but whose delivery could not be verified reads "applied · delivery unverified" with its reason; a target applied before tracking reads "applied before tracking"; every stack-built target names its stack, from the lifetime record when the summary has none; and the CPU column says it is a point-in-time sample.
+
+**Why this priority**: These are wrong or misleading readings on the live panel today.
+
+**Independent Test**: Record an apply whose execution succeeded and whose delivery stayed incomplete for lack of evidence; check the summary and the table show "applied · delivery unverified (required evidence missing)". Add a pre-tracking stack target with only a lifetime record; check its stack shows.
+
+**Acceptance Scenarios**:
+
+1. **Given** an apply whose execution succeeded but whose delivery is incomplete, **When** its summary is written, **Then** it records that outcome and its reason, and the panel shows "applied · delivery unverified (reason)", not "failed".
+2. **Given** an apply whose execution failed, **When** its summary is written, **Then** the panel shows "failed".
+3. **Given** a target with no summary, **When** the table loads, **Then** its last apply reads "applied before tracking", with the controller's recorded commit when known.
+4. **Given** a stack target with no summary but a lifetime record naming its slug, **When** the table loads, **Then** its stack column shows that slug.
+5. **Given** the resource page of a host, **When** it loads, **Then** there is exactly one table titled for hosted targets, the instance table is titled for Sandbox dev instances, and the CPU column is labelled as a point-in-time sample.
+
+---
+
 ### Edge Cases
 
 - No stacks and no hosted targets: the view says so and names the command that creates one.
@@ -113,6 +177,11 @@ Projects hosted with `sb host apply` that are not stacks are listed in the same 
 - A name-matched site that matches two stacks (overlapping slugs): it is shown under the longest matching slug only.
 - A wildcard route hostname: shown as text labelled "wildcard", never linked or checked.
 - An apply process that dies mid-apply: the stack keeps "applying" with its start time until the next apply records a new status.
+- A lifetime record that is partly written, oversized, a symlink or fails validation: shown as "unclassified, protected", reported as partial, never reapable.
+- A lifetime record whose state is "reaped" while its target files remain: shown with state "reaped", not reapable.
+- A controller with a remote that cannot be reached: that remote's lifetimes are "unknown" and the view reports it as partial; the page never waits for the remote.
+- A host with dev instances but no hosted targets: the landing page is unchanged apart from the section label.
+- Two copies of one branch expiring at the same moment: both are listed, ordered by owner then name.
 
 ## Requirements *(mandatory)*
 
@@ -134,6 +203,18 @@ Projects hosted with `sb host apply` that are not stacks are listed in the same 
 - **FR-014**: The view MUST be read-only: no new action, no new POST route, and nothing that applies, destroys, restarts or executes anything.
 - **FR-015**: A malformed or unreadable record MUST affect only its own row; the view MUST report partial evidence and keep showing the rest.
 - **FR-016**: Docs that describe `sb web`, `sb deploy` and `sb host apply` MUST be updated in the same change.
+- **FR-017**: Each stack and hosted target in the view MUST show its lifetime from spec 077's record: lifetime (temporary, hosted or permanent), owner label, expiry time and time left (temporary only), canonical, whether cleanup may remove it now and the reason, state (active, reaping or reaped) and the number of times its expiry was extended.
+- **FR-018**: A target with no lifetime record, or whose record is unreadable, partly written, oversized, a symlink or invalid by spec 077's rules, MUST show as "unclassified, protected" and MUST NOT show as reapable.
+- **FR-019**: On a Sandbox server, lifetimes MUST be read from the server's own lifetime record files, read only, without taking the store's lock and without creating, changing or removing any file.
+- **FR-020**: On a controller, lifetimes MUST come from the fields `sb host stack list --remote R --json` returns, fetched for each remote the controller's records name, in the background, cached for at least 60 seconds, with at most one fetch per remote in flight. An unreachable remote MUST be reported as partial evidence and MUST NOT delay the page.
+- **FR-021**: The view MUST list lifetime rows with temporary copies first, soonest expiry first, then hosted, permanent and unclassified. Copies of one branch MUST be separate rows naming their owners. A lifetime record with no matching card MUST still be listed.
+- **FR-022**: The host pages' hosted targets table MUST show each target's lifetime, owner and time left, and name its stack from the lifetime record when its summary has none.
+- **FR-023**: On a host with hosted targets, the landing page MUST lead with their count and a list linking to each target's hosting row; the two kinds MUST be labelled "Sandbox dev instances" and "Hosted apps (sb host apply / stacks)"; "Start all", "Stop all" and the empty-state "New instance" prompt MUST NOT be shown when there are no dev instances, and bulk actions MUST act on dev instances only.
+- **FR-024**: The sidebar MUST show the dev instance count and the hosted app count separately when the host reports hosted apps.
+- **FR-025**: A host's resource page MUST NOT show two tables that both claim to list hosted things: the instance table MUST be titled for Sandbox dev instances on that host.
+- **FR-026**: The target summary MUST record the apply outcome from the apply's delivery record: "failed" only when execution failed; "applied, delivery unverified" with the reason when execution succeeded and delivery is incomplete; "succeeded" when delivery is complete. A target with no summary MUST read "applied before tracking", with the controller's recorded commit when it has one.
+- **FR-027**: The CPU column MUST be labelled as a point-in-time sample.
+- **FR-028**: None of this MAY add an action: the panel never starts, stops, applies, classifies, changes the expiry of or reaps a hosted target.
 
 ### Key Entities
 
@@ -143,6 +224,8 @@ Projects hosted with `sb host apply` that are not stacks are listed in the same 
 - **Site link**: the record that a WordPress site (hostname, instance) belongs to a stack, with when it was made and the commit deployed.
 - **Server row**: one hostname shown to the viewer, with its origin (route, linked site, or name-matched site), state, health and ref.
 - **Health result**: the outcome of one bounded check of one hostname: up, up with login, redirect, client error, server error, or unreachable, with HTTP status and time checked.
+- **Lifetime row**: what the panel shows of one spec 077 lifetime record: lifetime, owner label, expiry and time left, canonical, reap eligibility and reason, state and extension count; or "unclassified, protected" when there is no valid record.
+- **Apply outcome**: the last apply's status as the summary records it: applying, succeeded, applied with delivery unverified (with a reason), or failed.
 
 ## Success Criteria *(mandatory)*
 
@@ -153,6 +236,9 @@ Projects hosted with `sb host apply` that are not stacks are listed in the same 
 - **SC-003**: Every hostname served by a stack's target on the server appears in the view after that target's next apply (100% coverage in a test with four routes and one linked site).
 - **SC-004**: No secret value from a target's configuration appears in the view or its data, verified by a test that plants known secret values in the inputs and searches every output for them.
 - **SC-005**: The panel sends no more than one health request per hostname per minute, however many viewers or refreshes there are.
+- **SC-006**: In a test with ten lifetime records (including one malformed, one partly written and one with no record), every row shows the right lifetime, and no unclassified row is ever shown as reapable.
+- **SC-007**: A viewer identifies the temporary copy closest to expiry, and its owner, from the top of the lifetime list in under 10 seconds.
+- **SC-008**: On a server with hosted apps and no dev instances, the landing page shows zero instance lifecycle buttons and leads with the hosted app count.
 
 ## Assumptions
 
@@ -163,3 +249,6 @@ Projects hosted with `sb host apply` that are not stacks are listed in the same 
 - Targets applied before this feature show on the server by project and environment only until their next apply writes a summary. No backfill is attempted.
 - The server-side panel needs its checkout updated to show the view; recording summaries needs only the controller's checkout, because `sb host apply` runs on the controller and writes to the remote over its existing connection.
 - `sb deploy --expose` is refused on nginx front doors today; a WordPress site for a stack on such a server is out of scope until that changes, and the fallback name match still applies wherever the server knows the hostname.
+- Lifetime records follow spec 077's final contract; the panel validates them with the same rules the store uses and adds no field of its own.
+- On a controller, lifetimes are fetched only for remotes the controller's stack records or hosting state name; other remotes' host pages show lifetime as unknown.
+- Targets applied before spec 076 keep no summary until their next apply; the panel says so rather than guessing a status.

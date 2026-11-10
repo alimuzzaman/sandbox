@@ -114,6 +114,20 @@ cd sandbox
 `setup` offers to install missing prerequisites (default always **No**)
 and never needs `sudo` for the base install.
 
+**Remote-only (no local Docker):** a controller that only runs jobs and hosts
+stacks on remote servers needs no container engine. Declare it once in
+`$SANDBOX_HOME/sandbox.local.yml`:
+
+```yaml
+controller:
+  local_runtime: none   # docker (default) | none
+```
+
+Remote commands never need local Docker either way. With the switch, local
+Docker instance commands refuse with a clear message, Herd instances keep
+working, and `sb doctor` checks only what a remote-only controller uses. See
+[remote-only controllers](docs/clean-url-default.md#remote-only-and-docker-less-controllers).
+
 `sb setup` is registry-wide and cannot be targeted with `--instance` or the
 routing `--label`. To reconcile an existing named instance, use
 `sb apply --instance NAME`; to prepare one project, use the project-scoped
@@ -537,7 +551,10 @@ other container uses, and its networks; the checkout is deleted only after that
 succeeds. Authorized CI job cleanup applies the same stack teardown after its
 existing identity checks and before broker source removal. A failed teardown
 keeps source and retained cleanup state; workspace reap reports
-`stack_teardown_incomplete` and a later run finishes it. A workspace whose jobs all finished more than 6 hours ago
+`stack_teardown_incomplete` and a later run finishes it. A stray container a job started without Compose,
+bound only inside the checkout, is planned under `remove_containers` with its evidence and
+removed first; any other bound container keeps the workspace (spec 080,
+`docs/resource-monitoring.md`). A workspace whose jobs all finished more than 6 hours ago
 (`SANDBOX_FINISHED_JOB_IDLE_HOURS` on the host) is a `safe`-tier
 `finished_job_idle` candidate even if its stack still runs; a queued or running
 job, an unreadable job registry, a live source-family reservation, or an active lease keeps it.
@@ -949,6 +966,7 @@ You can view and drive instances with:
 ./sb web                  # the same dashboard in the browser (127.0.0.1:8765)
 ./sb web --host tailscale # serve it to your tailnet, with full control (docs/remote-hosting.md)
                           # its Stacks & sites page (/hosting) lists every stack's servers, read-only
+                          # with each copy's lifetime, owner and time left (spec 077), read-only
                           # --allow-host NAME also accepts a tailnet-only proxy's name (repeatable)
 ./sb instance suspend <name>  # graceful stop; idle_stop is the resolved default
 ./sb instance resume <name>   # start a provisioned instance and wait for readiness
@@ -1023,7 +1041,12 @@ Host-incumbent adoption is opt-in and has its own read-only planning surface:
 ```
 
 Adapter proof tiers gate adoption only, never the default path. The instance stays
-usable at `http://localhost:<port>` when the selected provider is unavailable. See
+usable at `http://localhost:<port>` when the selected provider is unavailable.
+
+The proxy container (`sandbox-proxy`) exists only to give local Docker instances
+those no-port names, so it runs only while one needs it: `sb up` starts it,
+`sb down` / `sb instance delete` stop it once nothing is running, and it does
+not come back on its own after Docker restarts. See
 [the clean-URL default](docs/clean-url-default.md) and
 [domain resolution](docs/domain-resolution.md).
 

@@ -2622,8 +2622,11 @@ def _host_delivery_guidance(validated: dict, remote_name: str, *,
         req_token = secrets.token_hex(6)
         env_name = validated.get("environment", "env")
         request_id = f"deploy-{env_name}-{req_token}"
+    # Admission binds the job to exactly the source root; without
+    # --exact-project-dir, job-start would record the checkout above a source
+    # in a subfolder and the apply would refuse with recovery_source_mismatch.
     return [executable, "job-start", "--local", "--project-dir", validated["project_root"],
-            "--request-id", request_id, "--source-commit", source_commit,
+            "--exact-project-dir", "--request-id", request_id, "--source-commit", source_commit,
             "--timeout", str(int(timeout)), *(["--json"] if json_output else []),
             "--", executable, "host", "apply", "--project-dir",
             validated.get('manifest_root') or validated['project_root'], "--remote", remote_name, "--environment",
@@ -5261,7 +5264,29 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         result["apply_log"] = apply_log
     if summary_recorder is not None:
         summary_recorder.finished((delivery or {}).get("delivery_succeeded") is not False)
+    _record_stack_delivery(validated, remote_name, delivery)
     return result
+
+
+def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | None) -> None:
+    """Move the `sb host stack` record to the commit this apply proved delivered.
+
+    The record's ``commit`` must never run ahead of the server. Best effort: the
+    delivery has already happened, so a registry problem only leaves the
+    record at its earlier commit and is reported on stderr.
+    """
+    stack = validated.get("stack")
+    if not stack or (delivery or {}).get("delivery_succeeded") is not True:
+        return
+    from sandbox.hosting import stack_registry
+    try:
+        stack_registry.record_delivery(remote_name, stack["slug"], request_id=delivery.get("request_id"),
+                                       commit=stack["commit"])
+    except (stack_registry.StackRegistryError, OSError, KeyError, TypeError, AttributeError,
+            ValueError) as exc:
+        # A malformed record must not turn a delivered apply into a failure.
+        print(f"warning: stack {stack.get('slug')} record not updated to the delivered commit: "
+              f"{remote.redact_text(str(exc))[:200]}", file=sys.stderr)
 
 
 def _cmd_host_stage(args) -> None:

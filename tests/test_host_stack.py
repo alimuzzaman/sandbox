@@ -95,12 +95,15 @@ class _Runtime:
         patcher.start()
         test.addCleanup(patcher.stop)
 
-    def checkout(self, template: str = TEMPLATE) -> Path:
-        root = self.base / "hub"
+    def checkout(self, template: str = TEMPLATE, *, name: str = "hub", subdir: str = ".") -> Path:
+        """A committed checkout with the template and its compose file in ``subdir``."""
+        root = self.base / name
         root.mkdir()
         _git(root, "init", "--quiet", "--initial-branch=main")
-        (root / "sandbox.hosting.yml").write_text(template)
-        (root / "compose.yml").write_text(COMPOSE)
+        folder = root / subdir
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "sandbox.hosting.yml").write_text(template)
+        (folder / "compose.yml").write_text(COMPOSE)
         _git(root, "add", "-A")
         _git(root, "commit", "--quiet", "-m", "init")
         _git(root, "branch", "stack/demo")
@@ -234,6 +237,31 @@ class BranchPolicyTests(unittest.TestCase):
         with patch.object(hosting_cmd.remote, "current_branch", return_value="feat/one"):
             self.assertEqual(hosting_cmd._validate_apply_source(self._validated(None, ["feat/*"])),
                              "feat/one")
+
+
+class RecordDeliveryTests(unittest.TestCase):
+    def test_only_the_awaited_apply_moves_the_commit(self):
+        path = Path(tempfile.mkdtemp()) / "registry.json"
+        self.addCleanup(shutil.rmtree, path.parent, True)
+        with stack_registry.locked(path) as registry:
+            registry.put({"remote": "r", "slug": "demo", "commit": "a" * 40,
+                          "last_apply": {"request_id": "req-2", "commit": "b" * 40}})
+
+        def deliver(**values):
+            return stack_registry.record_delivery("r", "demo", path=path, now=7, **values)
+
+        for values in ({"request_id": "req-1", "commit": "b" * 40},   # an older apply
+                       {"request_id": "req-2", "commit": "c" * 40},   # another commit
+                       {"request_id": None, "commit": "b" * 40}):     # no durable request
+            with self.subTest(values=values):
+                self.assertFalse(deliver(**values))
+                self.assertEqual(stack_registry.read(path)["stacks"]["r/demo"]["commit"], "a" * 40)
+        self.assertFalse(stack_registry.record_delivery("r", "other", request_id="req-2",
+                                                        commit="b" * 40, path=path))
+        self.assertTrue(deliver(request_id="req-2", commit="b" * 40))
+        record = stack_registry.read(path)["stacks"]["r/demo"]
+        self.assertEqual((record["commit"], record["updated_at"]), ("b" * 40, 7))
+        self.assertFalse(deliver(request_id="req-2", commit="b" * 40))
 
 
 class PortAllocationTests(unittest.TestCase):
@@ -499,6 +527,9 @@ class StackCommandTests(unittest.TestCase):
         manifest = self.runtime.runtime / "stacks" / "demo" / "sandbox.hosting.yml"
         self.assertTrue(manifest.is_file())
         worktree = Path(result["source_root"])
+        # A template at the checkout root: the job binds the worktree root itself.
+        self.assertEqual(argv[argv.index("--project-dir") + 1], str(worktree))
+        self.assertEqual(Path(_git(worktree, "rev-parse", "--show-toplevel")).resolve(), worktree)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), self.head)
         self.assertEqual(_git(worktree, "status", "--porcelain"), "")
         record = stack_registry.read()["stacks"]["r/demo"]
@@ -511,6 +542,96 @@ class StackCommandTests(unittest.TestCase):
         self.assertEqual(again["ports"], result["ports"])
         self.assertFalse(worktree.exists())
         self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["worktrees"], [again["source_root"]])
+
+    def test_subfolder_template_job_binds_the_source_root_its_apply_admits(self):
+        """Feedback 20153592: a template in a checkout subfolder (`stacks/wp-site/`)."""
+        hub = self.runtime.checkout(name="setup", subdir="stacks/wp-site")
+        template = str(hub / "stacks" / "wp-site" / "sandbox.hosting.yml")
+        plan = host_stack._up(self.args("up", plan=True, template=template))["submission"]
+        planned = plan[:plan.index("--")]
+        self.assertTrue(planned[planned.index("--project-dir") + 1].endswith("<token>/stacks/wp-site"))
+        self.assertIn("--exact-project-dir", planned)
+        with patch.object(host_stack, "_submit", return_value="job-1") as submit:
+            result = host_stack._up(self.args("up", confirm=True, template=template))
+        argv = submit.call_args.args[0]
+        job, child = argv[:argv.index("--")], argv[argv.index("--") + 1:]
+        source_root = Path(result["source_root"])
+        worktree = Path(_git(source_root, "rev-parse", "--show-toplevel")).resolve()
+        self.assertEqual(source_root, worktree / "stacks" / "wp-site")
+        # host apply admits the job against the rendered manifest's source root,
+        # so job-start must record exactly that folder, not the worktree root.
+        manifest_root = self.runtime.runtime / "stacks" / "demo"
+        validated = hosting.validate_manifest(str(manifest_root), "sandbox")
+        self.assertEqual(validated["project_root"], str(source_root))
+        self.assertEqual(job[job.index("--project-dir") + 1], validated["project_root"])
+        self.assertIn("--exact-project-dir", job)
+        self.assertEqual(child[child.index("--project-dir") + 1], str(manifest_root))
+        self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["template"], template)
+
+    def test_record_commit_moves_only_when_its_apply_proves_delivery(self):
+        """Feedback 20153592: `stack list` must not run ahead of the server."""
+        manifest_root = self.runtime.runtime / "stacks" / "demo"
+
+        def apply_finished(succeeded, request_id=None):
+            """What `sb host apply` does for the rendered manifest once it finishes."""
+            validated = hosting.validate_manifest(str(manifest_root), "sandbox")
+            last = stack_registry.read()["stacks"]["r/demo"]["last_apply"]
+            hosting_cmd._record_stack_delivery(validated, "r", {
+                "delivery_succeeded": succeeded, "request_id": request_id or last["request_id"]})
+
+        def listed():
+            payload = host_stack._list(self.args("list"))
+            return payload["stacks"][0], host_stack._render_text(payload)
+
+        with patch.object(host_stack, "job_view", return_value=None):
+            with patch.object(host_stack, "_submit", return_value="job-1"):
+                host_stack._up(self.args("up", confirm=True))
+            record = stack_registry.read()["stacks"]["r/demo"]
+            self.assertIsNone(record["commit"])
+            self.assertEqual(record["last_apply"]["commit"], self.head)
+            # The remote lifetime record holds the claimed commit; the row does not.
+            self.assertEqual(self.remote_records()["sandbox-host-xspeed-hub-demo-sandbox"].stack.commit,
+                             self.head)
+            apply_finished(False)
+            row, text = listed()
+            self.assertIsNone(row["commit"])
+            self.assertEqual(row["last_apply"]["commit"], self.head)
+            self.assertIn("@not delivered", text)
+            apply_finished(True, request_id="another-request")
+            self.assertIsNone(listed()[0]["commit"])
+            apply_finished(True)
+            self.assertEqual(listed()[0]["commit"], self.head)
+            # A newer commit on the branch whose apply fails.
+            tree = _git(self.hub, "rev-parse", "HEAD^{tree}")
+            newer = _git(self.hub, "commit-tree", tree, "-p", self.head, "-m", "next")
+            _git(self.hub, "update-ref", "refs/heads/stack/demo", newer)
+            with patch.object(host_stack, "_submit", return_value="job-2"):
+                again = host_stack._up(self.args("up", confirm=True))
+            self.assertEqual(again["commit"], newer)
+            record = stack_registry.read()["stacks"]["r/demo"]
+            self.assertEqual((record["commit"], record["last_apply"]["commit"]), (self.head, newer))
+            apply_finished(False)
+            row, text = listed()
+            self.assertEqual((row["commit"], row["last_apply"]["commit"]), (self.head, newer))
+            self.assertIn(f"@{self.head[:12]}", text)
+            self.assertIn(f"commit {newer[:12]}", text)
+            apply_finished(True)
+            self.assertEqual(listed()[0]["commit"], newer)
+
+    def test_failed_submission_keeps_the_delivered_commit(self):
+        with patch.object(host_stack, "job_view", return_value={"lifecycle": "succeeded"}):
+            with patch.object(host_stack, "_submit", return_value="job-1"):
+                host_stack._up(self.args("up", confirm=True))
+            last = stack_registry.read()["stacks"]["r/demo"]["last_apply"]
+            self.assertTrue(stack_registry.record_delivery(
+                "r", "demo", request_id=last["request_id"], commit=self.head))
+            failure = host_stack.StackCommandError("stack_submission_failed", "refused")
+            with patch.object(host_stack, "_submit", side_effect=failure), \
+                    self.assertRaises(host_stack.StackCommandError):
+                host_stack._up(self.args("up", confirm=True))
+        record = stack_registry.read()["stacks"]["r/demo"]
+        self.assertEqual(record["commit"], self.head)
+        self.assertEqual(record["last_apply"]["status"], "submission_failed")
 
     def test_up_refused_while_previous_job_is_active(self):
         with patch.object(host_stack, "_submit", return_value="job-1"):

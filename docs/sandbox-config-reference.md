@@ -28,12 +28,15 @@ tailnet_names:
   acme_email: ops@example.test     # required: ACME account contact
   acme_server: letsencrypt         # optional: letsencrypt | letsencrypt-staging | https URL
   lego: /opt/homebrew/bin/lego     # optional: default is `lego` on PATH
+  lego_sha256: <64 lowercase hex>  # optional: trust a lego outside the known install paths
 ```
 
 A name's zone is the longest listed zone it falls under; its Cloudflare id is
 looked up at run time. `--acme-server` overrides `acme_server` for one call.
-A missing block is `tailnet_name_config_missing`; a malformed one (including a
-token value instead of a key name) is `tailnet_name_config_invalid`. See
+A `lego` outside `/usr/bin`, `/usr/local/bin` or a Homebrew `Cellar/lego/`
+is trusted only when its SHA-256 matches `lego_sha256`. A missing block is
+`tailnet_name_config_missing`; a malformed one (including a token value
+instead of a key name, or an unknown key) is `tailnet_name_config_invalid`. See
 [remote-hosting.md](remote-hosting.md#tailnet-only-hostnames-sb-host-tailnet-name-spec-078).
 
 A plugin repo becomes a **sandbox project** by carrying a `sandbox.config.json`

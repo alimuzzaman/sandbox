@@ -124,15 +124,18 @@ class TestWpCoreInstallState(_IsolatedInstanceTest):
                 with mock.patch.object(_lifecycle, "_core", return_value=state), \
                      mock.patch.object(_lifecycle, "_is_herd_instance", return_value=False), \
                      mock.patch.object(_lifecycle, "compose", side_effect=(
-                         RuntimeError("stop failed") if fails else None)):
+                         RuntimeError("stop failed") if fails else None)), \
+                     mock.patch.object(_lifecycle, "stop_proxy_if_idle") as idle:
                     if fails:
                         with self.assertRaises(RuntimeError):
                             _lifecycle.cmd_down({}, types.SimpleNamespace(resolved_instance="fixture"))
                         state.registry_put.assert_not_called()
+                        idle.assert_not_called()
                     else:
                         _lifecycle.cmd_down({}, types.SimpleNamespace(resolved_instance="fixture"))
                         state.registry_put.assert_called_once_with(
                             "/project", label="default", status="stopped")
+                        idle.assert_called_once_with({})
 
     def test_classifier_matrix_is_fail_closed(self):
         cases = (

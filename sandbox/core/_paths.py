@@ -594,7 +594,8 @@ _WEB_PAGE = """<!doctype html>
                 bg-neutral-100/60 dark:bg-neutral-950 flex flex-col">
     <div id="hostSelectorSlot" class="border-b border-brd px-2 py-1.5 dark:border-brd-dark"></div>
     <div class="flex items-center px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
-                text-neutral-400"><span>Instances</span><span id="runcount" class="ml-auto"></span></div>
+                text-neutral-400"><span>Dev instances</span><span id="runcount" class="ml-auto"></span></div>
+    <a id="hostedcount" data-link href="/hosting" class="hidden px-3 pb-1 text-[11px] text-neutral-500 hover:underline dark:text-neutral-400"></a>
     <nav id="list" class="flex-1 overflow-auto px-2 pb-2 space-y-0.5"></nav>
     <div class="p-2 border-t border-brd dark:border-brd-dark space-y-0.5">
       <button id="newBtn" class="w-full text-[13px] px-3 py-2 rounded

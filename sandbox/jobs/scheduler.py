@@ -3,18 +3,51 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
 import re
 import secrets
 import shutil
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+
+from sandbox.config.job_scheduler import (
+    DEFAULT_POLICY, JobSchedulerConfigError, JobSchedulerPolicy,
+)
 
 
 _SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 class WorkspaceBusy(RuntimeError):
-    pass
+    queue_reason = "workspace_or_capacity_busy"
+
+
+class SchedulerPolicyInvalid(WorkspaceBusy):
+    """Admission waits because this host's ``jobs.scheduler`` config is invalid.
+
+    The job stays queued with the config error code as its queue reason, so a
+    typo in the host config is visible and never silently widens admission.
+    """
+
+    def __init__(self, error: JobSchedulerConfigError) -> None:
+        super().__init__(f"{error.code}: {error}")
+        self.queue_reason = error.code
+
+
+def _host_machine_config() -> dict:
+    from sandbox.core._config import ConfigParseError, load_config
+    try:
+        return load_config()
+    except (SystemExit, OSError, ConfigParseError):  # die() exits on a missing sandbox.yml.
+        raise JobSchedulerConfigError(
+            "host machine config is unreadable", "job_policy_config_unreadable") from None
+
+
+def host_scheduler_policy() -> JobSchedulerPolicy:
+    """Read ``jobs.scheduler`` from this host's own machine config."""
+    from sandbox.config.job_scheduler import machine_job_scheduler_provider
+    return machine_job_scheduler_provider(_host_machine_config())
 
 
 def matrix_workspace_label(*, project_identity: str, parent_job_id: str,
@@ -26,13 +59,92 @@ def matrix_workspace_label(*, project_identity: str, parent_job_id: str,
     return f"m-{prefix}-{digest}"[:21]
 
 
+def check_host_policy_write(policy: JobSchedulerPolicy) -> None:
+    """Refuse before a local write when the base config would keep the block invalid.
+
+    ``sandbox.local.yml`` is deep-merged over the checked-in ``sandbox.yml``,
+    so a bad key there survives a local write; only fixing that file repairs it.
+    """
+    from sandbox.config.job_scheduler import machine_job_scheduler_provider
+    from sandbox.core._config import CONFIG, deep_merge
+    merged = deep_merge(_host_machine_config(), {"jobs": {"scheduler": policy.as_mapping()}})
+    try:
+        machine_job_scheduler_provider(merged)
+    except JobSchedulerConfigError as exc:
+        raise JobSchedulerConfigError(
+            f"{CONFIG.name} keeps jobs.scheduler invalid ({exc.code}): {exc}; fix it there",
+            "job_policy_invalid_base_config") from None
+
+
+def capacity_view(connection, policy: JobSchedulerPolicy,
+                  error: JobSchedulerConfigError | None = None) -> dict:
+    """Slots held by active jobs against ``policy``; read-only.
+
+    With an invalid host policy admission is refused, so nothing is available.
+    """
+    lifecycle = ("accepted", "queued", "running", "cancelling")
+    in_use = int(connection.execute(
+        "SELECT COUNT(*) FROM host_capacity_leases h JOIN jobs j ON j.job_id=h.job_id "
+        "WHERE j.lifecycle IN (?,?,?,?)", lifecycle,
+    ).fetchone()[0])
+    queued = int(connection.execute(
+        "SELECT COUNT(*) FROM jobs WHERE lifecycle='queued'").fetchone()[0])
+    return {
+        **policy.as_mapping(),
+        "in_use": in_use,
+        "available": 0 if error is not None else max(0, policy.max_parallel - in_use),
+        "queued": queued,
+        "policy_error": error.code if error is not None else None,
+    }
+
+
+def capacity_line(view: dict) -> str:
+    """One human line for a :func:`capacity_view` mapping (possibly remote-derived)."""
+    def number(key):
+        value = view.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else "?"
+    line = (f"job slots: {number('in_use')}/{number('max_parallel')} in use, "
+            f"{number('queued')} queued (floors {number('min_free_memory_mb')} MB memory, "
+            f"{number('min_free_disk_mb')} MB disk)")
+    error = view.get("policy_error")
+    if isinstance(error, str) and re.fullmatch(r"[a-z_]{1,64}", error):
+        line += f"; admission refused: {error}"
+    return line
+
+
 class JobScheduler:
-    def __init__(self, repository, *, max_parallel: int = 2,
-                 min_free_memory_mb: int = 512, min_free_disk_mb: int = 2048) -> None:
+    def __init__(self, repository, *, max_parallel: int = DEFAULT_POLICY.max_parallel,
+                 min_free_memory_mb: int = DEFAULT_POLICY.min_free_memory_mb,
+                 min_free_disk_mb: int = DEFAULT_POLICY.min_free_disk_mb,
+                 policy_loader: Callable[[], JobSchedulerPolicy] | None = None) -> None:
         self.repository = repository
         self.max_parallel = max_parallel
         self.min_free_memory_mb = min_free_memory_mb
         self.min_free_disk_mb = min_free_disk_mb
+        # With a loader, the policy is re-read before every admission and view,
+        # so a config change applies to the next admission without a restart.
+        self.policy_loader = policy_loader
+        self.policy_error: JobSchedulerConfigError | None = None
+
+    def _refresh_policy(self) -> None:
+        if self.policy_loader is None:
+            return
+        try:
+            policy = self.policy_loader()
+        except JobSchedulerConfigError as exc:
+            self.policy_error = exc
+            return
+        self.policy_error = None
+        self.max_parallel = policy.max_parallel
+        self.min_free_memory_mb = policy.min_free_memory_mb
+        self.min_free_disk_mb = policy.min_free_disk_mb
+
+    def capacity(self) -> dict:
+        """Effective slot policy and slots in use, for list and diagnostics views."""
+        self._refresh_policy()
+        policy = JobSchedulerPolicy(self.max_parallel, self.min_free_memory_mb,
+                                    self.min_free_disk_mb)
+        return capacity_view(self.repository.connection, policy, self.policy_error)
 
     def _resource_floor_available(self) -> bool:
         """Conservative host admission check; Docker gets stricter instance limits."""
@@ -61,6 +173,9 @@ class JobScheduler:
         namespace = self.namespace(row)
         now = datetime.now(timezone.utc)
         expiry = (now + timedelta(seconds=max(60, int(row["deadline_seconds"])))).isoformat()
+        self._refresh_policy()
+        if self.policy_error is not None:
+            raise SchedulerPolicyInvalid(self.policy_error)
         with self.repository.transaction(immediate=True) as connection:
             # Terminal jobs can finish without a later status read. Reap those
             # leases before admission so completed work cannot block a new job.
@@ -87,9 +202,11 @@ class JobScheduler:
                         f"workspace {row['workspace_label']!r} is busy; use an isolated label or wait"
                     )
             slots = {int(value[0]) for value in connection.execute("SELECT slot FROM host_capacity_leases").fetchall()}
-            slot = next((candidate for candidate in range(1, self.max_parallel + 1) if candidate not in slots), None)
-            if slot is None:
+            # Count held slots rather than probing 1..max: after the limit is
+            # lowered, high-numbered slots still held must keep counting.
+            if len(slots) >= self.max_parallel:
                 raise WorkspaceBusy("host capacity is busy; retry when a running job finishes")
+            slot = next(candidate for candidate in itertools.count(1) if candidate not in slots)
             lease_id = secrets.token_hex(16)
             timestamp = now.isoformat()
             connection.execute(
@@ -104,6 +221,7 @@ class JobScheduler:
 
     def queue_details(self, row: dict) -> dict:
         """Return bounded, advisory scheduler evidence for a queued job."""
+        self._refresh_policy()
         namespace = self.namespace(row)
         lifecycle = ("accepted", "queued", "running", "cancelling")
         queued_before = self.repository.connection.execute(
@@ -131,7 +249,10 @@ class JobScheduler:
         seen = set()
         candidates = (
             *workspace_rows,
-            *(active_slots if len(active_slots) >= self.max_parallel else ()),
+            # Under an invalid policy the limit is unknown; the queue reason
+            # carries the config error instead of naming slot holders.
+            *(active_slots if self.policy_error is None
+              and len(active_slots) >= self.max_parallel else ()),
         )
         for blocker in candidates:
             job_id = blocker[0]

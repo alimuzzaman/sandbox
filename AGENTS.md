@@ -74,7 +74,11 @@ adoption, and native runtimes are opt-in (`./sb domains use <provider>`). Adapte
 tiers gate adoption only — never the default path. Do not disable, stub, or bypass
 `_ensure_url_proxy` / `tools/proxy-helper.sh`: that counts as removal under principle VI and
 needs parity evidence plus explicit approval. Read `docs/clean-url-default.md` before
-touching specs 037/038/039 or their code.
+touching specs 037/038/039 or their code. The proxy has no restart policy and runs on demand
+(spec 082): `sb up` starts it, `stop_proxy_if_idle` stops it after `down`/`instance delete`
+only when no `sandbox-*` stack runs and no wake route exists; unknown keeps it. A remote-only
+controller (`controller.local_runtime: none`) refuses local Docker in `compose()` and
+`docker_daemon_preflight`; keep new local engine calls behind those choke points.
 
 **Docs with code.** Code change + matching `README.md` / `AGENTS.md` / `SKILL.md` / `WORKFLOW.md` land together. Non-obvious runtime findings → `memory/plugin-behavior/`.
 

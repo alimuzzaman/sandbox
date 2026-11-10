@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Mapping, TypedDict
@@ -35,6 +36,9 @@ class LastApply(TypedDict, total=False):
     submitted_at: int
     status: str
     error: str
+    # The commit this apply was asked to deliver. `sb host apply` copies it to
+    # the record's ``commit`` once it has proven the delivery (record_delivery).
+    commit: str
 
 
 class SiteLinkRef(TypedDict, total=False):
@@ -55,7 +59,9 @@ class StackRecord(TypedDict, total=False):
     checkout: str
     ref: str
     ref_branch: str
-    commit: str
+    # The last commit an apply proved delivered; None until the first one is.
+    # The commit the latest `stack up` asked for is ``last_apply.commit``.
+    commit: str | None
     hostnames: list[str]
     ports: dict[str, int]
     manifest: str
@@ -155,6 +161,29 @@ def locked(path: Path | None = None) -> Iterator[Registry]:
             yield Registry(read(path), path)
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def record_delivery(remote_name: str, slug: str, *, request_id: str | None, commit: str,
+                    now: int | None = None, path: Path | None = None) -> bool:
+    """Move a stack's ``commit`` to the commit its apply just proved delivered.
+
+    `sb host apply` calls this once delivery has succeeded. Only the apply the
+    record waits for counts: ``last_apply.request_id`` and ``last_apply.commit``
+    must both match, so a manual or older apply of the same manifest never
+    moves the record. Returns whether the record changed.
+    """
+    if not request_id:
+        return False
+    with locked(path) as registry:
+        record = registry.data["stacks"].get(record_key(remote_name, slug))
+        last = (record or {}).get("last_apply") or {}
+        if (not isinstance(record, dict) or last.get("request_id") != request_id
+                or last.get("commit") != commit or record.get("commit") == commit):
+            return False
+        record["commit"] = commit
+        record["updated_at"] = int(time.time()) if now is None else now
+        registry.put(record)
+        return True
 
 
 def records_for_remote(data: dict, remote_name: str) -> list[StackRecord]:

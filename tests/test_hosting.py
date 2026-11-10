@@ -3477,6 +3477,25 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(fixture.delivery()["operation"]["requested_outcome"]["application"]["commit"], fixture.commit)
         self.assertNotIn("environment", result)
 
+    def test_only_a_proven_delivery_reaches_the_stack_record(self):
+        """Feedback 20153592: a job bound to a checkout subfolder is admitted, and
+        only a succeeded delivery moves the `sb host stack` record's commit."""
+        manifest = _public_acme_manifest().replace("      require_clean: true\n",
+            "      require_clean: true\n      derived_environment:\n"
+            "        LENZORA_SOURCE_REVISION: pushed_commit_sha\n")
+        fixture = _HostingOwnerFixture(self, manifest, nested=True)
+        self.assertEqual(fixture.validated["project_root"], str(fixture.root))
+        with patch.object(hosting_cmd, "_record_stack_delivery") as record:
+            result = fixture.apply()
+        self.assertTrue(result["delivery"]["delivery_succeeded"])
+        record.assert_called_once_with(fixture.validated, fixture.remote_name, result["delivery"])
+        failed = _HostingOwnerFixture(self, manifest, nested=True)
+        failed.observe.return_value = _ready_observation(failed.commit)
+        with patch.object(hosting_cmd, "_record_stack_delivery") as record, \
+                self.assertRaises(RuntimeError):
+            failed.apply()
+        record.assert_not_called()
+
     def test_nested_runtime_outer_commit_cannot_complete_delivery(self):
         manifest = _public_acme_manifest().replace("      require_clean: true\n",
             "      require_clean: true\n      derived_environment:\n"
@@ -4081,6 +4100,10 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("a" * 40, joined)
         req_idx = argv.index("--request-id") + 1
         self.assertTrue(argv[req_idx].startswith("deploy-"))
+        # Admission binds the job to exactly the source root (feedback 20153592).
+        job = argv[:argv.index("--")]
+        self.assertEqual(job[job.index("--project-dir") + 1], validated["project_root"])
+        self.assertIn("--exact-project-dir", job)
 
     def test_host_status_and_diagnose_report_observed_revision_on_mismatch(self):
         with self._write(_manifest_with_derived_revision()) as directory:

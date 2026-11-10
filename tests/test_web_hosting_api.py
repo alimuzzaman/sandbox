@@ -18,7 +18,10 @@ import sandbox.core._dash as dash
 import sandbox.core._hosting as hosting_core
 from sandbox.commands import ui_dash
 from sandbox.hosting import panel_health
+from sandbox.hosting import panel_lifetime as pl
 from sandbox.hosting import panel_records as pr
+from sandbox.hosting import stack_registry
+from tests.test_target_lifetime import stack_record
 
 COMMIT = "c" * 40
 SECRET = "planted-secret-value-5555555555"
@@ -49,10 +52,22 @@ class HostingViewTest(unittest.TestCase):
         self.runtime.mkdir()
         self.jobs = []
         self.cache = panel_health.HealthCache(submit=self.jobs.append, probe_fn=lambda *a: {})
+        self.fetches = []
+        self.lifetime_jobs = []
+        self.lifetimes = pl.LifetimeCache(self.fetch, submit=self.lifetime_jobs.append)
 
-    def view(self, *, server=True, registry=None, host_state=None):
+    def fetch(self, remote):
+        self.fetches.append(remote)
+        record = {**stack_record(expires="2099-01-01T00:00:00Z"), "remote_record": "present"}
+        record.update(project="xspeed-hub-demo", environment="staging",
+                      compose_project="sandbox-host-xspeed-hub-demo-staging")
+        return {"ok": True, "remote": remote, "stacks": [record], "targets": [], "unclassified": [], "invalid": []}
+
+    def view(self, *, server=True, registry=None, host_state=None, stacks=None):
         core = SimpleNamespace(registry_all=lambda: registry or {})
-        with mock.patch.object(ui_dash, "_hosts_control_service", return_value=server), \
+        with mock.patch.object(ui_dash, "_hosting_lifetimes", return_value=self.lifetimes), \
+                mock.patch.object(stack_registry, "read", return_value=stacks or {"version": 1, "stacks": {}}), \
+                mock.patch.object(ui_dash, "_hosts_control_service", return_value=server), \
                 mock.patch("sandbox.core._paths.RUNTIME_DIR", self.runtime), \
                 mock.patch.object(hosting_core, "load_host_state", return_value=host_state or {"hosts": {}}), \
                 mock.patch.object(ui_dash, "_core", return_value=core), \
@@ -76,6 +91,42 @@ class HostingViewTest(unittest.TestCase):
         self.assertEqual(len(self.jobs), 2)  # scheduled, not awaited
         self.assertNotIn(SECRET, json.dumps(view))
 
+    def test_server_view_carries_this_servers_lifetimes(self):
+        write_summary(self.runtime)
+        store = self.runtime / "target-lifetimes"
+        store.mkdir()
+        record = stack_record(expires="2000-01-01T00:00:00Z", secret_note=SECRET)
+        record.update(project="xspeed-hub-demo", environment="staging",
+                      compose_project="sandbox-host-xspeed-hub-demo-staging")
+        (store / "sandbox-host-xspeed-hub-demo-staging.json").write_text(json.dumps(record))
+        (store / "sandbox-host-broken-x.json").write_text("{")
+        code, view = self.view()
+        self.assertEqual(code, 200)
+        lifetime = view["stacks"][0]["lifetime"]
+        self.assertEqual((lifetime["lifetime"], lifetime["owner"], lifetime["reap_eligible"], lifetime["reap_reason"]),
+                         ("temporary", "alice", True, "expired"))
+        self.assertEqual([(row["name"], row["classification"]) for row in view["lifetimes"]],
+                         [("demo", "recorded"), ("sandbox-host-broken-x", "unclassified")])
+        self.assertFalse(view["lifetimes"][1]["reap_eligible"])
+        self.assertIn("lifetime_record_invalid:sandbox-host-broken-x", view["partial_reasons"])
+        self.assertFalse((store / ".lock").exists())
+        self.assertEqual(self.fetches, [])
+        self.assertNotIn(SECRET, json.dumps(view))
+
+    def test_controller_lifetimes_come_from_stack_list_in_the_background(self):
+        stacks = {"version": 1, "stacks": {"xspeed-dev/demo": {
+            "remote": "xspeed-dev", "slug": "demo", "project": "xspeed-hub-demo", "environment": "staging",
+            "ref": "main", "ref_branch": "main", "commit": COMMIT, "hostnames": ["hub-demo.example.test"]}}}
+        code, view = self.view(server=False, stacks=stacks)
+        self.assertEqual(code, 200)
+        self.assertEqual(view["stacks"][0]["lifetime"]["reason"], "loading")  # never waits for the remote
+        self.assertEqual(len(self.lifetime_jobs), 1)
+        self.lifetime_jobs.pop()()
+        self.assertEqual(self.fetches, ["xspeed-dev"])
+        code, view = self.view(server=False, stacks=stacks)
+        self.assertEqual(view["stacks"][0]["lifetime"]["owner"], "alice")
+        self.assertEqual(view["lifetimes"][0]["remote"], "xspeed-dev")
+
     def test_controller_only_where_not_a_server(self):
         write_summary(self.runtime)
         code, view = self.view(server=False, registry={"k": {"instance": "i", "url": "https://wp-demo.example.test"}})
@@ -87,6 +138,7 @@ class HostingViewTest(unittest.TestCase):
         with mock.patch.object(hosting_core, "load_host_state", side_effect=hosting_core.HostingError("x")):
             core = SimpleNamespace(registry_all=lambda: {})
             with mock.patch.object(ui_dash, "_hosts_control_service", return_value=False), \
+                    mock.patch.object(stack_registry, "read", return_value={"version": 1, "stacks": {}}), \
                     mock.patch("sandbox.core._paths.RUNTIME_DIR", self.runtime), \
                     mock.patch.object(ui_dash, "_core", return_value=core), \
                     mock.patch.object(ui_dash, "_hosting_health", return_value=self.cache):

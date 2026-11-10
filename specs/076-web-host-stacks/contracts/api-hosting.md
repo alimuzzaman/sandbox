@@ -5,6 +5,7 @@
 - Methods: GET only. There is no POST, and `/api/action` gains no action.
 - Response: `200` with the `HostingView` from [data-model.md](../data-model.md), served with `Cache-Control: no-store`. The whole payload passes through `remote_core.redact_structure` before it is sent.
 - Latency: the endpoint reads local JSON files and the in-memory health cache only. It schedules stale health checks in the background and returns without waiting.
+- Lifetimes (follow-up 2026-11-10): `lifetimes` and each card's `lifetime` follow [data-model.md](../data-model.md). On a controller they come from a background cache of `sb host stack list --remote R --json`. A remote not yet fetched reads `unknown`/`loading`, and an unreachable remote adds `lifetime_unavailable:<remote>` to `partial_reasons`. The endpoint never waits for a fetch.
 - Failure: an unreadable source adds a reason to `partial_reasons` and the endpoint still returns `200`. An unexpected exception returns `500 {"ok": false, "error": "hosting view unavailable"}` with no detail.
 
 # Contract: `sb deploy --stack <slug>`

@@ -113,3 +113,4 @@
   Recommended follow-up (not built here): treat an unlabeled container whose every
   bind source lies inside that workspace checkout as owned, and record it in the
   manifest before removal. Operators can remove the stray container by hand today.
+- **Follow-up**: built in spec 080 (`specs/080-reap-stray-containers/`).

@@ -1,8 +1,9 @@
 import { esc } from "../dom";
 import { localHostName, localHostStatus, otherRemotes, remoteLabel, store, thisServer } from "../state";
 import { hostedTargetsSection } from "./hosting";
-import { instancePath, localHostPath, remotePath } from "../router";
+import { hostingPath, instancePath, localHostPath, remotePath } from "../router";
 import { theme } from "../theme";
+import { hostedCountText } from "../ui/hostlabels";
 
 type HostKind = "all" | "local" | "remote";
 
@@ -121,24 +122,43 @@ export function localHostView(): string {
   const pending = instances.filter(instance => instance.pending).length;
   const stopped = Math.max(0, instances.length - running - pending);
   // On a Sandbox server this page is the server itself: its `sb host apply`
-  // targets come from the server's own inventory, counted apart from instances.
+  // targets come from the server's own inventory, counted apart from dev
+  // instances. When it hosts apps, they lead; nothing here acts on them.
   const server = thisServer();
   const inventory = server ? store.remote[server.name] : undefined;
   const hosted = inventory?.hosted_targets;
-  const stats: Array<[string, string | number]> = [["Instances", instances.length], ["Running", running], ["Stopped", stopped], ["Pending", pending]];
-  if (server) stats.push(["Hosted targets", hosted ? hosted.total : inventory ? "unknown" : "…"]);
+  const hostsApps = !!hosted && hosted.total > 0;
+  const devEmpty = instances.length === 0;
+  const stats: Array<[string, string | number]> = [];
+  if (server) stats.push(["Hosted apps", hosted ? hosted.total : inventory ? "unknown" : "…"],
+    ["Hosted running", hosted ? hosted.running : inventory ? "unknown" : "…"]);
+  stats.push(["Dev instances", instances.length], ["Dev running", running]);
+  if (!server || !devEmpty) stats.push(["Stopped", stopped], ["Pending", pending]);
   const rows = instances.length ? instances.map(instance => `<a href="${instancePath(instance.name)}" data-link class="flex items-center gap-3 border-t border-neutral-200 px-4 py-3 first:border-t-0 hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 dark:border-neutral-800 dark:hover:bg-neutral-800/50">
     <span class="h-2 w-2 shrink-0 rounded-full ${instance.running ? "bg-emerald-500" : instance.pending ? "bg-amber-400" : "bg-neutral-300 dark:bg-neutral-600"}"></span>
     <span class="min-w-0 flex-1"><span class="block truncate text-[13px] font-medium text-neutral-900 dark:text-white">${esc(instance.name)}</span><span class="block truncate text-[11px] ${theme.quiet}">${esc(instance.project || "Local project")} · ${esc(instance.server || "server unknown")}</span></span>
     <span class="text-[11px] ${theme.quiet}">${instance.pending ? "pending" : instance.running ? "running" : "stopped"}</span><span aria-hidden="true" class="text-neutral-400">→</span>
-  </a>`).join("") : `<div class="p-6 text-center text-[13px] ${theme.quiet}">No local instances yet. Use New instance to create one from a local project.</div>`;
+  </a>`).join("")
+    : server
+      ? `<div class="p-6 text-center text-[13px] ${theme.quiet}">No Sandbox dev instances on this server.${hostsApps ? " Its hosted apps are listed above." : ""}</div>`
+      : `<div class="p-6 text-center text-[13px] ${theme.quiet}">No local instances yet. Use New instance to create one from a local project.</div>`;
+  // The create prompt belongs to a dev machine; on a server with no dev
+  // instances it would only suggest the server is empty.
+  const newButton = server && devEmpty ? "" : `<a href="/create" data-link class="${theme.primary}">New instance</a>`;
+  const devSection = `<section><div class="mb-3 flex items-center justify-between gap-3"><h2 class="text-[14px] font-semibold">Sandbox dev instances</h2>${newButton}</div><div class="${theme.panel} overflow-hidden">${rows}</div></section>`;
+  const hostedSection = server ? hostedTargetsSection(server.name, hosted, !inventory) : "";
+  const title = server ? "This server" : "This machine";
+  const subtitle = server
+    ? hostsApps ? `${hostedCountText(hosted!.total, hosted!.running)}; ${devEmpty ? "no Sandbox dev instances" : `${instances.length} Sandbox dev instance${instances.length === 1 ? "" : "s"}`}. Hosted apps are read-only here.`
+      : "Sandbox dev instances and any hosted apps on this server."
+    : "Local Sandbox instances and lifecycle controls.";
+  const lead = hostsApps ? `<div class="flex items-center justify-between gap-3"><span class="text-[12px] ${theme.muted}">Every hosted app links to its row on <a data-link href="${hostingPath()}" class="text-blue-700 hover:underline dark:text-blue-300">Stacks and hosted sites</a>.</span></div>` : "";
 
   return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">
-    <header><div class="${theme.label}">Local host</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">This machine</h1><p class="mt-1 text-[13px] ${theme.muted}">Local Sandbox instances and lifecycle controls.</p></header>
-    <section class="${theme.panel} grid grid-cols-2 gap-px overflow-hidden bg-neutral-200 p-0 dark:bg-neutral-800 ${server ? "sm:grid-cols-5" : "sm:grid-cols-4"}">
+    <header><div class="${theme.label}">${server ? "Sandbox server" : "Local host"}</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">${title}</h1><p class="mt-1 text-[13px] ${theme.muted}">${esc(subtitle)}</p></header>
+    <section class="${theme.panel} grid grid-cols-2 gap-px overflow-hidden bg-neutral-200 p-0 dark:bg-neutral-800 ${stats.length > 4 ? "sm:grid-cols-3 lg:grid-cols-6" : "sm:grid-cols-4"}">
       ${stats.map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${esc(label)}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${esc(String(value))}</div></div>`).join("")}
     </section>
-    <section><div class="mb-3 flex items-center justify-between gap-3"><h2 class="text-[14px] font-semibold">Local instances</h2><a href="/create" data-link class="${theme.primary}">New instance</a></div><div class="${theme.panel} overflow-hidden">${rows}</div></section>
-    ${server ? hostedTargetsSection(server.name, hosted, !inventory) : ""}
+    ${hostsApps ? `${lead}${hostedSection}${devSection}` : `${devSection}${hostedSection}`}
   </div></div>`;
 }

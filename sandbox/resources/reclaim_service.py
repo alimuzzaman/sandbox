@@ -642,6 +642,15 @@ class ReclaimService:
                 if not planned.get("ok"):
                     return {**planned, "action": "cleanup", "status": "refused"}
                 plan_id = planned["data"]["plan_id"]
+            elif tier is not None:
+                # Spec 080: ``--tier safe`` must never run a plan reviewed
+                # for another tier; refuse before the plan is begun.
+                existing = self.plan_store.load(plan_id)
+                if existing.scope != tier:
+                    raise ResourcePlanError(
+                        f"plan {plan_id} was made for tier {existing.scope!r}, not {tier!r}",
+                        "plan_kind_mismatch",
+                    )
             target = self.target()
             stored, resumed = self._load_for_execution(plan_id, target)
         except (ResourcePlanError, ResourceError, OSError, RuntimeError) as exc:
@@ -669,6 +678,8 @@ class ReclaimService:
                         "reason": item.get("reason"),
                         "expected_mtime": item.get("mtime"),
                         "stop_containers": item.get("stop_containers") or [],
+                        **({"remove_containers": item["remove_containers"]}
+                           if isinstance(item.get("remove_containers"), list) else {}),
                     }
                     for item in candidates
                 ],

@@ -131,8 +131,9 @@ async function performRefresh(): Promise<void> {
     const route = currentRoute();
     if (route.page === "remote" || route.page === "remote-instance") {
       await loadRemote(route.name);
-    } else if (route.page === "local-host" && thisServer()) {
-      // On a Sandbox server, /host/local lists the server's hosted targets.
+    } else if (thisServer()) {
+      // On a Sandbox server, /host/local lists the server's hosted apps and the
+      // sidebar counts them, so its own inventory loads on every other page too.
       await loadRemote(thisServer()!.name);
     }
     store.sync.lastCompleted = Date.now();

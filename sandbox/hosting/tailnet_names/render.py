@@ -1,12 +1,18 @@
 """nginx server blocks for tailnet-only names (spec 078). Pure functions."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
 from sandbox.hosting.tailnet_names.models import CERT_ROOT, TailnetName, Upstream
 
 HEADER_PREFIX = "# sandbox-tailnet-name "
+# Served by the block itself so the remote program can prove which version
+# of the block nginx has loaded: the marker is a digest of the block's own
+# text (with the marker zeroed), so any change to the block changes it.
+MARKER_PATH = "/.well-known/sandbox-tailnet-activation"
+_ZERO_MARKER = "0" * 32
 _TOKEN = re.compile(r"[a-z0-9.:-]+")
 
 
@@ -19,6 +25,13 @@ def _token(value: str) -> str:
 
 def render_block(name: TailnetName, upstream: Upstream, tailnet_ip: str, *,
                  http2_directive: bool) -> str:
+    text = _render(name, upstream, tailnet_ip, http2_directive=http2_directive)
+    marker = hashlib.sha256(text.encode()).hexdigest()[:32]
+    return text.replace(f'return 200 "{_ZERO_MARKER}"', f'return 200 "{marker}"', 1)
+
+
+def _render(name: TailnetName, upstream: Upstream, tailnet_ip: str, *,
+            http2_directive: bool) -> str:
     fqdn = _token(name.fqdn)
     ip = _token(tailnet_ip)
     target = _token(str(upstream))
@@ -46,6 +59,7 @@ server {{
     ssl_certificate     {cert_dir}/fullchain.pem;
     ssl_certificate_key {cert_dir}/privkey.pem;
     client_max_body_size 50m;
+    location = {MARKER_PATH} {{ default_type text/plain; return 200 "{_ZERO_MARKER}"; }}
     location / {{
         proxy_pass http://{target};
         proxy_http_version 1.1;

@@ -1972,6 +1972,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         getattr(args, "local", False) or getattr(args, "remote", None) or getattr(args, "detach", False)
     )
     remote_wp = args.cmd == "wp" and bool(getattr(args, "remote", None))
+    # Spec 082: a remote-only controller may have no local instance at all;
+    # its doctor reports the mode and the remote targets instead.
+    remote_only_doctor = (args.cmd == "doctor"
+                          and _core().local_runtime_remote_only())
     if chosen is None:
         if inner_local_observation:
             project_root = Path(getattr(args, "project_dir", "")).expanduser().resolve()
@@ -1982,7 +1986,8 @@ Per-project (each plugin carries its own sandbox.config.json):
                 2,
             )
         if (args.cmd in INSTANCE_SCOPED and not durable_exec and
-                not direct_instance_exec and not remote_wp):
+                not direct_instance_exec and not remote_wp
+                and not remote_only_doctor):
             # Distinguish "no instance at all for this cwd" from "cwd's
             # project owns MULTIPLE instances and neither --label nor a
             # default disambiguates" (multi-instance-per-root) — the latter

@@ -701,7 +701,7 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(naming.generate_slug("stack/demo", COMMIT, "alice", set(), accepts), "demo-alice-1")
         self.assertEqual(naming.generate_slug("stack/demo", COMMIT, "alice", {"demo-alice-1"}, accepts),
                          "demo-alice-2")
-        self.assertEqual(naming.generate_slug("", COMMIT, "Alice Example", set(), accepts), "ccccccc-alice-ex-1")
+        self.assertEqual(naming.generate_slug("", COMMIT, "Alice Example", set(), accepts), "cccccccc-alice-ex-1")
         long_branch = "feature/" + "x" * 40
         slug = naming.generate_slug(long_branch, COMMIT, "Someone With A Long Name", set(), accepts)
         self.assertTrue(accepts(slug), slug)

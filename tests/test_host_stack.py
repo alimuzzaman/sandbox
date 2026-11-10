@@ -607,7 +607,7 @@ class StackCommandTests(unittest.TestCase):
         before = self.remote_records()
         other_runtime = self.second_controller()
         with patch.object(host_stack, "_submit") as submit, \
-                self.assertRaises(host_stack.StackCommandError) as caught:
+                self.assertRaises(host_stack.hosting.HostingRefusal) as caught:
             host_stack._up(self.args("up", confirm=True))
         self.assertEqual(caught.exception.code, "stack_slug_taken")
         self.assertIn("alice", caught.exception.detail)
@@ -644,7 +644,7 @@ class StackCommandTests(unittest.TestCase):
         self.assertEqual(changed["ttl_seconds"], 3600)
         self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["ttl_seconds"], 3600)
         self.second_controller()
-        with self.assertRaises(host_stack.StackCommandError) as caught:
+        with self.assertRaises(host_stack.hosting.HostingRefusal) as caught:
             host_stack._ttl(self.args("ttl", ttl="2d", confirm=True))
         self.assertEqual(caught.exception.code, "stack_not_owner")
         forced = host_stack._ttl(self.args("ttl", ttl="2d", confirm=True, force_owner=True))
@@ -654,7 +654,7 @@ class StackCommandTests(unittest.TestCase):
         self.assertEqual(record.extended_count, 2)
         from sandbox.hosting import destroy
         with patch.object(destroy, "execute", return_value={"state": "destroyed"}) as execute, \
-                self.assertRaises(host_stack.StackCommandError) as caught:
+                self.assertRaises(host_stack.hosting.HostingRefusal) as caught:
             host_stack._down(self.args("down", confirm=True))
         self.assertEqual(caught.exception.code, "stack_not_owner")
         execute.assert_not_called()

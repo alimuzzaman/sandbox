@@ -73,6 +73,8 @@ _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 _TOKEN = re.compile(r"[0-9a-f]{32}")
 _TAILNET = ipaddress.ip_network("100.64.0.0/10")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# Exactly the temp names _write creates for files Sandbox owns.
+_TEMP = re.compile(r"\.(%s)\.tmp-[0-9a-f]{16}" % "|".join(re.escape(n) for n in KNOWN_FILES))
 
 
 class Refusal(Exception):
@@ -291,19 +293,19 @@ def _flock(dir_fd, name, wait, *, absolute=None):
 
 
 def _held(path):
-    if not os.path.exists(path):
-        return False
+    """True when the lock is held, or when it cannot be probed (fail closed)."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
         return False
-    except BlockingIOError:
-        return True
     except OSError:
-        return False
+        return True
     finally:
         os.close(fd)
 
@@ -350,13 +352,19 @@ class _NameScope:
 # ---------------------------------------------------------------------------
 # Host gate (re-checked inside the edge flock)
 
-def _gate(paths, payload, runner, *, holding_edge):
+def _check_locks(paths, *, holding_edge):
     held = [p for p in paths["locks"] if not (holding_edge and p == paths["edge_lock"]) and _held(p)]
     if held:
         raise Refusal("busy", "a Sandbox host transaction holds " + ", ".join(
             os.path.basename(p) for p in held))
+
+
+def _gate(paths, payload, runner, *, holding_edge):
+    _check_locks(paths, holding_edge=holding_edge)
     if _jobs_active(payload.get("jobs_probe"), runner):
         raise Refusal("busy", "a durable job is active on the remote")
+    # The job query takes a moment; look at the locks again after it.
+    _check_locks(paths, holding_edge=holding_edge)
 
 
 def _jobs_active(probe, runner, *, environ=None, getpwnam=None, lstat=os.lstat):
@@ -458,15 +466,86 @@ def _marker_ok(dir_fd, fqdn, paths):
     return isinstance(value, dict) and value.get("owner") == OWNER and value.get("fqdn") == fqdn
 
 
+def _owned_entries(dir_fd, paths):
+    """Entries of a per-name directory, refusing anything Sandbox did not write."""
+    entries = os.listdir(dir_fd)
+    for entry in entries:
+        if entry not in KNOWN_FILES and not _TEMP.fullmatch(entry):
+            raise Refusal("unmanaged", "the certificate directory holds a file Sandbox did not "
+                          "write: " + entry[:80])
+        st = _lstat(dir_fd, entry)
+        if st is not None and not (stat.S_ISREG(st.st_mode)
+                                   and st.st_uid in paths["trusted_uids"]):
+            raise Refusal("unmanaged", f"{entry} in the certificate directory is not a plain "
+                          "Sandbox file")
+    return entries
+
+
+def _empty_owned(dir_fd, paths):
+    """Delete a per-name directory's own files, the marker last."""
+    entries = _owned_entries(dir_fd, paths)
+    for entry in entries:
+        if entry != MARKER:
+            _unlink(dir_fd, entry)
+    _unlink(dir_fd, MARKER)
+    os.fsync(dir_fd)
+
+
+def _discard_leftovers(root_fd, fqdn, paths):
+    """Finish a staged create or a removal that a crash interrupted.
+
+    Only ``.<fqdn>.new-<hex>`` and ``.<fqdn>.removed-<hex>`` directories made
+    by this program qualify, and only when every entry is Sandbox's and any
+    marker names this fqdn; anything else is left alone.
+    """
+    pattern = re.compile(r"\." + re.escape(fqdn) + r"\.(new|removed)-[0-9a-f]{16}")
+    for entry in os.listdir(root_fd):
+        if not pattern.fullmatch(entry):
+            continue
+        try:
+            fd = _child_dir(root_fd, entry, paths)
+        except Refusal:
+            continue
+        if fd is None:
+            continue
+        try:
+            if MARKER in os.listdir(fd) and not _marker_ok(fd, fqdn, paths):
+                continue
+            _empty_owned(fd, paths)
+        except (Refusal, OSError):
+            continue
+        finally:
+            os.close(fd)
+        try:
+            os.rmdir(entry, dir_fd=root_fd)
+        except OSError:
+            pass
+
+
 def _name_dir(root_fd, fqdn, paths, *, create=False):
-    """The per-name directory fd when it is Sandbox's; None when absent."""
+    """The per-name directory fd when it is Sandbox's; None when absent.
+
+    A new directory is built under a staging name with its marker and renamed
+    into place, so a crash never leaves an unmarked directory at the name.
+    """
     fd = _child_dir(root_fd, fqdn, paths)
     if fd is None:
         if not create:
             return None
-        fd = _child_dir(root_fd, fqdn, paths, create_mode=0o755)
-        _write(fd, MARKER, json.dumps({"owner": OWNER, "fqdn": fqdn, "version": 1}).encode(),
-               0o600)
+        _discard_leftovers(root_fd, fqdn, paths)
+        staged = f".{fqdn}.new-{secrets.token_hex(8)}"
+        fd = _child_dir(root_fd, staged, paths, create_mode=0o755)
+        try:
+            _write(fd, MARKER, json.dumps({"owner": OWNER, "fqdn": fqdn, "version": 1}).encode(),
+                   0o600)
+            if _lstat(root_fd, fqdn) is not None:
+                raise Refusal("unmanaged", f"{fqdn} appeared while its directory was prepared")
+            os.rename(staged, fqdn, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            os.fsync(root_fd)
+        except BaseException:
+            os.close(fd)
+            _discard_leftovers(root_fd, fqdn, paths)
+            raise
         return fd
     try:
         if not _marker_ok(fd, fqdn, paths):
@@ -629,7 +708,8 @@ def _row(conf_fd, root, fqdn, paths, runner):
     row = {"fqdn": fqdn, "block_present": content is not None, "block_managed": managed,
            "header": _header(content) if managed else None, "dir_managed": False,
            "cert_present": False, "key_present": False, "cert_not_after": None,
-           "cert_sha256": None, "cert_names": [], "key_matches": None, "activation": None}
+           "cert_sha256": None, "cert_names": [], "key_matches": None, "activation": None,
+           "generation": None}
     if root is None:
         return row
     try:
@@ -651,7 +731,14 @@ def _row(conf_fd, root, fqdn, paths, runner):
             return row
         row["key_present"] = key is not None
         row["cert_present"] = chain is not None
-        row["activation"] = (journal or {}).get("state")
+        state = (journal or {}).get("state")
+        if state == "loaded":
+            # Loaded is proven only for the exact bytes on disk now.
+            if journal.get("generation") == _generation(content if managed else None, chain):
+                row["generation"] = journal["generation"]
+            else:
+                state = "stale"
+        row["activation"] = state
         if chain is not None:
             facts = _chain_facts(chain, key, runner)
             facts.pop("expired", None)
@@ -762,7 +849,8 @@ def commit(payload, paths, runner, lock_wait):
             generation = _generation(desired_block, desired_chain)
             journal = _journal(name_fd, paths) or {}
             result = {"ok": True, "not_after": facts["cert_not_after"],
-                      "sha256": facts["cert_sha256"], "settled": settled}
+                      "sha256": facts["cert_sha256"], "settled": settled,
+                      "generation": generation}
             if (journal.get("state") == "loaded" and journal.get("generation") == generation
                     and current_block == desired_block and current_chain == desired_chain
                     and not payload.get("force_reload")):
@@ -781,11 +869,20 @@ def commit(payload, paths, runner, lock_wait):
                 _write(name_fd, "fullchain.pem", desired_chain, 0o644)
             if desired_block != current_block:
                 _write(conf_fd, FILE_PREFIX + fqdn + ".conf", desired_block, 0o600)
-            ok, out = _nginx_test(runner)
+            try:
+                _check_locks(paths, holding_edge=True)
+                ok, out = _nginx_test(runner)
+            except Refusal:
+                _restore(conf_fd, name_fd, fqdn, record, paths)
+                _set_journal(name_fd, journal if journal.get("state") == "loaded"
+                             else dict(record, state="restored"))
+                raise
             if not ok:
                 _restore(conf_fd, name_fd, fqdn, record, paths)
-                _set_journal(name_fd, dict(record, state="loaded",
-                                           generation=_generation(current_block, current_chain)))
+                # Nothing was reloaded, so the previous journal still holds;
+                # an unproven one stays unproven for the next run to settle.
+                _set_journal(name_fd, journal if journal.get("state") == "loaded"
+                             else dict(record, state="restored"))
                 raise Refusal("nginx_rejected", _tail(out))
             _set_journal(name_fd, dict(record, state="tested"))
             ok, out = _reload(runner)
@@ -810,62 +907,79 @@ def commit(payload, paths, runner, lock_wait):
 
 
 def remove(payload, paths, runner, lock_wait):
-    """Remove the managed block (test, reload), then the managed directory."""
+    """Remove the managed block (test, reload), then the managed directory.
+
+    Ownership is read under the edge lock, right before anything is changed.
+    The lease is left for the controller to release after its DNS step.
+    """
     fqdn, token = _fqdn(payload.get("fqdn")), _token(payload.get("token"))
+    keep_directory = payload.get("keep_directory") is True
     scope = _NameScope(paths, fqdn, lock_wait, create=True)
     try:
         scope.require(token)
+        _discard_leftovers(scope.root, fqdn, paths)
         name_fd = _name_dir(scope.root, fqdn, paths)
         conf_fd = _open_dir(paths["conf_dir"], paths)
         edge = None
         try:
+            edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"])
+            _gate(paths, payload, runner, holding_edge=True)
             content, managed = _block(conf_fd, fqdn, paths)
             if content is not None and not managed:
                 raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
             if content is not None and name_fd is None:
                 raise Refusal("unmanaged", "a block exists without its managed directory")
-            edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"])
-            _gate(paths, payload, runner, holding_edge=True)
+            if name_fd is not None:
+                if not _marker_ok(name_fd, fqdn, paths):
+                    raise Refusal("unmanaged", "the certificate directory lost its marker")
+                if not keep_directory:
+                    _owned_entries(name_fd, paths)  # refuse before taking anything down
             result = {"ok": True, "block_removed": False, "directory_removed": False}
             if name_fd is not None:
                 journal = _journal(name_fd, paths) or {}
+                chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
                 if content is not None or journal.get("state") == "removing":
                     if content is not None:
                         _write(name_fd, "block.prev", content, 0o600)
                     _set_journal(name_fd, {"state": "removing", "had_block": content is not None})
                     _unlink(conf_fd, FILE_PREFIX + fqdn + ".conf")
-                    ok, out = _nginx_test(runner)
+                    try:
+                        _check_locks(paths, holding_edge=True)
+                        ok, out = _nginx_test(runner)
+                    except Refusal as exc:
+                        ok, out, refused = False, b"", exc
+                    else:
+                        refused = None
                     if ok:
                         ok, out = _reload(runner)
                     if not ok:
                         if content is not None:
                             _write(conf_fd, FILE_PREFIX + fqdn + ".conf", content, 0o600)
-                            if _nginx_test(runner)[0]:
-                                _reload(runner)
-                        _set_journal(name_fd, {"state": "loaded",
-                                               "generation": _generation(content, None)})
+                        if refused is None and _nginx_test(runner)[0] and _reload(runner)[0]:
+                            _set_journal(name_fd, {"state": "loaded",
+                                                   "generation": _generation(content, chain)})
+                        else:
+                            _set_journal(name_fd, {"state": "restored",
+                                                   "had_block": content is not None})
+                        if refused is not None:
+                            raise refused
                         raise Refusal("nginx_rejected", _tail(out))
                     result["block_removed"] = content is not None
                     _set_journal(name_fd, {"state": "loaded",
-                                           "generation": _generation(None, None)})
-                if payload.get("keep_directory") is True:
-                    # Exposure cleanup: the block is gone, the key and the
-                    # lease stay for the controller's next run.
+                                           "generation": _generation(None, chain)})
+                if keep_directory:
+                    # Exposure cleanup: the block is gone, the key stays.
                     return result
-                extra = [entry for entry in os.listdir(name_fd)
-                         if entry not in KNOWN_FILES and ".tmp-" not in entry]
-                if extra:
-                    raise Refusal("unmanaged", "the certificate directory holds files Sandbox "
-                                  "did not write: " + ", ".join(sorted(extra)[:5]))
-                for entry in os.listdir(name_fd):
-                    if entry in KNOWN_FILES and entry != MARKER or ".tmp-" in entry:
-                        _unlink(name_fd, entry)
-                _unlink(name_fd, MARKER)
+                # Rename to a tombstone first, so a crash never leaves an
+                # unmarked directory at the name.
+                tomb = f".{fqdn}.removed-{secrets.token_hex(8)}"
+                os.rename(fqdn, tomb, src_dir_fd=scope.root, dst_dir_fd=scope.root)
+                os.fsync(scope.root)
+                _empty_owned(name_fd, paths)
                 os.close(name_fd)
                 name_fd = None
-                os.rmdir(fqdn, dir_fd=scope.root)
+                os.rmdir(tomb, dir_fd=scope.root)
                 result["directory_removed"] = True
-            _unlink(scope.leases, fqdn + ".json")
             return result
         finally:
             if edge is not None:

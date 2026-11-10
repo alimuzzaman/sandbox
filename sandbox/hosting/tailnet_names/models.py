@@ -346,6 +346,7 @@ class RemoteInventoryEntry:
     dir_managed: bool = False
     dir_unsafe: bool = False
     activation: str | None = None
+    generation: str | None = None  # set only when the remote proves these bytes are loaded
 
     @property
     def upstream(self) -> str | None:
@@ -377,6 +378,8 @@ class RemoteInventoryEntry:
             dir_managed=row.get("dir_managed") is True,
             dir_unsafe=row.get("dir_unsafe") is True,
             activation=_optional_str(row, "activation"),
+            generation=row["generation"] if isinstance(row.get("generation"), str)
+            and _HEX64.fullmatch(row["generation"]) else None,
         )
 
 
@@ -420,6 +423,7 @@ class TailnetNameRecord:
     steps: Mapping[str, str] = field(default_factory=dict)
     updated_at: str = ""
     lease_token: str | None = None
+    verified_generation: str | None = None  # the activation both probes last passed
 
     def as_dict(self) -> dict:
         return {"fqdn": self.fqdn, "zone": self.zone, "upstream": self.upstream,
@@ -427,7 +431,7 @@ class TailnetNameRecord:
                 "dns_record_id": self.dns_record_id, "dns_adopted": self.dns_adopted,
                 "cert_not_after": self.cert_not_after, "cert_sha256": self.cert_sha256,
                 "steps": dict(self.steps), "updated_at": self.updated_at,
-                "lease_token": self.lease_token}
+                "lease_token": self.lease_token, "verified_generation": self.verified_generation}
 
     @classmethod
     def parse(cls, row: object) -> "TailnetNameRecord":
@@ -453,7 +457,8 @@ class TailnetNameRecord:
         if upstream != row.get("upstream"):
             raise corrupt("upstream")
         for key, pattern in (("dns_record_id", _HEX32), ("cert_sha256", _HEX64),
-                             ("lease_token", _HEX32), ("cert_not_after", _ISO_TIME)):
+                             ("lease_token", _HEX32), ("cert_not_after", _ISO_TIME),
+                             ("verified_generation", _HEX64)):
             value = row.get(key)
             if value is not None and not (isinstance(value, str) and pattern.fullmatch(value)):
                 raise corrupt(key)
@@ -469,4 +474,5 @@ class TailnetNameRecord:
             dns_record_id=row.get("dns_record_id"), dns_adopted=row.get("dns_adopted") is True,
             cert_not_after=row.get("cert_not_after"), cert_sha256=row.get("cert_sha256"),
             steps=dict(steps), updated_at=updated, lease_token=row.get("lease_token"),
+            verified_generation=row.get("verified_generation"),
         )

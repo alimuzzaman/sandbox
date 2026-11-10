@@ -245,22 +245,41 @@ def _inspect(ctx: Context, deps: Deps, fqdn: str | None) -> _Inspection:
     return _Inspection(bound if isinstance(bound, bool) else None, locks, rows)
 
 
-def _ownership(run: _Run, row: RemoteInventoryEntry | None) -> None:
+def _ownership(run: _Run, row: RemoteInventoryEntry | None, step: str = "preflight") -> None:
     """F4: refuse anything at the reserved paths that Sandbox did not write."""
     if row is None:
         return
     if row.dir_unsafe:
-        run.stop("preflight", REMOTE_PATH_UNSAFE,
+        run.stop(step, REMOTE_PATH_UNSAFE,
                  "the name's certificate directory is a symlink or has an untrusted owner or mode",
                  "refused")
     if row.block_present and not row.block_managed:
-        run.stop("preflight", UNMANAGED,
+        run.stop(step, UNMANAGED,
                  "the reserved block path holds a file Sandbox did not write; it was left alone",
                  "refused")
     if row.dir_present and not row.dir_managed:
-        run.stop("preflight", UNMANAGED,
+        run.stop(step, UNMANAGED,
                  "the certificate directory exists without Sandbox's marker; it was left alone",
                  "refused")
+
+
+def _fresh(run: _Run, ctx: Context, deps: Deps, fqdn: str, step: str, *,
+           require_bound: bool = False) -> RemoteInventoryEntry | None:
+    """The name's remote state read again under the lease: every policy
+    decision (ownership, upstream, certificate) is made from this, never from
+    the snapshot taken before the lease (another controller may have changed
+    the name in between)."""
+    info = run.call(step, _inspect, ctx, deps, fqdn)
+    if require_bound and info.bound is not True:
+        run.stop(step, TAILNET_ADDRESS_UNBOUND,
+                 f"the remote does not hold its recorded tailnet address {ctx.target.tailnet_ip}",
+                 "refused")
+    if info.locks:
+        run.stop(step, BUSY, "a Sandbox host transaction holds "
+                 + ", ".join(path.rsplit("/", 1)[-1] for path in info.locks), "refused")
+    row = info.rows.get(fqdn)
+    _ownership(run, row, step)
+    return row
 
 
 def _gate(ctx: Context, deps: Deps, run: _Run, locks: tuple[str, ...]) -> None:
@@ -321,12 +340,14 @@ class _Recorder:
     def __init__(self, store: StateStore, record: TailnetNameRecord | None, now) -> None:
         self.store, self.record, self.now = store, record, now
 
-    def save(self, step: str | None = None, status: str | None = None, **changes) -> None:
+    def save(self, step: str | None = None, status: str | None = None, *,
+             steps_extra: Mapping[str, str] | None = None, **changes) -> None:
         if self.record is None:
             return
         steps = dict(self.record.steps)
         if step:
             steps[step] = status
+        steps.update(steps_extra or {})
         self.record = replace(self.record, steps=steps, updated_at=_iso(self.now()), **changes)
         self.store.put(self.record)
 
@@ -363,8 +384,10 @@ def _obtain_chain(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: Tai
 
 
 def _committed(run: _Run, rec: _Recorder, data: dict) -> dict:
+    # Whatever is loaded now has not passed verification yet.
     rec.save("activate", "done", cert_not_after=data.get("not_after"),
-             cert_sha256=data.get("sha256"))
+             cert_sha256=data.get("sha256"), state="publishing", verified_generation=None,
+             steps_extra={"verify": "pending"})
     detail = "settled an interrupted change, " if data.get("settled") else ""
     if data.get("changed"):
         run.done("activate", detail + "tested and reloaded")
@@ -387,6 +410,13 @@ def _activate(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: Tailnet
     chain, _ = _obtain_chain(ctx, deps, run, rec, name, lego, token, allow_cached=False)
     data = _remote(run, "activate", deps, ctx, "commit", dict(payload, chain=chain), on_fail=fail)
     return _committed(run, rec, data)
+
+
+def _verified(run: _Run, rec: _Recorder, data: dict) -> None:
+    """Record the outcome; only a fully verified activation counts later."""
+    ok = run.result.ok
+    rec.save("verify", "done" if ok else "failed", state="published" if ok else "publishing",
+             verified_generation=data.get("generation") if ok else None)
 
 
 def _verify(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: TailnetName,
@@ -459,11 +489,6 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
             _ownership(run, row)
             run.done("preflight")
             _gate(ctx, deps, run, info.locks)
-            if row and row.block_present and row.upstream and row.upstream != str(upstream) \
-                    and not replace_upstream:
-                run.stop("activate", UPSTREAM_DIFFERS,
-                         f"already published with upstream {row.upstream}; "
-                         "pass --replace-upstream to change it", "refused")
             token = (existing.lease_token if existing and existing.lease_token
                      else deps.new_token())
             rec = _Recorder(store, replace(
@@ -472,6 +497,12 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
             rec.save()
             jobs = _jobs(run, deps, ctx)
             with _lease(run, deps, ctx, name.fqdn, token):
+                row = _fresh(run, ctx, deps, name.fqdn, "gate", require_bound=True)
+                if row and row.block_present and row.upstream and row.upstream != str(upstream) \
+                        and not replace_upstream:
+                    run.stop("activate", UPSTREAM_DIFFERS,
+                             f"already published with upstream {row.upstream}; "
+                             "pass --replace-upstream to change it", "refused")
                 # DNS (FR-007, FR-008)
                 res = run.call("dns", deps.dns, ctx.config,
                                {"op": "ensure", "zone": name.zone, "name": name.fqdn,
@@ -513,8 +544,7 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
 
                 # Verification (FR-017, FR-018)
                 _verify(ctx, deps, run, rec, name, token, jobs, data.get("sha256"))
-                rec.save("verify", "done" if run.result.ok else "failed",
-                         state="published" if run.result.ok else "publishing")
+                _verified(run, rec, data)
                 run.result.record = _record_view(rec.record)
     except _Stop:
         pass
@@ -579,9 +609,11 @@ def _renew_one(ctx: Context, deps: Deps, name: TailnetName, row: RemoteInventory
         _ownership(run, row)
         record = run.call("certificate", store.get, name.fqdn)
         run.call("certificate", _zone_check, ctx, name, record)
-        # F8: only a journal that proves the chain is loaded lets renew skip.
+        # Renew skips only a current certificate whose exact loaded bytes are
+        # proven by the remote AND passed both probes on this controller.
         current = not force and _cert_current(row, name.fqdn, deps.now())
-        if current and row.activation == "loaded":
+        if (current and row.activation == "loaded" and row.generation and record is not None
+                and record.state == "published" and record.verified_generation == row.generation):
             run.skipped("certificate", f"valid until {row.cert_not_after}", NOT_DUE)
             return run.result
         _gate(ctx, deps, run, locks)
@@ -592,12 +624,17 @@ def _renew_one(ctx: Context, deps: Deps, name: TailnetName, row: RemoteInventory
         rec.save()
         jobs = _jobs(run, deps, ctx)
         with _lease(run, deps, ctx, name.fqdn, token):
+            row = _fresh(run, ctx, deps, name.fqdn, "certificate")
+            if row is None or not row.block_present:
+                run.stop("certificate", NOT_FOUND,
+                         "no published block for this name on the remote; use add", "refused")
+            current = not force and _cert_current(row, name.fqdn, deps.now())
             if current:
-                # The certificate is fine but its activation is not proven:
-                # reconcile (test and reload) without issuing.
+                # The certificate is fine but its activation or verification
+                # is not proven: reconcile and verify without issuing.
                 chain, cached = None, False
                 run.skipped("certificate", f"valid until {row.cert_not_after}; reconciling "
-                            "an unproven activation")
+                            "and verifying the activation")
             else:
                 chain, cached = _obtain_chain(ctx, deps, run, rec, name, lego, token,
                                               allow_cached=not force)
@@ -605,7 +642,7 @@ def _renew_one(ctx: Context, deps: Deps, name: TailnetName, row: RemoteInventory
                        "jobs_probe": jobs}
             data = _activate(ctx, deps, run, rec, name, lego, token, payload, cached)
             _verify(ctx, deps, run, rec, name, token, jobs, data.get("sha256"))
-            rec.save("verify", "done" if run.result.ok else "failed")
+            _verified(run, rec, data)
             run.result.record = _record_view(rec.record)
     except _Stop:
         pass
@@ -670,7 +707,11 @@ def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
                             if existing else None, deps.now)
             rec.save()
             jobs = _jobs(run, deps, ctx)
+            # The lease spans the remote removal AND the DNS delete, so no
+            # other controller can publish the name in between.
             with _lease(run, deps, ctx, name.fqdn, token):
+                row = _fresh(run, ctx, deps, name.fqdn, "remove_block")
+                present = bool(row and (row.block_present or row.dir_present))
                 if present:
                     data = _remote(run, "remove_block", deps, ctx, "remove",
                                    {"fqdn": name.fqdn, "token": token, "jobs_probe": jobs},

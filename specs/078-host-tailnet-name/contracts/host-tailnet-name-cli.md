@@ -72,7 +72,7 @@ any result is not ok.
 | `tailnet_name_public_address_invalid` | `--public-address` is not a public IPv4 address. |
 | `tailnet_name_remote_failed` | The remote program could not run or returned no result. |
 | `tailnet_name_invalid` | FQDN fails hostname rules, is a wildcard or a zone apex. |
-| `tailnet_name_zone_not_allowed` | FQDN is under no configured zone, or its stored record names another zone; checked before any DNS, ACME or remote call. |
+| `tailnet_name_zone_not_allowed` | FQDN is under no configured zone, or its stored record names another zone; checked before any DNS or ACME call or remote change. |
 | `tailnet_name_upstream_invalid` | Upstream is not `IPV4:PORT` or `localhost:PORT`, or not loopback/private/tailnet. |
 | `tailnet_name_config_missing` / `tailnet_name_config_invalid` | `tailnet_names` block absent or malformed. |
 | `tailnet_name_remote_unknown` | `--remote` is not registered. |
@@ -101,7 +101,7 @@ any result is not ok.
 | `tailnet_name_public_exposed` | The public address presented a certificate valid for the name (ours or another); the block was removed and the detail says whether the name is still served. |
 | `tailnet_name_public_probe_unavailable` | No public address is known for the check. |
 | `tailnet_name_not_found` | `renew`/`remove`: no such name on the remote or in the state. |
-| `tailnet_name_not_due` | `renew` without `--force` on a certificate with more than 30 days left (status `skipped`, not an error; `ok` stays true). |
+| `tailnet_name_not_due` | `renew` without `--force` on a certificate with more than 30 days left whose exact loaded bytes are proven by the remote and passed both probes (status `skipped`, not an error; `ok` stays true). |
 
 ## Secrets
 

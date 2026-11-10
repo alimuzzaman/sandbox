@@ -8,10 +8,11 @@ import fcntl
 import json
 import os
 import pwd
+import shutil
 import stat
-import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ if str(REPO) not in sys.path:
 
 from sandbox.hosting.tailnet_names import _remote_main as rp  # noqa: E402
 from sandbox.hosting.tailnet_names import remote_program  # noqa: E402
+from tests.subprocess_support import run_test_process  # noqa: E402
 
 FQDN = "app.example.test"
 IP = "100.64.0.10"
@@ -34,6 +36,14 @@ HEADER = ('# sandbox-tailnet-name {"fqdn": "%s", "tailnet_ip": "%s", '
 
 def block(fqdn=FQDN, port=8025, body="server {}\n"):
     return HEADER % (fqdn, IP, port) + body
+
+
+def openssl(argv, *, input=None, check=False):
+    """Real openssl with a synthetic environment (never the parent's)."""
+    res = run_test_process(list(argv), input=input, capture_output=True, timeout=60)
+    if check and res.returncode != 0:
+        raise AssertionError(res.stderr)
+    return res.returncode, res.stdout or b"", res.stderr or b""
 
 
 class FakeHost:
@@ -62,7 +72,7 @@ class FakeHost:
             return 0, b"", b""
         if tool == "ip":
             return 0, self.addresses.encode(), b""
-        return rp.run(argv, timeout=timeout, input=input)
+        return openssl(argv, input=input)
 
     def ran(self, *prefix):
         return [call for call in self.calls if call[:len(prefix)] == list(prefix)]
@@ -92,7 +102,10 @@ class Base(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def tearDown(self):
-        subprocess.run(["rm", "-rf", str(self.base)], check=False)
+        for root, dirs, _files in os.walk(self.base):
+            for name in dirs:
+                os.chmod(os.path.join(root, name), 0o755)
+        shutil.rmtree(self.base, ignore_errors=True)
 
     @property
     def name_dir(self) -> Path:
@@ -122,14 +135,14 @@ class Base(unittest.TestCase):
         (d / "san.ext").write_text(f"subjectAltName=DNS:{name}\n")
         key = self.name_dir / "privkey.pem"
         if other_key:
-            subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout",
-                            "-out", str(d / "other.pem")], check=True, capture_output=True)
+            openssl(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout",
+                     "-out", str(d / "other.pem")], check=True)
             key = d / "other.pem"
-            subprocess.run(["openssl", "req", "-new", "-key", str(key), "-subj", "/CN=" + name,
-                            "-out", str(d / "req.csr")], check=True, capture_output=True)
-        subprocess.run(["openssl", "x509", "-req", "-in", str(d / "req.csr"), "-signkey", str(key),
-                        "-days", str(days), "-extfile", str(d / "san.ext"),
-                        "-out", str(d / "c.pem")], check=True, capture_output=True)
+            openssl(["openssl", "req", "-new", "-key", str(key), "-subj", "/CN=" + name,
+                     "-out", str(d / "req.csr")], check=True)
+        openssl(["openssl", "x509", "-req", "-in", str(d / "req.csr"), "-signkey", str(key),
+                 "-days", str(days), "-extfile", str(d / "san.ext"),
+                 "-out", str(d / "c.pem")], check=True)
         return (d / "c.pem").read_text()
 
     def commit(self, token=TOKEN, **payload):
@@ -545,6 +558,130 @@ class InspectTests(Base):
         self.assertTrue(row["block_present"])
         self.assertFalse(row["block_managed"])
         self.assertTrue(row["dir_unsafe"])
+
+
+class RemovalAndCrashTests(Base):
+    """Re-review N2-N5 and the fail-closed lock probe."""
+
+    def test_remove_keeps_the_lease_for_the_controller_to_release(self):
+        self.publish()
+        self.assertTrue(self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)["ok"])
+        result = self.reserve(token=OTHER)
+        self.assertEqual((result["ok"], result["code"]), (False, "busy"))
+        self.assertTrue(self.call("release", fqdn=FQDN, token=TOKEN)["released"])
+        self.assertTrue(self.reserve(token=OTHER)["ok"])
+
+    def test_remove_reads_ownership_under_the_edge_lock(self):
+        self.publish()
+        fd = os.open(self.paths["edge_lock"], os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        out = {}
+        worker = threading.Thread(target=lambda: out.update(self.call(
+            "remove", lock_wait=10, fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)))
+        worker.start()
+        try:
+            time.sleep(0.5)  # remove is now waiting for the edge lock
+            self.conf.write_text("server { listen 443; }\n")
+        finally:
+            os.close(fd)
+        worker.join(15)
+        self.assertEqual((out.get("ok"), out.get("code")), (False, "unmanaged"))
+        self.assertEqual(self.conf.read_text(), "server { listen 443; }\n")
+        self.assertTrue(self.name_dir.exists())
+
+    def test_only_exact_sandbox_temp_names_are_cleaned_up(self):
+        self.publish()
+        for foreign in ("notes.tmp-operator", ".fullchain.pem.tmp-backup",
+                        ".other.pem.tmp-0123456789abcdef"):
+            with self.subTest(foreign=foreign):
+                (self.name_dir / foreign).write_text("operator's")
+                result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+                self.assertEqual((result["ok"], result["code"]), (False, "unmanaged"))
+                self.assertEqual((self.name_dir / foreign).read_text(), "operator's")
+                self.assertTrue(self.conf.exists(), "nothing was taken down")
+                (self.name_dir / foreign).unlink()
+        (self.name_dir / ".fullchain.pem.tmp-0123456789abcdef").write_text("partial")
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(self.name_dir.exists())
+
+    def leftover(self, kind, files, marker=True):
+        root = Path(self.paths["cert_root"])
+        path = root / f".{FQDN}.{kind}-{'0' * 16}"
+        os.mkdir(path, 0o755)
+        os.chmod(path, 0o755)
+        if marker:
+            (path / "managed.json").write_text(json.dumps(
+                {"owner": "sandbox-tailnet-name", "fqdn": FQDN, "version": 1}))
+            os.chmod(path / "managed.json", 0o600)
+        for name, text in files.items():
+            (path / name).write_text(text)
+        return path
+
+    def test_a_create_or_remove_interrupted_by_a_crash_is_finished(self):
+        self.reserve()
+        staged = self.leftover("new", {})
+        tomb = self.leftover("removed", {"privkey.pem": "old", "fullchain.pem": "old"})
+        self.csr()
+        self.assertFalse(staged.exists())
+        self.assertFalse(tomb.exists())
+        self.assertTrue(json.loads((self.name_dir / "managed.json").read_text())["fqdn"] == FQDN)
+        self.assertEqual([p for p in os.listdir(self.paths["cert_root"]) if ".new-" in p], [])
+
+    def test_a_leftover_with_foreign_content_is_left_alone(self):
+        self.reserve()
+        foreign = self.leftover("removed", {"notes.txt": "operator's"})
+        other = self.leftover("new", {}, marker=False)
+        (other / "managed.json").write_text(json.dumps({"owner": "x", "fqdn": "other.example.test"}))
+        os.chmod(other / "managed.json", 0o600)
+        self.csr()
+        self.assertEqual((foreign / "notes.txt").read_text(), "operator's")
+        self.assertTrue((other / "managed.json").exists())
+
+    def test_removal_never_leaves_an_unmarked_directory_at_the_name(self):
+        self.publish()
+        calls = []
+
+        def crash(path, *args, **kwargs):
+            calls.append(path)
+            raise OSError("simulated crash")
+        with mock.patch.object(rp.os, "rmdir", side_effect=crash):
+            result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertFalse(result["ok"])
+        self.assertTrue(calls and ".removed-" in calls[0], calls)
+        self.assertFalse(self.name_dir.exists(), "the name itself is free")
+        self.reserve()
+        self.csr()  # a fresh add proceeds and cleans the tombstone
+        self.assertEqual([p for p in os.listdir(self.paths["cert_root"]) if ".removed-" in p], [])
+
+    def test_an_unprobeable_lock_counts_as_held(self):
+        os.symlink(self.base / "nowhere", self.paths["locks"][0])
+        self.assertTrue(rp._held(self.paths["locks"][0]))
+        self.assertFalse(rp._held(self.paths["locks"][2]))
+        self.reserve()
+        chain = self.sign(self.csr())
+        result = self.commit(block=block(), chain=chain)
+        self.assertEqual((result["ok"], result["code"]), (False, "busy"))
+
+    def test_inventory_proves_loaded_only_for_the_bytes_on_disk(self):
+        self.publish()
+        [row] = self.call("inspect", tailnet_ip=IP)["inventory"]
+        self.assertEqual(row["activation"], "loaded")
+        self.assertEqual(row["generation"], json.loads(
+            (self.name_dir / "activation.json").read_text())["generation"])
+        self.conf.write_text(block(port=9000))
+        [row] = self.call("inspect", tailnet_ip=IP)["inventory"]
+        self.assertEqual((row["activation"], row["generation"]), ("stale", None))
+
+    def test_a_rejected_change_over_an_unproven_state_stays_unproven(self):
+        chain = self.publish()
+        (self.name_dir / "activation.json").unlink()
+        self.host.nginx_ok = False
+        result = self.commit(block=block(port=9000), chain=chain)
+        self.assertEqual(result["code"], "nginx_rejected")
+        journal = json.loads((self.name_dir / "activation.json").read_text())
+        self.assertNotEqual(journal["state"], "loaded")
+        self.assertEqual(self.conf.read_text(), block())
 
 
 if __name__ == "__main__":

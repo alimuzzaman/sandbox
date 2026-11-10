@@ -1690,13 +1690,19 @@ published name changes nothing.
    root 0600 regular file whose first line is this feature's header for the
    same name, and a certificate directory only when it holds a valid
    `managed.json` marker. A symlinked or group/world-writable path is
-   `tailnet_name_remote_path_unsafe`.
+   `tailnet_name_remote_path_unsafe`. A new directory is built under a
+   staging name with its marker and renamed into place, and a removed one is
+   renamed to a tombstone before it is emptied, so a crash never leaves an
+   unmarked directory at the name; the next run finishes either leftover.
 2. **Gate**: no durable job is active on the remote and none of
    `/run/lock/sandbox-{hosting-caddy,edge-nginx,docker-pool}.lock` is held.
-   A busy remote is refused (`tailnet_name_busy`), never waited for. The run
-   then takes a per-name lease on the remote (token and expiry, under a
-   per-name lock), so a second controller working on the same name is
-   refused (`tailnet_name_busy`) until the lease is released or expires.
+   A busy remote is refused (`tailnet_name_busy`), never waited for. A lock
+   that cannot be probed counts as held. The run then takes a per-name lease
+   on the remote (token and expiry, under a per-name lock), so a second
+   controller working on the same name is refused (`tailnet_name_busy`) until
+   the lease is released or expires. Under the lease the name is inspected
+   again, and every decision (ownership, upstream, certificate) is made from
+   that fresh view, not from the one taken before the lease.
 3. **DNS**: a DNS-only (unproxied) A record from the name to the tailnet IPv4
    in Cloudflare. The helper reads the name's complete record set (every
    type). Exactly one identical record is adopted; anything else (another
@@ -1710,7 +1716,8 @@ published name changes nothing.
    while it has more than 30 days left and the remote accepts it.
 5. **Activate**: the chain and the block are installed together by the remote
    program. Under `flock /run/lock/sandbox-edge-nginx.lock` it checks the
-   lease, re-checks the gate (locks and durable jobs, failing closed),
+   lease, re-checks the gate (locks and durable jobs, failing closed; the
+   locks again right before `nginx -t`),
    writes an activation journal (`written`, `tested`, `loaded`), installs
    both files through exclusive temp files and renames, runs `nginx -t` and
    reloads. A failed test or reload restores the previous block and chain.
@@ -1740,15 +1747,20 @@ Changing the upstream of a published name needs `--replace-upstream`.
 
 `renew FQDN` or `renew --all` reissues certificates that expire within 30 days
 (`--force` reissues anyway) and activates them the same way, then verifies
-again. A current certificate whose activation is not proven loaded is tested
-and reloaded without reissuing. `renew --all` reports names outside today's
+again. It skips a name (`tailnet_name_not_due`) only when the remote proves
+the exact bytes on disk are loaded and those same bytes passed both probes on
+this controller. Otherwise a current certificate is reconciled (test and
+reload) and verified without reissuing, so a name whose last verification
+failed, or that crashed before verifying, is checked again. `renew --all` reports names outside today's
 zones and leaves them alone. `sb remote edge` reports a tailnet certificate
 that is overdue with the hint `run sb host tailnet-name renew`. Scheduling
 `renew --all` from a routine is not built yet.
 
-`remove` takes the lease, removes the block (test and reload, under the edge
-lock and the re-checked gate), then the certificate directory (refusing any
-file Sandbox did not write), then the DNS record, recording each step. It
+`remove` takes the lease and holds it until the DNS step is done. Under the
+edge lock and the re-checked gate it reads the block's ownership, refuses any
+file in the certificate directory that Sandbox did not write (only its own
+files and its exact temp names qualify), removes the block (test and
+reload), then the directory, then the DNS record, recording each step. It
 deletes the record only when the name's complete record set is exactly the
 record this controller recorded (same id, type A, the tailnet address, no
 proxy). Otherwise it leaves the records in place
@@ -1756,8 +1768,8 @@ proxy). Otherwise it leaves the records in place
 change made between that read and the delete is not excluded.
 
 Every mutating run first checks the name's zone against today's
-`tailnet_names.zones` and the zone stored in its record, before any DNS,
-ACME or remote call (`tailnet_name_zone_not_allowed`); `list` flags such names
+`tailnet_names.zones` and the zone stored in its record, before any DNS or
+ACME call or remote change (`tailnet_name_zone_not_allowed`); `list` flags such names
 with `zone_not_allowed`. A controller state file that does not parse is
 `tailnet_name_state_corrupt`, never treated as empty.
 

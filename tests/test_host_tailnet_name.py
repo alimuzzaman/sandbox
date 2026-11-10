@@ -486,7 +486,10 @@ class StateTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _openssl(*args, cwd):
-    subprocess.run(["openssl", *args], cwd=cwd, check=True, capture_output=True, timeout=60)
+    from tests.subprocess_support import run_test_process
+    res = run_test_process(["openssl", *args], cwd=cwd, capture_output=True, timeout=60)
+    if res.returncode != 0:
+        raise AssertionError(res.stderr)
 
 
 _CERTS: dict = {}
@@ -725,7 +728,8 @@ class FakeRemote:
                 self.reloads += 1
             current = self.chains[fqdn]
             return {"ok": True, "changed": not same, "settled": None,
-                    "not_after": current["not_after"], "sha256": current["sha"]}
+                    "not_after": current["not_after"], "sha256": current["sha"],
+                    "generation": self.generation(fqdn)}
         if action == "remove":
             if self.remove_error:
                 return {"ok": False, "code": self.remove_error}
@@ -740,9 +744,11 @@ class FakeRemote:
             self.keys.discard(fqdn)
             self.chains.pop(fqdn, None)
             self.activation.pop(fqdn, None)
-            self.leases.pop(fqdn, None)
             return {"ok": True, "block_removed": removed, "directory_removed": had_dir}
         raise AssertionError(action)
+
+    def generation(self, fqdn):
+        return sha((self.blocks.get(fqdn) or "") + "\0" + ((self.chains.get(fqdn) or {}).get("pem") or ""))
 
     def served(self, fqdn):
         return (self.chains.get(fqdn) or {}).get("sha") if fqdn in self.blocks else None
@@ -759,7 +765,9 @@ class FakeRemote:
                "cert_present": chain is not None, "key_present": fqdn in self.keys,
                "cert_not_after": chain and chain["not_after"], "cert_sha256": chain and chain["sha"],
                "cert_names": [fqdn] if chain else [], "key_matches": True if chain else None,
-               "activation": self.activation.get(fqdn)}
+               "activation": self.activation.get(fqdn),
+               "generation": self.generation(fqdn) if self.activation.get(fqdn) == "loaded"
+               else None}
         return row
 
     def preflight(self, entry, declared, own_file):
@@ -1250,6 +1258,80 @@ class ListRenewRemoveTests(ServiceTestCase):
         result = service.remove(self.ctx, self.deps, self.name)
         self.assertEqual((result.ok, result.code), (False, m.BUSY))
         self.assertIn(FQDN, self.remote.blocks)
+
+    def test_renew_does_not_skip_a_name_that_failed_verification(self):
+        """Re-review N1: NOT_DUE needs a verified activation, not just a loaded one."""
+        self.public = verify.ProbeResult("timeout")
+        self.assertEqual(self.add().code, m.PUBLIC_PROBE_INCONCLUSIVE)
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertEqual(result.results[0].code, m.PUBLIC_PROBE_INCONCLUSIVE)
+        self.assertEqual(len(self.issued), 1, "a current certificate is not reissued")
+        self.public = verify.ProbeResult("refused")
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertNotEqual(result.results[0].steps[0].code, m.NOT_DUE)
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertEqual(result.results[0].steps[0].code, m.NOT_DUE)
+
+    def test_renew_verifies_after_a_crash_between_commit_and_verify(self):
+        calls = {"n": 0}
+
+        def crash(address, fqdn, *, send_request):
+            calls["n"] += 1
+            raise KeyboardInterrupt("simulated crash")
+        self.deps.probe = crash
+        with self.assertRaises(KeyboardInterrupt):
+            self.add()
+        self.assertEqual(self.store.load()[FQDN].steps["verify"], "pending")
+        self.deps.probe = self._probe
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertIn("verify_public", [step.step for step in result.results[0].steps])
+        self.assertEqual(self.store.load()[FQDN].state, "published")
+
+    def test_renew_does_not_trust_a_stale_activation(self):
+        self.add()
+        self.remote.activation[FQDN] = "stale"
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertNotEqual(result.results[0].steps[0].code, m.NOT_DUE)
+
+    def test_remove_holds_the_lease_through_the_dns_delete(self):
+        """Re-review N2: no other controller can publish between the remote
+        removal and the DNS delete."""
+        self.add()
+        seen = {}
+        dns = self.deps.dns
+
+        def checking(cfg, request):
+            if request["op"] == "delete":
+                other = self.remote.call(None, "reserve", {"fqdn": FQDN, "token": "f" * 32,
+                                                           "seconds": 600})
+                seen["other"] = other
+            return dns(cfg, request)
+        self.deps.dns = checking
+        result = service.remove(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertEqual(seen["other"]["code"], "busy")
+        self.assertEqual(self.remote.leases, {}, "released after the DNS step")
+
+    def test_policy_is_decided_from_the_remote_as_it_is_under_the_lease(self):
+        """Re-review N6: a replacement made by another controller just before
+        this run took the lease is not silently undone."""
+        self.add()
+        call = self.remote.call
+        theirs = render.render_block(self.name, m.Upstream("127.0.0.1", 9000), TAILNET_IP,
+                                     http2_directive=True)
+
+        def racing(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks[FQDN] = theirs
+            return call(entry, action, payload)
+        self.deps.remote_call = racing
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
+        self.assertEqual(self.remote.blocks[FQDN], theirs)
+        self.assertEqual(self.remote.leases, {})
 
 
 class CliTests(unittest.TestCase):

@@ -613,36 +613,36 @@ def list_names(ctx: Context, deps: Deps) -> ListResult:
     return ListResult(names)
 
 
-def _renew_one(ctx: Context, deps: Deps, name: TailnetName, row: RemoteInventoryEntry | None,
-               locks: tuple[str, ...], store: StateStore, lego: str, force: bool) -> Result:
+def _renew_one(ctx: Context, deps: Deps, name: TailnetName, store: StateStore, lego: str,
+               force: bool) -> Result:
+    """Renew one name. Every decision, including "not found" and "not due",
+    is made from the remote as it is under the name's lease."""
     run = _Run("renew", name.fqdn)
     try:
-        if row is None or not row.block_present:
-            run.stop("certificate", NOT_FOUND,
-                     "no published block for this name on the remote; use add", "refused")
-        _ownership(run, row)
         record = run.call("certificate", store.get, name.fqdn)
         run.call("certificate", _zone_check, ctx, name, record)
-        # Renew skips only a current certificate whose exact loaded bytes are
-        # proven by the remote AND passed both probes on this controller.
-        current = not force and _cert_current(row, name.fqdn, deps.now())
-        if (current and row.activation == "loaded" and row.generation and record is not None
-                and record.state == "published" and record.verified_generation == row.generation):
-            run.skipped("certificate", f"valid until {row.cert_not_after}", NOT_DUE)
-            return run.result
-        _gate(ctx, deps, run, locks)
         token = record.lease_token if record and record.lease_token else deps.new_token()
-        rec = _Recorder(store, replace(record or TailnetNameRecord(
-            name.fqdn, name.zone, row.upstream or "127.0.0.1:1", ctx.target.tailnet_ip,
-            state="published"), lease_token=token), deps.now)
-        rec.save()
-        jobs = _jobs(run, deps, ctx)
         with _lease(run, deps, ctx, name.fqdn, token):
-            row = _fresh(run, ctx, deps, name.fqdn, "certificate")
+            info = run.call("certificate", _inspect, ctx, deps, name.fqdn)
+            row = info.rows.get(name.fqdn)
             if row is None or not row.block_present:
                 run.stop("certificate", NOT_FOUND,
                          "no published block for this name on the remote; use add", "refused")
+            _ownership(run, row, "certificate")
+            # Skip only a current certificate whose exact loaded bytes are
+            # proven by the remote AND passed both probes on this controller.
             current = not force and _cert_current(row, name.fqdn, deps.now())
+            if (current and row.activation == "loaded" and row.generation
+                    and record is not None and record.state == "published"
+                    and record.verified_generation == row.generation):
+                run.skipped("certificate", f"valid until {row.cert_not_after}", NOT_DUE)
+                return run.result
+            _gate(ctx, deps, run, info.locks)
+            rec = _Recorder(store, replace(record or TailnetNameRecord(
+                name.fqdn, name.zone, row.upstream or "127.0.0.1:1", ctx.target.tailnet_ip,
+                state="published"), lease_token=token), deps.now)
+            rec.save()
+            jobs = _jobs(run, deps, ctx)
             if current:
                 # The certificate is fine but its activation or verification
                 # is not proven: reconcile and verify without issuing.
@@ -687,10 +687,10 @@ def renew(ctx: Context, deps: Deps, name: TailnetName | None, *, all_names: bool
                             "certificate", "refused", exc.code, exc.detail)],
                             exc.code, exc.detail))
                 return RenewResult(skipped + [
-                    _renew_one(ctx, deps, item, row, info.locks, store, lego, force)
-                    for item, row in targets])
-            return RenewResult([_renew_one(ctx, deps, item, row, info.locks, store, lego, force)
-                                for item, row in targets])
+                    _renew_one(ctx, deps, item, store, lego, force)
+                    for item, _row in targets])
+            return RenewResult([_renew_one(ctx, deps, item, store, lego, force)
+                                for item, _row in targets])
     except TailnetNameError as exc:
         status = "refused" if exc.code in _REFUSALS else "failed"
         failed = Result("renew", fqdn, [StepOutcome("certificate", status, exc.code, exc.detail)],

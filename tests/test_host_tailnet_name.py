@@ -1392,6 +1392,33 @@ class ListRenewRemoveTests(ServiceTestCase):
         self.assertNotIn("no longer served", result.error)
 
 
+    def test_renew_decides_not_due_from_the_remote_under_the_lease(self):
+        """Re-review 3 NEW-2: a change made just before the lease is seen."""
+        self.add()
+        call = self.remote.call
+        theirs = render.render_block(self.name, m.Upstream("127.0.0.1", 9000), TAILNET_IP,
+                                     http2_directive=True)
+
+        def replaced(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks[FQDN] = theirs
+                self.remote.activation[FQDN] = "written"
+            return call(entry, action, payload)
+        self.deps.remote_call = replaced
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertNotEqual(result.results[0].steps[0].code, m.NOT_DUE)
+        self.assertEqual(self.remote.activation[FQDN], "loaded")
+
+        def removed(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks.pop(FQDN, None)
+            return call(entry, action, payload)
+        self.deps.remote_call = removed
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertEqual(result.results[0].code, m.NOT_FOUND)
+        self.assertEqual(self.remote.leases, {})
+
+
 class CliTests(unittest.TestCase):
     def _main(self, *argv: str) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as home:

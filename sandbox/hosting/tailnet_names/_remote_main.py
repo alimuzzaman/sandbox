@@ -593,12 +593,54 @@ def _nginx_test(runner):
     return rc == 0, out + err
 
 
-def _reload(runner):
+def _workers(runner):
+    """(master pid, frozenset of its child pids), or None when unknown."""
+    rc, out, _ = runner(["systemctl", "show", "-p", "MainPID", "--value", "nginx"])
+    master = _text(out).strip()
+    if rc != 0 or not master.isdigit() or master == "0":
+        return None
+    rc, out, _ = runner(["ps", "-o", "pid=", "--ppid", master])
+    if rc not in (0, 1):  # ps exits 1 when the master has no children
+        return None
+    return master, frozenset(pid for pid in _text(out).split() if pid.isdigit())
+
+
+def _reload(runner, paths, *, sleep=time.sleep):
+    """Reload nginx and wait for proof that the master ACCEPTED the new
+    configuration: on success nginx starts a new set of worker processes;
+    when it rejects a reload (a socket it cannot bind, for example) it keeps
+    the old workers and the old configuration, even though `systemctl
+    reload` itself succeeded. No new workers within the wait is a failure.
+    """
+    before = _workers(runner)
+    if before is None:
+        return False, b"the nginx master process could not be found"
     rc, out, err = runner(["systemctl", "reload", "nginx"])
     if rc != 0:
         return False, out + err
-    rc, out, err = runner(["systemctl", "is-active", "--quiet", "nginx"])
-    return rc == 0, out + err
+    deadline = time.monotonic() + paths.get("reload_wait", 10.0)
+    while True:
+        now = _workers(runner)
+        if now is not None and now[1] and (now[0] != before[0] or now[1] - before[1]):
+            return True, b""
+        if time.monotonic() >= deadline:
+            return False, (b"nginx kept its previous configuration: no new worker processes "
+                           b"started after the reload")
+        sleep(0.2)
+
+
+def _apply(runner, paths, fence):
+    """The host gate, nginx -t, the gate again, then a proven reload.
+
+    Returns (ok, failed_stage, output); a gate refusal propagates.
+    """
+    fence()
+    ok, out = _nginx_test(runner)
+    if not ok:
+        return False, "test", out
+    fence()
+    ok, out = _reload(runner, paths)
+    return ok, None if ok else "reload", out
 
 
 def _journal(name_fd, paths):
@@ -645,22 +687,17 @@ def _settle(conf_fd, name_fd, fqdn, paths, runner, fence):
     if not journal or journal.get("state") == "loaded":
         return None
     state = journal.get("state")
-    ok, out = _nginx_test(runner)
-    if ok and state in ("written", "tested", "removing", "restored"):
-        fence()
-        ok, out = _reload(runner)
-        if ok:
-            block, _managed = _block(conf_fd, fqdn, paths)
-            chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
-            _set_journal(name_fd, {"state": "loaded", "generation": _generation(block, chain)})
-            return "reloaded"
+    ok, _stage, out = _apply(runner, paths, fence)
+    if ok:
+        block, _managed = _block(conf_fd, fqdn, paths)
+        chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
+        _set_journal(name_fd, {"state": "loaded", "generation": _generation(block, chain)})
+        return "reloaded"
     if state in ("written", "tested"):
         _restore(conf_fd, name_fd, fqdn, journal, paths)
         _set_journal(name_fd, dict(journal, state="restored"))
-        ok, out = _nginx_test(runner)
+        ok, _stage, out = _apply(runner, paths, fence)
         if ok:
-            fence()
-        if ok and _reload(runner)[0]:
             block, _managed = _block(conf_fd, fqdn, paths)
             chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
             _set_journal(name_fd, {"state": "loaded", "generation": _generation(block, chain)})
@@ -921,13 +958,12 @@ def commit(payload, paths, runner, lock_wait):
             except Refusal:
                 undo()
                 raise
-            ok, out = _reload(runner)
+            ok, out = _reload(runner, paths)
             if not ok:
                 _restore(conf_fd, name_fd, fqdn, record, paths)
                 _set_journal(name_fd, dict(record, state="restored"))
                 try:
-                    fence()
-                    back = _nginx_test(runner)[0] and _reload(runner)[0]
+                    back = _apply(runner, paths, fence)[0]
                 except Refusal:
                     back = False
                 if back:
@@ -994,23 +1030,17 @@ def remove(payload, paths, runner, lock_wait):
                     _unlink(conf_fd, FILE_PREFIX + fqdn + ".conf")
                     failure = None
                     try:
-                        fence()
-                        ok, out = _nginx_test(runner)
+                        ok, stage, out = _apply(runner, paths, fence)
                         if not ok:
-                            failure = Refusal("nginx_rejected", _tail(out))
-                        else:
-                            fence()
-                            ok, out = _reload(runner)
-                            if not ok:
-                                failure = Refusal("reload_failed", _tail(out))
+                            failure = Refusal("nginx_rejected" if stage == "test"
+                                              else "reload_failed", _tail(out))
                     except Refusal as exc:
                         failure = exc
                     if failure is not None:
                         if content is not None:
                             _write(conf_fd, FILE_PREFIX + fqdn + ".conf", content, 0o600)
                             try:
-                                fence()
-                                back = _nginx_test(runner)[0] and _reload(runner)[0]
+                                back = _apply(runner, paths, fence)[0]
                             except Refusal:
                                 back = False
                             _set_journal(name_fd, {"state": "loaded",

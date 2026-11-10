@@ -1721,7 +1721,11 @@ published name changes nothing.
    recovery reloads),
    writes an activation journal (`written`, `tested`, `loaded`), installs
    both files through exclusive temp files and renames, runs `nginx -t` and
-   reloads. A failed test or reload restores the previous block and chain.
+   reloads. A reload counts only when nginx proves it took the new
+   configuration: the master (systemd's `MainPID` for `nginx`) must start a
+   new set of worker processes within a few seconds. `systemctl reload`
+   succeeding is not enough, because nginx keeps its old configuration when
+   it rejects a reload (a socket it cannot bind, for example). A failed test or reload restores the previous block and chain.
    A rerun that finds an unfinished journal settles it first (test and
    reload, or restore); a file being on disk never counts as loaded.
    The block, `/etc/nginx/conf.d/sandbox-tailnet-<fqdn>.conf` (root, 0600),
@@ -1748,7 +1752,9 @@ The upstream must be `localhost`, a loopback, private or tailnet IPv4 and a
 port. Hostnames are refused, because nginx resolves them once at start-up.
 Changing the upstream of a published name needs `--replace-upstream`.
 
-`renew FQDN` or `renew --all` reissues certificates that expire within 30 days
+`renew FQDN` or `renew --all` takes each name's lease first and decides
+everything, including "not found" and "not due", from the remote as it is
+under the lease. It reissues certificates that expire within 30 days
 (`--force` reissues anyway) and activates them the same way, then verifies
 again. It skips a name (`tailnet_name_not_due`) only when the remote proves
 the exact bytes on disk are loaded and those same bytes passed both probes on

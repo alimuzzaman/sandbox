@@ -52,6 +52,9 @@ class FakeHost:
     def __init__(self):
         self.nginx_ok = True
         self.reload_ok = True
+        self.reload_accepted = True  # False: reload acknowledged, old config kept
+        self.workers = {"101", "102"}
+        self.generation = 0
         self.jobs = []
         self.jobs_seq = None  # per-query answers, to admit a job mid-commit
         self.jobs_rc = 0
@@ -69,9 +72,17 @@ class FakeHost:
         if tool == "nginx":
             return (0, b"ok", b"") if self.nginx_ok else (1, b"", b"emerg: bad cert")
         if tool == "systemctl":
-            if argv[1] == "reload" and not self.reload_ok:
-                return 1, b"", b"failed"
+            if argv[1] == "show":
+                return 0, b"100\n", b""
+            if argv[1] == "reload":
+                if not self.reload_ok:
+                    return 1, b"", b"failed"
+                if self.reload_accepted:
+                    self.generation += 1
+                    self.workers = {f"{self.generation}01", f"{self.generation}02"}
             return 0, b"", b""
+        if tool == "ps":
+            return 0, ("\n".join(sorted(self.workers)) + "\n").encode(), b""
         if tool == "ip":
             return 0, self.addresses.encode(), b""
         return openssl(argv, input=input)
@@ -82,16 +93,19 @@ class FakeHost:
 
 class Base(unittest.TestCase):
     def setUp(self):
-        tmp_parent = "/tmp"
-        st = os.stat(tmp_parent)
+        # Canonical path: the program refuses every symlinked component, and
+        # /tmp itself is a symlink on some systems.
+        tmp_parent = os.path.realpath("/tmp")
+        st = os.lstat(tmp_parent)
         if st.st_uid != 0 or not st.st_mode & stat.S_ISVTX:
             self.skipTest("needs a root-owned sticky /tmp")
-        self.base = Path(tempfile.mkdtemp(dir=tmp_parent))
+        self.base = Path(os.path.realpath(tempfile.mkdtemp(dir=tmp_parent)))
         os.chmod(self.base, 0o755)
         uid = os.getuid()
         self.paths = {"conf_dir": str(self.base / "conf.d"), "cert_root": str(self.base / "certs"),
                       "locks": [str(self.base / f"lock{i}") for i in range(3)],
-                      "edge_lock": str(self.base / "lock1"), "trusted_uids": [0, uid]}
+                      "edge_lock": str(self.base / "lock1"), "trusted_uids": [0, uid],
+                      "reload_wait": 0.5}
         os.mkdir(self.paths["conf_dir"], 0o755)
         os.chmod(self.paths["conf_dir"], 0o755)
         self.home = self.base / "home"
@@ -771,6 +785,68 @@ class RoundThreeTests(Base):
         self.call("release", fqdn=FQDN, token=TOKEN)
         self.assertEqual(self.call("extend", fqdn=FQDN, token=TOKEN, seconds=600)["code"],
                          "lease_lost", "a released lease is not revived")
+
+
+class RoundFourTests(Base):
+    """Re-review 3: proven reload acceptance, gates on recovery reloads."""
+
+    def journal(self):
+        return json.loads((self.name_dir / "activation.json").read_text())
+
+    def test_an_acknowledged_but_rejected_reload_is_a_failure(self):
+        chain = self.publish()
+        self.host.reload_accepted = False
+        result = self.commit(block=block(port=9000), chain=chain)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertEqual(self.conf.read_text(), block(), "the previous block is back")
+        self.assertNotEqual(self.journal()["state"], "loaded")
+        self.host.reload_accepted = True
+        result = self.commit(block=block(port=9000), chain=chain)
+        self.assertEqual((result["ok"], result["changed"]), (True, True))
+        self.assertEqual(self.journal()["state"], "loaded")
+
+    def test_remove_never_cleans_up_after_an_unaccepted_reload(self):
+        self.publish()
+        self.host.reload_accepted = False
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertTrue(self.name_dir.exists())
+        self.assertEqual(self.conf.read_text(), block())
+
+    def test_an_unknown_master_is_not_a_proven_reload(self):
+        calls = []
+
+        def runner(argv, *, timeout=30, input=None):
+            calls.append(argv)
+            return 0, b"0\n", b""
+        ok, _out = rp._reload(runner, self.paths)
+        self.assertFalse(ok)
+        self.assertFalse([c for c in calls if c[:2] == ["systemctl", "reload"]])
+
+    def test_a_rollback_reload_rechecks_the_gate(self):
+        chain = self.publish()
+        before = len(self.host.ran("systemctl", "reload", "nginx"))
+        self.host.reload_ok = False
+        # gate, before test, before reload, rollback before test, rollback before reload
+        self.host.jobs_seq = [[], [], [], [], [{"id": "j"}]]
+        result = self.commit(block=block(port=9000), chain=chain)
+        self.assertEqual(result["code"], "reload_failed")
+        self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), before + 1,
+                         "no rollback reload while a job is active")
+        self.assertEqual(self.journal()["state"], "restored")
+
+    def test_settling_a_crash_rechecks_the_gate_before_its_test(self):
+        chain = self.publish()
+        os.chmod(self.name_dir / "activation.json", 0o600)
+        (self.name_dir / "activation.json").write_text(json.dumps(
+            {"state": "written", "generation": "0" * 64, "had_block": True, "had_chain": True,
+             "chain_changed": False}))
+        tests = len(self.host.ran("nginx", "-t"))
+        self.host.jobs_seq = [[], [{"id": "j"}]]
+        result = self.commit(block=block(), chain=chain)
+        self.assertEqual((result["ok"], result["code"]), (False, "busy"))
+        self.assertEqual(len(self.host.ran("nginx", "-t")), tests)
+        self.assertEqual(self.journal()["state"], "written")
 
 
 if __name__ == "__main__":

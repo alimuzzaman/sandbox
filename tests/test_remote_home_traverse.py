@@ -137,5 +137,58 @@ class ImageStageTraverseTests(unittest.TestCase):
                                 for p in guard.read_opens))
 
 
+
+def load_stage_helper():
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "scripts" / "provision_image_stage_helper.py"
+    spec = importlib.util.spec_from_file_location("provision_image_stage_helper_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class DescriptorWalkTraverseTests(unittest.TestCase):
+    def tree(self, directory):
+        home = Path(directory).resolve() / "home" / "alim" / "sandbox"
+        home.mkdir(parents=True)
+        for path in (Path(directory).resolve(), home.parent.parent, home.parent):
+            path.chmod(0o711)
+        return home
+
+    def test_stage_helper_creates_owner_directories_past_traverse_only_ancestors(self):
+        helper = load_stage_helper()
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
+            home = self.tree(directory)
+            target = home / "runtime" / "helpers" / "image-stage"
+            guard = TraverseOnlyAncestors(home)
+            with patch.object(os, "O_PATH", FAKE_O_PATH, create=True), \
+                 patch.object(os, "open", side_effect=guard):
+                helper._ensure_owner_directories(home, target, os.geteuid())
+            self.assertTrue(target.is_dir())
+            self.assertEqual(oct(target.stat().st_mode & 0o777), oct(0o700))
+
+    def test_private_inputs_walk_reaches_a_directory_past_traverse_only_ancestors(self):
+        from sandbox.hosting.images.activation import private_inputs
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
+            home = self.tree(directory)
+            guard = TraverseOnlyAncestors(home)
+            with patch.object(os, "O_PATH", FAKE_O_PATH, create=True), \
+                 patch.object(os, "open", side_effect=guard):
+                descriptor = private_inputs._directory_fd(home)
+            try:
+                self.assertEqual(os.fstat(descriptor).st_ino, home.stat().st_ino)
+            finally:
+                os.close(descriptor)
+
+    def test_a_refusal_without_o_path_still_raises(self):
+        helper = load_stage_helper()
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
+            home = self.tree(directory)
+            guard = TraverseOnlyAncestors(home)
+            with patch.object(os, "O_PATH", None, create=True), \
+                 patch.object(os, "open", side_effect=guard), \
+                 self.assertRaises(PermissionError):
+                helper._open_walk_dir(str(home.parent), None)
+
 if __name__ == "__main__":
     unittest.main()

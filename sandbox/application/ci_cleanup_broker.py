@@ -170,14 +170,30 @@ def remove_workspace_metadata(namespace: str, label: str,
     raise CiCleanupBrokerError("cleanup_journal_required")
 
 
+def _open_walk_dir(name, dir_fd: int, extra: int = 0) -> int:
+    """Open one directory on a descriptor walk.
+
+    A host may make an ancestor traverse-only (for example /home at 0711),
+    which refuses O_RDONLY. Such a directory is opened O_PATH instead: enough
+    to fstat it and to open its children, and nothing more.
+    """
+    flags = os.O_DIRECTORY | os.O_NOFOLLOW | extra
+    try:
+        return os.open(name, os.O_RDONLY | flags, dir_fd=dir_fd)
+    except PermissionError:
+        o_path = getattr(os, "O_PATH", None)
+        if o_path is None:
+            raise
+        return os.open(name, o_path | flags, dir_fd=dir_fd)
+
+
 def _open_absolute(path: Path) -> int:
     if not path.is_absolute():
         raise CiCleanupBrokerError("cleanup_root_invalid")
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for part in path.parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW |
-                            os.O_CLOEXEC, dir_fd=fd)
+            child = _open_walk_dir(part, fd, os.O_CLOEXEC)
             os.close(fd)
             fd = child
         return fd

@@ -83,6 +83,23 @@ def _read_source(path: Path, owner_uid: int) -> bytes:
         os.close(fd)
 
 
+def _open_walk_dir(name, dir_fd: int, extra: int = 0) -> int:
+    """Open one directory on a descriptor walk.
+
+    A host may make an ancestor traverse-only (for example /home at 0711),
+    which refuses O_RDONLY. Such a directory is opened O_PATH instead: enough
+    to fstat it and to open its children, and nothing more.
+    """
+    flags = os.O_DIRECTORY | os.O_NOFOLLOW | extra
+    try:
+        return os.open(name, os.O_RDONLY | flags, dir_fd=dir_fd)
+    except PermissionError:
+        o_path = getattr(os, "O_PATH", None)
+        if o_path is None:
+            raise
+        return os.open(name, o_path | flags, dir_fd=dir_fd)
+
+
 def _ensure_owner_directories(home: Path, target: Path, owner_uid: int) -> None:
     if not home.is_absolute() or target.parent != home / "runtime" / "helpers":
         raise RuntimeError("invalid staging helper directory identity")
@@ -95,8 +112,7 @@ def _ensure_owner_directories(home: Path, target: Path, owner_uid: int) -> None:
             home_or_runtime = index in {len(home_parts) - 1, len(home_parts)}
             protected = index >= protected_index
             try:
-                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                dir_fd=fd)
+                child = _open_walk_dir(part, fd)
             except FileNotFoundError:
                 if not (home_or_runtime or protected):
                     raise RuntimeError("staging helper parent directory is missing") from None

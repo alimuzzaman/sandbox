@@ -301,6 +301,10 @@ run `host apply`).
 - **Link.** `https://<hostname><path>#sandbox_autologin=<token>`, a 256-bit token in the
   fragment. The page at `path` clears the fragment and posts the token by itself.
   Previews that do not run scripts never use the link.
+  `path` answers that page only while at least one link is live, and 404 otherwise. So
+  a prober who knows `path` can tell that a share is open, but never which link or its
+  token. Serving the page at all times would instead show that a gate exists at all
+  times.
 - **Records.** Links, spent-use markers and sessions are files under
   `/run/sandbox-login/sites/<entry>/` on the service tmpfs, named by SHA-256 hash. The
   gate never stores a token or a session secret. They survive a process restart and

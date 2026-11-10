@@ -1175,5 +1175,29 @@ class RoundSixTests(Base):
         self.assertNotIn(old[0], kept)
         self.assertIn(old[-1], kept)
 
+
+class RoundSevenTests(Base):
+    def test_created_directories_are_durable_in_their_parents(self):
+        """Re-review 10 NEW-1: the certificate root and the leases directory
+        are fsynced into their parents before reserve returns."""
+        events = []
+        real_mkdir, real_fsync = os.mkdir, os.fsync
+
+        def mkdir(name, mode=0o777, *, dir_fd=None):
+            real_mkdir(name, mode, dir_fd=dir_fd)
+            events.append(("mkdir", os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_ino))
+
+        def fsync(fd):
+            events.append(("fsync", os.fstat(fd).st_ino))
+            return real_fsync(fd)
+        with mock.patch.object(rp.os, "mkdir", mkdir), mock.patch.object(rp.os, "fsync", fsync):
+            self.assertTrue(self.reserve()["ok"])
+        root = Path(self.paths["cert_root"])
+        for created, parent in ((root, self.base), (root / rp.LEASES, root)):
+            with self.subTest(created=created.name):
+                made = events.index(("mkdir", created.stat().st_ino))
+                self.assertIn(("fsync", created.stat().st_ino), events[made:])
+                self.assertIn(("fsync", parent.stat().st_ino), events[made:])
+
 if __name__ == "__main__":
     unittest.main()

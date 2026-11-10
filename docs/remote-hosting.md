@@ -1736,7 +1736,9 @@ published name changes nothing.
    never counts as proof of an unload. A name directory that never reached
    an activation (no certificate, history, journal or backup) needs no
    proof, since nginx cannot have loaded a block without its certificate;
-   such a partial add can always be removed. Every block unlink is fsynced before
+   such a partial add can always be removed. Every directory the remote program
+   creates is fsynced, with its parent, before anything is written below it.
+   Every block unlink is fsynced before
    anything that depends on it, such as deleting the certificates. `systemctl reload`
    succeeding is not proof, because nginx keeps its old configuration when
    it rejects a reload (a socket it cannot bind, for example), and a worker

@@ -149,6 +149,24 @@ def _trusted(st, paths, *, allow_sticky=False):
     return True
 
 
+def _make_dir(parent_fd, name, mode):
+    """Create ``name`` under ``parent_fd`` and make the new entry durable.
+
+    The new directory and its parent are both fsynced before the fd is
+    returned, so nothing written below it can outlive the entry on power loss.
+    """
+    os.mkdir(name, mode, dir_fd=parent_fd)
+    fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    try:
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+        os.fsync(parent_fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _open_dir(path, paths, *, create_mode=None, sticky_last=False):
     """Open an absolute directory through trusted, non-symlink components.
 
@@ -168,9 +186,7 @@ def _open_dir(path, paths, *, create_mode=None, sticky_last=False):
             except FileNotFoundError:
                 if not (last and create_mode is not None):
                     raise Refusal("missing", path) from None
-                os.mkdir(part, create_mode, dir_fd=fd)
-                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
-                os.fchmod(child, create_mode)
+                child = _make_dir(fd, part, create_mode)
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise Refusal("path_unsafe", f"{path} is not a plain directory") from None
@@ -193,9 +209,7 @@ def _child_dir(parent_fd, name, paths, *, create_mode=None):
     except FileNotFoundError:
         if create_mode is None:
             return None
-        os.mkdir(name, create_mode, dir_fd=parent_fd)
-        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
-        os.fchmod(fd, create_mode)
+        fd = _make_dir(parent_fd, name, create_mode)
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             raise Refusal("path_unsafe", f"{name} is not a plain directory") from None

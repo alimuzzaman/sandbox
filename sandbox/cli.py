@@ -1509,6 +1509,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    # Spec 072: before any command effect, fast-forward this controller to a
+    # newer published revision a remote reported, then re-run once.
+    from sandbox.controller_update.hook import maybe_auto_update
+    maybe_auto_update(args, sys.argv)
+
     # Feedback storage is independent of machine config and must remain usable
     # when sandbox.local.yml itself needs recovery.
     if args.cmd == "feedback":

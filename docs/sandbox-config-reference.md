@@ -6,6 +6,14 @@
 listing/verification. `RECOVERY_PASSPHRASE` is inherited only for protected capture operations;
 never write it to config or pass it as a CLI/MCP argument.
 
+## Controller auto-update (machine config)
+
+`defaults.controller_auto_update` (YAML bool, default `true`) in
+`$SANDBOX_HOME/sandbox.local.yml` or `sandbox.yml` turns controller
+auto-update off for the machine; `SANDBOX_AUTO_UPDATE=0|1` overrides it per
+process. This is machine config, not a `sandbox.config.*` project key. See
+[controller-auto-update.md](controller-auto-update.md).
+
 A plugin repo becomes a **sandbox project** by carrying a `sandbox.config.json`
 (or `.yml`) at its root. This is the per-project source of truth in the
 MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /

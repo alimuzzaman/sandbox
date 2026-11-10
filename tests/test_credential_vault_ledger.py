@@ -78,10 +78,12 @@ class TestProofRunLedger(LedgerTestCase):
         self.assertEqual(again["job"]["job_id"], "job-fixture-0001")
 
     def test_empty_or_malformed_acceptance_is_acceptance_unknown(self):
-        for acceptance in ({}, {"job_id": ""}, {"job_id": None}, "", None,
-                           {"job_id": "x"}, {"accepted": True}):
+        for index, acceptance in enumerate(({}, {"job_id": ""}, {"job_id": None}, "", None,
+                                            {"job_id": "x"}, {"accepted": True})):
             with self.subTest(acceptance=acceptance):
-                request_id = f"cv-proof-{abs(hash(repr(acceptance))) % 10000:04d}"
+                # Distinct per subtest; hash() of a str is randomized per process
+                # and could give two subtests the same id.
+                request_id = f"cv-proof-{1000 + index:04d}"
                 self.open_run(request_id=request_id)
                 record = self.ledger.record_acceptance(request_id, acceptance)
                 self.assertEqual(record["job"]["state"], "unknown")

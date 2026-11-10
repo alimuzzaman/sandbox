@@ -82,10 +82,10 @@ class TestRemoteHostingImages(unittest.TestCase):
                 {"schema_version": 1, "ok": False, "phase": "inode", "code": "inode_key"})
 
     def test_inode_exec_anchors_at_mapped_top_level_when_root_open_is_denied(self):
-        from types import SimpleNamespace
-        from unittest.mock import patch
         from sandbox.transports.remote_hosting_images import _INODE_EXEC
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent.parent) as directory:
+        # Outside the checkout for the same reason as the test above: remote
+        # deployment workspaces can have group-writable ancestors.
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             home = Path(directory).resolve() / "home" / "alim" / "sandbox"
             revision = "b" * 40
             helper_bytes = b"print('helper')\n"
@@ -93,6 +93,8 @@ class TestRemoteHostingImages(unittest.TestCase):
             root = (home / "runtime" / "helpers" / "image-stage"
                     / f"sha256-{digest}-revision-{revision}")
             root.mkdir(parents=True)
+            for path in (Path(directory) / "home", home.parent):
+                path.chmod(0o755)
             for path in (home, home / "runtime", home / "runtime" / "helpers",
                          home / "runtime" / "helpers" / "image-stage", root):
                 path.chmod(0o700)
@@ -104,37 +106,48 @@ class TestRemoteHostingImages(unittest.TestCase):
                         "capability_revision": "systemd-cgroup-v2-batch-stage-v2"}
             manifest_path = root / "manifest-v2.json"
             manifest_path.write_text(json.dumps(manifest)); manifest_path.chmod(0o600)
-            real_open, real_fstat = os.open, os.fstat
-            top_fd = None; opened = []
-            def guarded_open(path, flags, *args, **kwargs):
-                nonlocal top_fd
-                opened.append(path)
-                if path == "/":
-                    raise PermissionError("protected root")
-                descriptor = real_open(path, flags, *args, **kwargs)
-                if isinstance(path, str) and path == "/" + root.parts[1]:
-                    top_fd = descriptor
-                return descriptor
-            def mapped_fstat(descriptor):
-                nonlocal top_fd
-                value = real_fstat(descriptor)
-                if descriptor != top_fd:
-                    return value
-                top_fd = None
-                return SimpleNamespace(st_mode=value.st_mode, st_uid=65534)
-            class Executed(Exception):
-                pass
-            old_argv = sys.argv
-            sys.argv = ["inode-exec", str(root), str(home), json.dumps(manifest),
-                        manifest["entry"], "manifest-v2.json"]
-            try:
-                with patch.object(os, "open", side_effect=guarded_open), \
-                     patch.object(os, "fstat", side_effect=mapped_fstat), \
-                     patch.object(os, "execv", side_effect=Executed), \
-                     self.assertRaises(Executed):
-                    exec(compile(_INODE_EXEC, "<inode-exec>", "exec"), {})
-            finally:
-                sys.argv = old_argv
+            # _INODE_EXEC ends with os._exit, so it runs in a child process,
+            # never in the test runner. The child denies opening "/", reports
+            # the top-level directory as owned by a mapped uid, and replaces
+            # execv with a JSON report of what was opened.
+            harness = (
+                "import json, os, sys\n"
+                "from types import SimpleNamespace\n"
+                f"SOURCE = {_INODE_EXEC!r}\n"
+                f"TOP = {'/' + root.parts[1]!r}\n"
+                "real_open, real_fstat = os.open, os.fstat\n"
+                "state = {'top_fd': None}\n"
+                "opened = []\n"
+                "def guarded_open(path, flags, *args, **kwargs):\n"
+                "    opened.append(path)\n"
+                "    if path == '/':\n"
+                "        raise PermissionError('protected root')\n"
+                "    descriptor = real_open(path, flags, *args, **kwargs)\n"
+                "    if path == TOP:\n"
+                "        state['top_fd'] = descriptor\n"
+                "    return descriptor\n"
+                "def mapped_fstat(descriptor):\n"
+                "    value = real_fstat(descriptor)\n"
+                "    if descriptor != state['top_fd']:\n"
+                "        return value\n"
+                "    state['top_fd'] = None\n"
+                "    return SimpleNamespace(st_mode=value.st_mode, st_uid=65534)\n"
+                "def reported_execv(*_args):\n"
+                "    os.write(1, ('EXECUTED ' + json.dumps(opened) + '\\n').encode())\n"
+                "    os._exit(0)\n"
+                "os.open, os.fstat, os.execv = guarded_open, mapped_fstat, reported_execv\n"
+                "sys.argv = ['inode-exec'] + sys.argv[1:]\n"
+                "exec(compile(SOURCE, '<inode-exec>', 'exec'), {'__name__': '__main__'})\n"
+            )
+            result = run_test_process(
+                (sys.executable, "-c", harness, str(root), str(home), json.dumps(manifest),
+                 manifest["entry"], "manifest-v2.json"),
+                capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertEqual(len(lines), 1, result.stdout)
+            self.assertTrue(lines[0].startswith("EXECUTED "), result.stdout)
+            opened = json.loads(lines[0].removeprefix("EXECUTED "))
             self.assertNotIn("/", opened)
             self.assertEqual(opened[0], "/" + root.parts[1])
 

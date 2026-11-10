@@ -53,6 +53,7 @@ class FakeHost:
         self.nginx_ok = True
         self.reload_ok = True
         self.jobs = []
+        self.jobs_seq = None  # per-query answers, to admit a job mid-commit
         self.jobs_rc = 0
         self.addresses = f"2: tailscale0    inet {IP}/32 scope global tailscale0\n"
         self.calls = []
@@ -62,7 +63,8 @@ class FakeHost:
         if "job-list" in argv:
             if self.jobs_rc:
                 return 1, b"", b"failed"
-            return 0, (json.dumps({"ok": True, "jobs": self.jobs}) + "\n").encode(), b""
+            jobs = self.jobs_seq.pop(0) if self.jobs_seq else self.jobs
+            return 0, (json.dumps({"ok": True, "jobs": jobs}) + "\n").encode(), b""
         tool = os.path.basename(argv[0])
         if tool == "nginx":
             return (0, b"ok", b"") if self.nginx_ok else (1, b"", b"emerg: bad cert")
@@ -682,6 +684,93 @@ class RemovalAndCrashTests(Base):
         journal = json.loads((self.name_dir / "activation.json").read_text())
         self.assertNotEqual(journal["state"], "loaded")
         self.assertEqual(self.conf.read_text(), block())
+
+
+class RoundThreeTests(Base):
+    """Re-review 2: R1 removal proof, R2 lease extension, R3 gate at the boundary."""
+
+    def crash_after_unlink(self, state="removing"):
+        self.conf.unlink()
+        os.chmod(self.name_dir / "activation.json", 0o600)
+        (self.name_dir / "activation.json").write_text(json.dumps({"state": state}))
+
+    def remove(self, **extra):
+        return self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe, **extra)
+
+    def test_a_block_gone_from_disk_is_not_proof_of_unload(self):
+        self.publish()
+        self.crash_after_unlink()
+        self.host.nginx_ok = False
+        result = self.remove()
+        self.assertEqual((result["ok"], result["code"]), (False, "nginx_rejected"))
+        self.assertEqual(json.loads((self.name_dir / "activation.json").read_text())["state"],
+                         "removing", "the unload stays unproven")
+        self.assertTrue(self.name_dir.exists())
+        reloads = len(self.host.ran("systemctl", "reload", "nginx"))
+        self.host.nginx_ok = True
+        result = self.remove()
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["reloaded"])
+        self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), reloads + 1)
+        self.assertFalse(self.name_dir.exists())
+
+    def test_every_unproven_state_without_a_block_is_reloaded_before_cleanup(self):
+        for state in ("restored", "written", "tested", None):
+            with self.subTest(state=state):
+                self.publish()
+                if state is None:
+                    self.conf.unlink()
+                    (self.name_dir / "activation.json").unlink()
+                else:
+                    self.crash_after_unlink(state)
+                reloads = len(self.host.ran("systemctl", "reload", "nginx"))
+                for keep in (True, False):
+                    result = self.remove(keep_directory=keep)
+                    self.assertTrue(result["ok"], result)
+                self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), reloads + 1,
+                                 "reloaded once to prove the unload, then trusted")
+                self.call("release", fqdn=FQDN, token=TOKEN)
+
+    def test_remove_reports_a_failed_reload_as_such(self):
+        self.publish()
+        self.host.reload_ok = False
+        result = self.remove()
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertEqual(self.conf.read_text(), block())
+
+    def test_a_job_admitted_after_the_first_query_stops_the_commit(self):
+        old = self.publish()
+        before = len(self.host.ran("systemctl", "reload", "nginx"))
+        for answers, tested in (([[], [{"id": "j"}]], False), ([[], [], [{"id": "j"}]], True)):
+            with self.subTest(tested=tested):
+                tests = len(self.host.ran("nginx", "-t"))
+                self.host.jobs_seq = [list(a) for a in answers]
+                result = self.commit(block=block(port=9000), chain=old)
+                self.assertEqual((result["ok"], result["code"]), (False, "busy"))
+                self.assertEqual(self.conf.read_text(), block(), "the previous block is back")
+                self.assertEqual(len(self.host.ran("nginx", "-t")) > tests, tested)
+                self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), before)
+                self.assertEqual(json.loads((self.name_dir / "activation.json").read_text())["state"],
+                                 "loaded")
+
+    def test_a_job_admitted_mid_remove_stops_it_with_the_block_back(self):
+        self.publish()
+        self.host.jobs_seq = [[], [{"id": "j"}]]
+        result = self.remove()
+        self.assertEqual((result["ok"], result["code"]), (False, "busy"))
+        self.assertEqual(self.conf.read_text(), block())
+        self.assertTrue(self.name_dir.exists())
+
+    def test_extend_proves_and_renews_the_lease(self):
+        self.assertEqual(self.call("extend", fqdn=FQDN, token=TOKEN, seconds=600)["code"],
+                         "lease_lost", "no lease, no cert root yet")
+        self.reserve()
+        self.assertTrue(self.call("extend", fqdn=FQDN, token=TOKEN, seconds=600)["ok"])
+        self.assertEqual(self.call("extend", fqdn=FQDN, token=OTHER, seconds=600)["code"],
+                         "lease_lost")
+        self.call("release", fqdn=FQDN, token=TOKEN)
+        self.assertEqual(self.call("extend", fqdn=FQDN, token=TOKEN, seconds=600)["code"],
+                         "lease_lost", "a released lease is not revived")
 
 
 if __name__ == "__main__":

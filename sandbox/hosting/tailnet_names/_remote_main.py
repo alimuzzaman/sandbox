@@ -636,14 +636,18 @@ def _restore(conf_fd, name_fd, fqdn, journal, paths):
         _unlink(name_fd, "fullchain.pem")
 
 
-def _settle(conf_fd, name_fd, fqdn, paths, runner):
-    """Finish an interrupted commit or remove before anything else (FR-019)."""
+def _settle(conf_fd, name_fd, fqdn, paths, runner, fence):
+    """Finish an interrupted commit or remove before anything else (FR-019).
+
+    ``fence`` re-checks the host gate before every reload.
+    """
     journal = _journal(name_fd, paths)
     if not journal or journal.get("state") == "loaded":
         return None
     state = journal.get("state")
     ok, out = _nginx_test(runner)
     if ok and state in ("written", "tested", "removing", "restored"):
+        fence()
         ok, out = _reload(runner)
         if ok:
             block, _managed = _block(conf_fd, fqdn, paths)
@@ -654,6 +658,8 @@ def _settle(conf_fd, name_fd, fqdn, paths, runner):
         _restore(conf_fd, name_fd, fqdn, journal, paths)
         _set_journal(name_fd, dict(journal, state="restored"))
         ok, out = _nginx_test(runner)
+        if ok:
+            fence()
         if ok and _reload(runner)[0]:
             block, _managed = _block(conf_fd, fqdn, paths)
             chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
@@ -765,6 +771,29 @@ def reserve(payload, paths, runner, lock_wait):
         scope.close()
 
 
+def extend(payload, paths, runner, lock_wait):
+    """Prove this run still holds the lease and push its expiry out.
+
+    The controller calls it right before each of its own side effects (DNS,
+    issuance), so a holder whose lease expired and was taken over stops.
+    """
+    fqdn, token = _fqdn(payload.get("fqdn")), _token(payload.get("token"))
+    seconds = payload.get("seconds")
+    if not isinstance(seconds, int) or not 60 <= seconds <= LEASE_SECONDS_MAX:
+        raise Refusal("request_invalid", "invalid lease length")
+    try:
+        scope = _NameScope(paths, fqdn, lock_wait, create=False)
+    except Refusal as exc:
+        if exc.code == "missing":
+            raise Refusal("lease_lost", "no lease exists for this name; rerun") from None
+        raise
+    try:
+        scope.require(token, extend=seconds)
+        return {"ok": True}
+    finally:
+        scope.close()
+
+
 def release(payload, paths, runner, lock_wait):
     fqdn, token = _fqdn(payload.get("fqdn")), _token(payload.get("token"))
     try:
@@ -837,7 +866,9 @@ def commit(payload, paths, runner, lock_wait):
             current_block, managed = _block(conf_fd, fqdn, paths)
             if current_block is not None and not managed:
                 raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
-            settled = _settle(conf_fd, name_fd, fqdn, paths, runner)
+            def fence():
+                _gate(paths, payload, runner, holding_edge=True)
+            settled = _settle(conf_fd, name_fd, fqdn, paths, runner, fence)
             current_block, _managed = _block(conf_fd, fqdn, paths)
             current_chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
             desired_block = block if block is not None else current_block
@@ -869,27 +900,37 @@ def commit(payload, paths, runner, lock_wait):
                 _write(name_fd, "fullchain.pem", desired_chain, 0o644)
             if desired_block != current_block:
                 _write(conf_fd, FILE_PREFIX + fqdn + ".conf", desired_block, 0o600)
-            try:
-                _check_locks(paths, holding_edge=True)
-                ok, out = _nginx_test(runner)
-            except Refusal:
-                _restore(conf_fd, name_fd, fqdn, record, paths)
-                _set_journal(name_fd, journal if journal.get("state") == "loaded"
-                             else dict(record, state="restored"))
-                raise
-            if not ok:
-                _restore(conf_fd, name_fd, fqdn, record, paths)
+            def undo():
                 # Nothing was reloaded, so the previous journal still holds;
                 # an unproven one stays unproven for the next run to settle.
+                _restore(conf_fd, name_fd, fqdn, record, paths)
                 _set_journal(name_fd, journal if journal.get("state") == "loaded"
                              else dict(record, state="restored"))
+            try:
+                fence()  # the gate again, right before the test
+            except Refusal:
+                undo()
+                raise
+            ok, out = _nginx_test(runner)
+            if not ok:
+                undo()
                 raise Refusal("nginx_rejected", _tail(out))
             _set_journal(name_fd, dict(record, state="tested"))
+            try:
+                fence()  # and right before the reload
+            except Refusal:
+                undo()
+                raise
             ok, out = _reload(runner)
             if not ok:
                 _restore(conf_fd, name_fd, fqdn, record, paths)
                 _set_journal(name_fd, dict(record, state="restored"))
-                if _nginx_test(runner)[0] and _reload(runner)[0]:
+                try:
+                    fence()
+                    back = _nginx_test(runner)[0] and _reload(runner)[0]
+                except Refusal:
+                    back = False
+                if back:
                     _set_journal(name_fd, {"state": "loaded", "generation": _generation(
                         current_block, current_chain)})
                 raise Refusal("reload_failed", _tail(out))
@@ -923,7 +964,10 @@ def remove(payload, paths, runner, lock_wait):
         edge = None
         try:
             edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"])
-            _gate(paths, payload, runner, holding_edge=True)
+
+            def fence():
+                _gate(paths, payload, runner, holding_edge=True)
+            fence()
             content, managed = _block(conf_fd, fqdn, paths)
             if content is not None and not managed:
                 raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
@@ -938,33 +982,45 @@ def remove(payload, paths, runner, lock_wait):
             if name_fd is not None:
                 journal = _journal(name_fd, paths) or {}
                 chain = _read(name_fd, "fullchain.pem", paths, mode=0o644)
-                if content is not None or journal.get("state") == "removing":
+                proven = (journal.get("state") == "loaded"
+                          and journal.get("generation") == _generation(content, chain))
+                # A block on disk is taken down; a block already gone from
+                # disk is not proof that nginx unloaded it, so anything short
+                # of a proven loaded state is tested and reloaded first.
+                if content is not None or not proven:
                     if content is not None:
                         _write(name_fd, "block.prev", content, 0o600)
-                    _set_journal(name_fd, {"state": "removing", "had_block": content is not None})
+                    _set_journal(name_fd, {"state": "removing"})
                     _unlink(conf_fd, FILE_PREFIX + fqdn + ".conf")
+                    failure = None
                     try:
-                        _check_locks(paths, holding_edge=True)
+                        fence()
                         ok, out = _nginx_test(runner)
+                        if not ok:
+                            failure = Refusal("nginx_rejected", _tail(out))
+                        else:
+                            fence()
+                            ok, out = _reload(runner)
+                            if not ok:
+                                failure = Refusal("reload_failed", _tail(out))
                     except Refusal as exc:
-                        ok, out, refused = False, b"", exc
-                    else:
-                        refused = None
-                    if ok:
-                        ok, out = _reload(runner)
-                    if not ok:
+                        failure = exc
+                    if failure is not None:
                         if content is not None:
                             _write(conf_fd, FILE_PREFIX + fqdn + ".conf", content, 0o600)
-                        if refused is None and _nginx_test(runner)[0] and _reload(runner)[0]:
+                            try:
+                                fence()
+                                back = _nginx_test(runner)[0] and _reload(runner)[0]
+                            except Refusal:
+                                back = False
                             _set_journal(name_fd, {"state": "loaded",
-                                                   "generation": _generation(content, chain)})
-                        else:
-                            _set_journal(name_fd, {"state": "restored",
-                                                   "had_block": content is not None})
-                        if refused is not None:
-                            raise refused
-                        raise Refusal("nginx_rejected", _tail(out))
+                                                   "generation": _generation(content, chain)}
+                                         if back else {"state": "restored"})
+                        # Without the block on disk the journal stays
+                        # "removing": the unload is still unproven.
+                        raise failure
                     result["block_removed"] = content is not None
+                    result["reloaded"] = True
                     _set_journal(name_fd, {"state": "loaded",
                                            "generation": _generation(None, chain)})
                 if keep_directory:
@@ -991,7 +1047,7 @@ def remove(payload, paths, runner, lock_wait):
         scope.close()
 
 
-ACTIONS = {"inspect": inspect, "reserve": reserve, "release": release, "csr": csr,
+ACTIONS = {"inspect": inspect, "reserve": reserve, "extend": extend, "release": release, "csr": csr,
            "commit": commit, "remove": remove}
 
 

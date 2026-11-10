@@ -79,14 +79,15 @@ def parse_leaf(der: bytes) -> Leaf:
     if validity[0] != _SEQUENCE or len(times) != 2:
         raise ValueError("bad validity")
     not_after = _time(*times[1])
-    names: list[str] = []
+    common: list[str] = []
+    dns: list[str] = []
     for set_tag, rdn in _children(subject[1]):
         if set_tag != _SET:
             raise ValueError("bad subject")
         for _seq, attribute in _children(rdn):
             parts = _children(attribute)
             if len(parts) == 2 and parts[0][1] == _CN_OID:
-                names.append(parts[1][1].decode("utf-8", "replace").lower())
+                common.append(parts[1][1].decode("utf-8", "replace").lower())
     for tag, value in fields[start + 6:]:
         if tag != _EXPLICIT_3:
             continue
@@ -95,8 +96,10 @@ def parse_leaf(der: bytes) -> Leaf:
             if parts and parts[0][1] == _SAN_OID:
                 for name_tag, name in _children(_only(parts[-1][1], _SEQUENCE)):
                     if name_tag == _DNS_NAME:
-                        names.append(name.decode("ascii").lower())
-    return Leaf(tuple(dict.fromkeys(names)), not_after)
+                        dns.append(name.decode("ascii").lower())
+    # DNS SANs take precedence; the subject CN counts only without them
+    # (RFC 6125 section 6.4.4).
+    return Leaf(tuple(dict.fromkeys(dns or common)), not_after)
 
 
 def first_der(chain_pem: str) -> bytes:

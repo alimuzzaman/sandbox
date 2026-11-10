@@ -326,6 +326,14 @@ def _lease(run: _Run, deps: Deps, ctx: Context, fqdn: str, token: str) -> Iterat
             pass  # the lease expires on its own
 
 
+def _hold(run: _Run, step: str, deps: Deps, ctx: Context, fqdn: str, token: str) -> None:
+    """Re-prove the remote lease right before a controller-side side effect
+    (DNS, issuance), so a run whose lease expired and was taken over stops
+    instead of acting on the name."""
+    _remote(run, step, deps, ctx, "extend", {"fqdn": fqdn, "token": token,
+                                              "seconds": LEASE_SECONDS})
+
+
 def _jobs(run: _Run, deps: Deps, ctx: Context) -> dict:
     try:
         return deps.jobs_probe(ctx.target.entry)
@@ -376,6 +384,7 @@ def _obtain_chain(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: Tai
         rec.save("certificate", "done")
         run.done("certificate", "reused the certificate issued earlier for this name")
         return cached, True
+    _hold(run, "certificate", deps, ctx, name.fqdn, token)
     chain = run.call("certificate", deps.issue, ctx.config, name.fqdn, data["csr"], lego,
                      on_fail=rec.failing("certificate"))
     rec.save("certificate", "done")
@@ -452,8 +461,12 @@ def _verify(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: TailnetNa
         pass
     again = public_outcome(deps.probe(target.public_ip, name.fqdn, send_request=False),
                            expected_sha, name.fqdn)
-    if removal == "removed" and not again.exposed:
+    if removal == "removed" and again.outcome.status == "done":
         detail = verdict.outcome.detail + "; the block was removed and the name is no longer served"
+    elif removal == "removed" and not again.exposed:
+        detail = (verdict.outcome.detail + "; the block was removed, but the check afterwards was "
+                  "inconclusive (" + (again.outcome.detail or "no detail") + "), so it is not "
+                  "known whether the name is still served")
     elif removal == "removed":
         detail = (verdict.outcome.detail + "; the block was removed but the public address still "
                   "presents a certificate for this name, so something else serves it")
@@ -504,6 +517,7 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
                              f"already published with upstream {row.upstream}; "
                              "pass --replace-upstream to change it", "refused")
                 # DNS (FR-007, FR-008)
+                _hold(run, "dns", deps, ctx, name.fqdn, token)
                 res = run.call("dns", deps.dns, ctx.config,
                                {"op": "ensure", "zone": name.zone, "name": name.fqdn,
                                 "ip": target.tailnet_ip}, on_fail=rec.failing("dns"))
@@ -719,6 +733,9 @@ def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
                     rec.save("remove_block", "done")
                     if data.get("block_removed"):
                         run.done("remove_block", "tested and reloaded")
+                    elif data.get("reloaded"):
+                        run.done("remove_block", "the block was already off disk; tested and "
+                                 "reloaded to prove it is unloaded")
                     else:
                         run.skipped("remove_block", "no block on the remote")
                     rec.save("remove_certificate", "done")
@@ -729,6 +746,7 @@ def remove(ctx: Context, deps: Deps, name: TailnetName) -> Result:
                     run.skipped("remove_certificate", "no certificate directory")
 
                 record = rec.record
+                _hold(run, "remove_dns", deps, ctx, name.fqdn, token)
                 if record and record.dns_record_id:
                     res = run.call("remove_dns", deps.dns, ctx.config,
                                    {"op": "delete", "zone": record.zone, "name": name.fqdn,

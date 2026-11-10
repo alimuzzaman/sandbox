@@ -1716,8 +1716,9 @@ published name changes nothing.
    while it has more than 30 days left and the remote accepts it.
 5. **Activate**: the chain and the block are installed together by the remote
    program. Under `flock /run/lock/sandbox-edge-nginx.lock` it checks the
-   lease, re-checks the gate (locks and durable jobs, failing closed; the
-   locks again right before `nginx -t`),
+   lease, re-checks the gate (locks and durable jobs, failing closed, and
+   again right before `nginx -t` and right before the reload, including
+   recovery reloads),
    writes an activation journal (`written`, `tested`, `loaded`), installs
    both files through exclusive temp files and renames, runs `nginx -t` and
    reloads. A failed test or reload restores the previous block and chain.
@@ -1738,7 +1739,9 @@ published name changes nothing.
    `tailnet_name_public_probe_inconclusive`. Any certificate valid for the
    name, ours or not, is `tailnet_name_public_exposed`: the block is removed
    (the key stays) and the address probed again to report whether something
-   else still serves the name. The public address is the SSH host when it is
+   else still serves the name (or that the follow-up check was inconclusive).
+   Coverage follows the certificate's DNS SANs; the subject CN counts only
+   when the certificate has none. The public address is the SSH host when it is
    public, or `--public-address`.
 
 The upstream must be `localhost`, a loopback, private or tailnet IPv4 and a
@@ -1756,16 +1759,28 @@ zones and leaves them alone. `sb remote edge` reports a tailnet certificate
 that is overdue with the hint `run sb host tailnet-name renew`. Scheduling
 `renew --all` from a routine is not built yet.
 
-`remove` takes the lease and holds it until the DNS step is done. Under the
+`remove` takes the lease and holds it until the DNS step is done; the lease
+is re-proved (and extended) on the remote right before every controller-side
+side effect (the DNS create or delete and the ACME issuance), so a run whose
+lease expired and was taken over stops instead. Under the
 edge lock and the re-checked gate it reads the block's ownership, refuses any
 file in the certificate directory that Sandbox did not write (only its own
 files and its exact temp names qualify), removes the block (test and
-reload), then the directory, then the DNS record, recording each step. It
+reload), then the directory, then the DNS record, recording each step. A
+block already gone from disk is not taken as proof that nginx unloaded it:
+unless the journal proves the loaded state, `remove` tests and reloads before
+it deletes the directory or the DNS record. It
 deletes the record only when the name's complete record set is exactly the
 record this controller recorded (same id, type A, the tailnet address, no
 proxy). Otherwise it leaves the records in place
 (`tailnet_name_dns_not_owned`). The provider has no compare-and-delete, so a
 change made between that read and the delete is not excluded.
+
+Limits: the host gate is a set of checks, not a reservation. A durable job or
+host lock taken between the last check and the reload is not excluded, and a
+run suspended between re-proving its lease and the provider call it guards is
+not fenced. The public check probes one IPv4 address from this controller; it
+says nothing about IPv6 or other vantage points.
 
 Every mutating run first checks the name's zone against today's
 `tailnet_names.zones` and the zone stored in its record, before any DNS or

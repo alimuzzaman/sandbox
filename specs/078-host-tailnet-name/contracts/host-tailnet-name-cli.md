@@ -86,8 +86,8 @@ any result is not ok.
 | `tailnet_name_remote_path_unsafe` | A remote path is a symlink, not a regular file/directory, or has an untrusted owner or mode (including a private key that is not root 0600). |
 | `tailnet_name_state_corrupt` | The controller state file does not parse; nothing is changed. |
 | `tailnet_name_public_probe_inconclusive` | The public check timed out, could not route, failed DNS or errored, or presented an undecodable certificate. |
-| `tailnet_name_busy` | A durable job is active on the remote, a host transaction lock is held (checked again inside the edge lock), this controller is already working on the remote, or another run holds the name's remote lease (or this run lost it). |
-| `tailnet_name_gate_unavailable` | The job query or lock probe could not answer, or the remote Sandbox home or job registry could not be verified (fails closed). |
+| `tailnet_name_busy` | A durable job is active on the remote or a host transaction lock is held (checked again inside the edge lock, before `nginx -t` and before the reload), this controller is already working on the remote, or another run holds the name's remote lease (or this run lost it, checked again before every DNS or ACME call). |
+| `tailnet_name_gate_unavailable` | The job query could not answer, or the remote Sandbox home or job registry could not be verified (fails closed). A lock that cannot be probed counts as held and is reported as `tailnet_name_busy`. |
 | `tailnet_name_secret_unavailable` | The broker refused or could not provide the token. |
 | `tailnet_name_dns_conflict` | The name's complete record set is not empty and not exactly one identical DNS-only A record. |
 | `tailnet_name_dns_failed` | The DNS provider call failed. |
@@ -95,7 +95,7 @@ any result is not ok.
 | `tailnet_name_upstream_differs` | `add`: published with another upstream and no `--replace-upstream`. |
 | `tailnet_name_certificate_failed` | `lego` failed, or the issued chain does not match the key or the name. |
 | `tailnet_name_install_failed` | Writing the certificate or the renewal transaction failed (previous chain restored). |
-| `tailnet_name_nginx_rejected` | `nginx -t` failed; the previous block and chain were restored, nginx not reloaded. |
+| `tailnet_name_nginx_rejected` | `nginx -t` failed; the previous block and chain were restored, nginx not reloaded (on `remove`, a block already off disk stays recorded as an unproven removal). |
 | `tailnet_name_reload_failed` | The reload failed, or an interrupted activation could not be settled; previous state restored where possible. |
 | `tailnet_name_tailnet_probe_failed` | The tailnet HTTPS check failed. |
 | `tailnet_name_public_exposed` | The public address presented a certificate valid for the name (ours or another); the block was removed and the detail says whether the name is still served. |

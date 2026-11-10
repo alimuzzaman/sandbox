@@ -554,6 +554,13 @@ class X509Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 x509.parse_leaf(bad)
 
+    def test_dns_sans_take_precedence_over_the_subject_cn(self):
+        """Re-review R5: CN=<fqdn> with SANs for other names is not valid for <fqdn>."""
+        cert, _key, _sha = make_cert(FQDN, san="DNS:other.example.test")
+        leaf = x509.parse_leaf(x509.first_der(Path(cert).read_text()))
+        self.assertEqual(leaf.names, ("other.example.test",))
+        self.assertFalse(x509.covers(leaf.names, FQDN))
+
     def test_covers_exact_and_single_label_wildcards(self):
         self.assertTrue(x509.covers((FQDN,), FQDN))
         self.assertTrue(x509.covers(("*.example.test",), FQDN))
@@ -595,9 +602,11 @@ class VerifyTests(unittest.TestCase):
                                                 FQDN)
                 self.assertEqual((verdict.outcome.code, verdict.exposed, verdict.ours),
                                  (m.PUBLIC_EXPOSED, True, False))
-        unrelated = make_cert("other.example.test", san="DNS:other.example.test")
-        verdict = verify.public_outcome(self.probe(unrelated, send_request=False), ours[2], FQDN)
-        self.assertEqual((verdict.outcome.status, verdict.exposed), ("done", False))
+        for unrelated in (make_cert("other.example.test", san="DNS:other.example.test"),
+                          make_cert(FQDN, san="DNS:other.example.test")):
+            verdict = verify.public_outcome(self.probe(unrelated, send_request=False), ours[2],
+                                            FQDN)
+            self.assertEqual((verdict.outcome.status, verdict.exposed), ("done", False))
 
     def test_a_refused_connection_passes_and_a_timeout_does_not(self):
         closed = socket.socket()
@@ -705,6 +714,8 @@ class FakeRemote:
             return {"ok": True}
         if self.leases.get(fqdn) != payload.get("token"):
             return {"ok": False, "code": "lease_lost"}
+        if action == "extend":
+            return {"ok": True}
         if action == "csr":
             if fqdn in self.foreign_dir:
                 return {"ok": False, "code": "unmanaged"}
@@ -1334,15 +1345,63 @@ class ListRenewRemoveTests(ServiceTestCase):
         self.assertEqual(self.remote.leases, {})
 
 
+    def test_a_run_whose_lease_was_taken_over_does_not_touch_dns(self):
+        """Re-review R2: the lease is re-proved right before the DNS delete."""
+        self.add()
+        call = self.remote.call
+
+        def takeover(entry, action, payload):
+            data = call(entry, action, payload)
+            if action == "remove":
+                self.remote.leases[FQDN] = "f" * 32  # expired, then taken by another run
+            return data
+        self.deps.remote_call = takeover
+        requests = len(self.dns.requests)
+        result = service.remove(self.ctx, self.deps, self.name)
+        self.assertEqual((result.ok, result.code), (False, m.BUSY))
+        self.assertEqual(len(self.dns.requests), requests)
+        self.assertIn(FQDN, self.dns.records)
+        self.assertIn(FQDN, self.store.load())
+
+    def test_dns_and_issuance_re_prove_the_lease_first(self):
+        call = self.remote.call
+        order = []
+
+        def watch(entry, action, payload):
+            order.append(action)
+            return call(entry, action, payload)
+        self.deps.remote_call = watch
+        dns = self.deps.dns
+        issue = self.deps.issue
+        self.deps.dns = lambda cfg, request: (order.append("DNS"), dns(cfg, request))[1]
+        self.deps.issue = lambda *a: (order.append("ISSUE"), issue(*a))[1]
+        self.assertTrue(self.add().ok)
+        for side_effect in ("DNS", "ISSUE"):
+            self.assertEqual(order[order.index(side_effect) - 1], "extend", order)
+
+    def test_an_inconclusive_check_after_cleanup_is_not_reported_as_safe(self):
+        """Re-review R6."""
+        def probe(address, fqdn, *, send_request):
+            if address == TAILNET_IP:
+                return self._probe(address, fqdn, send_request=send_request)
+            return self.exposed() if FQDN in self.remote.blocks else verify.ProbeResult("timeout")
+        self.deps.probe = probe
+        result = self.add()
+        self.assertEqual(result.code, m.PUBLIC_EXPOSED)
+        self.assertIn("inconclusive", result.error)
+        self.assertNotIn("no longer served", result.error)
+
+
 class CliTests(unittest.TestCase):
     def _main(self, *argv: str) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as home:
-            env = {"HOME": home, "SANDBOX_HOME": home, "PATH": os.environ.get("PATH", ""),
-                   "PYTHONPATH": str(REPO), "SANDBOX_AUTO_UPDATE": "0"}
+            from tests.subprocess_support import run_test_process
+            env = {"HOME": home, "SANDBOX_HOME": home, "PYTHONPATH": str(REPO),
+                   "SANDBOX_AUTO_UPDATE": "0"}
             code = ("import sys; sys.argv = ['sb', *sys.argv[1:]]\n"
                     "from sandbox.cli import main\nmain()\n")
-            return subprocess.run([sys.executable, "-c", code, *argv], cwd=home, env=env,
-                                  capture_output=True, text=True, timeout=120, check=False)
+            return run_test_process([sys.executable, "-c", code, *argv], cwd=home, env=env,
+                                    capture_output=True, text=True, timeout=120, check=False)
 
     def test_add_without_configuration_refuses_with_json(self):
         result = self._main("host", "tailnet-name", "add", FQDN, "--remote", "nosuch",

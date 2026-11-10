@@ -6,6 +6,7 @@
 //   /instance/<name>/console -> instance detail + console drawer open
 //   /host/local              -> local host overview
 //   /usage                   -> agent usage page
+//   /hosting                 -> stacks and hosted sites (read-only)
 //
 // On hard-refresh/deep-link the Python server serves the app for any non-/api
 // path (SPA fallback), then this router renders the right view.
@@ -16,6 +17,7 @@ export type Route =
   | { page: "local-host" }
   | { page: "instance"; name: string; console: boolean }
   | { page: "usage" }
+  | { page: "hosting" }
   | { page: "remote"; name: string }
   | { page: "remote-instance"; name: string; instance: string }
   | { page: "notfound" };
@@ -27,6 +29,7 @@ export function parse(pathname: string): Route {
   if (parts[0] === "host" && parts[1] === "local" && parts.length === 2)
     return { page: "local-host" };
   if (parts[0] === "usage" && parts.length === 1) return { page: "usage" };
+  if (parts[0] === "hosting" && parts.length === 1) return { page: "hosting" };
   if (parts[0] === "remote" && parts[1] && parts.length === 2)
     return { page: "remote", name: decodeURIComponent(parts[1]) };
   if (parts[0] === "remote" && parts[1] && parts[2] === "instance" && parts[3] && parts.length === 4)
@@ -68,6 +71,12 @@ export function instancePath(name: string, console = false): string {
   return console ? `${base}/console` : base;
 }
 export const localHostPath = (): string => "/host/local";
+export const hostingPath = (): string => "/hosting";
+// One hosted target's card on /hosting. Server-side rows use "this-server".
+export const hostingAnchor = (remote: string, project: string, environment: string): string =>
+  `hosting-${remote}/${project}/${environment}`;
+export const hostingTargetPath = (remote: string, project: string, environment: string): string =>
+  `${hostingPath()}#${encodeURIComponent(hostingAnchor(remote, project, environment))}`;
 export const remotePath = (name: string): string => `/remote/${encodeURIComponent(name)}`;
 export const remoteInstancePath = (name: string, instance: string): string =>
   `${remotePath(name)}/instance/${encodeURIComponent(instance)}`;

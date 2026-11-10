@@ -1753,6 +1753,68 @@ the bridge. Put it behind `tailscale serve` only if your setup keeps the browser
 and `Origin` intact; listening on the tailnet address directly needs neither `sudo` nor
 `tailscale serve`.
 
+To reach it under your own name, such as an HTTPS proxy on the server's tailnet address
+that forwards to the dashboard with the browser's `Host` intact, list that name with
+`--allow-host` (repeatable):
+
+```bash
+./sb web --host tailscale --port 8780 --exact-port --allow-host sandbox.example.test
+```
+
+A listed name passes the host check only while the dashboard listens on a tailnet
+address; on loopback or any other address the flag is ignored and a warning is printed.
+A request under a listed name must carry no `Origin` or exactly `https://<that name>`, so
+a cross-site post with a listed `Host` is still refused. Unlisted names keep getting 403.
+`X-Forwarded-Host` and other forwarding headers are never read. The proxy itself must
+listen on the tailnet address only, since every request it forwards arrives from this
+machine.
+
+#### Stacks and hosted sites
+
+The **Stacks & sites** page (`/hosting`, data at `GET /api/hosting`) is read-only. It lists
+every `sb host stack` with one row per server created for it, plus the projects hosted with
+`sb host apply` without a stack. Each row is a link, with its state, its health and the
+ref it was built from. A stack also shows its slug, project, branch, commit, template
+path, last apply (status, time and request id), its Mailpit loopback port and named
+ports, and its created time. A TTL appears once stacks have one. The page has no actions.
+
+On a server it is built only from files on that server:
+
+- `sb host apply` writes `runtime/hosts/<project>/<environment>/summary.json` under the
+  remote's `$SANDBOX_HOME` when an apply starts, succeeds and fails. The file holds only
+  the fields above, never a secret value or a secret key name, and the target's
+  `environment.env` is never read. Writing it is best-effort and never fails an apply.
+  A target applied before this existed is listed by project and environment until its
+  next apply.
+- `sb deploy --remote R --ensure --expose --domain wp-<slug>.<zone> --stack <slug>`
+  lists that WordPress site under the stack. Before any remote effect it refuses when
+  `--expose` is missing, the slug is malformed, or the controller has no such stack on
+  `R`. After a successful deploy it writes `runtime/stack-sites/<slug>/<hostname>.json`
+  on the remote and adds the site to the controller's stack record, which `sb host
+  stack up` keeps. A site deployed without `--stack` whose hostname is
+  `<prefix>-<slug>.<zone>` (the zone of the stack's own hostnames) shows under the stack
+  labelled "matched by name".
+
+On a controller the same page is built from the controller's stack registry and hosting
+state, labelled with each remote. There, route modes are not recorded, so every hostname
+is shown as served.
+
+Health is one HTTPS `GET` per hostname at most once a minute (a 4-second timeout, no
+redirects followed, no credentials sent), shared by every viewer of one `sb web`
+process and capped at 64 hostnames per round. The page never waits for it: rows show
+"checking" until a result arrives. Only hostnames from Sandbox's own records are probed,
+never wildcards and never anything a request names. A hostname that is tailnet-only,
+such as a `mail-<slug>` route, reads "unreachable" from anywhere outside the tailnet.
+
+The host pages count hosted targets apart from Sandbox instances. The host inventory
+(`/inventory` from the control service, and **this-server** in `sb web` on a server) has a
+`hosted_targets` block: one row per target under `runtime/hosts/`, with its stack slug,
+last apply status and the containers named `sandbox-host-<project>-<environment>-*`
+(the longest matching Compose project wins). Those containers count toward their target,
+not toward any instance or the unattributed list. Each row links to its card on
+`/hosting`. On a server, `/host/local` shows the same rows. A controller sees them for a
+registered remote only after `sb remote service migrate` installs this code there.
+
 ## 8. CLI + MCP surface
 
 See `specs/014-remote-vps-hosting/contracts/cli-and-mcp.md` for the full flag/JSON-shape
@@ -1774,7 +1836,7 @@ reference. Summary:
 | `./sb remote network-range propose\|list <name> [--json]` | Read-only development-range proposal, or the recorded ranges and allocations (spec 063) |
 | `./sb remote network-range assign <name> --cidr <cidr> [--subnet-prefix N] [--confirm]` | Plan, or with `--confirm` record, a development range on the remote |
 | `./sb deploy --remote <name> [--deploy-timeout <seconds>]` | One-way, on-demand push of local state to the VPS with a bounded Git push budget |
-| `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
+| `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes] [--stack <slug>]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames); `--stack` lists the site under that `sb host stack` in the web panel |
 | `./sb delivery inspect --project-dir <dir> --remote <name> (--environment <env> \| --label <label>) [--operation-id <id> \| --request-id <id>] [--observe] [--limit 1..50] [--cursor <token>] [--json]` | Read the executing controller's bounded delivery history; default is recorded-only, while `--observe` adds current read-only evidence |
 | `./sb wp --remote <name> --project-dir <dir> --timeout <seconds> -- <wp args...>` | Run bounded WP-CLI against that project's existing deployed WordPress instance through authenticated control HTTP; request/unit/live runtime digests and stable non-symlink deploy identity must match; host-file staging command families are refused; timeout or output overflow is nonzero unknown; no workspace creation, generic exec, SSH fallback, or automatic retry |
 

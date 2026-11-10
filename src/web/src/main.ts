@@ -2,8 +2,8 @@
 // initialise the router, and start the single-flight refresh scheduler.
 
 import { $ } from "./dom";
-import { store } from "./state";
-import { fetchData, fetchRemotes, fetchUsage, fetchRemote } from "./api";
+import { store, thisServer } from "./state";
+import { fetchData, fetchRemotes, fetchUsage, fetchRemote, fetchHosting } from "./api";
 import { navigate, initRouter, onRoute, currentRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
@@ -18,6 +18,7 @@ import {
   plugFilter, copyText, loadUsageThenRender, setActionDeps,
 } from "./actions";
 import { doCreate, submitCreate, initCreateView } from "./pages/create";
+import { hostingStillChecking } from "./pages/hosting";
 import type { SbApi } from "./types";
 
 // ---- data refresh scheduler ----
@@ -50,11 +51,55 @@ function loadRemote(name: string, mode: "fast" | "deep" = "fast"): Promise<void>
   return request;
 }
 
+// Stacks and hosted sites: one request at a time. While health checks are
+// still running on the server, look again a few times, then fall back to the
+// normal poll.
+let hostingInFlight: Promise<void> | null = null;
+let hostingFollowUps = 0;
+let hostingTimer = 0;
+function loadHosting(): Promise<void> {
+  if (hostingInFlight) return hostingInFlight;
+  hostingInFlight = (async () => {
+    try {
+      store.hosting = await fetchHosting();
+      store.hostingError = null;
+    } catch (error) {
+      store.hostingError = error instanceof Error ? error.message : "Hosting view unavailable";
+    } finally {
+      hostingInFlight = null;
+      renderDetail(false);
+      scrollToHostingAnchor();
+    }
+    window.clearTimeout(hostingTimer);
+    if (currentRoute().page === "hosting" && hostingStillChecking() && hostingFollowUps < 3) {
+      hostingFollowUps++;
+      hostingTimer = window.setTimeout(() => { void loadHosting(); }, 5000);
+    }
+  })();
+  return hostingInFlight;
+}
+function refreshHosting(): void { hostingFollowUps = 0; scrolledHash = ""; void loadHosting(); }
+
+// A host page links to one card as /hosting#<anchor>; scroll to it once per visit.
+let scrolledHash = "";
+function scrollToHostingAnchor(): void {
+  if (currentRoute().page !== "hosting" || !location.hash || location.hash === scrolledHash) return;
+  let id = "";
+  try { id = decodeURIComponent(location.hash.slice(1)); } catch { return; }
+  const card = document.getElementById(id);
+  if (!card) return;
+  scrolledHash = location.hash;
+  card.scrollIntoView({ block: "start" });
+}
+
 async function performRefresh(): Promise<void> {
   if (store.paused) return;
   store.sync.refreshing = true;
   store.sync.error = null;
   renderDetail(false);
+  // The hosting view reads local files only; never hold it behind the slower
+  // instance inventory.
+  if (currentRoute().page === "hosting") void loadHosting();
   try {
     // Remote summaries are registry-local and cheap; local instance rows may
     // require one Compose probe per registered project. Fetch them separately
@@ -86,6 +131,9 @@ async function performRefresh(): Promise<void> {
     const route = currentRoute();
     if (route.page === "remote" || route.page === "remote-instance") {
       await loadRemote(route.name);
+    } else if (route.page === "local-host" && thisServer()) {
+      // On a Sandbox server, /host/local lists the server's hosted targets.
+      await loadRemote(thisServer()!.name);
     }
     store.sync.lastCompleted = Date.now();
   } catch (error) {
@@ -166,7 +214,7 @@ function showHelp(): void {
 
 // ---- expose the inline-handler surface ----
 const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
-  navigate, goHome, selectInstance, selectRemote, refreshRemote, refreshHosts, showUsage, showHelp, openTerminal,
+  navigate, goHome, selectInstance, selectRemote, refreshRemote, refreshHosts, refreshHosting, showUsage, showHelp, openTerminal,
   submitCreate,
   doCreate, doDelete, doFocus, doServer, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter: () => plugFilter(activeInstanceName()),
@@ -215,6 +263,7 @@ function boot(): void {
   onRoute((route) => {
     render();
     if (route.page === "create") initCreateView();
+    if (route.page === "hosting") refreshHosting();
     if (route.page === "remote" || route.page === "remote-instance" || route.page === "home" || route.page === "local-host") {
       void refresh();
     }
@@ -229,6 +278,7 @@ function boot(): void {
   // Initial paint from current URL, then start polling.
   render();
   if (currentRoute().page === "create") initCreateView();
+  if (currentRoute().page === "hosting") refreshHosting();
   const r0 = currentRoute();
   if (r0.page === "instance" && r0.console) openTerminal(r0.name);
   startPolling();

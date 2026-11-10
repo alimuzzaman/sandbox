@@ -1,5 +1,6 @@
 import { esc } from "../dom";
-import { localHostName, localHostStatus, otherRemotes, remoteLabel, store } from "../state";
+import { localHostName, localHostStatus, otherRemotes, remoteLabel, store, thisServer } from "../state";
+import { hostedTargetsSection } from "./hosting";
 import { instancePath, localHostPath, remotePath } from "../router";
 import { theme } from "../theme";
 
@@ -85,8 +86,9 @@ export function hostsView(): string {
     const total = data?.instances ? String(data.instances.total) : busy ? "…" : "—";
     const running = data?.instances ? String(data.instances.running) : busy ? "…" : "—";
     const memory = data?.host?.memory_used_percent == null ? "—" : `${data.host.memory_used_percent}%`;
+    const hosted = data?.hosted_targets ? `${data.hosted_targets.total} hosted target${data.hosted_targets.total === 1 ? "" : "s"} · ` : "";
     const note = busy ? "Refreshing host inventory…" : data
-      ? `${data.evidence_status} ${data.scan_mode || "fast"} evidence`
+      ? `${hosted}${data.evidence_status} ${data.scan_mode || "fast"} evidence`
       : remote.control_ready ? "Waiting for first inventory" : "Control service unavailable";
     return hostCard(remoteLabel(remote.name), remotePath(remote.name),
       remote.local ? "This server" : "Remote host", remote.control_ready,
@@ -118,6 +120,13 @@ export function localHostView(): string {
   const running = instances.filter(instance => instance.running).length;
   const pending = instances.filter(instance => instance.pending).length;
   const stopped = Math.max(0, instances.length - running - pending);
+  // On a Sandbox server this page is the server itself: its `sb host apply`
+  // targets come from the server's own inventory, counted apart from instances.
+  const server = thisServer();
+  const inventory = server ? store.remote[server.name] : undefined;
+  const hosted = inventory?.hosted_targets;
+  const stats: Array<[string, string | number]> = [["Instances", instances.length], ["Running", running], ["Stopped", stopped], ["Pending", pending]];
+  if (server) stats.push(["Hosted targets", hosted ? hosted.total : inventory ? "unknown" : "…"]);
   const rows = instances.length ? instances.map(instance => `<a href="${instancePath(instance.name)}" data-link class="flex items-center gap-3 border-t border-neutral-200 px-4 py-3 first:border-t-0 hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 dark:border-neutral-800 dark:hover:bg-neutral-800/50">
     <span class="h-2 w-2 shrink-0 rounded-full ${instance.running ? "bg-emerald-500" : instance.pending ? "bg-amber-400" : "bg-neutral-300 dark:bg-neutral-600"}"></span>
     <span class="min-w-0 flex-1"><span class="block truncate text-[13px] font-medium text-neutral-900 dark:text-white">${esc(instance.name)}</span><span class="block truncate text-[11px] ${theme.quiet}">${esc(instance.project || "Local project")} · ${esc(instance.server || "server unknown")}</span></span>
@@ -126,9 +135,10 @@ export function localHostView(): string {
 
   return `<div class="${theme.page}"><div class="${theme.shell} space-y-6">
     <header><div class="${theme.label}">Local host</div><h1 class="mt-1 text-[26px] font-semibold tracking-tight">This machine</h1><p class="mt-1 text-[13px] ${theme.muted}">Local Sandbox instances and lifecycle controls.</p></header>
-    <section class="${theme.panel} grid grid-cols-2 gap-px overflow-hidden bg-neutral-200 p-0 dark:bg-neutral-800 sm:grid-cols-4">
-      ${[["Instances", instances.length], ["Running", running], ["Stopped", stopped], ["Pending", pending]].map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${label}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${value}</div></div>`).join("")}
+    <section class="${theme.panel} grid grid-cols-2 gap-px overflow-hidden bg-neutral-200 p-0 dark:bg-neutral-800 ${server ? "sm:grid-cols-5" : "sm:grid-cols-4"}">
+      ${stats.map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${esc(label)}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${esc(String(value))}</div></div>`).join("")}
     </section>
     <section><div class="mb-3 flex items-center justify-between gap-3"><h2 class="text-[14px] font-semibold">Local instances</h2><a href="/create" data-link class="${theme.primary}">New instance</a></div><div class="${theme.panel} overflow-hidden">${rows}</div></section>
+    ${server ? hostedTargetsSection(server.name, hosted, !inventory) : ""}
   </div></div>`;
 }

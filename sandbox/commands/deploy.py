@@ -29,7 +29,7 @@ _REMOTE_DEPLOY_CAPABILITIES = {
 # then apply the CURRENT local diff fresh.
 
 def _fail(remote_name: str | None, message: str, as_json: bool,
-          *, source_ref: str | None = None) -> None:
+          *, source_ref: str | None = None, error_code: str | None = None) -> None:
     if as_json:
         print(json.dumps({
             "ok": False,
@@ -37,7 +37,7 @@ def _fail(remote_name: str | None, message: str, as_json: bool,
             "remote_selection": "explicit" if remote_name else None,
             "source_ref": source_ref,
             "resolved_commit": None,
-            "error_code": "source_not_immutable" if source_ref else "deploy_failed",
+            "error_code": error_code or ("source_not_immutable" if source_ref else "deploy_failed"),
             "pushed_commit": None,
             "uncommitted_files_applied": 0,
             "instance": None,
@@ -47,6 +47,70 @@ def _fail(remote_name: str | None, message: str, as_json: bool,
         import sys as _sys
         _sys.exit(1)
     die(sr.redact_ssh_connection(message))
+
+
+def _stack_slug(args) -> str | None:
+    # Adapters that build their own args object may carry a non-string; only a
+    # real `--stack` value counts.
+    slug = getattr(args, "stack", None)
+    return slug if isinstance(slug, str) else None
+
+
+def _stack_link_refusal(args, remote_name: str) -> tuple[str, str] | None:
+    """Why `--stack` cannot be honoured, checked before any remote effect (spec 076)."""
+    slug = _stack_slug(args)
+    if slug is None:
+        return None
+    from sandbox.hosting import panel_records, stack_registry
+    if not getattr(args, "expose", False):
+        return ("deploy_stack_requires_expose",
+                "--stack records an exposed site; pass --expose (and --domain) with it")
+    if not panel_records.SLUG_RE.fullmatch(slug):
+        return ("deploy_stack_invalid", "--stack must be a stack slug (lowercase letters, numbers, hyphens)")
+    try:
+        record = stack_registry.read()["stacks"].get(stack_registry.record_key(remote_name, slug))
+    except stack_registry.StackRegistryError as exc:
+        return ("deploy_stack_unknown", f"--stack {slug}: {exc.detail}")
+    if not isinstance(record, dict):
+        return ("deploy_stack_unknown",
+                f"--stack {slug}: no stack {slug!r} on remote {remote_name!r}; "
+                f"see `sb host stack list --remote {remote_name}`")
+    return None
+
+
+def _record_stack_link(entry: dict, remote_name: str, slug: str, instance: dict,
+                       hostname: str, commit: str | None) -> dict:
+    """Record a deployed site under its stack, on the remote and in the controller record.
+
+    Best-effort: the deploy already succeeded, so a failure here is reported,
+    never raised.
+    """
+    import time as _time
+    from sandbox.hosting import panel_records, stack_registry
+    outcome = {"slug": slug, "hostname": hostname, "recorded": False}
+    try:
+        link = panel_records.build_site_link(
+            remote=remote_name, slug=slug, hostname=hostname,
+            instance=str(instance.get("instance") or ""), label=str(instance.get("label") or "default"),
+            commit=commit, recorded_at=int(_time.time()))
+        home = sr.resolve_sandbox_home(entry)
+        command = panel_records.remote_write_command(
+            panel_records.site_link_path(home, slug, link["hostname"]), panel_records.encode_record(link))
+        result = sr.ssh_run(entry, command, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError("remote write failed")
+        with stack_registry.locked() as registry:
+            record = registry.get(remote_name, slug)
+            if record is None:
+                raise LookupError("stack record disappeared")
+            sites = [site for site in record.get("sites") or [] if site.get("hostname") != link["hostname"]]
+            sites.append({key: link[key] for key in ("hostname", "instance", "label", "commit", "recorded_at")})
+            record["sites"] = sorted(sites, key=lambda site: site["hostname"])
+            registry.put(record)
+        outcome["recorded"] = True
+    except Exception as exc:  # the deploy is done; only the panel link is missing
+        outcome["error_code"] = f"stack_link_{type(exc).__name__}"
+    return outcome
 
 
 def _deploy_error_code(error: BaseException, source_ref: str | None) -> str:
@@ -215,6 +279,9 @@ def _cmd_deploy(cfg, args) -> None:
             require_capability(entry, "instance_routes")
         except FrontDoorError as exc:
             _fail(remote_name, str(exc), as_json, source_ref=source_ref)
+    stack_refusal = _stack_link_refusal(args, remote_name)
+    if stack_refusal is not None:
+        _fail(remote_name, stack_refusal[1], as_json, source_ref=source_ref, error_code=stack_refusal[0])
 
     attempt = None
     instance = None
@@ -441,6 +508,10 @@ def _cmd_deploy(cfg, args) -> None:
         die(str(e))
         return
 
+    stack_link = None
+    if _stack_slug(args) and instance and public_url:
+        stack_link = _record_stack_link(entry, remote_name, _stack_slug(args), instance,
+                                        public_url.removeprefix("https://"), pushed_sha)
     result = {"ok": True, "remote": remote_name,
              "remote_selection": "explicit",
              "source_ref": source_ref, "resolved_commit": pushed_sha,
@@ -455,6 +526,8 @@ def _cmd_deploy(cfg, args) -> None:
              "pro_plugins": pro_plugins,
              "url": public_url, "error": None, "delivery": delivery_summary,
              "advisories": advisories}
+    if stack_link is not None:
+        result["stack_link"] = stack_link
     if as_json:
         print(json.dumps(result))
     else:
@@ -467,6 +540,10 @@ def _cmd_deploy(cfg, args) -> None:
             print(f"  applied {applied} uncommitted file(s)")
         for advisory in advisories:
             print(f"  advisory: {advisory} (see the warning above)")
+        if stack_link is not None:
+            print(f"  stack {stack_link['slug']}: " + (
+                "site recorded for the web panel" if stack_link["recorded"]
+                else f"site not recorded ({stack_link.get('error_code')}); the panel may match it by name"))
         if include_paths:
             print(f"  explicitly included {len(include_paths)} ignored artifact file(s)")
         if pro_plugins and not pro_plugins.get("ok"):

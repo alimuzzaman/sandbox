@@ -37,6 +37,15 @@ class LastApply(TypedDict, total=False):
     error: str
 
 
+class SiteLinkRef(TypedDict, total=False):
+    """A WordPress site `sb deploy --stack` made for this stack (spec 076)."""
+    hostname: str
+    instance: str
+    label: str
+    commit: str | None
+    recorded_at: int
+
+
 class StackRecord(TypedDict, total=False):
     remote: str
     slug: str
@@ -54,6 +63,7 @@ class StackRecord(TypedDict, total=False):
     created_at: int
     updated_at: int
     last_apply: LastApply
+    sites: list[SiteLinkRef]
 
 
 def stacks_dir() -> Path:

@@ -605,6 +605,10 @@ _WEB_PAGE = """<!doctype html>
         text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
         <span class="text-[13px] leading-none font-mono">›_</span> Terminal</button>
+      <a id="hostingBtn" href="/hosting" data-link class="w-full text-[13px] px-3 py-2 rounded text-left
+        text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[13px] leading-none">⧉</span> Stacks &amp; sites</a>
       <a id="usageBtn" href="/usage" data-link class="w-full text-[13px] px-3 py-2 rounded text-left
         text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">

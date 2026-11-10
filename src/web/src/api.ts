@@ -1,7 +1,7 @@
 // Typed fetch wrappers for the Python /api endpoints.
 
 import type {
-  AppData, ActionResult, JobSnapshot, Usage, RemoteInventory, RemoteSummary,
+  AppData, ActionResult, JobSnapshot, Usage, RemoteInventory, RemoteSummary, HostingView,
 } from "./types";
 
 async function getJSON<T>(path: string): Promise<T> {
@@ -15,6 +15,7 @@ export const fetchData = () => getJSON<AppData>("/api/instances");
 export const fetchRemotes = () =>
   getJSON<{ remotes: RemoteSummary[] }>("/api/remotes");
 export const fetchUsage = () => getJSON<Usage>("/api/usage");
+export const fetchHosting = () => getJSON<HostingView>("/api/hosting");
 export const fetchRemote = (name: string, mode: "fast" | "deep" = "fast") =>
   getJSON<RemoteInventory>(`/api/remote/${encodeURIComponent(name)}${mode === "deep" ? "?deep=1" : ""}`);
 export const fetchJob = (id: string, offset: number) =>

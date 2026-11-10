@@ -685,6 +685,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bind only --port (no scan); used by the snapshot-bridge auto-start")
     web.add_argument("--open", action="store_true",
         help="open the dashboard in your browser on start")
+    web.add_argument("--allow-host", action="append", default=None, metavar="NAME",
+        help="also accept this host name (repeatable), e.g. a tailnet-only proxy name; "
+             "honoured only on a tailnet address, with Origin https://NAME")
 
     mcp_p = sub.add_parser("mcp",
         help="Run the MCP server over stdio (register: claude mcp add --scope user sandbox -- ./sb mcp)")
@@ -1020,6 +1023,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         metavar="HOSTNAME",
         help="extra hostname the exposed instance also answers on (repeatable); "
              "defaults to the project's sandbox.config.json `aliases`")
+    deploy_p.add_argument("--stack", default=None, metavar="SLUG",
+        help="with --expose, record this site as part of the `sb host stack` SLUG on "
+             "--remote, so the web panel lists it under that stack")
     deploy_p.add_argument("--prune-routes", action="store_true",
         help="with --expose, delete remote routes pointing at this instance's "
              "port that are not the current domain or an alias")

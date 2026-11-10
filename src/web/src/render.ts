@@ -9,6 +9,7 @@ import { usageView } from "./pages/usage";
 import { hostsView, localHostView, sidebarHostSelector } from "./pages/hosts";
 import { createView } from "./pages/create";
 import { remoteView } from "./pages/remote";
+import { hostingView } from "./pages/hosting";
 import { rowMenu, type RowMenuItem } from "./ui/rowmenu";
 import type { Instance } from "./types";
 
@@ -165,6 +166,7 @@ function detailSignature(route: Route): string {
       store.busy[r.name] || "", store.data.plugins.length]);
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
+  if (route.page === "hosting") return "hosting:" + store.hostingError + ":" + JSON.stringify(store.hosting);
   if (route.page === "local-host") return "local-host:" + JSON.stringify(store.data.instances);
   if (route.page === "remote" || route.page === "remote-instance") return route.page + ":" + route.name + ":" + (route.page === "remote-instance" ? route.instance : "") + ":" + !!store.remoteBusy[route.name] + ":" + JSON.stringify(store.remote[route.name] || null);
   if (route.page === "home") return "home:" + store.sync.refreshing + ":" + store.sync.lastCompleted + ":" + store.sync.error + ":" + JSON.stringify(store.data.remotes) + ":" + JSON.stringify(store.remote);
@@ -182,6 +184,7 @@ function viewForRoute(route: Route): string {
   switch (route.page) {
     case "create": return createView();
     case "usage": return usageView();
+    case "hosting": return hostingView();
     case "local-host": return localHostView();
     case "remote": return remoteView(route.name, store.remote[route.name]);
     case "remote-instance": return remoteView(route.name, store.remote[route.name], route.instance);

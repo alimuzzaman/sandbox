@@ -52,12 +52,15 @@ try:
  parts=root.split('/')[1:]; home_parts=home.split('/')[1:]
  if not parts or not home_parts or any(part in {'','.','..'} for part in parts+home_parts) or parts[:len(home_parts)]!=home_parts: fail('inode_key')
  current='/'+parts[0]
- dfd=os.open(current,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); info=os.fstat(dfd); mode=stat.S_IMODE(info.st_mode)
+ traverse=getattr(os,'O_PATH',os.O_RDONLY)
+ def flags_for(path): return (os.O_RDONLY if path==home or path.startswith(home+'/') else traverse)|os.O_DIRECTORY|os.O_NOFOLLOW
+ dfd=os.open(current,flags_for(current)); info=os.fstat(dfd); mode=stat.S_IMODE(info.st_mode)
  if not stat.S_ISDIR(info.st_mode) or mode&0o022: fail('inode_key')
  if (current==home and info.st_uid!=owner_uid) or (current!=home and info.st_uid not in {0,65534,owner_uid}): fail('inode_key')
  for part in parts[1:]:
-  child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=dfd); info=os.fstat(child)
-  current+='/'+part; mode=stat.S_IMODE(info.st_mode)
+  current+='/'+part
+  child=os.open(part,flags_for(current),dir_fd=dfd); info=os.fstat(child)
+  mode=stat.S_IMODE(info.st_mode)
   if not stat.S_ISDIR(info.st_mode): fail('inode_key')
   if current==home or current==home+'/runtime':
    if info.st_uid!=owner_uid or mode&0o022: fail('inode_key')

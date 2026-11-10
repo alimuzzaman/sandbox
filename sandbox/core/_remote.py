@@ -2614,6 +2614,30 @@ _REMOTE_MCP_ENV = "$HOME/.sandbox/mcp-remote.env"
 _REMOTE_MCP_UNIT_ENV = "%h/.sandbox/mcp-remote.env"
 _REMOTE_MCP_REVISION_RE = re.compile(r"[0-9a-f]{24}")
 _REMOTE_SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}")
+# Ancestors above the Sandbox home are opened O_PATH: a host may make one
+# traverse-only (for example /home at 0711), which O_RDONLY cannot open.
+_REMOTE_HOME_NORMALIZE_PROGRAM = r'''import os,stat,sys
+home=sys.argv[1]; owner=os.geteuid(); current=''
+traverse=getattr(os,'O_PATH',os.O_RDONLY)
+fd=os.open('/',traverse|os.O_DIRECTORY)
+for part in home.split('/')[1:]:
+ current+='/'+part
+ child=os.open(part,(os.O_RDONLY if current==home else traverse)|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd); info=os.fstat(child)
+ mode=stat.S_IMODE(info.st_mode)
+ if not stat.S_ISDIR(info.st_mode): raise SystemExit(69)
+ if current==home:
+  if info.st_uid!=owner or mode&0o002: raise SystemExit(69)
+  os.fchmod(child,mode&~0o022); os.fsync(child)
+ elif info.st_uid not in {0,owner} or mode&0o022: raise SystemExit(69)
+ os.close(fd); fd=child
+try: rfd=os.open('runtime',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+except FileNotFoundError: rfd=None
+if rfd is not None:
+ info=os.fstat(rfd); mode=stat.S_IMODE(info.st_mode)
+ if not stat.S_ISDIR(info.st_mode) or info.st_uid!=owner or mode&0o002: raise SystemExit(69)
+ os.fchmod(rfd,mode&~0o022); os.fsync(rfd); os.close(rfd)
+os.close(fd)'''
+
 _REMOTE_SOURCE_ACTIVATE_PROGRAM = r'''import ctypes,os,sys
 source,target=sys.argv[1:]; libc=ctypes.CDLL(None,use_errno=True)
 flag=2 if os.path.exists(target) else 1
@@ -4960,25 +4984,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         # state conversion (T028); no production remote may be marked
         # coordination-enabled before it.
     )
-    normalize_program = r'''import os,stat,sys
-home=sys.argv[1]; owner=os.geteuid(); current=''
-fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
-for part in home.split('/')[1:]:
- child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd); info=os.fstat(child)
- current+='/'+part; mode=stat.S_IMODE(info.st_mode)
- if not stat.S_ISDIR(info.st_mode): raise SystemExit(69)
- if current==home:
-  if info.st_uid!=owner or mode&0o002: raise SystemExit(69)
-  os.fchmod(child,mode&~0o022); os.fsync(child)
- elif info.st_uid not in {0,owner} or mode&0o022: raise SystemExit(69)
- os.close(fd); fd=child
-try: rfd=os.open('runtime',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
-except FileNotFoundError: rfd=None
-if rfd is not None:
- info=os.fstat(rfd); mode=stat.S_IMODE(info.st_mode)
- if not stat.S_ISDIR(info.st_mode) or info.st_uid!=owner or mode&0o002: raise SystemExit(69)
- os.fchmod(rfd,mode&~0o022); os.fsync(rfd); os.close(rfd)
-os.close(fd)'''
+    normalize_program = _REMOTE_HOME_NORMALIZE_PROGRAM
     stage_root = "$HOME/sandbox/" + staged_source["stage_name"]
     command = (
         "set -eu; umask 077; IFS= read -r sandbox_remote_mcp_token; "

@@ -88,7 +88,8 @@ function field(label: string, value: string): string {
 }
 
 function sourceNote(source: string, remote: string): string {
-  return source === "this-server" ? `this server · recorded as ${remote}` : `controller record · ${remote}`;
+  if (source !== "this-server") return `controller record · ${remote}`;
+  return remote === "this-server" ? "this server" : `this server · recorded as ${remote}`;
 }
 
 function stackCard(stack: HostingStack): string {

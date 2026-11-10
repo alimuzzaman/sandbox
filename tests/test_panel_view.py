@@ -217,7 +217,21 @@ class ControllerSourceTest(unittest.TestCase):
         self.assertEqual(len(records["targets"]), 2)
         self.assertTrue(all(len(target["routes"]) == 2 for target in records["targets"]))
         self.assertIn("controller_records_truncated", records["partial_reasons"])
-        self.assertIn("controller_hostnames_truncated", records["partial_reasons"])
+        self.assertIn("controller_hostnames_truncated:r/site0/production", records["partial_reasons"])
+
+    def test_controller_input_walk_is_bounded(self):
+        hosts = {f"r/site{index}/production": {"hostnames": [f"www.site{index}.example.test"]}
+                 for index in range(5)}
+        with mock.patch.object(pv, "MAX_CONTROLLER_INPUT", 2):
+            records = pv.controller_records({}, {"hosts": hosts}, lambda record: {})
+        self.assertEqual(len(records["targets"]), 2)
+        self.assertEqual(records["partial_reasons"], ["controller_records_truncated"])
+
+    def test_merged_reasons_are_capped(self):
+        sources = [server(partial=[f"r{n}" for n in range(4)]), server(partial=["x", "y"])]
+        with mock.patch.object(pv.pr, "MAX_PARTIAL_REASONS", 3):
+            view = pv.build_view(sources)
+        self.assertEqual(view["partial_reasons"], ["r0", "r1", "r2", "partial_reasons_truncated"])
 
     def test_stack_claims_survive_the_cap(self):
         stacks = {f"r/s{index}": {"remote": "r", "slug": f"s{index}", "project": f"p{index}",

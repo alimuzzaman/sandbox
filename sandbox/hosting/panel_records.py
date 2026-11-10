@@ -442,17 +442,30 @@ def _read_json(path: Path) -> object:
 
 
 SCAN_LIMIT = 2000  # directory entries looked at per directory, matching or not
+TOTAL_SCAN_LIMIT = 20000  # directory entries looked at per read, across the whole tree
 MAX_PARTIAL_REASONS = 50
 
 
-def _children(path: Path, *, directories: bool, suffix: str = "") -> tuple[list[Path], bool]:
-    """Up to SCAN_LIMIT entries of ``path`` (no symlinked directories), and whether more were left."""
+class _Budget:
+    def __init__(self, total: int):
+        self.left = total
+
+
+def _children(path: Path, *, directories: bool, suffix: str = "",
+              budget: _Budget | None = None) -> tuple[list[Path], bool]:
+    """Up to SCAN_LIMIT entries of ``path`` (no symlinked directories), and whether more were left.
+
+    ``budget`` is shared by every scan of one read, so the whole tree costs
+    at most TOTAL_SCAN_LIMIT entry checks however it is shaped.
+    """
     found: list[Path] = []
     try:
         with os.scandir(path) as entries:
             for scanned, entry in enumerate(entries):
-                if scanned >= SCAN_LIMIT:
+                if scanned >= SCAN_LIMIT or (budget is not None and budget.left <= 0):
                     return sorted(found), True
+                if budget is not None:
+                    budget.left -= 1
                 try:
                     is_dir = entry.is_dir(follow_symlinks=False)
                 except OSError:
@@ -482,10 +495,12 @@ def read_server_records(runtime_dir: Path) -> ServerRecords:
         elif reasons[-1] != "partial_reasons_truncated":
             reasons.append("partial_reasons_truncated")
 
+    budget = _Budget(TOTAL_SCAN_LIMIT)
+
     def targets_full() -> bool:
         return len(records["targets"]) + len(records["legacy"]) >= MAX_TARGETS
 
-    projects, more = _children(runtime_dir / "hosts", directories=True)
+    projects, more = _children(runtime_dir / "hosts", directories=True, budget=budget)
     if more:
         note("hosted_targets_truncated")
     for project_dir in projects:
@@ -494,7 +509,7 @@ def read_server_records(runtime_dir: Path) -> ServerRecords:
             break
         if not TARGET_PART_RE.fullmatch(project_dir.name):
             continue
-        environments, more = _children(project_dir, directories=True)
+        environments, more = _children(project_dir, directories=True, budget=budget)
         if more:
             note(f"hosted_targets_truncated:{project_dir.name}")
         for env_dir in environments:
@@ -514,13 +529,13 @@ def read_server_records(runtime_dir: Path) -> ServerRecords:
                     note(f"target_summary_unreadable:{label}:{type(exc).__name__}")
             elif (env_dir / "compose.override.yml").exists():
                 records["legacy"].append({"project": project_dir.name, "environment": env_dir.name})
-    slugs, more = _children(runtime_dir / SITES_DIR, directories=True)
+    slugs, more = _children(runtime_dir / SITES_DIR, directories=True, budget=budget)
     if more:
         note("site_links_truncated")
     for slug_dir in slugs:
         if not SLUG_RE.fullmatch(slug_dir.name):
             continue
-        files, more = _children(slug_dir, directories=False, suffix=".json")
+        files, more = _children(slug_dir, directories=False, suffix=".json", budget=budget)
         if more:
             note(f"site_links_truncated:{slug_dir.name}")
         for path in files:

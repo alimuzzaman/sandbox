@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import time
+from itertools import islice
 from typing import Callable, Iterable, Literal, TypedDict
 from urllib.parse import urlsplit
 
@@ -25,6 +26,7 @@ Origin = Literal["route", "linked", "matched_by_name"]
 RowState = Literal["serving", "redirecting", "applying", "failed", "instance_not_found", "unknown"]
 
 MAX_KNOWN_SITES = 1000
+MAX_CONTROLLER_INPUT = 2000
 
 HealthLookup = Callable[[list[tuple[str, str]]], dict[str, HealthResult]]
 
@@ -162,21 +164,28 @@ def controller_records(stack_data: dict, host_state: dict,
             out["partial_reasons"].append("controller_records_truncated")
         return True
 
-    def bounded_hosts(values: object) -> list[str]:
-        hostnames = sorted({str(value) for value in values}) if isinstance(values, list) else []
+    def bounded_hosts(values: object, key: str) -> list[str]:
+        values = list(islice(values, MAX_CONTROLLER_INPUT)) if isinstance(values, list) else []
+        hostnames = sorted({str(value) for value in values})
         if len(hostnames) > pr.MAX_ROUTES:
-            out["partial_reasons"].append("controller_hostnames_truncated")
+            out["partial_reasons"].append(f"controller_hostnames_truncated:{key}")
         return hostnames[:pr.MAX_ROUTES]
 
-    claimed = {key_of(record) for record in stacks.values() if isinstance(record, dict)}
-    for record in stacks.values():
+    # The controller's files are already parsed, but walk at most a fixed
+    # number of entries from each so oversized state stays cheap to show.
+    stack_records = list(islice(stacks.values(), MAX_CONTROLLER_INPUT))
+    host_entries = list(islice(hosts.items(), MAX_CONTROLLER_INPUT))
+    if len(stacks) > MAX_CONTROLLER_INPUT or len(hosts) > MAX_CONTROLLER_INPUT:
+        out["partial_reasons"].append("controller_records_truncated")
+    claimed = {key_of(record) for record in stack_records if isinstance(record, dict)}
+    for record in stack_records:
         if not isinstance(record, dict):
             continue
         if full():
             break
         key = key_of(record)
         entry = hosts.get(key) if isinstance(hosts.get(key), dict) else {}
-        hostnames = bounded_hosts(record.get("hostnames") or entry.get("hostnames") or [])
+        hostnames = bounded_hosts(record.get("hostnames") or entry.get("hostnames") or [], key)
         try:
             last = _controller_apply(last_apply_view(record), None) or {
                 "status": "applying", "started_at": 0, "finished_at": None, "request_id": None}
@@ -208,14 +217,14 @@ def controller_records(stack_data: dict, host_state: dict,
                     recorded_at=site.get("recorded_at") or 0))
             except (ValueError, TypeError, AttributeError) as exc:
                 out["partial_reasons"].append(f"site_link_unreadable:{record.get('slug')}:{type(exc).__name__}")
-    for key, entry in sorted(hosts.items()):
+    for key, entry in sorted(host_entries, key=lambda item: str(item[0])):
         if key in claimed or not isinstance(entry, dict):
             continue
         if full():
             break
         remote, _, rest = str(key).partition("/")
         project, _, environment = rest.partition("/")
-        hostnames = bounded_hosts(entry.get("hostnames") or [])
+        hostnames = bounded_hosts(entry.get("hostnames") or [], str(key))
         if not hostnames:
             continue
         try:
@@ -304,7 +313,11 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
     legacy: dict[tuple[str, str], pr.LegacyTarget] = {}
     links: list[tuple[Source, pr.SiteLink]] = []
     for source in sources:
-        partial.extend(source["partial_reasons"])
+        for reason in source["partial_reasons"]:
+            if len(partial) < pr.MAX_PARTIAL_REASONS:
+                partial.append(reason)
+            elif partial[-1] != "partial_reasons_truncated":
+                partial.append("partial_reasons_truncated")
         for target in source["targets"]:
             key = (target["remote"], target["project"], target["environment"])
             if key not in chosen or (source["source"] == "this-server" and chosen[key][0] != "this-server"):

@@ -248,6 +248,14 @@ class ReadServerRecordsTest(unittest.TestCase):
         self.assertLessEqual(len(records["links"]), 3)
         self.assertIn("site_links_truncated:demo", records["partial_reasons"])
 
+    def test_total_scan_budget_spans_the_tree(self):
+        for index in range(3):
+            self.write(f"hosts/p{index}/production/compose.override.yml", "services: {}")
+        with unittest.mock.patch.object(pr, "TOTAL_SCAN_LIMIT", 4):
+            records = pr.read_server_records(self.runtime)
+        self.assertLess(len(records["legacy"]), 3)
+        self.assertTrue(any(reason.startswith("hosted_targets_truncated") for reason in records["partial_reasons"]))
+
     def test_targets_and_reasons_are_bounded(self):
         self.write("hosts/xspeed-hub-demo/staging/summary.json", self.summary())
         self.write("hosts/zz-legacy/production/compose.override.yml", "services: {}")

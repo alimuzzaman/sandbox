@@ -5259,12 +5259,15 @@ def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | N
     """Move the `sb host stack` record to the commit this apply delivered.
 
     Called where the apply completes, the same point that makes its durable job
-    (and so ``last_apply.status``) succeed. The delivery-outcome summary is
-    ``incomplete`` when optional proof is still unobserved (feedback 94bf4610:
-    ``required_evidence_missing`` on a running deploy), so only ``failed`` or
-    ``unknown`` keeps the record back. Best effort: the delivery has already
-    happened, so a registry problem only leaves the record at its earlier
-    commit and is reported on stderr.
+    (and so ``last_apply.status``) succeed. By then the runtime was freshly
+    observed ready, a declared ``pushed_commit_sha`` revision matched (a
+    mismatch raises before this point, and edge-only replay needs the exact
+    revision observed), and the host recorded ``recorded_revision``. The
+    delivery-outcome summary can still be ``incomplete`` (feedback 94bf4610:
+    ``required_evidence_missing``) when no runtime revision is declared or the
+    public edge was not observed, so only ``failed`` or ``unknown`` keeps the
+    record back. Best effort: the delivery has already happened, so a registry
+    problem only leaves the record at its earlier commit, reported on stderr.
     """
     stack = validated.get("stack")
     if not stack or (delivery or {}).get("delivery_state") not in {"succeeded", "incomplete"}:

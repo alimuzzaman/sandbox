@@ -5269,7 +5269,9 @@ def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | N
     try:
         stack_registry.record_delivery(remote_name, stack["slug"], request_id=delivery.get("request_id"),
                                        commit=stack["commit"])
-    except (stack_registry.StackRegistryError, OSError, KeyError) as exc:
+    except (stack_registry.StackRegistryError, OSError, KeyError, TypeError, AttributeError,
+            ValueError) as exc:
+        # A malformed record must not turn a delivered apply into a failure.
         print(f"warning: stack {stack.get('slug')} record not updated to the delivered commit: "
               f"{remote.redact_text(str(exc))[:200]}", file=sys.stderr)
 

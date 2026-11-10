@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from sandbox.application.context import durable_job_dependencies
-from sandbox.application.target_service import TargetResolutionError
+from sandbox.application.target_service import TargetResolutionError, exact_project_target
 from sandbox.jobs.models import (ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity,
                                  TargetRequest, normalize_output_page_bytes,
                                  normalize_output_wait_seconds)
@@ -76,34 +76,6 @@ def _source_identity(root: str) -> SourceIdentity:
     # the deploy identity returned by the deployment transport before acceptance.
     canonical_root = str(Path(root).expanduser().resolve())
     return SourceIdentity("sha256:" + hashlib.sha256(canonical_root.encode()).hexdigest())
-
-
-def _exact_project_target(target, project_dir):
-    """Narrow a resolved local target to the named directory.
-
-    `sb host apply` admission binds its durable job to the manifest's source
-    root. When that is a subfolder of a checkout (a nested ``source_root``, or
-    a `sb host stack up` template in a subfolder) the resolver widens it to the
-    checkout, and admission refuses with ``recovery_source_mismatch``. The
-    directory must be the resolved project root or inside it, so this only
-    narrows; identity is re-derived from the narrowed root exactly as
-    admission derives it.
-    """
-    from sandbox.config.facade import project_identity
-    exact = Path(project_dir).expanduser().resolve()
-    resolved = Path(target.project_root)
-    if target.kind != "local":
-        raise TargetResolutionError("invalid_project", "--exact-project-dir needs a local job")
-    if exact != resolved and resolved not in exact.parents:
-        raise TargetResolutionError(
-            "invalid_project", f"--exact-project-dir must lie inside the project root {resolved}")
-    if exact == resolved:
-        return target
-    identity = project_identity({"root": exact})
-    digest = hashlib.sha256(str(exact).encode()).hexdigest()[:12]
-    return replace(target, project_root=str(exact), namespace=f"local:{digest}",
-                   sources={**target.sources, "identity": identity["identity"],
-                            "canonical_root": identity["canonical_root"]})
 
 
 def _resolved_project_identity(target) -> str:
@@ -466,7 +438,7 @@ def cmd_job_start(_cfg, args) -> None:
             required_capability="job.exec" if getattr(args, "remote", None) else None,
         ))
         if getattr(args, "exact_project_dir", False):
-            target = _exact_project_target(target, getattr(args, "project_dir", "."))
+            target = exact_project_target(target, getattr(args, "project_dir", "."))
     except TargetResolutionError as exc:
         from sandbox.readiness.errors import raise_registration_refusal
         raise_registration_refusal(exc)

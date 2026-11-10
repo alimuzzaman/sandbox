@@ -131,7 +131,11 @@ def cmd_web(cfg, args) -> None:
     import socket
 
     port = getattr(args, "port", None) or 8765
-    host = _web_bind_host(getattr(args, "host", None) or "127.0.0.1")
+    requested_hosts = getattr(args, "host", None) or ["127.0.0.1"]
+    if isinstance(requested_hosts, str):
+        requested_hosts = [requested_hosts]
+    hosts = list(dict.fromkeys(_web_bind_host(value) for value in requested_hosts))
+    host = hosts[0]
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):     # quiet — don't spam the console
@@ -169,7 +173,7 @@ def cmd_web(cfg, args) -> None:
             # /api/instance/ bridge routes are token-gated (see _bridge_handle)
             # and may be reached from a container via the docker host-gateway,
             # so they are NOT restricted this way.
-            return _web_request_allowed(self.client_address[0], host,
+            return _web_request_allowed(self.client_address[0], self.server.server_address[0],
                                         self.headers.get("Host"), self.headers.get("Origin"))
 
         def do_DELETE(self):
@@ -281,25 +285,33 @@ def cmd_web(cfg, args) -> None:
     # Bind the requested port; if it's busy (a previous `./sb web` still up, or
     # anything else), auto-pick the next free one instead of crashing.
     requested = port
-    # The snapshot-bridge auto-start passes --host 0.0.0.0 so a container can
-    # reach it via the docker host-gateway; dashboard routes stay gated by
-    # _local, and the /api/instance/ bridge routes are per-instance-token-gated.
-    # `--exact-port` (used by the bridge auto-start) binds only the requested
-    # port instead of scanning, so the bridge never lands on a different port
-    # than the mu-plugin expects.
+    # The snapshot-bridge auto-start also listens on the Docker gateway so a
+    # container can reach it via the docker host-gateway; dashboard routes stay
+    # gated by _local, and the /api/instance/ bridge routes are
+    # per-instance-token-gated. `--exact-port` (used by the bridge auto-start)
+    # binds only the requested port instead of scanning, so the bridge never
+    # lands on a different port than the mu-plugin expects. Every address
+    # shares one port.
     exact = getattr(args, "exact_port", False)
-    server_class = ThreadingHTTPServer
-    if ":" in host:
-        server_class = type("ThreadingHTTPServerV6", (ThreadingHTTPServer,),
-                            {"address_family": socket.AF_INET6})
-    httpd = None
+
+    def server_class(address):
+        if ":" not in address:
+            return ThreadingHTTPServer
+        return type("ThreadingHTTPServerV6", (ThreadingHTTPServer,),
+                    {"address_family": socket.AF_INET6})
+
+    servers = []
     for cand in range(requested, requested + (1 if exact else 20)):
         try:
-            httpd = server_class((host, cand), Handler)
+            for address in hosts:
+                servers.append(server_class(address)((address, cand), Handler))
             port = cand
             break
         except OSError:
-            continue
+            for server in servers:
+                server.server_close()
+            servers = []
+    httpd = servers[0] if servers else None
     if httpd is None:
         die(f"couldn't bind port {requested}"
             + ("" if exact else f"–{requested+19}")
@@ -309,16 +321,19 @@ def cmd_web(cfg, args) -> None:
              f"(another `./sb web` may already be running).")
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else (f"[{host}]" if ":" in host else host)
     url = f"http://{shown}:{port}"
-    reach = "any device on your tailnet" if _is_tailnet_ip(host) else "this machine only"
+    reach = "any device on your tailnet" if any(map(_is_tailnet_ip, hosts)) else "this machine only"
     ok(f"Sandbox web UI: {url}  (dashboard: {reach}, full control — Ctrl-C to stop)")
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     if getattr(args, "open", False):
         run([opener, url], check=False)
+    for extra in servers[1:]:
+        threading.Thread(target=extra.serve_forever, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         info("shutting down web UI")
-        httpd.shutdown()
+        for server in servers:
+            server.shutdown()
 
 register({
     'dashboard': cmd_dashboard,

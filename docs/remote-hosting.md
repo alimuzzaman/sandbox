@@ -1500,11 +1500,17 @@ browser from driving it. The address check is not proof of tailnet membership on
 own, since `100.64.0.0/10` is also shared carrier address space. Membership rests on
 the dashboard listening only on the tailnet address and on Tailscale's own firewall rules,
 which on Linux drop that range unless it arrives on the Tailscale interface. Do not run it
-this way on a host where Tailscale's firewall rules are turned off. `--host` also takes any IP literal; with
-`0.0.0.0` the dashboard still serves only this machine, which is how the wp-admin snapshot
-bridge runs on port 8765. `sb up` starts that bridge itself; if you start `sb web` on 8765
-yourself first, pass `--host 0.0.0.0` or containers may not reach the bridge. Use another
-port for a tailnet dashboard on a host that also runs the bridge. Put it behind `tailscale serve` only if your setup keeps the browser's `Host`
+this way on a host where Tailscale's firewall rules are turned off.
+
+`--host` takes any IP literal and can be repeated to listen on several addresses with one
+port. The wp-admin snapshot bridge that `sb up` starts on port 8765 listens on `127.0.0.1`
+and, on Linux, on the Docker default bridge gateway (normally `172.17.0.1`), which is what
+containers reach as `host.docker.internal`. It never listens on every address. Docker
+Desktop forwards `host.docker.internal` to loopback. If the gateway can't be read, the
+bridge stays on loopback and containers on Linux can't reach it. If you start `sb web` on
+8765 yourself before `sb up` on Linux, add `--host 127.0.0.1 --host 172.17.0.1` so
+containers can reach it. Use another port for a tailnet dashboard on a host that also runs
+the bridge. Put it behind `tailscale serve` only if your setup keeps the browser's `Host`
 and `Origin` intact; listening on the tailnet address directly needs neither `sudo` nor
 `tailscale serve`.
 

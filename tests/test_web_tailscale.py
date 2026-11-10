@@ -1,6 +1,7 @@
 import contextlib
 import io
 import socket
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,10 +15,13 @@ TAILNET = "100.64.0.9"
 
 
 class FakeServer:
-    bound = None
+    bound = []
+    taken = set()
 
     def __init__(self, address, handler):
-        FakeServer.bound = (address, getattr(type(self), "address_family", socket.AF_INET))
+        if address in FakeServer.taken:
+            raise OSError("in use")
+        FakeServer.bound.append((address, getattr(type(self), "address_family", socket.AF_INET)))
 
     def serve_forever(self):
         raise KeyboardInterrupt
@@ -25,18 +29,22 @@ class FakeServer:
     def shutdown(self):
         pass
 
+    def server_close(self):
+        pass
 
-def start(host=None, tailscale_output=None):
-    args = SimpleNamespace(port=8765, exact_port=True, open=False)
+
+def start(host=None, tailscale_output=None, exact=True, taken=()):
+    args = SimpleNamespace(port=8765, exact_port=exact, open=False)
     if host is not None:
         args.host = host
     ip = SimpleNamespace(returncode=0 if tailscale_output else 1, stdout=tailscale_output or "", stderr="")
-    FakeServer.bound = None
+    FakeServer.bound, FakeServer.taken = [], set(taken)
     with mock.patch("http.server.ThreadingHTTPServer", FakeServer), \
+            mock.patch.object(ui_dash.threading, "Thread"), \
             mock.patch.object(ui_dash.subprocess, "run", return_value=ip) as run, \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         ui_dash.cmd_web({}, args)
-    return FakeServer.bound, run
+    return (FakeServer.bound[-1] if FakeServer.bound else None), run
 
 
 class BindAddressTest(unittest.TestCase):
@@ -62,6 +70,16 @@ class BindAddressTest(unittest.TestCase):
 
     def test_an_ipv6_address_gets_an_ipv6_socket(self):
         self.assertEqual(start("::1")[0], (("::1", 8765), socket.AF_INET6))
+
+    def test_several_addresses_share_one_port(self):
+        start(["127.0.0.1", "172.17.0.1"])
+        self.assertEqual([address for address, _ in FakeServer.bound],
+                         [("127.0.0.1", 8765), ("172.17.0.1", 8765)])
+
+    def test_a_port_busy_on_any_address_moves_every_address_on(self):
+        start(["127.0.0.1", "172.17.0.1"], exact=False, taken={("172.17.0.1", 8765)})
+        self.assertEqual([address for address, _ in FakeServer.bound][-2:],
+                         [("127.0.0.1", 8766), ("172.17.0.1", 8766)])
 
 
 class RequestGateTest(unittest.TestCase):
@@ -110,15 +128,31 @@ class RequestGateTest(unittest.TestCase):
 
 
 class BridgeStartTest(unittest.TestCase):
-    def test_the_snapshot_bridge_still_listens_for_containers(self):
+    def hosts(self, platform, gateway="172.17.0.1", returncode=0, error=None):
+        inspect = SimpleNamespace(returncode=returncode, stdout=f"{gateway}\n", stderr="")
         with tempfile.TemporaryDirectory() as runtime, \
                 mock.patch.object(bridge, "RUNTIME_DIR", Path(runtime)), \
+                mock.patch.object(bridge.sys, "platform", platform), \
                 mock.patch.object(bridge, "_bridge_port_up", side_effect=[False] + [True] * 20), \
+                mock.patch.object(bridge.subprocess, "run", side_effect=error, return_value=inspect), \
                 mock.patch.object(bridge.subprocess, "Popen") as popen, \
                 mock.patch("time.sleep"):
             bridge._ensure_bridge_server()
         argv = popen.call_args.args[0]
-        self.assertEqual(argv[argv.index("--host") + 1], "0.0.0.0")
+        return [argv[index + 1] for index, item in enumerate(argv) if item == "--host"]
+
+    def test_on_linux_it_listens_for_containers_on_the_docker_gateway_only(self):
+        self.assertEqual(self.hosts("linux"), ["127.0.0.1", "172.17.0.1"])
+
+    def test_on_macos_docker_desktop_reaches_it_on_loopback(self):
+        self.assertEqual(self.hosts("darwin"), ["127.0.0.1"])
+
+    def test_it_never_listens_on_every_address(self):
+        for case in ({"gateway": "0.0.0.0"}, {"gateway": "203.0.113.5"}, {"gateway": "nonsense"},
+                     {"returncode": 1}, {"error": OSError("no docker")},
+                     {"error": subprocess.TimeoutExpired("docker", 5)}):
+            with self.subTest(**{key: str(value) for key, value in case.items()}):
+                self.assertEqual(self.hosts("linux", **case), ["127.0.0.1"])
 
 
 if __name__ == "__main__":

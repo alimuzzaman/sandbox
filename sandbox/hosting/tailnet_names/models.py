@@ -49,6 +49,11 @@ PUBLIC_EXPOSED = "tailnet_name_public_exposed"
 PUBLIC_PROBE_UNAVAILABLE = "tailnet_name_public_probe_unavailable"
 NOT_FOUND = "tailnet_name_not_found"
 NOT_DUE = "tailnet_name_not_due"
+PUBLIC_PROBE_INCONCLUSIVE = "tailnet_name_public_probe_inconclusive"
+ACME_CLIENT_UNTRUSTED = "tailnet_name_acme_client_untrusted"
+STATE_CORRUPT = "tailnet_name_state_corrupt"
+UNMANAGED = "tailnet_name_unmanaged"
+REMOTE_PATH_UNSAFE = "tailnet_name_remote_path_unsafe"
 
 TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 UPSTREAM_NETWORKS = tuple(ipaddress.ip_network(net) for net in (
@@ -66,6 +71,9 @@ ACME_SERVERS = {
 }
 
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+_HEX32 = re.compile(r"[0-9a-f]{32}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_ISO_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,189}")
 
@@ -108,6 +116,7 @@ class TailnetNameConfig:
     acme_email: str
     acme_server: str = ACME_SERVERS["letsencrypt"]
     lego_path: str | None = None
+    lego_sha256: str | None = None
 
     @classmethod
     def parse(cls, block: object) -> "TailnetNameConfig":
@@ -151,7 +160,16 @@ class TailnetNameConfig:
         if lego is not None and not (isinstance(lego, str) and lego.startswith("/")
                                      and "\x00" not in lego):
             raise TailnetNameError(CONFIG_INVALID, "tailnet_names.lego must be an absolute path")
-        return cls(tuple(zones), source, key, email, server, lego)
+        digest = block.get("lego_sha256")
+        if digest is not None and not (isinstance(digest, str) and _HEX64.fullmatch(digest)):
+            raise TailnetNameError(CONFIG_INVALID,
+                                   "tailnet_names.lego_sha256 must be 64 lowercase hex digits")
+        unknown = set(block) - {"zones", "cloudflare_token", "acme_email", "acme_server", "lego",
+                                "lego_sha256"}
+        if unknown:
+            raise TailnetNameError(CONFIG_INVALID,
+                                   "tailnet_names has unknown keys: " + ", ".join(sorted(unknown)))
+        return cls(tuple(zones), source, key, email, server, lego, digest)
 
     @classmethod
     def load(cls) -> "TailnetNameConfig":
@@ -285,7 +303,7 @@ class RemoteTarget:
     public_ip: str | None
 
 
-StepName = Literal["preflight", "gate", "dns", "certificate", "install", "server_block",
+StepName = Literal["preflight", "gate", "dns", "certificate", "activate",
                    "verify_tailnet", "verify_public", "remove_block", "remove_certificate",
                    "remove_dns"]
 StepStatus = Literal["done", "skipped", "refused", "failed", "not_run"]
@@ -323,6 +341,11 @@ class RemoteInventoryEntry:
     cert_sha256: str | None
     cert_names: tuple[str, ...]
     key_matches: bool | None
+    block_managed: bool = False
+    dir_present: bool = False
+    dir_managed: bool = False
+    dir_unsafe: bool = False
+    activation: str | None = None
 
     @property
     def upstream(self) -> str | None:
@@ -348,6 +371,12 @@ class RemoteInventoryEntry:
             cert_sha256=_optional_str(row, "cert_sha256"),
             cert_names=tuple(n for n in names if isinstance(n, str)),
             key_matches=key_matches if isinstance(key_matches, bool) else None,
+            block_managed=row.get("block_managed") is True,
+            dir_present=row.get("dir_present") is True or row.get("dir_managed") is True
+            or row.get("dir_unsafe") is True,
+            dir_managed=row.get("dir_managed") is True,
+            dir_unsafe=row.get("dir_unsafe") is True,
+            activation=_optional_str(row, "activation"),
         )
 
 
@@ -390,32 +419,54 @@ class TailnetNameRecord:
     cert_sha256: str | None = None
     steps: Mapping[str, str] = field(default_factory=dict)
     updated_at: str = ""
+    lease_token: str | None = None
 
     def as_dict(self) -> dict:
         return {"fqdn": self.fqdn, "zone": self.zone, "upstream": self.upstream,
                 "tailnet_ip": self.tailnet_ip, "state": self.state,
                 "dns_record_id": self.dns_record_id, "dns_adopted": self.dns_adopted,
                 "cert_not_after": self.cert_not_after, "cert_sha256": self.cert_sha256,
-                "steps": dict(self.steps), "updated_at": self.updated_at}
+                "steps": dict(self.steps), "updated_at": self.updated_at,
+                "lease_token": self.lease_token}
 
     @classmethod
-    def parse(cls, row: object) -> "TailnetNameRecord | None":
-        """Parse one stored record; a malformed record is dropped (None)."""
-        if not isinstance(row, Mapping) or hostname(row.get("fqdn")) is None:
-            return None
+    def parse(cls, row: object) -> "TailnetNameRecord":
+        """Parse one stored record strictly; anything malformed is STATE_CORRUPT.
+
+        A record carries DNS ownership, so it is never dropped silently.
+        """
+        def corrupt(why: str) -> TailnetNameError:
+            return TailnetNameError(STATE_CORRUPT, f"a stored tailnet-name record is invalid ({why}); "
+                                    "inspect $SANDBOX_HOME/runtime/tailnet-names/ before retrying")
+        if not isinstance(row, Mapping):
+            raise corrupt("not an object")
+        fqdn, zone = hostname(row.get("fqdn")), hostname(row.get("zone"))
+        if fqdn is None or zone is None or not fqdn.endswith("." + zone):
+            raise corrupt("name or zone")
         if row.get("state") not in ("publishing", "published", "removing"):
-            return None
-        for key in ("zone", "upstream", "tailnet_ip"):
-            if not isinstance(row.get(key), str):
-                return None
-        steps = row.get("steps") if isinstance(row.get("steps"), Mapping) else {}
+            raise corrupt("state")
+        try:
+            upstream = str(Upstream.parse(row.get("upstream")))
+            tailnet_ip = tailnet_address(row.get("tailnet_ip"))
+        except TailnetNameError:
+            raise corrupt("upstream or tailnet address") from None
+        if upstream != row.get("upstream"):
+            raise corrupt("upstream")
+        for key, pattern in (("dns_record_id", _HEX32), ("cert_sha256", _HEX64),
+                             ("lease_token", _HEX32), ("cert_not_after", _ISO_TIME)):
+            value = row.get(key)
+            if value is not None and not (isinstance(value, str) and pattern.fullmatch(value)):
+                raise corrupt(key)
+        steps = row.get("steps", {})
+        if not isinstance(steps, Mapping) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in steps.items()):
+            raise corrupt("steps")
+        updated = row.get("updated_at", "")
+        if not isinstance(updated, str) or (updated and not _ISO_TIME.fullmatch(updated)):
+            raise corrupt("updated_at")
         return cls(
-            fqdn=row["fqdn"], zone=row["zone"], upstream=row["upstream"],
-            tailnet_ip=row["tailnet_ip"], state=row["state"],
-            dns_record_id=_optional_str(row, "dns_record_id"),
-            dns_adopted=row.get("dns_adopted") is True,
-            cert_not_after=_optional_str(row, "cert_not_after"),
-            cert_sha256=_optional_str(row, "cert_sha256"),
-            steps={str(k): str(v) for k, v in steps.items()},
-            updated_at=row.get("updated_at") if isinstance(row.get("updated_at"), str) else "",
+            fqdn=fqdn, zone=zone, upstream=upstream, tailnet_ip=tailnet_ip, state=row["state"],
+            dns_record_id=row.get("dns_record_id"), dns_adopted=row.get("dns_adopted") is True,
+            cert_not_after=row.get("cert_not_after"), cert_sha256=row.get("cert_sha256"),
+            steps=dict(steps), updated_at=updated, lease_token=row.get("lease_token"),
         )

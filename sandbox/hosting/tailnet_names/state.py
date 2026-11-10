@@ -16,7 +16,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from sandbox.hosting.tailnet_names.models import BUSY, TailnetNameError, TailnetNameRecord
+from sandbox.hosting.tailnet_names.models import (
+    BUSY,
+    STATE_CORRUPT,
+    TailnetNameError,
+    TailnetNameRecord,
+)
 
 _REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 VERSION = 1
@@ -40,18 +45,31 @@ class StateStore:
         os.chmod(self.root, 0o700)
 
     def load(self) -> dict[str, TailnetNameRecord]:
+        """All records; a missing file is empty, an unreadable one is STATE_CORRUPT.
+
+        The file holds DNS ownership, so it is never read as empty by mistake.
+        """
         try:
-            document = json.loads(self.path.read_text())
+            text = self.path.read_text()
         except FileNotFoundError:
             return {}
-        except (OSError, ValueError):
-            return {}
+        except OSError as exc:
+            raise TailnetNameError(STATE_CORRUPT,
+                                   f"cannot read {self.path.name} ({type(exc).__name__})") from None
+        try:
+            document = json.loads(text)
+        except ValueError:
+            document = None
         names = document.get("names") if isinstance(document, dict) else None
+        if not isinstance(names, dict) or document.get("version") != VERSION:
+            raise TailnetNameError(STATE_CORRUPT, f"{self.path.name} is not a version "
+                                   f"{VERSION} tailnet-name state file; inspect it before retrying")
         records = {}
-        for row in (names or {}).values() if isinstance(names, dict) else ():
+        for key, row in names.items():
             record = TailnetNameRecord.parse(row)
-            if record is not None:
-                records[record.fqdn] = record
+            if record.fqdn != key:
+                raise TailnetNameError(STATE_CORRUPT, f"{self.path.name} has a mismatched key")
+            records[record.fqdn] = record
         return records
 
     def get(self, fqdn: str) -> TailnetNameRecord | None:

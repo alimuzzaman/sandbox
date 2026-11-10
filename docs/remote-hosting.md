@@ -1684,63 +1684,105 @@ published name changes nothing.
 
 1. **Preflight**: nginx is installed, active and passes `nginx -t`, includes
    `conf.d/*.conf`, and serves the name nowhere else; the remote holds its
-   tailnet address.
+   tailnet address. Anything already at the name's reserved paths that
+   Sandbox did not write is refused and left alone
+   (`tailnet_name_unmanaged`): a block counts as Sandbox's only when it is a
+   root 0600 regular file whose first line is this feature's header for the
+   same name, and a certificate directory only when it holds a valid
+   `managed.json` marker. A symlinked or group/world-writable path is
+   `tailnet_name_remote_path_unsafe`.
 2. **Gate**: no durable job is active on the remote and none of
    `/run/lock/sandbox-{hosting-caddy,edge-nginx,docker-pool}.lock` is held.
-   A busy remote is refused (`tailnet_name_busy`), never waited for.
+   A busy remote is refused (`tailnet_name_busy`), never waited for. The run
+   then takes a per-name lease on the remote (token and expiry, under a
+   per-name lock), so a second controller working on the same name is
+   refused (`tailnet_name_busy`) until the lease is released or expires.
 3. **DNS**: a DNS-only (unproxied) A record from the name to the tailnet IPv4
-   in Cloudflare. An identical existing record is adopted. A record with
-   another address, a proxied record or several records is refused
+   in Cloudflare. The helper reads the name's complete record set (every
+   type). Exactly one identical record is adopted; anything else (another
+   address, a proxied record, another type, several records) is refused
    (`tailnet_name_dns_conflict`) and never changed.
 4. **Certificate**: the remote generates an EC P-256 key in
    `/etc/nginx/sandbox-tailnet/<fqdn>/privkey.pem` (root, 0600) and a signing
-   request. `lego` on the controller gets a DNS-01 certificate for it. The key
-   never leaves the remote.
-5. **Install**: `fullchain.pem` (0644) next to the key, after checking that it
-   matches the key and the name.
-6. **Server block**: `/etc/nginx/conf.d/sandbox-tailnet-<fqdn>.conf` (root,
-   0600) listens only on `<tailnet-ip>:80` (308 to HTTPS) and
-   `<tailnet-ip>:443 ssl` with HTTP/2. It proxies to the upstream with
-   websocket headers, `proxy_buffering off` and `proxy_read_timeout 600s`, and
-   drops any other Host with 444. It is never a `default_server`. It is
-   installed through the front door's edge transaction: under
-   `flock /run/lock/sandbox-edge-nginx.lock`, `nginx -t`, then a reload. When
-   the test fails the new file is removed and nginx is not reloaded.
-7. **Verify**: HTTPS to the tailnet address must present the installed
+   request; `openssl` reads and writes only through stdin and stdout. `lego`
+   on the controller gets a DNS-01 certificate for it. The key never leaves
+   the remote. A certificate `lego` already issued for the name is reused
+   while it has more than 30 days left and the remote accepts it.
+5. **Activate**: the chain and the block are installed together by the remote
+   program. Under `flock /run/lock/sandbox-edge-nginx.lock` it checks the
+   lease, re-checks the gate (locks and durable jobs, failing closed),
+   writes an activation journal (`written`, `tested`, `loaded`), installs
+   both files through exclusive temp files and renames, runs `nginx -t` and
+   reloads. A failed test or reload restores the previous block and chain.
+   A rerun that finds an unfinished journal settles it first (test and
+   reload, or restore); a file being on disk never counts as loaded.
+   The block, `/etc/nginx/conf.d/sandbox-tailnet-<fqdn>.conf` (root, 0600),
+   listens only on `<tailnet-ip>:80` (308 to HTTPS) and `<tailnet-ip>:443 ssl`
+   with HTTP/2. It proxies to the upstream with websocket headers,
+   `proxy_buffering off` and `proxy_read_timeout 600s`, and drops any other
+   Host with 444. It is never a `default_server`.
+6. **Verify**: HTTPS to the tailnet address must present the installed
    certificate and answer HTTP (`tailnet_name_tailnet_probe_failed`
-   otherwise; the name stays and a rerun repeats the check). A connection to
-   the public address with the name as SNI must not present it. If it does,
-   the block is removed and the run fails with `tailnet_name_public_exposed`.
-   The public address is the SSH host when it is public, or `--public-address`.
+   otherwise, after a few tries; the name stays and a rerun repeats the
+   check). The public address is then probed with the name as SNI. It passes
+   only on a conclusive refusal (connection refused, reset or closed, or a
+   TLS alert) or on a certificate that is not valid for the name. A timeout,
+   an unreachable route or any other error is
+   `tailnet_name_public_probe_inconclusive`. Any certificate valid for the
+   name, ours or not, is `tailnet_name_public_exposed`: the block is removed
+   (the key stays) and the address probed again to report whether something
+   else still serves the name. The public address is the SSH host when it is
+   public, or `--public-address`.
 
 The upstream must be `localhost`, a loopback, private or tailnet IPv4 and a
 port. Hostnames are refused, because nginx resolves them once at start-up.
 Changing the upstream of a published name needs `--replace-upstream`.
 
 `renew FQDN` or `renew --all` reissues certificates that expire within 30 days
-(`--force` reissues anyway), installs them under the edge lock with test and
-reload, restores the previous chain if the test fails, and verifies again.
-`sb remote edge` reports a tailnet certificate that is overdue with the hint
-`run sb host tailnet-name renew`. Scheduling `renew --all` from a routine is
-not built yet.
+(`--force` reissues anyway) and activates them the same way, then verifies
+again. A current certificate whose activation is not proven loaded is tested
+and reloaded without reissuing. `renew --all` reports names outside today's
+zones and leaves them alone. `sb remote edge` reports a tailnet certificate
+that is overdue with the hint `run sb host tailnet-name renew`. Scheduling
+`renew --all` from a routine is not built yet.
 
-`remove` removes the block (test and reload), then the certificate directory,
-then the DNS record, recording each step. It deletes the record only when it
-still has the id this controller recorded, the tailnet address and no proxy.
-Otherwise it leaves the record in place (`tailnet_name_dns_not_owned`).
+`remove` takes the lease, removes the block (test and reload, under the edge
+lock and the re-checked gate), then the certificate directory (refusing any
+file Sandbox did not write), then the DNS record, recording each step. It
+deletes the record only when the name's complete record set is exactly the
+record this controller recorded (same id, type A, the tailnet address, no
+proxy). Otherwise it leaves the records in place
+(`tailnet_name_dns_not_owned`). The provider has no compare-and-delete, so a
+change made between that read and the delete is not excluded.
+
+Every mutating run first checks the name's zone against today's
+`tailnet_names.zones` and the zone stored in its record, before any DNS,
+ACME or remote call (`tailnet_name_zone_not_allowed`); `list` flags such names
+with `zone_not_allowed`. A controller state file that does not parse is
+`tailnet_name_state_corrupt`, never treated as empty.
 
 **Configuration and the token.** The zones, the token reference and the ACME
 contact live in the `tailnet_names` block of `$SANDBOX_HOME/sandbox.local.yml`
 (see [sandbox-config-reference.md](sandbox-config-reference.md#tailnet-names-machine-config)).
-The Cloudflare token (Zone:Read and DNS:Edit on those zones) must be in a
-file secret source such as `personal`. It reaches only two fixed children
-run by the secrets broker as `CLOUDFLARE_DNS_API_TOKEN`: the shipped stdlib
-DNS helper and `lego`. It never appears in argv, configuration, state,
-output, logs or feedback. Install `lego` on the controller yourself (for
-example `brew install lego`). Controller state lives in
+The Cloudflare token (Zone:Read and DNS:Edit on those zones) is read through
+the secrets broker. It reaches only two programs, each run through a use
+profile that Sandbox defines in-process (`sandbox-tailnet-name-dns` and
+`sandbox-tailnet-name-lego`, never MCP-reachable; a project profile with one
+of those names is refused), with a fixed argv and the token in
+`CLOUDFLARE_DNS_API_TOKEN`: the shipped stdlib DNS helper, which reads its
+request from a private file and refuses redirects, and `lego`. It never
+appears in argv, configuration, state, output, logs or feedback.
+
+`lego` is pinned before it gets the token: its real path, owned by root or
+you with no group/world write on it or any parent, must be in a known install
+location (`/usr/bin/lego`, `/usr/local/bin/lego`, a Homebrew `Cellar/lego/`)
+or match `tailnet_names.lego_sha256`, and `lego --version`, run without the
+token, must report lego 5 or later. Anything else is
+`tailnet_name_acme_client_untrusted`. Install `lego` on the controller
+yourself (for example `brew install lego`). Controller state lives in
 `$SANDBOX_HOME/runtime/tailnet-names/<remote>.json` (names, addresses, the
-record id and the certificate expiry only), and `lego`'s account in
-`$SANDBOX_HOME/runtime/tailnet-names/acme/` (0700).
+record id, the certificate expiry and the lease token only), and `lego`'s
+account in `$SANDBOX_HOME/runtime/tailnet-names/acme/` (0700).
 
 **Apps that check the Host header.** nginx forwards `Host: <fqdn>`. An app
 behind the name that validates Host has to allow the name itself. The Sandbox

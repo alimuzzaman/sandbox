@@ -78,19 +78,50 @@ def _usage(args) -> str:
     return ""
 
 
-def default_deps(project_dir: str | None):
+def secret_service_factory(project_dir: str | None):
+    """Build the broker's SecretService with Sandbox's two fixed use profiles.
+
+    The profiles are added to the project's descriptor BEFORE the service is
+    built, so a provider source binds them into its authority like any other
+    profile. A project profile that already uses one of these names is refused
+    rather than overridden.
+    """
+    import copy
     from pathlib import Path
 
+    from sandbox.core._paths import BASE
+    from sandbox.core._secrets import secret_file
+    from sandbox.hosting.tailnet_names.models import SECRET_UNAVAILABLE
+    from sandbox.secrets.context import build_secret_service
+    from sandbox.secrets.service import load_secret_project_descriptor
+
+    root = Path(project_dir or ".").expanduser().resolve()
+
+    def factory(extra_profiles: dict):
+        descriptor = copy.deepcopy(dict(load_secret_project_descriptor(root) or {}))
+        secrets_block = dict(descriptor.get("secrets") or {})
+        profiles = dict(secrets_block.get("useProfiles") or {})
+        clash = sorted(set(profiles) & set(extra_profiles))
+        if clash:
+            raise TailnetNameError(SECRET_UNAVAILABLE,
+                                   "the project defines reserved use profile(s) "
+                                   + ", ".join(clash) + "; rename them")
+        profiles.update(copy.deepcopy(extra_profiles))
+        secrets_block["useProfiles"] = profiles
+        descriptor["secrets"] = secrets_block
+        return build_secret_service(project_root=root, config=descriptor,
+                                    personal_path=secret_file(), runtime_root=BASE / "runtime")
+
+    return factory
+
+
+def default_deps(project_dir: str | None):
     from sandbox.core import _remote
     from sandbox.hosting.front_door import nginx
     from sandbox.hosting.tailnet_names import remote_program, service, state, verify
     from sandbox.hosting.tailnet_names.broker import Broker
 
-    def secret_service():
-        from sandbox.commands.secrets import _service
-        return _service(project_dir or ".")
-
-    broker = Broker(secret_service, acme_root=state.default_root() / "acme")
+    broker = Broker(secret_service_factory(project_dir), acme_root=state.default_root() / "acme")
 
     def active_jobs(remote: str) -> bool:
         from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -98,19 +129,25 @@ def default_deps(project_dir: str | None):
                                        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                                        remote_sb_path=_remote.remote_sb_path)
         page = transport.list(remote, active_only=True, limit=1)
-        return bool(page.get("jobs"))
+        jobs = page.get("jobs") if isinstance(page, dict) else None
+        if not isinstance(jobs, list):
+            raise RuntimeError("job list unavailable")
+        return bool(jobs)
+
+    def jobs_probe(entry) -> dict:
+        # The remote program re-checks jobs as the SSH user against this home.
+        return {"home": _remote.resolve_sandbox_home(dict(entry))}
 
     return service.Deps(
         remote_call=lambda entry, action, payload: remote_program.call(entry, action, payload),
         preflight=lambda entry, declared, own_file: nginx.preflight(
             dict(entry), declared=declared, own_file=own_file),
-        apply_route=lambda entry, name, content: nginx.apply_route(
-            dict(entry), name, content, loopback_probe=False),
-        remove_route=lambda entry, name: nginx.remove_route(dict(entry), name),
         dns=broker.dns,
-        issue=lambda cfg, fqdn, csr, lego: broker.issue(cfg, fqdn, csr, lego=lego),
+        issue=broker.issue,
+        cached_chain=broker.cached_chain,
         find_lego=broker.find_lego,
         active_jobs=active_jobs,
+        jobs_probe=jobs_probe,
         probe=verify.probe,
         store=lambda remote: state.StateStore(state.default_root(), remote),
     )
@@ -129,7 +166,12 @@ def cmd_host_tailnet_name(args) -> None:
     try:
         config = None
         name = upstream = None
-        if action != "list":
+        if action == "list":
+            try:
+                config = models.TailnetNameConfig.load()
+            except TailnetNameError:
+                config = None
+        else:
             config = models.TailnetNameConfig.load().with_acme_server(
                 getattr(args, "acme_server", None))
             if args.tailnet_hostname:

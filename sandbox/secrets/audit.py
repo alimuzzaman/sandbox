@@ -16,7 +16,7 @@ from .models import SecretBrokerError
 _ALLOWED_FIELDS = frozenset({
     "schema_version", "event_id", "correlation_id", "phase", "operation",
     "source", "keys", "surface", "actor", "profile", "decision",
-    "reason_code", "at", "revision", "count", "input_channel",
+    "reason_code", "at", "revision", "count", "input_channel", "destination",
 })
 _FORBIDDEN_TOKENS = (
     "value", "secret", "preview", "mask", "length", "hash", "excerpt",
@@ -26,6 +26,19 @@ OWNERSHIP_OPERATIONS = frozenset({
     "ownership_classify", "ownership_approve", "ownership_migrate",
     "ownership_cleanup", "ownership_run",
 })
+
+
+def _with_destination(event: dict[str, Any], destination: str | None) -> dict[str, Any]:
+    """Add the non-secret copy destination only when one exists (spec 071).
+
+    Events without one keep their existing shape.
+    """
+    if destination is None:
+        return event
+    if not isinstance(destination, str) or not 1 <= len(destination) <= 512 or any(
+            ord(character) < 32 or ord(character) == 127 for character in destination):
+        raise SecretBrokerError("audit_invalid", "audit destination is invalid")
+    return {**event, "destination": destination}
 
 
 def _now() -> str:
@@ -46,9 +59,10 @@ class SecretAudit:
         surface: str,
         profile: str | None = None,
         input_channel: str | None = None,
+        destination: str | None = None,
     ) -> str:
         correlation_id = uuid.uuid4().hex
-        self._append({
+        self._append(_with_destination({
             "schema_version": 1,
             "event_id": uuid.uuid4().hex,
             "correlation_id": correlation_id,
@@ -63,7 +77,7 @@ class SecretAudit:
             "reason_code": None,
             "at": _now(),
             "input_channel": input_channel,
-        })
+        }, destination))
         return correlation_id
 
     def outcome(
@@ -80,8 +94,9 @@ class SecretAudit:
         revision: str | None = None,
         count: int | None = None,
         input_channel: str | None = None,
+        destination: str | None = None,
     ) -> None:
-        self._append({
+        self._append(_with_destination({
             "schema_version": 1,
             "event_id": uuid.uuid4().hex,
             "correlation_id": correlation_id,
@@ -98,14 +113,14 @@ class SecretAudit:
             "revision": revision,
             "count": count,
             "input_channel": input_channel,
-        })
+        }, destination))
 
     def _append(self, event: dict[str, Any]) -> None:
         operation = event.get("operation", "")
         is_ownership = isinstance(operation, str) and operation.startswith("ownership_")
         if is_ownership:
             if (operation not in OWNERSHIP_OPERATIONS or event.get("revision") is not None
-                    or event.get("input_channel") is not None):
+                    or event.get("input_channel") is not None or "destination" in event):
                 raise SecretBrokerError("audit_invalid", "ownership audit permits names and counts only")
             event = {k: v for k, v in event.items() if k not in ("revision", "input_channel")}
         if set(event) - _ALLOWED_FIELDS:

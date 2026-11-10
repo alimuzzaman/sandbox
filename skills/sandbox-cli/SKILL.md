@@ -47,6 +47,12 @@ route, TLS, provider, or authorization failure, stop on the broker's bounded
 result; do not use a plaintext, public, shared-credential, or raw-CLI fallback.
 See `docs/secret-inspection.md`.
 
+File sources: `sb secrets unset --source ALIAS KEY` removes one key (a missing key
+refuses with `key_missing`). `sb secrets copy --source ALIAS --key KEY --remote NAME
+--target-source ALIAS [--as NEWKEY]` sends one value to a provisioned remote's own
+`secrets set --stdin --skip-unchanged` over SSH stdin; a rerun reports
+`already_current`. Both are local CLI only and never print values.
+
 ## Ownership profiles
 
 Spec 069's separate CLI-only `secrets ownership` capability supports explicit

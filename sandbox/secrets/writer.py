@@ -63,6 +63,16 @@ def _render(document: ParsedDocument, key: str, value: str, *, exists: bool) -> 
     return document.raw_bytes + prefix + render_assignment(key, value).encode("utf-8") + newline
 
 
+def _same_value(record, value: str) -> bool:
+    stored = getattr(record, "value", None)
+    if not isinstance(stored, str) or not isinstance(value, str):
+        return False
+    try:
+        return hmac.compare_digest(stored.encode("utf-8"), value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+
+
 def update_source(
     source: SafeSource,
     *,
@@ -71,8 +81,14 @@ def update_source(
     revision_key: bytes,
     intent: str = "either",
     expected_revision: str | None = None,
+    skip_unchanged: bool = False,
 ) -> tuple[str, str]:
-    """Update one key, returning (created|updated, new opaque revision)."""
+    """Update one key, returning (created|updated|already_current, revision).
+
+    With ``skip_unchanged`` an existing byte-identical value is left in place
+    and reported as ``already_current`` with the current revision. That check
+    precedes the intent check, so a create-only rerun converges (spec 071).
+    """
     if intent not in {"create", "replace", "either"}:
         raise SecretBrokerError("intent_conflict", "secret update intent is invalid")
     current_revision = opaque_revision(revision_key, source.content)
@@ -85,6 +101,8 @@ def update_source(
             raise SecretBrokerError("syntax_unsupported", "secret source syntax cannot be updated") from exc
         raise
     exists = key in document.entries
+    if skip_unchanged and exists and _same_value(document.entries[key], value):
+        return "already_current", current_revision
     if intent == "create" and exists:
         raise SecretBrokerError("intent_conflict", "secret key already exists")
     if intent == "replace" and not exists:

@@ -258,6 +258,32 @@ Never use a plaintext flag, `KEY=value`, an ordinary environment variable, an
 arbitrary input file, or a shell command string. Confirm only non-secret status,
 validation state, and the opaque revision. Do not inspect the file afterward.
 
+`--skip-unchanged` makes `set` report `already_current` and write nothing when
+the key already holds the identical value.
+
+## 6a. Remove one key or copy one key to a remote
+
+```bash
+./sb secrets unset --source SOURCE_ALIAS SECRET_KEY --project-dir PROJECT_DIR
+
+./sb secrets copy --source SOURCE_ALIAS --key SECRET_KEY \
+  --remote REMOTE_NAME --target-source REMOTE_SOURCE_ALIAS [--as REMOTE_KEY] \
+  [--create-only | --replace-only] --project-dir PROJECT_DIR
+```
+
+`unset` removes one dotenv assignment and nothing else. A missing key refuses
+with `key_missing`, so a rerun is safe and changes nothing; it is never success.
+Use `--if-revision` when working from a prior inspection.
+
+`copy` sends the value only on the stdin of the remote's own
+`sb secrets set --stdin --skip-unchanged`, over SSH to a registered, provisioned
+remote. A rerun reports `already_current`. `remote_unsupported` means the remote
+runtime needs `sb remote service migrate REMOTE_NAME --confirm`; ask the operator,
+do not work around it. `remote_timeout` means the outcome is unknown; rerun the
+same copy rather than inspecting either file. Both commands are local CLI only and
+print names, actions and opaque revisions, never values. Agents run them only when
+the operator asked for that exact source, key and remote.
+
 ## 6b. Group a dotenv source without reading it
 
 ```bash

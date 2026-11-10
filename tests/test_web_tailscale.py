@@ -148,6 +148,16 @@ class AllowHostGateTest(unittest.TestCase):
                 self.assertFalse(self.allowed(host))
         self.assertFalse(self.allowed(LISTED, names=frozenset()))
 
+    def test_a_malformed_host_with_a_listed_name_is_refused(self):
+        for host in (f"{LISTED}/path", f"user@{LISTED}", f"user:pw@{LISTED}", f"{LISTED}?q=1",
+                     f"{LISTED}#frag", f"{LISTED}:port", f"{LISTED}:443/x", f" {LISTED}"):
+            with self.subTest(host=host):
+                self.assertFalse(self.allowed(host))
+
+    def test_a_listed_name_with_a_port_needs_the_same_origin(self):
+        self.assertTrue(self.allowed(f"{LISTED}:8443", origin=f"https://{LISTED}:8443"))
+        self.assertFalse(self.allowed(f"{LISTED}:8443", origin=f"https://{LISTED}"))
+
     def test_a_listed_name_needs_its_own_https_origin(self):
         for origin in ("https://evil.example.test", f"http://{LISTED}", f"https://{LISTED}:8443",
                        f"https://{TAILNET}:8765", "null", "http://localhost:5173"):

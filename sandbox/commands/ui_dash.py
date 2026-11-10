@@ -62,6 +62,9 @@ def _web_bind_host(value: str) -> str:
     return address
 
 
+_LISTED_HOST_RE = re.compile(r"([A-Za-z0-9.-]{1,253})(?::[0-9]{1,5})?")
+
+
 def _web_allowed_names(values) -> frozenset[str]:
     """`--allow-host` names: plain DNS names, never an IP, loopback name or wildcard."""
     from sandbox.core._hosting import HostingError, normalize_hostname
@@ -94,7 +97,11 @@ def _web_request_allowed(peer, bound_host, host_header, origin,
         name = urlsplit(f"//{host_header}").hostname if host_header else None
     except ValueError:
         return False
-    listed = bool(name) and name in allowed_names and _is_tailnet_ip(bound_host)
+    # A listed name must be the whole Host value (an optional numeric port at
+    # most): no userinfo, path or query rides along on the permissive parse above.
+    exact = _LISTED_HOST_RE.fullmatch(host_header or "")
+    listed = (exact is not None and exact.group(1).lower() in allowed_names
+              and _is_tailnet_ip(bound_host))
     if not name or not (name in _LOOPBACK_NAMES or _ip(name) is not None
                         or name.endswith(".ts.net") or listed):
         return False

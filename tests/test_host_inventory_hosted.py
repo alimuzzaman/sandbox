@@ -7,8 +7,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from sandbox.hosting import panel_lifetime as pl
 from sandbox.hosting import panel_records as pr
+from sandbox.hosting.lifetime import hoststore as hs
 from sandbox.remote_runtime import host_inventory
+from tests.test_target_lifetime import NOW, stack_record
 
 COMMIT = "c" * 40
 SECRET = "planted-secret-value-7777777777"
@@ -77,6 +80,47 @@ class AttributionTest(unittest.TestCase):
                          ("unknown", False, set()))
 
 
+class LifetimeRowsTest(unittest.TestCase):
+    """Spec 076 follow-up: rows carry the host's own lifetime view and stack fallback."""
+
+    def test_rows_carry_lifetime_stack_fallback_and_reason(self):
+        record = stack_record("wp-test-stacks", project="xspeed-wp", expires=hs.to_rfc3339(NOW - 60))
+        record["environment"] = "test-stacks"
+        record["compose_project"] = "sandbox-host-xspeed-wp-test-stacks"
+        listing = pl.listing({record["compose_project"]: pl.project(record, NOW)})
+        records = {"targets": [
+            {"project": "agent-notes", "environment": "apply-eb3345e-2",
+             "compose_project": "sandbox-host-agent-notes-apply-eb3345e-2",
+             "last_apply": {"status": "unverified", "reason": "required_evidence_missing"}},
+        ], "legacy": [{"project": "xspeed-wp", "environment": "test-stacks"}]}
+        usage, _ = host_inventory._hosted_target_usage(records, [], listing)
+        by_key = {row["key"]: row for row in usage}
+        legacy = by_key["xspeed-wp/test-stacks"]
+        self.assertEqual(legacy["stack_slug"], "wp-test-stacks")
+        self.assertEqual((legacy["lifetime"]["lifetime"], legacy["lifetime"]["reap_eligible"]), ("temporary", True))
+        notes = by_key["agent-notes/apply-eb3345e-2"]
+        self.assertEqual((notes["last_apply_status"], notes["last_apply_reason"]),
+                         ("unverified", "required_evidence_missing"))
+        self.assertEqual((notes["lifetime"]["classification"], notes["lifetime"]["reason"]),
+                         ("unclassified", "no_record"))
+        self.assertFalse(notes["lifetime"]["reap_eligible"])
+
+    def test_summary_slug_wins_over_lifetime_slug(self):
+        record = stack_record("other", project="hub", expires=hs.to_rfc3339(NOW + 60))
+        listing = pl.listing({record["compose_project"]: pl.project(record, NOW)})
+        records = {"targets": [{"project": "hub", "environment": "sandbox",
+                                "compose_project": record["compose_project"], "stack": {"slug": "demo"}}],
+                   "legacy": []}
+        usage, _ = host_inventory._hosted_target_usage(records, [], listing)
+        self.assertEqual(usage[0]["stack_slug"], "demo")
+
+    def test_without_a_listing_lifetime_is_unknown(self):
+        usage, _ = host_inventory._hosted_target_usage({"targets": [], "legacy": [
+            {"project": "a", "environment": "b"}]}, [])
+        self.assertEqual(usage[0]["lifetime"]["classification"], "unknown")
+        self.assertFalse(usage[0]["lifetime"]["reap_eligible"])
+
+
 class SnapshotTest(unittest.TestCase):
     def snapshot(self, runtime: Path, rows, instances=()):
         diagnostics = {"containers": {"status": "complete", "rows": rows}, "process_view": {}}
@@ -110,6 +154,23 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(per_instance, {"sandbox-demo": 1, "xspeed-hub-demo": 0})
         self.assertEqual([row["name"] for row in snapshot["unattributed_containers"]], ["unrelated"])
         self.assertNotIn(SECRET, json.dumps(snapshot))
+
+    def test_snapshot_reads_the_hosts_lifetime_records_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "runtime"
+            runtime.mkdir()
+            write_legacy(runtime, "hub-demo", "sandbox")
+            record = stack_record(expires=hs.to_rfc3339(NOW + 3600))
+            store = runtime / "target-lifetimes"
+            store.mkdir()
+            (store / (record["compose_project"] + ".json")).write_text(json.dumps(record))
+            (store / "sandbox-host-broken-x.json").write_text("{")
+            snapshot = self.snapshot(runtime, [])
+            self.assertFalse((store / ".lock").exists())
+        row = snapshot["hosted_targets"]["rows"][0]
+        self.assertEqual((row["stack_slug"], row["lifetime"]["owner"], row["lifetime"]["lifetime"]),
+                         ("demo", "alice", "temporary"))
+        self.assertTrue(any(reason.startswith("lifetime_record_invalid:") for reason in snapshot["partial_reasons"]))
 
     def test_no_hosted_targets_keeps_the_old_shape(self):
         with tempfile.TemporaryDirectory() as tmp:

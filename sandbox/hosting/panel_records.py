@@ -22,7 +22,10 @@ import re
 import shlex
 import time
 from pathlib import Path, PurePosixPath
-from typing import Callable, Literal, TypedDict
+from typing import TYPE_CHECKING, Callable, Literal, TypedDict
+
+if TYPE_CHECKING:
+    from typing import NotRequired
 
 from sandbox.hosting.names import TARGET_PART_RE
 
@@ -34,8 +37,11 @@ MAX_TARGETS = 200
 MAX_SITE_LINKS = 500
 MAX_ROUTES = 64
 
-ApplyStatus = Literal["applying", "succeeded", "failed"]
-APPLY_STATUSES: frozenset[str] = frozenset({"applying", "succeeded", "failed"})
+# "unverified": the apply executed, but its delivery could not be verified
+# (the delivery record stays incomplete, with a reason). "failed" is kept for
+# an apply whose execution failed.
+ApplyStatus = Literal["applying", "succeeded", "unverified", "failed"]
+APPLY_STATUSES: frozenset[str] = frozenset({"applying", "succeeded", "unverified", "failed"})
 
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -57,6 +63,7 @@ class LastApply(TypedDict):
     started_at: int
     finished_at: int | None
     request_id: str | None
+    reason: NotRequired[str | None]  # the delivery reason (``required_evidence_missing``, ...), when known
 
 
 class StackFacts(TypedDict, total=False):

@@ -305,22 +305,18 @@ def _resolve_instance(instance: str) -> dict:
     return out
 
 def _proxy_container_running() -> bool:
-    """True if the sandbox-proxy Caddy container is up. Mirrors sb, including
-    spec 082: no engine call on a remote-only controller."""
+    """True if the sandbox-proxy Caddy container is up.
+
+    Delegates to sb's own guarded probe (spec 082: no engine call on a
+    remote-only controller). There is deliberately no raw `docker` fallback:
+    if the shared probe cannot load, report "not running", which only means
+    the per-port URL is reported instead of the clean one."""
     try:
         import sys
         if str(SANDBOX_ROOT) not in sys.path:
             sys.path.insert(0, str(SANDBOX_ROOT))
         from sandbox.core._domains import _proxy_running_state
         return _proxy_running_state() is True
-    except Exception:
-        pass
-    try:
-        res = subprocess.run(
-            ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
-             "--project-directory", str(SANDBOX_ROOT), "ps", "-q", "proxy"],
-            capture_output=True, text=True, timeout=10)
-        return res.returncode == 0 and bool((res.stdout or "").strip())
     except Exception:
         return False
 
@@ -390,7 +386,17 @@ def _compose(*args: str, instance: str,
     # Spec 063: on a host with development ranges, allocate before a command
     # that can create the stack's networks, pass the subnet override, and hold
     # the range lock until the command has exited.
-    from sandbox.core._docker import range_compose_session
+    from sandbox.core._docker import local_runtime_selection, range_compose_session
+    from sandbox.config.local_runtime import (
+        LocalRuntimeConfigError, remote_only_message,
+    )
+    # Spec 082: a remote-only controller refuses before any engine call.
+    try:
+        selection = local_runtime_selection()
+    except LocalRuntimeConfigError as exc:
+        return {"ok": False, "error": str(exc)}
+    if selection.remote_only:
+        return {"ok": False, "error": remote_only_message(selection)}
     with contextlib.ExitStack() as range_lock:
         try:
             range_args, _ = range_lock.enter_context(range_compose_session(instance, args))

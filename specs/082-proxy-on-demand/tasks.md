@@ -64,7 +64,7 @@ only on xspeed-dev through `sb job-start --remote xspeed-dev`, compared with an
 - [x] T026 [US2] Doctor resolves without an instance when remote-only in sandbox/cli.py
 
 - [x] T034 [US2] Generic Compose adapter refuses every operation when remote-only in sandbox/runtimes/compose.py (found in self-review: it runs `docker compose` through its own process runner, not `compose()`)
-- [x] T035 [US2] MCP proxy probe uses the gated core probe in mcp/wp-server/app.py
+- [x] T035 [US2] MCP proxy probe uses the gated core probe with no raw `docker` fallback, and MCP `_compose` refuses when remote-only, in mcp/wp-server/app.py (Luna review finding)
 - [x] T036 [US1] Patch the idle check in the `cmd_down` test in tests/test_instance_ready_install_state.py so no unit test reaches the real engine
 
 ## Phase 5: User Story 3 - Docs (P2)

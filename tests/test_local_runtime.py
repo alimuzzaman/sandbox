@@ -138,6 +138,41 @@ class TestGenericComposeAdapter(unittest.TestCase):
                 OperationRequest("/project", "start")))
 
 
+class TestMcpHelpers(unittest.TestCase):
+    def _app(self):
+        import importlib
+        import sys
+        from pathlib import Path
+        try:
+            import httpx  # noqa: F401  (the MCP helper module needs it)
+        except ImportError:
+            self.skipTest("MCP dependencies are not installed in this environment")
+        mcp_root = str(Path(__file__).resolve().parents[1] / "mcp" / "wp-server")
+        had_app = "app" in sys.modules
+        sys.path.insert(0, mcp_root)
+        try:
+            module = importlib.import_module("app")
+        except ImportError as exc:
+            self.skipTest(f"MCP helper module unavailable: {exc}")
+        finally:
+            sys.path.remove(mcp_root)
+            if not had_app:
+                self.addCleanup(sys.modules.pop, "app", None)
+        return module
+
+    def test_mcp_compose_and_proxy_probe_make_no_engine_call(self):
+        app = self._app()
+        compose_file = mock.Mock()
+        compose_file.exists.return_value = True
+        with _remote_only(), mock.patch.object(app, "_compose_file", return_value=compose_file), \
+                mock.patch("subprocess.run") as sub_run:
+            result = app._compose("ps", instance="demo")
+            self.assertFalse(app._proxy_container_running())
+        self.assertFalse(result["ok"])
+        self.assertIn("controller.local_runtime", result["error"])
+        sub_run.assert_not_called()
+
+
 class TestMissingDocker(unittest.TestCase):
     def test_compose_without_docker_returns_127_or_refuses(self):
         from sandbox.core import _docker

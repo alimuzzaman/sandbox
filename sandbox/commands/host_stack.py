@@ -644,14 +644,17 @@ def _up(args) -> dict:
         record: stack_registry.StackRecord = {
             "remote": remote_name, "slug": slug, "project": project, "environment": environment,
             "template": str(template_path), "checkout": str(checkout), "ref": ref.ref,
-            "ref_branch": ref.ref_branch, "commit": ref.commit, "hostnames": sorted(hostnames),
+            "ref_branch": ref.ref_branch, "hostnames": sorted(hostnames),
+            # `commit` stays what an apply last proved delivered; `sb host apply`
+            # moves it to last_apply.commit once this one is (record_delivery).
+            "commit": (previous or {}).get("commit"),
             "ports": ports, "manifest": str(manifest_path),
             "worktrees": [*earlier, str(worktree)],
             "created_at": (previous or {}).get("created_at", now), "updated_at": now,
             # Spec 076: sites `sb deploy --stack` linked to this stack outlive a re-apply.
             **({"sites": list(previous["sites"])} if (previous or {}).get("sites") else {}),
             "last_apply": {"request_id": request_id, "job_id": None, "submitted_at": now,
-                           "status": "submitting"},
+                           "status": "submitting", "commit": ref.commit},
             "copy_id": claim_request["record"]["copy_id"], "owner": stored.get("owner"),
             "lifetime": stored.get("lifetime"), "lifetime_source": stored.get("lifetime_source"),
             "ttl_seconds": stored.get("ttl_seconds"), "expires_at": stored.get("expires_at"),
@@ -734,6 +737,10 @@ def _list_row(local: dict | None, remote_item: dict | None, remote_state: str) -
     row["mine"] = bool(local) and (not remote_item or local.get("copy_id") == remote_item.get("copy_id"))
     row["remote_record"] = remote_state
     row["last_apply"] = _last_apply_view(local) if local else None
+    if row["mine"]:
+        # The remote record holds the commit its claim was made for; this
+        # controller's record holds the one an apply proved delivered.
+        row["commit"] = local.get("commit")
     return row
 
 
@@ -971,7 +978,7 @@ def _render_text(payload: dict) -> str:
             ports = ", ".join(f"{name}={port}" for name, port in (item.get("ports") or {}).items()) or "none"
             owner = (item.get("owner") or {}).get("label") or "unknown"
             lines.append(f"{item['slug']}  {item['project']}/{item['environment']}  "
-                         f"{item.get('ref')}@{(item.get('commit') or '')[:12]}"
+                         f"{item.get('ref')}@{(item.get('commit') or '')[:12] or 'not delivered'}"
                          f"{'  (mine)' if item.get('mine') else ''}")
             lines.append(f"  owner: {owner}  copy: {item.get('copy_id') or 'none'}  "
                          f"lifetime: {item.get('lifetime') or 'unclassified'}"
@@ -982,8 +989,9 @@ def _render_text(payload: dict) -> str:
             lines.append(f"  hosts: {', '.join(item.get('hostnames') or [])}")
             lines.append(f"  ports: {ports}")
             if last:
+                requested = f", commit {last['commit'][:12]}" if last.get("commit") else ""
                 lines.append(f"  last apply: {last.get('status', 'unknown')} at {last.get('at')} "
-                             f"(job {last.get('job_id') or 'none'})")
+                             f"(job {last.get('job_id') or 'none'}{requested})")
         for item in payload.get("targets") or []:
             lines.append(f"target {item['project']}/{item['environment']}  lifetime: {item.get('lifetime')}  "
                          f"expires: {_when(item.get('expires_at'))}")

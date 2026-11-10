@@ -719,6 +719,8 @@ be combined with `--environment` and is rejected for mutating or remote actions.
 # requires durable job context; prepare and run apply inside sb job-start:
 ./sb job-start --local --project-dir /path/to/site --request-id <req-id> --source-commit HEAD --timeout 900 -- \
   ./sb host apply --project-dir /path/to/site --environment production --remote myvps --confirm
+# When the source root is a subfolder of its checkout, add --exact-project-dir so the job
+# binds that folder, not the checkout above it (host plan prints the full command).
 
 ./sb host logs --project-dir /path/to/site --environment production --remote myvps --lines 200
 ```
@@ -1461,6 +1463,14 @@ PR branch never reads as diverged. The detached worktree passes the branch gate 
 the recorded `ref_branch`; a detached commit passes only `allowed_branches: ['*']`,
 and `['{ref_branch}']` refuses it with `stack_branch_unavailable`.
 
+A template may sit in a subfolder of its checkout (for example
+`stacks/wp-site/sandbox.hosting.yml`); its `source_root` is then that folder of the
+worktree. The durable job binds exactly that source root (`job-start --project-dir
+<source root> --exact-project-dir`), the root host apply admission checks, so it is
+not widened to the worktree root and refused with `recovery_source_mismatch`. The
+host apply's own `--project-dir` stays the rendered manifest's folder, as for any
+manifest outside its source root.
+
 Every `stack.ports` name gets a loopback port from 18100-18199 on that remote, chosen
 by one read-only SSH probe (`ss` plus Docker's published ports) so it is not bound by
 anything except the stack's own containers, and distinct from other stacks' ports and
@@ -1484,6 +1494,16 @@ only) and, only once that succeeds, removes the worktrees, the rendered manifest
 the record, releasing the ports. A destroy failure keeps all of them
 (`stack_destroy_failed`). `list` shows slug, project, ref and commit, hostnames,
 ports, and the last apply's status and time from the durable job.
+
+The stack record's `commit` is the commit the server is proven to run. `up` records
+the commit it asks for as `last_apply.commit` and keeps `commit` at the previously
+delivered one (null before the first delivery, shown as `not delivered`). `sb host
+apply` moves `commit` to `last_apply.commit` only once its delivery has succeeded,
+and only for the apply the record is waiting for (same `last_apply.request_id`). A
+failed, refused or cancelled apply leaves `commit` where it was, so `list` never runs
+ahead of the server. For this controller's own copies `list` reports that `commit`;
+the remote lifetime record keeps the commit its claim was made for, which `list`
+shows for other controllers' copies.
 
 **Hostname ownership.** Every apply, a stack's or an ordinary one, refuses before any
 effect a hostname that a different project already holds on the same remote, with

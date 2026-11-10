@@ -41,13 +41,14 @@ stack_instance:
   "manifest": "/abs/runtime/stacks/demo/sandbox.hosting.yml",
   "worktrees": ["/abs/runtime/stacks/demo/source/<sha12>-<token>"],
   "last_apply": {"request_id": "...", "job_id": "...", "submitted_at": 1762790400,
-                 "status": "submitted"}
+                 "status": "submitted", "commit": "<sha>"}
 }}}
 ```
 
 - Key `<remote>/<slug>`; a slug is unique per controller across remotes.
 - `ports` is set on the first `up` and only changed by a `--port` pin; removed only by `down`.
 - `last_apply.status` is refined at read time from the durable job (`accepted|queued|running|cancelling|succeeded|failed|timed_out|cancelled|interrupted`).
+- `last_apply.commit` is the commit the latest `up` asked for. `commit` is the last commit an apply proved delivered (`null` before the first): `sb host apply` copies `last_apply.commit` into it only after its delivery succeeds and only when its request id is `last_apply.request_id` (feedback 20153592).
 
 ## Hosting state addition
 

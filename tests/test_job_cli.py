@@ -300,6 +300,56 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(submitted, [])
         self.assertEqual(json.loads(output.getvalue())["code"], "executable_unavailable")
 
+    def test_start_exact_project_dir_binds_the_named_source_root(self):
+        """Host apply admission binds its job to the manifest's source root, which
+        the resolver would widen to the enclosing checkout (feedback 20153592)."""
+        from sandbox.config.facade import project_identity
+        from sandbox.jobs.models import ResolvedTarget
+        from sandbox.workspaces.repository import WorkspaceIndexError
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, base, True)
+        checkout = (base / "checkout").resolve()
+        source = checkout / "stacks" / "wp-site"
+        source.mkdir(parents=True)
+        (base / "elsewhere").mkdir()
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+
+        def start(project_dir, *flags, kind="local"):
+            target = ResolvedTarget(project_root=str(checkout), kind=kind, remote_name=None,
+                                    workspace_label="default", namespace="local:checkout",
+                                    sources={"identity": "project:checkout"})
+            submitted = []
+
+            def submit(submission):
+                submitted.append(submission)
+                raise WorkspaceIndexError("workspace_alias_collision", "captured")
+            args = parser.parse_args(["--project-dir", str(project_dir), *flags, "--local",
+                                      "--json", "--", "true"])
+            with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(resolve=lambda _request: target),
+                    "job_service": SimpleNamespace(submit=submit),
+                }), redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors, \
+                    self.assertRaises(SystemExit):
+                cmd_job_start(None, args)
+            return submitted, errors.getvalue()
+
+        widened, _ = start(source)
+        self.assertEqual(widened[0].project_root, str(checkout))
+        exact, _ = start(source, "--exact-project-dir")
+        digest = "sha256:" + hashlib.sha256(str(source).encode()).hexdigest()
+        self.assertEqual(exact[0].project_root, str(source))
+        # The values `sandbox.delivery.admission.validate_durable_context` compares.
+        self.assertEqual(exact[0].project_identity, project_identity({"root": source})["identity"])
+        self.assertEqual(exact[0].source.identity, digest)
+        same, _ = start(checkout, "--exact-project-dir")
+        self.assertEqual(same[0].project_root, str(checkout))
+        for project_dir, kind in ((base / "elsewhere", "local"), (source, "remote")):
+            with self.subTest(project_dir=project_dir, kind=kind):
+                refused, errors = start(project_dir, "--exact-project-dir", kind=kind)
+                self.assertEqual(refused, [])
+                self.assertIn("invalid_project", errors)
+
     def test_start_reports_workspace_ownership_refusal_as_typed_json(self):
         from sandbox.workspaces.repository import WorkspaceIndexError
         parser = __import__("argparse").ArgumentParser()

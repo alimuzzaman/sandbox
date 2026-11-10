@@ -1511,7 +1511,7 @@ def durable_job_dependencies():
     from sandbox.jobs.process import capture_process_identity
     from sandbox.jobs.registry import JobRepository
     from sandbox.jobs.storage import JobStorage
-    from sandbox.jobs.scheduler import JobScheduler
+    from sandbox.jobs.scheduler import JobScheduler, host_scheduler_policy
     from sandbox.workspaces import WorkspaceRepository
 
     repository = JobRepository(RUNTIME_DIR / "jobs" / "registry.sqlite3")
@@ -1525,7 +1525,9 @@ def durable_job_dependencies():
         process_identity=capture_process_identity, clock=time, profiles=profiles,
     )
     target = target_service()
-    scheduler = JobScheduler(repository)
+    # The slot limit and floors are this host's own ``jobs.scheduler`` config,
+    # re-read at each admission (no service restart needed after a change).
+    scheduler = JobScheduler(repository, policy_loader=host_scheduler_policy)
     workspace_repository = WorkspaceRepository(
         RUNTIME_DIR / "workspaces" / "index.sqlite3",
         storage.root / "workspaces",

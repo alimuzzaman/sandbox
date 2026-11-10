@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -22,6 +23,33 @@ class TargetServiceProtocol(Protocol):
 # selection back from here (spec 063 FR-021). Threads start with no value.
 _LAST_SELECTION: contextvars.ContextVar = contextvars.ContextVar(
     "sandbox_last_remote_selection", default=None)
+
+
+def exact_project_target(target: ResolvedTarget, project_dir) -> ResolvedTarget:
+    """Narrow a resolved local target to the named directory (`job-start --exact-project-dir`).
+
+    `sb host apply` admission binds its durable job to the manifest's source
+    root. When that is a subfolder of a checkout (a nested ``source_root``, or
+    a `sb host stack up` template in a subfolder) the resolver widens it to the
+    checkout, and admission refuses with ``recovery_source_mismatch``. The
+    directory must be the resolved project root or inside it, so this only
+    narrows; the identity is derived from the narrowed root exactly as
+    admission derives it.
+    """
+    exact = Path(project_dir).expanduser().resolve()
+    resolved = Path(target.project_root)
+    if target.kind != "local":
+        raise TargetResolutionError("invalid_project", "--exact-project-dir needs a local job")
+    if exact != resolved and resolved not in exact.parents:
+        raise TargetResolutionError(
+            "invalid_project", f"--exact-project-dir must lie inside the project root {resolved}")
+    if exact == resolved:
+        return target
+    narrowed = project_identity({"root": exact})
+    sources = dict(target.sources)
+    sources.update(identity=narrowed["identity"], canonical_root=narrowed["canonical_root"])
+    digest = hashlib.sha256(str(exact).encode()).hexdigest()[:12]
+    return replace(target, project_root=str(exact), namespace=f"local:{digest}", sources=sources)
 
 
 def last_selection(project_root: str, remote_name: str) -> str | None:

@@ -27,7 +27,8 @@ from sandbox.core import (
     _valet_proxy_active, _write_local_yaml, active_project_file,
     collect_instance_rows, compose, compose_file, die, ensure_instance, ensure_pyyaml,
     focus_file, info, load_config, ok, proxy_available, regen_caddyfile,
-    reload_proxy, resolve_instances, snapshots_dir, valet_proxy_remove, wp_dir,
+    reload_proxy, resolve_instances, snapshots_dir, stop_proxy_if_idle,
+    valet_proxy_remove, wp_dir,
     wpcli, _write_abilities_context,
 )
 from sandbox.config.init_files import (
@@ -949,6 +950,9 @@ def _refresh_caddy_routes_after_instance_delete() -> None:
     except (OSError, RuntimeError, TypeError, ValueError):
         info("instance was deleted, but Sandbox Caddy routes could not be "
              "refreshed; run `./sb domains up` to retry")
+    # Spec 082: deleting the last local instance stops the idle proxy. Never
+    # raises; unknown state keeps the proxy running.
+    stop_proxy_if_idle()
 
 
 def _cleanup_native_owner(cfg, owner) -> bool:

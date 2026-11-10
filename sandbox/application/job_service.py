@@ -199,11 +199,11 @@ class JobService:
                         parallel_safe=(submission.parallel_safe or
                                        submission.workspace_mode == "isolated"),
                     )
-                except WorkspaceBusy:
+                except WorkspaceBusy as busy:
                     queue = self.scheduler.queue_details(row)
                     row = self.repository.transition(
                         row["job_id"], Lifecycle.QUEUED,
-                        queue_reason="workspace_or_capacity_busy",
+                        queue_reason=busy.queue_reason,
                         queue_position=queue["position"],
                     )
                     row["_queue_details"] = queue
@@ -483,13 +483,13 @@ class JobService:
                         snapshot = committed
                     self._launch(self.storage.job_dir(job_id) / "descriptor.json")
                     snapshot = self.repository.snapshot(job_id)
-                except WorkspaceBusy:
+                except WorkspaceBusy as busy:
                     if (
                         snapshot.get("sync_relationship_id") is not None
                         and snapshot.get("queue_reason") == "sync_generation_launching"
                     ):
                         snapshot = self.repository.reset_pending_sync_launch(job_id)
-                    snapshot["queue_reason"] = "workspace_or_capacity_busy"
+                    snapshot["queue_reason"] = busy.queue_reason
                     if self.scheduler is not None:
                         snapshot["queue"] = self.scheduler.queue_details(snapshot)
                         snapshot["queue_position"] = snapshot["queue"]["position"]

@@ -41,6 +41,27 @@ def _job_counts() -> dict:
     return result
 
 
+def _job_slots() -> dict | None:
+    """Effective ``jobs.scheduler`` limit and slots in use; None when unreadable."""
+    from sandbox.config.job_scheduler import DEFAULT_POLICY, JobSchedulerConfigError
+    from sandbox.jobs.scheduler import capacity_view, host_scheduler_policy
+
+    try:
+        policy, error = host_scheduler_policy(), None
+    except JobSchedulerConfigError as exc:
+        policy, error = DEFAULT_POLICY, exc
+    home = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
+    path = home / "runtime" / "jobs" / "registry.sqlite3"
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return capacity_view(connection, policy, error)
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error):
+        return None
+
+
 def _diagnostic_process_snapshot() -> dict:
     """Collect bounded process evidence with fixed argv and no shell or SSH."""
     from sandbox.core import _remote as remote_core
@@ -88,25 +109,35 @@ def _container_key(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
-def _hosted_target_usage(records: dict, container_rows: list) -> tuple[list[dict], set[str]]:
+def _hosted_target_usage(records: dict, container_rows: list,
+                         lifetimes: dict | None = None) -> tuple[list[dict], set[str]]:
     """Attribute ``sandbox-host-<project>-<environment>-*`` containers to hosted targets.
 
     ``records`` is ``panel_records.read_server_records``. A container goes to the
     target with the longest matching Compose project prefix, so one target's
-    name cannot take a sibling's containers. Returns the rows and the names of
-    the containers they claimed.
+    name cannot take a sibling's containers. ``lifetimes`` is this host's
+    ``panel_lifetime.read_server`` listing: each row carries its lifetime view,
+    and a stack target with no summary takes its stack name from the record.
+    Returns the rows and the names of the containers they claimed.
     """
+    from sandbox.hosting import panel_lifetime
+
     targets = []
     for target in list(records.get("targets") or ()) + list(records.get("legacy") or ()):
         project, environment = str(target["project"]), str(target["environment"])
         compose = str(target.get("compose_project") or f"sandbox-host-{project}-{environment}")
         stack = target.get("stack") if isinstance(target.get("stack"), dict) else None
         last_apply = target.get("last_apply") if isinstance(target.get("last_apply"), dict) else None
+        lifetime = panel_lifetime.lookup(lifetimes, compose)
+        slug = (stack.get("slug") if stack else None) or (
+            lifetime["slug"] if lifetime["kind"] == "stack" else None)
         targets.append({
             "key": f"{project}/{environment}", "project": project, "environment": environment,
-            "compose_project": compose, "stack_slug": stack.get("slug") if stack else None,
+            "compose_project": compose, "stack_slug": slug,
             "recorded": "compose_project" in target,
             "last_apply_status": last_apply.get("status") if last_apply else None,
+            "last_apply_reason": last_apply.get("reason") if last_apply else None,
+            "lifetime": lifetime,
             "_prefix": _container_key(compose) + "-", "_matched": [],
         })
     by_length = sorted(targets, key=lambda row: -len(row["_prefix"]))
@@ -132,6 +163,14 @@ def _hosted_target_usage(records: dict, container_rows: list) -> tuple[list[dict
         })
     usage.sort(key=lambda row: row["key"])
     return usage, claimed
+
+
+def _lifetime_listing(runtime_dir: Path) -> dict:
+    """This host's spec 077 lifetime records, read only (no lock, no write)."""
+    import time
+
+    from sandbox.hosting import panel_lifetime
+    return panel_lifetime.read_server(runtime_dir, int(time.time()))
 
 
 def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
@@ -165,7 +204,9 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
         from sandbox.hosting import panel_records
         records = panel_records.read_server_records(_paths.RUNTIME_DIR)
         partial.extend(records["partial_reasons"][:20])
-        hosted, attributed_names = _hosted_target_usage(records, container_rows)
+        lifetimes = _lifetime_listing(Path(_paths.RUNTIME_DIR))
+        partial.extend(lifetimes["partial_reasons"][:20])
+        hosted, attributed_names = _hosted_target_usage(records, container_rows, lifetimes)
     except Exception:
         hosted, attributed_names = [], set()
         partial.append("hosted_target_inventory_unavailable")

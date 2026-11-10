@@ -719,6 +719,8 @@ be combined with `--environment` and is rejected for mutating or remote actions.
 # requires durable job context; prepare and run apply inside sb job-start:
 ./sb job-start --local --project-dir /path/to/site --request-id <req-id> --source-commit HEAD --timeout 900 -- \
   ./sb host apply --project-dir /path/to/site --environment production --remote myvps --confirm
+# When the source root is a subfolder of its checkout, add --exact-project-dir so the job
+# binds that folder, not the checkout above it (host plan prints the full command).
 
 ./sb host logs --project-dir /path/to/site --environment production --remote myvps --lines 200
 ```
@@ -1461,6 +1463,14 @@ PR branch never reads as diverged. The detached worktree passes the branch gate 
 the recorded `ref_branch`; a detached commit passes only `allowed_branches: ['*']`,
 and `['{ref_branch}']` refuses it with `stack_branch_unavailable`.
 
+A template may sit in a subfolder of its checkout (for example
+`stacks/wp-site/sandbox.hosting.yml`); its `source_root` is then that folder of the
+worktree. The durable job binds exactly that source root (`job-start --project-dir
+<source root> --exact-project-dir`), the root host apply admission checks, so it is
+not widened to the worktree root and refused with `recovery_source_mismatch`. The
+host apply's own `--project-dir` stays the rendered manifest's folder, as for any
+manifest outside its source root.
+
 Every `stack.ports` name gets a loopback port from 18100-18199 on that remote, chosen
 by one read-only SSH probe (`ss` plus Docker's published ports) so it is not bound by
 anything except the stack's own containers, and distinct from other stacks' ports and
@@ -1484,6 +1494,16 @@ only) and, only once that succeeds, removes the worktrees, the rendered manifest
 the record, releasing the ports. A destroy failure keeps all of them
 (`stack_destroy_failed`). `list` shows slug, project, ref and commit, hostnames,
 ports, and the last apply's status and time from the durable job.
+
+The stack record's `commit` is the commit the server is proven to run. `up` records
+the commit it asks for as `last_apply.commit` and keeps `commit` at the previously
+delivered one (null before the first delivery, shown as `not delivered`). `sb host
+apply` moves `commit` to `last_apply.commit` only once its delivery has succeeded,
+and only for the apply the record is waiting for (same `last_apply.request_id`). A
+failed, refused or cancelled apply leaves `commit` where it was, so `list` never runs
+ahead of the server. For this controller's own copies `list` reports that `commit`;
+the remote lifetime record keeps the commit its claim was made for, which `list`
+shows for other controllers' copies.
 
 **Hostname ownership.** Every apply, a stack's or an ordinary one, refuses before any
 effect a hostname that a different project already holds on the same remote, with
@@ -1684,63 +1704,163 @@ published name changes nothing.
 
 1. **Preflight**: nginx is installed, active and passes `nginx -t`, includes
    `conf.d/*.conf`, and serves the name nowhere else; the remote holds its
-   tailnet address.
+   tailnet address. Anything already at the name's reserved paths that
+   Sandbox did not write is refused and left alone
+   (`tailnet_name_unmanaged`): a block counts as Sandbox's only when it is a
+   root 0600 regular file whose first line is this feature's header for the
+   same name, and a certificate directory only when it holds a valid
+   `managed.json` marker. A symlinked or group/world-writable path is
+   `tailnet_name_remote_path_unsafe`. A new directory is built under a
+   staging name with its marker and renamed into place, and a removed one is
+   renamed to a tombstone before it is emptied, so a crash never leaves an
+   unmarked directory at the name; the next run finishes either leftover.
+   When the nginx checks fail and this name has an unfinished activation on
+   the remote, its own untested block may be the cause: `add` first settles
+   that one transaction (the same gate, lease, edge lock and proofs as an
+   activation), then runs the nginx checks again. Any other failure is
+   refused as before.
 2. **Gate**: no durable job is active on the remote and none of
    `/run/lock/sandbox-{hosting-caddy,edge-nginx,docker-pool}.lock` is held.
-   A busy remote is refused (`tailnet_name_busy`), never waited for.
+   A busy remote is refused (`tailnet_name_busy`), never waited for. A lock
+   that cannot be probed counts as held. The run then takes a per-name lease
+   on the remote (token and expiry, under a per-name lock), so a second
+   controller working on the same name is refused (`tailnet_name_busy`) until
+   the lease is released or expires. Under the lease the name is inspected
+   again, and every decision (ownership, upstream, certificate) is made from
+   that fresh view, not from the one taken before the lease.
 3. **DNS**: a DNS-only (unproxied) A record from the name to the tailnet IPv4
-   in Cloudflare. An identical existing record is adopted. A record with
-   another address, a proxied record or several records is refused
+   in Cloudflare. The helper reads the name's complete record set (every
+   type). Exactly one identical record is adopted; anything else (another
+   address, a proxied record, another type, several records) is refused
    (`tailnet_name_dns_conflict`) and never changed.
 4. **Certificate**: the remote generates an EC P-256 key in
    `/etc/nginx/sandbox-tailnet/<fqdn>/privkey.pem` (root, 0600) and a signing
-   request. `lego` on the controller gets a DNS-01 certificate for it. The key
-   never leaves the remote.
-5. **Install**: `fullchain.pem` (0644) next to the key, after checking that it
-   matches the key and the name.
-6. **Server block**: `/etc/nginx/conf.d/sandbox-tailnet-<fqdn>.conf` (root,
-   0600) listens only on `<tailnet-ip>:80` (308 to HTTPS) and
-   `<tailnet-ip>:443 ssl` with HTTP/2. It proxies to the upstream with
-   websocket headers, `proxy_buffering off` and `proxy_read_timeout 600s`, and
-   drops any other Host with 444. It is never a `default_server`. It is
-   installed through the front door's edge transaction: under
-   `flock /run/lock/sandbox-edge-nginx.lock`, `nginx -t`, then a reload. When
-   the test fails the new file is removed and nginx is not reloaded.
-7. **Verify**: HTTPS to the tailnet address must present the installed
+   request; `openssl` reads and writes only through stdin and stdout. `lego`
+   on the controller gets a DNS-01 certificate for it. The key never leaves
+   the remote. A certificate `lego` already issued for the name is reused
+   while it has more than 30 days left and the remote accepts it.
+5. **Activate**: the chain and the block are installed together by the remote
+   program. Under `flock /run/lock/sandbox-edge-nginx.lock` it checks the
+   lease, re-checks the gate (locks and durable jobs, failing closed, and
+   again right before `nginx -t` and right before the reload, including
+   recovery reloads),
+   writes an activation journal (`written`, `tested`, `loaded`), installs
+   both files through exclusive temp files and renames, runs `nginx -t` and
+   reloads. A reload counts only when nginx is seen serving what is on disk:
+   the remote program connects to `<tailnet-ip>:443` with the name as SNI and
+   must get the installed certificate and, from
+   `/.well-known/sandbox-tailnet-activation`, the block's own marker (a digest
+   of the block's text, so every version of the block has its own). After a
+   removal or a rollback to no block, nothing may listen, or the handshake
+   for the name must present a certificate the name never had. Each leaf is
+   recorded in the name's directory before any journal or chain write that
+   could install it, failed attempts included; the last 64 are kept, with
+   the current and previous chains. An older entry can age out because a new
+   leaf is recorded only from a proven state, whose certificate is the
+   current chain and is always kept. The response body
+   never counts as proof of an unload. A name directory that never reached
+   an activation (no certificate, history, journal or backup) needs no
+   proof, since nginx cannot have loaded a block without its certificate;
+   such a partial add can always be removed. Every directory the remote program
+   creates or opens for writing is fsynced, with its parent, before anything is
+   written below it, so a retry also settles one left by an interrupted run.
+   Every block unlink is fsynced before
+   anything that depends on it, such as deleting the certificates. `systemctl reload`
+   succeeding is not proof, because nginx keeps its old configuration when
+   it rejects a reload (a socket it cannot bind, for example), and a worker
+   it respawns runs that old configuration. A failed test or reload restores the previous block and chain.
+   A rerun that finds an unfinished journal settles it first (test and
+   reload, or restore); a file being on disk never counts as loaded.
+   The block, `/etc/nginx/conf.d/sandbox-tailnet-<fqdn>.conf` (root, 0600),
+   listens only on `<tailnet-ip>:80` (308 to HTTPS) and `<tailnet-ip>:443 ssl`
+   with HTTP/2. It proxies to the upstream with websocket headers,
+   `proxy_buffering off` and `proxy_read_timeout 600s`, and drops any other
+   Host with 444, and answers the marker path above itself. It is never a
+   `default_server`.
+6. **Verify**: HTTPS to the tailnet address must present the installed
    certificate and answer HTTP (`tailnet_name_tailnet_probe_failed`
-   otherwise; the name stays and a rerun repeats the check). A connection to
-   the public address with the name as SNI must not present it. If it does,
-   the block is removed and the run fails with `tailnet_name_public_exposed`.
-   The public address is the SSH host when it is public, or `--public-address`.
+   otherwise, after a few tries; the name stays and a rerun repeats the
+   check). The public address is then probed with the name as SNI. It passes
+   only on a conclusive refusal (connection refused, reset or closed, or a
+   TLS alert) or on a certificate that is not valid for the name. A timeout,
+   an unreachable route or any other error is
+   `tailnet_name_public_probe_inconclusive`. Any certificate valid for the
+   name, ours or not, is `tailnet_name_public_exposed`: the block is removed
+   (the key stays) and the address probed again to report whether something
+   else still serves the name (or that the follow-up check was inconclusive).
+   Coverage follows the certificate's DNS SANs; the subject CN counts only
+   when the certificate has none. The public address is the SSH host when it is
+   public, or `--public-address`.
 
 The upstream must be `localhost`, a loopback, private or tailnet IPv4 and a
 port. Hostnames are refused, because nginx resolves them once at start-up.
 Changing the upstream of a published name needs `--replace-upstream`.
 
-`renew FQDN` or `renew --all` reissues certificates that expire within 30 days
-(`--force` reissues anyway), installs them under the edge lock with test and
-reload, restores the previous chain if the test fails, and verifies again.
-`sb remote edge` reports a tailnet certificate that is overdue with the hint
-`run sb host tailnet-name renew`. Scheduling `renew --all` from a routine is
-not built yet.
+`renew FQDN` or `renew --all` takes each name's lease first and decides
+everything, including "not found" and "not due", from the remote as it is
+under the lease. It reissues certificates that expire within 30 days
+(`--force` reissues anyway) and activates them the same way, then verifies
+again. It skips a name (`tailnet_name_not_due`) only when the remote proves
+the exact bytes on disk are loaded and those same bytes passed both probes on
+this controller. Otherwise a current certificate is reconciled (test and
+reload) and verified without reissuing, so a name whose last verification
+failed, or that crashed before verifying, is checked again. `renew --all` reports names outside today's
+zones and leaves them alone. `sb remote edge` reports a tailnet certificate
+that is overdue with the hint `run sb host tailnet-name renew`. Scheduling
+`renew --all` from a routine is not built yet.
 
-`remove` removes the block (test and reload), then the certificate directory,
-then the DNS record, recording each step. It deletes the record only when it
-still has the id this controller recorded, the tailnet address and no proxy.
-Otherwise it leaves the record in place (`tailnet_name_dns_not_owned`).
+`remove` takes the lease and holds it until the DNS step is done; the lease
+is re-proved (and extended) on the remote right before every controller-side
+side effect (the DNS create or delete and the ACME issuance), so a run whose
+lease expired and was taken over stops instead. Under the
+edge lock and the re-checked gate it reads the block's ownership, refuses any
+file in the certificate directory that Sandbox did not write (only its own
+files and its exact temp names qualify), removes the block (test and
+reload), then the directory, then the DNS record, recording each step. A
+block already gone from disk is not taken as proof that nginx unloaded it:
+unless the journal proves the loaded state, `remove` tests and reloads before
+it deletes the directory or the DNS record. It
+deletes the record only when the name's complete record set is exactly the
+record this controller recorded (same id, type A, the tailnet address, no
+proxy). Otherwise it leaves the records in place
+(`tailnet_name_dns_not_owned`). The provider has no compare-and-delete, so a
+change made between that read and the delete is not excluded.
+
+Limits: the host gate is a set of checks, not a reservation. A durable job or
+host lock taken between the last check and the reload is not excluded, and a
+run suspended between re-proving its lease and the provider call it guards is
+not fenced. The public check probes one IPv4 address from this controller; it
+says nothing about IPv6 or other vantage points.
+
+Every mutating run first checks the name's zone against today's
+`tailnet_names.zones` and the zone stored in its record, before any DNS or
+ACME call or remote change (`tailnet_name_zone_not_allowed`); `list` flags such names
+with `zone_not_allowed`. A controller state file that does not parse is
+`tailnet_name_state_corrupt`, never treated as empty.
 
 **Configuration and the token.** The zones, the token reference and the ACME
 contact live in the `tailnet_names` block of `$SANDBOX_HOME/sandbox.local.yml`
 (see [sandbox-config-reference.md](sandbox-config-reference.md#tailnet-names-machine-config)).
-The Cloudflare token (Zone:Read and DNS:Edit on those zones) must be in a
-file secret source such as `personal`. It reaches only two fixed children
-run by the secrets broker as `CLOUDFLARE_DNS_API_TOKEN`: the shipped stdlib
-DNS helper and `lego`. It never appears in argv, configuration, state,
-output, logs or feedback. Install `lego` on the controller yourself (for
-example `brew install lego`). Controller state lives in
+The Cloudflare token (Zone:Read and DNS:Edit on those zones) is read through
+the secrets broker. It reaches only two programs, each run through a use
+profile that Sandbox defines in-process (`sandbox-tailnet-name-dns` and
+`sandbox-tailnet-name-lego`, never MCP-reachable; a project profile with one
+of those names is refused), with a fixed argv and the token in
+`CLOUDFLARE_DNS_API_TOKEN`: the shipped stdlib DNS helper, which reads its
+request from a private file and refuses redirects, and `lego`. It never
+appears in argv, configuration, state, output, logs or feedback.
+
+`lego` is pinned before it gets the token: its real path, owned by root or
+you with no group/world write on it or any parent, must be in a known install
+location (`/usr/bin/lego`, `/usr/local/bin/lego`, a Homebrew `Cellar/lego/`)
+or match `tailnet_names.lego_sha256`, and `lego --version`, run without the
+token, must report lego 5 or later. Anything else is
+`tailnet_name_acme_client_untrusted`. Install `lego` on the controller
+yourself (for example `brew install lego`). Controller state lives in
 `$SANDBOX_HOME/runtime/tailnet-names/<remote>.json` (names, addresses, the
-record id and the certificate expiry only), and `lego`'s account in
-`$SANDBOX_HOME/runtime/tailnet-names/acme/` (0700).
+record id, the certificate expiry and the lease token only; each write is a
+fsynced rename followed by a directory fsync, so a recorded DNS record id
+survives power loss), and `lego`'s account in `$SANDBOX_HOME/runtime/tailnet-names/acme/` (0700).
 
 **Apps that check the Host header.** nginx forwards `Host: <fqdn>`. An app
 behind the name that validates Host has to allow the name itself. The Sandbox
@@ -2006,6 +2126,34 @@ last apply status and the containers named `sandbox-host-<project>-<environment>
 not toward any instance or the unattributed list. Each row links to its card on
 `/hosting`. On a server, `/host/local` shows the same rows. A controller sees them for a
 registered remote only after `sb remote service migrate` installs this code there.
+
+**Lifetimes.** Every stack and hosted target on `/hosting` shows its spec 077 lifetime record:
+
+- lifetime (`temporary`, `hosted` or `permanent`), owner label, and expiry with time left;
+- `canonical`;
+- whether server cleanup may remove it now, and why (`expired` or `merged`);
+- `state` (`active`, `reaping` or `reaped`) and `extended_count`.
+
+A "Lifetimes" list at the top of the page orders them temporary first, then hosted, then permanent, with unclassified targets last. Within temporary, reapable copies come first, then the soonest to expire. Several copies of one branch are separate rows, each with its owner. A record with no card of its own is still listed.
+
+Where the lifetimes come from:
+
+- On a server, the panel reads `runtime/target-lifetimes/*.json` through `Store.peek` in `hoststore.py`. It takes no lock, writes nothing, skips symlinks, and reads at most 500 files of 256 KiB each. Validation and eligibility use the store's own rules.
+- On a controller, it runs `sb host stack list --remote R --json` for each remote its records name. The result is cached for 60 seconds, the fetch runs in the background, and the page never waits for a remote. Until the first result arrives the lifetime reads "loading". An unreachable remote reads "unknown" and is reported as partial.
+
+A target with no record, or with a record that is unreadable, partly written, oversized or invalid, reads "unclassified, protected". It is never shown as reapable. The panel has no classify, TTL or reap control.
+
+The host pages' hosted apps table shows the same lifetime, owner and time left, ordered the same way. Each row's lifetime is built by the host itself into its inventory. A stack target with no `summary.json` takes its stack name from the lifetime record.
+
+**Last apply.** `summary.json` records the outcome from the apply's delivery record:
+
+- `succeeded`: delivery is complete.
+- `unverified`: the apply executed, but delivery stayed incomplete or unknown. The reason is kept, for example `required_evidence_missing` when the project declares no source revision. The panel shows "applied · delivery unverified (required evidence missing)".
+- `failed`: execution failed or delivery failed.
+
+A target without a summary reads "applied before tracking", not a bare "not recorded".
+
+**Landing page and sidebar.** On a server with hosted apps, `/host/local` leads with them: their count and a list linking to their `/hosting` rows. The two kinds are labelled "Sandbox dev instances" and "Hosted apps (sb host apply / stacks)". With no dev instances, the page hides the "New instance" prompt and the footer hides "Start all" and "Stop all". Those buttons act on dev instances only. The sidebar shows the dev instance count and the hosted app count. A host's resource page titles its instance table "Sandbox dev instances on this host". CPU figures are labelled as a point-in-time sample from one `docker stats` read.
 
 ## 8. CLI + MCP surface
 

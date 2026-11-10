@@ -488,6 +488,13 @@ the job and source root still bind the selected source checkout. Recovery compar
 the retained original argv with that optional digest. Its absence preserves the
 legacy source-root comparison and is never filled from a later invocation.
 
+The job binds the source root exactly. When that root is a subfolder of its
+checkout (a nested `source_root`, or a `sb host stack up` template in a
+subfolder), `job-start` would otherwise record the project root above it, so the
+guidance passes `--exact-project-dir`: `job-start` then records `--project-dir`
+itself, which must lie inside the resolved project root, and derives the project
+and source identities from it exactly as admission does.
+
 Artifact preparation refuses with `source_artifact_unavailable`,
 `source_artifact_invalid`, or `source_artifact_mismatch`. A mismatched publication
 return stops before reset and configuration writes; retained effects still show

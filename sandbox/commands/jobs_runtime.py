@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from sandbox.application.context import durable_job_dependencies
-from sandbox.application.target_service import TargetResolutionError
+from sandbox.application.target_service import TargetResolutionError, exact_project_target
 from sandbox.jobs.models import (ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity,
                                  TargetRequest, normalize_output_page_bytes,
                                  normalize_output_wait_seconds)
@@ -188,6 +188,9 @@ def _resolved_output_profile(target, explicit: str | None) -> str:
 def configure_start_parser(parser) -> None:
     parser.description = "Start a detached durable job from explicit argv after --."
     parser.add_argument("--project-dir", default=".")
+    parser.add_argument("--exact-project-dir", action="store_true",
+                        help="record --project-dir itself as the job's project root instead of "
+                             "the project root above it; it must lie inside that project")
     parser.add_argument("--project-identity",
                         help="canonical project identity supplied by a detached controller")
     parser.add_argument("--kind", default="exec", help=argparse.SUPPRESS)
@@ -372,6 +375,9 @@ def configure_retention_parser(parser) -> None:
 def configure_matrix_parser(parser) -> None:
     parser.description = "Fan out one explicit argv into isolated durable workspace jobs."
     parser.add_argument("--project-dir", default=".")
+    parser.add_argument("--exact-project-dir", action="store_true",
+                        help="record --project-dir itself as the job's project root instead of "
+                             "the project root above it; it must lie inside that project")
     parser.add_argument("--project-identity",
                         help="canonical project identity supplied by a detached controller")
     target = parser.add_mutually_exclusive_group()
@@ -431,6 +437,8 @@ def cmd_job_start(_cfg, args) -> None:
             workspace=getattr(args, "workspace", None),
             required_capability="job.exec" if getattr(args, "remote", None) else None,
         ))
+        if getattr(args, "exact_project_dir", False):
+            target = exact_project_target(target, getattr(args, "project_dir", "."))
     except TargetResolutionError as exc:
         from sandbox.readiness.errors import raise_registration_refusal
         raise_registration_refusal(exc)
@@ -723,7 +731,10 @@ def cmd_job_list(_cfg, args) -> None:
     # Repository rows remain internal. Public list responses carry compact
     # summaries and a cursor, with full details available through job-status.
     has_more = None
+    slots = None
     if isinstance(result, dict):
+        # A remote runtime reports its own scheduler; older runtimes omit it.
+        slots = result.get("slots") if isinstance(result.get("slots"), dict) else None
         if result.get("ok") is False:
             _die(str(result.get("error") or result.get("code") or "job list failed"))
         page = result.get("page")
@@ -744,6 +755,12 @@ def cmd_job_list(_cfg, args) -> None:
             has_more = bool(dependencies["job_service"].list(following))
     from sandbox.jobs.listing import job_page
     envelope = job_page(result, limit=limit, has_more=has_more)
+    if not remote_name:
+        scheduler = getattr(dependencies["job_service"], "scheduler", None)
+        slots = scheduler.capacity() if scheduler is not None else None
+    if slots is not None:
+        from sandbox.jobs.listing import job_slots
+        envelope["slots"] = job_slots(slots)
     if getattr(args, "json", False):
         print(json.dumps(envelope, sort_keys=True))
     else:
@@ -751,6 +768,9 @@ def cmd_job_list(_cfg, args) -> None:
             print(f"{item['job_id']} {item['lifecycle']} {item['workspace_label']}")
         if envelope["page"]["next_cursor"]:
             print("Next: --cursor-job-id " + envelope["page"]["next_cursor"])
+        if envelope.get("slots") is not None:
+            from sandbox.jobs.scheduler import capacity_line
+            print(capacity_line(envelope["slots"]))
 
 
 def cmd_job_cancel(_cfg, args) -> None:

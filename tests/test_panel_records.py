@@ -158,6 +158,107 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(recorder.run(lambda: {"ok": 1}), {"ok": 1})
 
 
+def delivery(execution="succeeded", state="incomplete", reason="required_evidence_missing"):
+    return {"execution_state": execution, "delivery_state": state,
+            "delivery_succeeded": state == "succeeded",
+            "evidence_completeness": "complete" if state == "succeeded" else "partial", "reason": reason}
+
+
+class ApplyOutcomeTest(unittest.TestCase):
+    """Spec 076 follow-up: the outcome comes from the delivery record, not a bool."""
+
+    def test_outcome_from_delivery_fields(self):
+        cases = [
+            ((True, delivery(state="succeeded", reason="none")), ("succeeded", None)),
+            ((False, delivery()), ("unverified", "required_evidence_missing")),
+            ((False, delivery(state="unknown", reason="effect_unknown")), ("unverified", "effect_unknown")),
+            ((False, delivery(execution="failed", state="failed", reason="binding_mismatch")),
+             ("failed", "binding_mismatch")),
+            ((False, delivery(execution="timed_out", state="incomplete")), ("failed", "required_evidence_missing")),
+            ((False, delivery(state="failed", reason="initializer_refused")), ("failed", "initializer_refused")),
+            ((True, None), ("succeeded", None)),
+            ((False, None), ("failed", None)),
+            ((False, {"execution_state": "succeeded", "delivery_state": "incomplete",
+                      "reason": "<script>"}), ("unverified", None)),
+            ((True, "not a mapping"), ("succeeded", None)),
+        ]
+        for (ok, record), expected in cases:
+            with self.subTest(ok=ok, record=record):
+                self.assertEqual(pr.apply_outcome(ok, record), expected)
+
+    def recorder(self):
+        commands: list[str] = []
+        clock = iter([100, 200, 300])
+        recorder = pr.SummaryRecorder(validated(), "xspeed-dev", RUNTIME, run_remote=commands.append,
+                                      stack_record=STACK_RECORD, clock=lambda: next(clock))
+        return recorder, commands
+
+    def run_apply(self, record, ok):
+        recorder, commands = self.recorder()
+
+        def apply():
+            recorder.started("/h", COMMIT, "req-1")
+            # The call inside the apply passes a bool (hosting.py); run() finishes from the result.
+            recorder.finished(ok)
+            return {"commit": COMMIT, "delivery": record}
+        result = recorder.run(apply)
+        self.assertEqual(result["delivery"], record)
+        return [json.loads(decoded_payload(command))["last_apply"] for command in commands]
+
+    def test_executed_but_unverified_is_not_failed(self):
+        writes = self.run_apply(delivery(), ok=False)
+        self.assertEqual([write["status"] for write in writes], ["applying", "unverified"])
+        self.assertEqual(writes[-1]["reason"], "required_evidence_missing")
+        self.assertEqual(writes[-1]["finished_at"], 200)
+
+    def test_execution_failure_is_failed(self):
+        writes = self.run_apply(delivery(execution="failed", state="failed", reason="binding_mismatch"), ok=False)
+        self.assertEqual([write["status"] for write in writes], ["applying", "failed"])
+        self.assertEqual(writes[-1]["reason"], "binding_mismatch")
+
+    def test_complete_delivery_is_succeeded(self):
+        writes = self.run_apply(delivery(state="succeeded", reason="none"), ok=True)
+        self.assertEqual(writes[-1]["status"], "succeeded")
+        self.assertNotIn("reason", writes[-1])
+
+    def test_finished_outside_run_still_works(self):
+        recorder, commands = self.recorder()
+        recorder.started("/h", COMMIT, None)
+        recorder.finished(False, delivery())
+        self.assertEqual(json.loads(decoded_payload(commands[-1]))["last_apply"]["status"], "unverified")
+
+    def test_apply_that_never_finishes_stays_applying(self):
+        recorder, commands = self.recorder()
+
+        def apply():
+            recorder.started("/h", COMMIT, None)
+            return {"refused": True}
+        recorder.run(apply)
+        self.assertEqual([json.loads(decoded_payload(c))["last_apply"]["status"] for c in commands], ["applying"])
+
+    def test_nested_run_keeps_the_outer_deferral(self):
+        recorder, commands = self.recorder()
+
+        def apply():
+            recorder.started("/h", COMMIT, None)
+            recorder.run(lambda: None)  # a nested run must not end the outer deferral
+            recorder.finished(False)
+            return {"delivery": delivery()}
+        recorder.run(apply)
+        self.assertEqual([json.loads(decoded_payload(c))["last_apply"]["status"] for c in commands],
+                         ["applying", "unverified"])
+
+    def test_summary_parser_accepts_unverified_and_validates_reason(self):
+        base = json.loads(pr.encode_record(pr.build_target_summary(
+            validated(), "xspeed-dev", RUNTIME, commit=COMMIT,
+            last_apply={"status": "unverified", "started_at": 1, "finished_at": 2, "request_id": None,
+                        "reason": "required_evidence_missing"})))
+        self.assertEqual(pr.parse_target_summary(base)["last_apply"]["reason"], "required_evidence_missing")
+        base["last_apply"]["reason"] = "Not A Reason!"
+        with self.assertRaises(pr.RecordError):
+            pr.parse_target_summary(base)
+
+
 class ReadServerRecordsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

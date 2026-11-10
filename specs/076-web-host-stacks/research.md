@@ -46,3 +46,32 @@
 
 - **Decision**: Record the template path relative to the stack's checkout (`StackRecord.checkout`), falling back to the file name.
 - **Rationale**: The absolute path is a controller-local detail (a user's home directory). The relative path is what a reader needs to find the template in the repository.
+
+## R8. Reading lifetime records on the server (follow-up)
+
+- Decision: add `Store.peek(now)` to `hoststore.py`. It is lock-free and writes nothing. It skips symlinks and non-regular files, reads at most 256 KiB per file and 500 files, and returns `view()` dicts and `invalid` entries.
+- Rationale: gotcha 35 keeps every read, validation and eligibility rule in `hoststore.py`. `Store.load()` is unbounded and follows symlinks. `list` takes the exclusive lock and creates `.lock`. A panel must not do either.
+- Alternatives: call `list` through the store program (it takes a lock and writes `.lock`); read files in `panel_records` (that duplicates the store's reading rules).
+
+## R9. Lifetimes on a controller
+
+- Decision: run `sb host stack list --remote R --json` as a subprocess from a background cache, one remote per job, and parse each row with `hoststore.parse_record`, then `view(record, now)`.
+- Rationale: the brief names this command as the controller contract. A subprocess keeps the panel off `host_stack.py`, which another thread owns. Re-parsing applies the store's own rules to data that crossed a process boundary.
+- Alternatives: import `host_stack._list` (private, owned elsewhere); SSH from the panel (duplicates the client).
+
+## R10. Apply outcome without touching `hosting.py`
+
+- Decision: `SummaryRecorder.run(apply)` defers the `finished(ok)` call made inside the apply, then finishes from `result["delivery"]` (`execution_state`, `delivery_state`, `reason`) once the apply returns.
+- Rationale: the bool at the call site loses the difference between "execution failed" and "delivery unverified". The delivery summary is already in the returned result. `hosting.py` is on a path another thread owns.
+- Alternatives: change the call site to pass the delivery dict. That is the cleaner one-line follow-up once the other thread lands.
+
+## R11. Host pages on a controller
+
+- Decision: host inventory rows carry the remote's own `lifetime` view, so a controller's host page shows lifetimes from the remote's inventory with no extra SSH.
+- Rationale: the inventory is built on the host that holds the records, and its shape is not protocol-fingerprinted (`shapes.py` does not list it).
+- Limit: the change reaches a remote only after its runtime is updated.
+
+## R12. TypeScript tests
+
+- Decision: put the pure labelling and ordering decisions in an import-free module, `src/web/src/ui/hostlabels.ts`, tested with `node --test` the way `ui/poller.ts` is.
+- Rationale: render modules import the DOM and cannot load in plain node.

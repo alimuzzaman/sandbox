@@ -47,6 +47,8 @@ export interface RemoteInventory {
 export interface HostedTargetUsage {
   key: string; project: string; environment: string; compose_project: string;
   stack_slug: string | null; recorded: boolean; last_apply_status: string | null;
+  // Follow-up 2026-11-10; absent from hosts whose runtime predates it.
+  last_apply_reason?: string | null; lifetime?: LifetimeView;
   attribution_status: string; container_count: number; running: boolean;
   memory_used_bytes: number; cpu_percent: number;
 }
@@ -68,7 +70,31 @@ export interface HostingServer {
   instance: string | null;
   health: HostingHealth;
 }
-export interface HostingApply { status: string; started_at: number | null; finished_at: number | null; request_id: string | null }
+export type ApplyStatus = "applying" | "succeeded" | "unverified" | "failed";
+export interface HostingApply { status: ApplyStatus | string; started_at: number | null; finished_at: number | null; request_id: string | null; reason?: string | null }
+
+// One spec 077 lifetime record as the panel shows it. Anything that is not a
+// valid record is "unclassified" (protected) or "unknown"; neither is reapable.
+export interface LifetimeView {
+  classification: "recorded" | "unclassified" | "unknown";
+  reason: "no_record" | "invalid" | "unavailable" | "loading" | null;
+  lifetime: "temporary" | "hosted" | "permanent" | null;
+  owner: string | null;
+  expires_at: number | null;
+  seconds_left: number | null;
+  canonical: boolean;
+  reap_eligible: boolean;
+  reap_reason: "expired" | "merged" | null;
+  state: "active" | "reaping" | "reaped" | null;
+  extended_count: number;
+  kind: "stack" | "target" | null;
+  slug: string | null; copy_id: string | null; ref_branch: string | null; commit: string | null;
+}
+export interface LifetimeRow extends LifetimeView {
+  remote: string; source: "this-server" | "controller";
+  project: string; environment: string; compose_project: string;
+  name: string; card: boolean;
+}
 export interface HostingStack {
   key: string; remote: string; source: "this-server" | "controller";
   slug: string; project: string; environment: string;
@@ -76,18 +102,21 @@ export interface HostingStack {
   ports: Record<string, number>; mailpit_port: number | null; loopback_port: number | null;
   created_at: number | null; ttl_expires_at: number | null;
   last_apply: HostingApply;
+  compose_project: string; lifetime: LifetimeView;
   servers: HostingServer[];
 }
 export interface HostingTarget {
   key: string; remote: string; source: "this-server" | "controller";
   project: string; environment: string; commit: string | null; loopback_port: number | null;
   last_apply: HostingApply | null; recorded: boolean;
+  compose_project: string; lifetime: LifetimeView; stack_slug: string | null;
   servers: HostingServer[];
 }
 export interface HostingView {
   ok: boolean; generated_at: number;
   sources: Array<"this-server" | "controller">;
   stacks: HostingStack[]; targets: HostingTarget[];
+  lifetimes: LifetimeRow[];
   partial_reasons: string[];
 }
 

@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- `jobs.scheduler` in a host's machine config sets its durable-job slot limit (`max_parallel`, 1-32, default 2) and free memory and disk floors (at least 512 MB and 2048 MB, the defaults). `sb job-policy [--remote R]` shows it and, with `--confirm`, writes it; the next admission uses it without a restart. `job-list` and `remote service diagnostics` report the limit and slots in use. Control protocol 23: remotes must be migrated to serve this controller.
 - `healthcheck.deadline_seconds` (60-600, default 60) sets how long `sb host apply` waits for the health path.
 
 ### Fixed

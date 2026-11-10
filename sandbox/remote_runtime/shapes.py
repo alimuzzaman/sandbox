@@ -49,6 +49,7 @@ RUNTIME_PRODUCERS = (
     "sandbox/commands/workspaces.py",
     "sandbox/application/workspace_service.py",
     "sandbox/commands/jobs_runtime.py",
+    "sandbox/commands/job_policy.py",
     "sandbox/application/job_service.py",
     "sandbox/jobs/models.py",
     "sandbox/jobs/listing.py",

@@ -63,7 +63,7 @@ confirmed canonical up `sweep` (the merge-sweep result).
 | `stack_owner_invalid` | the owner label is an email address |
 | `stack_limit_reached` | per-owner cap, remote-wide cap or free-disk minimum |
 | `stack_record_unavailable` | the host store program failed or returned no result |
-| `stack_record_invalid` | the record exists but fails validation (classify/ttl refuse it) |
+| `stack_record_invalid` | the record exists but fails validation: `ttl` and claims always refuse it; `classify` and `down` refuse it without `--force-owner`, and a forced repair renames the bad file to `<compose_project>.json.invalid-<epoch>` (kept, audited) instead of overwriting it |
 | `stack_reap_unavailable` | `reap --remote` against a runtime without this feature |
 | `target_not_found` | classify a target with no runtime directory on the remote |
 | `stack_limits_invalid` | non-positive limits |

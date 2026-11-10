@@ -164,6 +164,8 @@ class EligibilityTests(unittest.TestCase):
             ("hosted", stack_record(lifetime="hosted", ref_branch="dev"), (False, "hosted")),
             ("permanent", stack_record(lifetime="permanent"), (False, "permanent")),
             ("reaping resumes", stack_record(state="reaping", reap_run=reap_run), (True, "expired")),
+            ("reaping, changed to permanent by hand",
+             stack_record(state="reaping", reap_run=reap_run, lifetime="permanent"), (False, "permanent")),
             ("reaped", stack_record(state="reaped", reap_run=reap_run, expires=past), (False, "reaped")),
         ]
         for label, data, expected in cases:
@@ -399,6 +401,34 @@ class HostStoreTests(unittest.TestCase):
         self.assertEqual(self.run_op("claim", record=stack_record())["code"], hs.RECORD_INVALID)
         self.assertEqual(bad.read_text(), "{not json")
 
+    def test_forced_repair_sets_an_invalid_file_aside(self):
+        root = self.home / "runtime" / "target-lifetimes"
+        root.mkdir(parents=True)
+        (self.home / "runtime" / "hosts" / "mockups" / "sandbox").mkdir(parents=True)
+        bad = root / "sandbox-host-mockups-sandbox.json"
+        bad.write_text("{not json")
+        refused = self.run_op("classify", project="mockups", environment="sandbox", lifetime="permanent")
+        self.assertEqual(refused["code"], hs.RECORD_INVALID)
+        self.assertEqual(bad.read_text(), "{not json")
+        rejected = self.run_op("classify", project="mockups", environment="sandbox", lifetime="nope",
+                               force_owner=True)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(bad.read_text(), "{not json")
+        done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="permanent",
+                           force_owner=True)
+        kept = root / done["result"]["kept"]
+        self.assertEqual(kept.read_text(), "{not json")
+        self.assertEqual(self.run_op("list")["result"]["invalid"], [])
+        bad.write_text("{again")
+        released = self.run_op("release", compose_project="sandbox-host-mockups-sandbox", force_owner=True)
+        self.assertTrue(released["result"]["released"])
+        self.assertEqual((root / released["result"]["kept"]).read_text(), "{again")
+        self.assertFalse(bad.exists())
+
+    def test_host_store_parses_as_python_3_8(self):
+        import ast
+        ast.parse(Path(hs.__file__).read_text(encoding="utf-8"), feature_version=(3, 8))
+
     def test_unclassified_deployed_targets_are_listed(self):
         (self.home / "runtime" / "hosts" / "agent-notes" / "production").mkdir(parents=True)
         self.assertEqual(self.run_op("list")["result"]["unclassified"],
@@ -613,6 +643,17 @@ class ReaperTests(unittest.TestCase):
         later = reaper.reap(self.home, now=NOW + 60, run_id="run2", confirm=True, runner=FakeShell())
         self.assertEqual([item["status"] for item in later["outcomes"]], ["reaped"])
         self.assertEqual(self.records()[0]["sandbox-host-hub-demo-sandbox"].state, "reaped")
+
+    def test_reaping_record_made_permanent_by_hand_is_not_resumed(self):
+        reap_run = {"run_id": "r1", "started_at": self.old, "reason": "expired"}
+        data = stack_record(state="reaping", reap_run=reap_run, lifetime="permanent")
+        data["updated_at"] = self.old
+        _write_record(self.home, data)
+        shell = FakeShell()
+        result = self.reap(shell)
+        self.assertEqual(shell.commands, [])
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(self.records()[0]["sandbox-host-hub-demo-sandbox"].state, "reaping")
 
     def test_failed_inventory_removes_nothing(self):
         _write_record(self.home, self.expired())

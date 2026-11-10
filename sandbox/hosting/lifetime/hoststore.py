@@ -755,6 +755,17 @@ class Store:
         except FileNotFoundError:
             return False
 
+    def set_aside(self, compose_project, now):
+        """Keep an invalid record's bytes under a name ``load`` ignores; return that name."""
+        source = self.path(compose_project)
+        kept = source.with_name("%s.invalid-%d" % (source.name, int(now)))
+        try:
+            os.replace(str(source), str(kept))
+        except FileNotFoundError:
+            return None
+        self._sync_dir()
+        return kept.name
+
     def audit(self, op, compose_project, caller, now, **detail):
         line = {"op": op, "compose_project": compose_project, "at": to_rfc3339(now),
                 "by": None if caller is None else {"label": caller.label, "controller": caller.controller}}
@@ -938,10 +949,12 @@ def _release(store, request, now):
         if compose_project in invalid and not request.get("force_owner"):
             raise StoreRefusal(RECORD_INVALID, "the record for %s is invalid; pass --force-owner to "
                                "release it" % compose_project)
-        removed = store.delete(compose_project)
-        if removed:
-            store.audit("release", compose_project, caller, now, invalid=True)
-        return {"released": removed}
+        if compose_project in invalid:
+            kept = store.set_aside(compose_project, now)
+            if kept:
+                store.audit("release", compose_project, caller, now, invalid=True, kept=kept)
+            return {"released": bool(kept), "kept": kept}
+        return {"released": store.delete(compose_project)}
     copy_id = request.get("copy_id")
     if (record.stack is not None and copy_id and record.stack.copy_id == copy_id
             and record.owner.same_person(caller)):
@@ -990,9 +1003,10 @@ def _classify(store, request, now):
         raise StoreRefusal(RECORD_INVALID, "the record for %s is invalid; pass --force-owner to "
                            "replace it" % compose_project)
     if request.get("clear"):
-        removed = store.delete(compose_project)
+        kept = _set_aside_invalid(store, compose_project, invalid, caller, now)
+        removed = bool(kept) or store.delete(compose_project)
         store.audit("unclassify", compose_project, caller, now, removed=removed)
-        return {"record": None, "removed": removed}
+        return {"record": None, "removed": removed, "kept": kept}
     if record is None and compose_project not in store.deployed():
         raise StoreRefusal(TARGET_NOT_FOUND, "%s/%s has no runtime directory on this remote"
                            % (project, environment))
@@ -1032,9 +1046,20 @@ def _classify(store, request, now):
     checked = parse_record(record_to_dict(stored))
     if isinstance(checked, Invalid):
         raise StoreRefusal(LIFETIME_INVALID, checked.reason)
+    kept = _set_aside_invalid(store, compose_project, invalid, caller, now)
     store.write(stored)
     store.audit("classify", compose_project, caller, now, lifetime=lifetime, ttl_seconds=ttl)
-    return {"record": view(stored, now)}
+    return {"record": view(stored, now), "kept": kept}
+
+
+def _set_aside_invalid(store, compose_project, invalid, caller, now):
+    """A forced repair keeps the invalid bytes for inspection instead of overwriting them."""
+    if compose_project not in invalid:
+        return None
+    kept = store.set_aside(compose_project, now)
+    if kept:
+        store.audit("set_aside", compose_project, caller, now, kept=kept)
+    return kept
 
 
 def _policy_op(store, request, now):

@@ -1526,6 +1526,8 @@ malformed one reads as unclassified.
 
 **No record is not a delete signal.** A target with no record, or an unreadable or
 invalid one, is protected and listed as unclassified until someone classifies it.
+Replacing or clearing an invalid record needs `--force-owner`; the bad file is
+renamed to `<compose_project>.json.invalid-<epoch>` and kept, never overwritten.
 
 ```bash
 ./sb host stack up --template T --remote R --confirm                # generated name, temporary, 14d

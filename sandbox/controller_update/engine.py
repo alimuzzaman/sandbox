@@ -72,6 +72,39 @@ def _drop_journal(path: Path) -> None:
         path.unlink()
 
 
+def _journal_matches_verified_update(root: Path, branch: str, old: str, new: str,
+                                     policy: Policy) -> bool:
+    """True when the journal describes an update git itself recorded.
+
+    The journal lives in the operator's own runtime area, so it cannot be made
+    unforgeable against someone who can already write there (they could edit
+    the checkout directly). It is held to what the repository records instead:
+    the same origin bar as a forward update, ``old -> new`` a strict
+    fast-forward to a commit on that upstream, and the branch's own reflog
+    showing ``new`` immediately after ``old`` among its latest entries. That
+    rules out naming an arbitrary ancestor such as the root commit.
+    """
+    if old == new:
+        return False
+    checkout = gitops.read_checkout(root, timeout=policy.git_timeout)
+    if (checkout is None or checkout.branch != branch
+            or checkout.upstream_remote != "origin" or not checkout.upstream_branch
+            or not gitops.is_github_url(checkout.origin_url)):
+        return False
+    tip = f"refs/remotes/origin/{checkout.upstream_branch}"
+    timeout = policy.git_timeout
+    if not (gitops.has_commit(root, old, timeout=timeout)
+            and gitops.has_commit(root, new, timeout=timeout)
+            and gitops.is_ancestor(root, old, new, timeout=timeout)
+            and gitops.is_ancestor(root, new, tip, timeout=timeout)):
+        return False
+    # Newest first. A crash before the ref step leaves [new, old, ...]; one
+    # after it leaves [old, new, old, ...]. Either way the update shows up as
+    # ``new`` directly followed by ``old``, within the last few entries.
+    values = gitops.recent_ref_values(root, f"refs/heads/{branch}", limit=4, timeout=timeout)
+    return any(values[i] == new and values[i + 1] == old for i in range(len(values) - 1))
+
+
 def _recover(root: Path, lock_dir: Path, policy: Policy) -> Decision | None:
     """Finish a rollback a crash interrupted. ``None`` means nothing to do."""
     journal = journal_path(root, lock_dir)
@@ -90,6 +123,14 @@ def _recover(root: Path, lock_dir: Path, policy: Policy) -> Decision | None:
         # git accepts; anything else is not a rollback of this checkout.
         if (not gitops.valid_branch_name(resolved, branch, timeout=policy.git_timeout)
                 or gitops.current_branch(resolved, timeout=policy.git_timeout) != branch):
+            _drop_journal(journal)
+            return None
+        # The journal is only a note to ourselves, so it proves nothing on its
+        # own: act on it only when it still describes an update this engine
+        # could have made, a fast-forward from ``old`` to a ``new`` that is on
+        # the branch's published upstream. Otherwise it could name any local
+        # commit as the place to roll back to.
+        if not _journal_matches_verified_update(resolved, branch, old, new, policy):
             _drop_journal(journal)
             return None
         try:

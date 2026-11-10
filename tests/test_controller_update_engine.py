@@ -475,6 +475,45 @@ class InterruptedRollbackTests(EngineCase):
         self.assertEqual(self.repos.git(self.repos.ctl, "rev-parse", "refs/heads/other"), c2)
         self.assertEqual(self.repos.head(), c2)
 
+    def test_journal_naming_an_unrelated_rollback_target_is_dropped(self):
+        c2 = self.updated_to_c2()
+        # A commit that was never part of a verified update of main.
+        self.repos.git(self.repos.ctl, "switch", "-q", "-c", "side", self.repos.c1)
+        side = self.repos.commit(self.repos.ctl, "side.txt", "x\n", "side")
+        self.repos.git(self.repos.ctl, "switch", "-q", "main")
+        journal = self.journal(side, c2)
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.head(), c2)
+
+    def test_journal_whose_new_revision_is_not_on_upstream_is_dropped(self):
+        c2 = self.updated_to_c2()
+        local = self.repos.commit(self.repos.ctl, "mine.txt", "x\n", "local only")
+        journal = self.journal(c2, local)
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.head(), local)
+
+    def test_journal_naming_an_older_ancestor_than_the_update_is_dropped(self):
+        c2 = self.updated_to_c2()
+        c3 = self.repos.publish("c.txt", "three\n", "third")
+        self.repos.fetch_ctl()
+        self.repos.git(self.repos.ctl, "merge", "-q", "--ff-only", c3)
+        # The real update was c2 -> c3; the journal claims c1 -> c3.
+        journal = self.journal(self.repos.c1, c3)
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.head(), c3)
+
+    def test_journal_is_dropped_when_upstream_is_not_origin(self):
+        c2 = self.updated_to_c2()
+        self.repos.git(self.repos.ctl, "remote", "add", "mirror", str(self.repos.ctl))
+        self.repos.git(self.repos.ctl, "config", "branch.main.remote", "mirror")
+        journal = self.journal(self.repos.c1, c2)
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.head(), c2)
+
     def test_journal_with_an_invalid_branch_name_is_dropped(self):
         c2 = self.updated_to_c2()
         journal = self.journal(self.repos.c1, c2, branch="bad..name")

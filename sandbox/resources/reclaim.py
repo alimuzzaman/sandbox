@@ -19,6 +19,8 @@ import hashlib
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from .workspace_teardown import MAX_STRAYS_PER_CHECKOUT, owns_compose_project
+
 
 LIFECYCLE_CLASSES = (
     "PROTECTED", "LIVE", "STOPPED", "REGONLY", "BASE", "ORPHAN", "UNKNOWN",
@@ -480,6 +482,9 @@ class ReclaimCandidate:
     tier: str
     reason: str
     stop_containers: tuple[str, ...] = ()
+    # Spec 080: owned strays the cleanup may stop and remove, each
+    # ``{id, name, fingerprint, evidence}`` from ``assess_stray_container``.
+    remove_containers: tuple[Mapping[str, Any], ...] = ()
 
     def identity(self) -> str:
         return self.kind + "-" + hashlib.sha256(
@@ -490,6 +495,9 @@ class ReclaimCandidate:
         canonical = "\n".join((
             self.kind, self.locator, self.lifecycle_class, self.reason,
             "" if self.mtime is None else f"{self.mtime:.0f}",
+        ) + tuple(
+            str(item.get("id")) + ":" + str(item.get("fingerprint"))
+            for item in self.remove_containers
         ))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -506,6 +514,7 @@ class ReclaimCandidate:
             "tier": self.tier,
             "reason": self.reason,
             "stop_containers": list(self.stop_containers),
+            "remove_containers": [dict(item) for item in self.remove_containers],
         }
 
 
@@ -595,6 +604,47 @@ def _entry_tier(entry: ClassifiedEntry) -> tuple[str, str] | None:
     return None
 
 
+def _bound_containers(entry: ClassifiedEntry) -> tuple[tuple[dict, ...], tuple[dict, ...], str | None]:
+    """Spec 080: split a workspace's bound containers into owned strays and
+    protected ones. Returns ``(remove_containers, protected, skip_reason)``.
+
+    A record without ``stray`` evidence (an older probe) keeps today's
+    behaviour: it is neither removed nor reported here, and the host cleanup
+    refuses the workspace as before.
+    """
+    if not entry.is_workspace or "-workspace-" not in entry.name:
+        return (), (), None
+    strays: dict[str, dict] = {}
+    protected: list[dict] = []
+    for item in entry.containers:
+        identity = str(item.get("id") or "")
+        name = str(item.get("name") or "")
+        project = item.get("project")
+        if isinstance(project, str) and project:
+            if not owns_compose_project(entry.name, project):
+                protected.append({"id": identity, "name": name,
+                                  "reason": "foreign_compose_project"})
+            continue
+        verdict = item.get("stray")
+        if not isinstance(verdict, Mapping):
+            continue
+        if verdict.get("owned") is True and identity and isinstance(
+                verdict.get("fingerprint"), str) and verdict.get("fingerprint"):
+            strays.setdefault(identity, {
+                "id": identity, "name": name,
+                "fingerprint": verdict["fingerprint"],
+                "evidence": dict(verdict.get("evidence") or {}),
+            })
+        else:
+            protected.append({"id": identity, "name": name,
+                              "reason": str(verdict.get("reason") or "invalid_record")})
+    if protected:
+        return (), tuple(protected), "bound_container_protected"
+    if len(strays) > MAX_STRAYS_PER_CHECKOUT:
+        return (), (), "too_many_stray_containers"
+    return tuple(strays.values()), (), None
+
+
 def tier_candidates(
     inventory: Mapping[str, Any],
     tier: str,
@@ -660,17 +710,29 @@ def tier_candidates(
                 "reason": "size_unmeasured", "bytes": None,
             })
             continue
+        remove_containers, protected, refusal = _bound_containers(entry)
+        if refusal is not None:
+            row = {
+                "kind": "worktree", "locator": entry.path,
+                "display_name": entry.name, "class": entry.lifecycle_class,
+                "reason": refusal, "bytes": entry.size_bytes,
+            }
+            if protected:
+                row["protected_containers"] = list(protected)
+            skipped.append(row)
+            continue
         reclaimable_names[entry.name] = entry_tier
         candidates.append(ReclaimCandidate(
             seq=0, kind="worktree", locator=entry.path, display_name=entry.name,
             bytes=int(entry.size_bytes), mtime=entry.mtime,
             lifecycle_class=entry.lifecycle_class, tier=entry_tier,
             reason=reason,
-            stop_containers=tuple(
+            stop_containers=tuple(dict.fromkeys(
                 str(item.get("id") or item.get("name") or "")
                 for item in entry.containers
                 if item.get("id") or item.get("name")
-            ),
+            )),
+            remove_containers=remove_containers,
         ))
 
     for volume in sorted(inventory.get("volumes") or (),

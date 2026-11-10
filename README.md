@@ -537,7 +537,10 @@ other container uses, and its networks; the checkout is deleted only after that
 succeeds. Authorized CI job cleanup applies the same stack teardown after its
 existing identity checks and before broker source removal. A failed teardown
 keeps source and retained cleanup state; workspace reap reports
-`stack_teardown_incomplete` and a later run finishes it. A workspace whose jobs all finished more than 6 hours ago
+`stack_teardown_incomplete` and a later run finishes it. A stray container a job started without Compose,
+bound only inside the checkout, is planned under `remove_containers` with its evidence and
+removed first; any other bound container keeps the workspace (spec 080,
+`docs/resource-monitoring.md`). A workspace whose jobs all finished more than 6 hours ago
 (`SANDBOX_FINISHED_JOB_IDLE_HOURS` on the host) is a `safe`-tier
 `finished_job_idle` candidate even if its stack still runs; a queued or running
 job, an unreadable job registry, a live source-family reservation, or an active lease keeps it.

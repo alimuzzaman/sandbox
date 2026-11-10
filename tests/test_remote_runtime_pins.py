@@ -250,7 +250,10 @@ class PinTests(unittest.TestCase):
         """A daemon the install starts (the legacy MCP restart) must not inherit it."""
         release = self.remote_home / "release"
         self.addCleanup(release.touch)
-        inner = f"(while [ ! -e {release} ]; do sleep 0.05; done) </dev/null >/dev/null 2>&1 &"
+        # The loop also ends once the fixture home is removed: cleanup touches
+        # release and then deletes the directory before the loop can see it.
+        inner = (f"(while [ ! -e {release} ] && [ -d {self.remote_home} ]; do sleep 0.05; done)"
+                 " </dev/null >/dev/null 2>&1 &")
         self.assertEqual(self._gated(inner).returncode, 0)
         self.assertEqual(self._gated("true").returncode, 0)
 

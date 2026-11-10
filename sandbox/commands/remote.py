@@ -2060,10 +2060,14 @@ def _cmd_provision(args, as_json: bool) -> None:
         _record_provision_event(journal, "bootstrap_failed", status="failed", detail=detail)
         die(f"provisioning '{name}' failed: {detail}")
     _record_provision_event(journal, "bootstrap_complete")
+    retired = None
     if switching:
         try:
+            # Prove Tailscale is joined before stopping the working HTTPS control:
+            # the installer succeeds without joining when no auth key is given.
+            sr.resolve_tailscale_ip(entry)
             _record_provision_event(journal, "transport_switch_retiring_https_unit")
-            _retire_https_control_unit(entry)
+            retired = _retire_https_control_unit(entry)
         except (RuntimeError, subprocess.SubprocessError, OSError) as e:
             _record_provision_event(journal, "transport_switch_failed", status="failed", detail=str(e))
             die(f"could not switch '{name}' to Tailscale control: "
@@ -2104,8 +2108,12 @@ def _cmd_provision(args, as_json: bool) -> None:
             tailscale_ip = None
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         _record_provision_event(journal, "control_service_failed", status="failed", detail=str(e))
+        restored = ""
+        if retired:
+            restored = ("; the HTTPS control service was put back" if _restore_https_control_unit(entry, retired)
+                        else f"; the HTTPS control unit is set aside at {retired} and could not be put back")
         die(f"could not start the remote MCP server on '{name}': "
-            f"{sr.redact_ssh_connection(str(e), entry)}")
+            f"{sr.redact_ssh_connection(str(e), entry)}{restored}")
         return
     # The credential remains in the owner-only local secret store and is sent
     # to the remote only on stdin while its service credential file is created.
@@ -2142,18 +2150,29 @@ def _transport_switch_plan(name: str, entry: dict) -> dict:
     }
 
 
-def _retire_https_control_unit(entry: dict) -> None:
+_REMOVED_UNITS = "$HOME/.sandbox/removed-units"
+
+
+def _retire_https_control_unit(entry: dict) -> str | None:
     """Stop and set aside the Sandbox-owned HTTPS control unit before a Tailscale one replaces it.
 
     Its ownership marker is proven against the recorded HTTPS registration, so a
-    foreign unit is never touched. Safe to rerun: a unit already set aside, or
-    one already serving Tailscale for this remote, needs nothing.
+    foreign unit is never touched. Returns the backup path, so a failed switch
+    can put it back. Safe to rerun: a unit Sandbox already set aside, or one
+    already serving Tailscale for this remote, needs nothing.
     """
+    unit = sr.REMOTE_MCP_SERVICE
     status = sr.remote_mcp_service_status(entry)
     if status.get("probe_state", "complete") != "complete":
         raise RuntimeError(status.get("probe_error") or "remote_service_probe_unavailable")
     if status.get("ownership") == "missing":
-        return
+        # Only an earlier switch's own backup proves the unit was retired by Sandbox.
+        found = sr.ssh_run(entry, f"ls -1t {_REMOVED_UNITS}/{unit}.* 2>/dev/null | head -1", timeout=15)
+        backup = (found.stdout or "").strip() if found.returncode == 0 else ""
+        if not backup:
+            raise RuntimeError("transport_switch_unit_missing: no control unit and no Sandbox backup "
+                               "of one; check the server before switching")
+        return backup
     if status.get("ownership") != "proven":
         address = sr.resolve_tailscale_ip(entry)
         port = entry.get("mcp_port") or sr.DEFAULT_MCP_PORT
@@ -2164,17 +2183,29 @@ def _retire_https_control_unit(entry: dict) -> None:
             return
         raise RuntimeError("transport_switch_unit_not_owned: the existing control unit could not "
                            "be proven to be Sandbox's, so it was left untouched")
-    unit = sr.REMOTE_MCP_SERVICE
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = f"{_REMOVED_UNITS}/{unit}.{stamp}"
     res = sr.ssh_run(entry, (
-        f"systemctl --user stop {unit} && "
-        f"{{ systemctl --user disable {unit} >/dev/null 2>&1 || true; }} && "
-        "umask 077 && mkdir -p $HOME/.sandbox/removed-units && "
-        f"mv -f $HOME/.config/systemd/user/{unit} $HOME/.sandbox/removed-units/{unit}.{stamp} && "
-        "systemctl --user daemon-reload"), timeout=60)
+        f"systemctl --user stop {unit} && systemctl --user disable {unit} && "
+        f"umask 077 && mkdir -p {_REMOVED_UNITS} && "
+        f"mv -f $HOME/.config/systemd/user/{unit} {backup} && systemctl --user daemon-reload"),
+        timeout=60)
     if res.returncode != 0:
-        raise RuntimeError("transport_switch_unit_not_retired: could not stop and set aside the "
-                           "HTTPS control unit")
+        raise RuntimeError("transport_switch_unit_not_retired: could not stop, disable and set "
+                           "aside the HTTPS control unit")
+    return backup
+
+
+def _restore_https_control_unit(entry: dict, backup: str) -> bool:
+    """Put a retired HTTPS control unit back and start it, after a failed switch."""
+    unit = sr.REMOTE_MCP_SERVICE
+    if not re.fullmatch(r"(\$HOME|/[A-Za-z0-9._/-]+)/\.sandbox/removed-units/"
+                        + re.escape(unit) + r"\.\d{8}T\d{6}Z", backup or ""):
+        return False
+    res = sr.ssh_run(entry, (
+        f"mv -f {backup} $HOME/.config/systemd/user/{unit} && systemctl --user daemon-reload && "
+        f"systemctl --user enable --now {unit}"), timeout=60)
+    return res.returncode == 0
 
 
 def _cmd_up(args, as_json: bool) -> None:

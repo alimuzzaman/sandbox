@@ -73,7 +73,8 @@
 - **Decision**: owner = `{label, controller}`; controller = the existing controller id
   (`sandbox.secrets.ownership.journal.load_controller_id`, file
   `$BASE/runtime/secret-ownership/controller-id`); label = `--owner` or the template
-  checkout's `git config user.email`, required. Copy id = 8 hex chars generated at
+  checkout's `git config user.name`, required; an email is refused (the panel shows it
+  to every tester). Copy id = 8 hex chars generated at
   the first `up`, stored in the controller stack registry.
 - **Trust**: accident prevention only; everyone with SSH access can edit the files.
 

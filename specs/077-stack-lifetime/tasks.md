@@ -21,7 +21,7 @@ run only on xspeed-dev through `sb job-start --remote xspeed-dev`, by a Haiku he
 - [ ] T005 Host store in `sandbox/hosting/lifetime/hoststore.py`: `Store(home)` with flock, atomic writes (0600/0700), audit lines; ops `list`, `check`, `claim`, `update`, `release`, `record_merge`, `classify`, `policy`; `main()` reads one JSON request from stdin and prints one JSON line
 - [ ] T006 Tests for T005 in `tests/test_target_lifetime.py`: run ops in-process and as `python3 -c <source>` subprocess against a temp `SANDBOX_HOME`; two concurrent claims of one slug (multiprocessing) produce exactly one winner; unknown keys survive an update; invalid file never rewritten by claim
 - [ ] T007 Controller client in `sandbox/hosting/lifetime/client.py`: ship `hoststore.py` source over `remote.ssh_run(..., input_data=...)`, parse the response, map refusals to `HostingRefusal` codes; injectable runner for tests
-- [ ] T008 [P] Naming in `sandbox/hosting/lifetime/naming.py`: owner label (flag or `git config user.email`), normalized repo identity from `remote.origin.url` (no credentials), `generate_slug(ref_branch, commit, owner, taken, pattern)`; tests in `tests/test_target_lifetime.py`
+- [ ] T008 [P] Naming in `sandbox/hosting/lifetime/naming.py`: owner label (flag or `git config user.name`; an email is refused), normalized repo identity from `remote.origin.url` (no credentials), `generate_slug(ref_branch, commit, owner, taken, pattern)`; tests in `tests/test_target_lifetime.py`
 - [ ] T009 Template `stack.dev_branch` (optional, default `dev`) in `sandbox/hosting/stack_template.py`; registry fields in `sandbox/hosting/stack_registry.py`; test in `tests/test_host_stack.py`
 
 ## Phase 3: User Story 2 - Many copies, never taken over (P1)

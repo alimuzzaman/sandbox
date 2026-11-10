@@ -19,8 +19,8 @@ from sandbox.hosting.stack_template import StackRef, StackTemplateError
 from sandbox.hosting.lifetime import client as lifetime_client, hoststore
 from tests.subprocess_support import run_test_process
 
-OWNER_A = {"label": "a@example.test", "controller": "a" * 32}
-OWNER_B = {"label": "b@example.test", "controller": "b" * 32}
+OWNER_A = {"label": "alice", "controller": "a" * 32}
+OWNER_B = {"label": "bob", "controller": "b" * 32}
 
 COMMIT = "a" * 40
 
@@ -582,7 +582,7 @@ class StackCommandTests(unittest.TestCase):
         result = host_stack._up(self.args("up", plan=True))
         self.assertEqual(result["lifetime"], "temporary")
         self.assertEqual(result["ttl_seconds"], 14 * 86400)
-        self.assertEqual(result["owner"]["label"], "a@example.test")
+        self.assertEqual(result["owner"]["label"], "alice")
         self.assertEqual(self.remote_records(), {})
 
     def test_confirm_claims_the_remote_record_and_mirrors_it(self):
@@ -610,7 +610,7 @@ class StackCommandTests(unittest.TestCase):
                 self.assertRaises(host_stack.StackCommandError) as caught:
             host_stack._up(self.args("up", confirm=True))
         self.assertEqual(caught.exception.code, "stack_slug_taken")
-        self.assertIn("a@example.test", caught.exception.detail)
+        self.assertIn("alice", caught.exception.detail)
         submit.assert_not_called()
         self.assertFalse((other_runtime / "stacks" / "demo").exists())
         self.assertEqual(self.remote_records(), before)
@@ -619,7 +619,7 @@ class StackCommandTests(unittest.TestCase):
         with patch.object(host_stack, "_submit", return_value="job-1"):
             first = host_stack._up(self.args("up", confirm=True, name=None))
             second = host_stack._up(self.args("up", confirm=True, name=None))
-        self.assertEqual((first["slug"], second["slug"]), ("demo-a-1", "demo-a-2"))
+        self.assertEqual((first["slug"], second["slug"]), ("demo-alice-1", "demo-alice-2"))
         self.assertTrue(first["generated_name"])
         self.assertNotEqual(first["ports"], second["ports"])
         self.assertNotEqual(first["project"], second["project"])
@@ -650,7 +650,8 @@ class StackCommandTests(unittest.TestCase):
         forced = host_stack._ttl(self.args("ttl", ttl="2d", confirm=True, force_owner=True))
         self.assertEqual(forced["ttl_seconds"], 2 * 86400)
         record = self.remote_records()["sandbox-host-xspeed-hub-demo-sandbox"]
-        self.assertEqual(record.overrides[-1]["by"]["label"], "b@example.test")
+        self.assertEqual(record.overrides[-1]["by"]["label"], "bob")
+        self.assertEqual(record.extended_count, 2)
         from sandbox.hosting import destroy
         with patch.object(destroy, "execute", return_value={"state": "destroyed"}) as execute, \
                 self.assertRaises(host_stack.StackCommandError) as caught:
@@ -672,7 +673,8 @@ class StackCommandTests(unittest.TestCase):
         listed = host_stack._list(self.args("list"))
         rows = {row["slug"]: row for row in listed["stacks"]}
         self.assertEqual(set(rows), {"demo", "other"})
-        self.assertEqual(rows["demo"]["owner"]["label"], "a@example.test")
+        self.assertEqual(rows["demo"]["owner"]["label"], "alice")
+        self.assertEqual(rows["demo"]["schema_version"], 1)
         self.assertFalse(rows["demo"]["mine"])
         self.assertTrue(rows["other"]["mine"])
         self.assertEqual(rows["demo"]["remote_record"], "present")

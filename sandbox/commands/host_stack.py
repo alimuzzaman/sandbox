@@ -427,10 +427,9 @@ def _remote_ports(records: list[dict], compose_project: str) -> dict[int, str]:
     for item in records:
         if item.get("compose_project") == compose_project or item.get("state") == "reaped":
             continue
-        stack = item.get("stack") or {}
-        for port in (stack.get("ports") or {}).values():
+        for port in (item.get("ports") or {}).values():
             if isinstance(port, int):
-                ports[port] = str(stack.get("slug") or item.get("compose_project"))
+                ports[port] = str(item.get("slug") or item.get("compose_project"))
     return ports
 
 
@@ -446,26 +445,36 @@ def _draft(*, project, environment, slug, copy_id, caller, repo, ref, dev_branch
     temporary = lifetime == "temporary"
     ttl = (ttl or hoststore.DEFAULT_TTL_SECONDS) if temporary else None
     return {
-        "schema": hoststore.SCHEMA, "compose_project": hoststore.compose_project_for(project, environment),
+        "schema_version": hoststore.SCHEMA,
+        "compose_project": hoststore.compose_project_for(project, environment),
         "project": project, "environment": environment, "kind": "stack",
         "lifetime": lifetime, "lifetime_source": source, "ttl_seconds": ttl,
-        "expires_at": hoststore.to_rfc3339(now + ttl) if temporary else None,
+        "expires_at": hoststore.to_rfc3339(now + ttl) if temporary else None, "extended_count": 0,
         "state": "active", "owner": caller, "created_at": stamp, "updated_at": stamp,
+        "classified_by": None, "classified_at": None,
         "front_door": front_door, "dns_mode": "unknown", "hostnames": sorted(hostnames),
-        "stack": {"slug": slug, "copy_id": copy_id, "repo": repo, "ref": ref.ref,
-                  "ref_branch": ref.ref_branch, "commit": ref.commit, "dev_branch": dev_branch,
-                  "canonical": lifetime == "hosted", "template": str(template_path),
-                  "ports": dict(ports)},
-        "merge": None, "reap": None, "overrides": [],
+        "slug": slug, "copy_id": copy_id, "repo": repo, "ref": ref.ref, "ref_branch": ref.ref_branch,
+        "commit": ref.commit, "dev_branch": dev_branch, "canonical": lifetime == "hosted",
+        "template": str(template_path), "ports": dict(ports),
+        "merge": None, "reap_run": None, "overrides": [],
     }
 
 
+# The agreed panel fields (spec 077, FR-026) that `stack list --json` returns per row.
+RECORD_FIELDS = (
+    "schema_version", "compose_project", "project", "environment", "kind", "lifetime",
+    "lifetime_source", "ttl_seconds", "expires_at", "extended_count", "state", "owner",
+    "created_at", "updated_at", "classified_by", "classified_at", "slug", "copy_id", "repo",
+    "ref", "ref_branch", "commit", "dev_branch", "canonical", "template", "ports", "hostnames",
+    "front_door", "dns_mode", "merge", "reap", "reap_run")
+
+
 def _lifetime_fields(record: dict) -> dict:
-    stack = record.get("stack") or {}
     return {"lifetime": record.get("lifetime"), "lifetime_source": record.get("lifetime_source"),
             "ttl_seconds": record.get("ttl_seconds"), "expires_at": record.get("expires_at"),
-            "owner": record.get("owner"), "copy_id": stack.get("copy_id"),
-            "canonical": bool(stack.get("canonical")), "state": record.get("state")}
+            "extended_count": record.get("extended_count", 0), "owner": record.get("owner"),
+            "copy_id": record.get("copy_id"), "canonical": bool(record.get("canonical")),
+            "state": record.get("state"), "reap": record.get("reap")}
 
 
 # ----------------------------------------------------------------- commands
@@ -490,7 +499,7 @@ def _up(args) -> dict:
     remote_records = _remote_records(listing, remote_name)
     generated = not getattr(args, "name", None)
     if generated:
-        taken = {str((item.get("stack") or {}).get("slug")) for item in remote_records}
+        taken = {str(item.get("slug")) for item in remote_records if item.get("slug")}
         taken |= {str(item.get("slug")) for item in stack_registry.read()["stacks"].values()
                   if isinstance(item, dict)}
 
@@ -641,11 +650,11 @@ def _up(args) -> dict:
             "created_at": (previous or {}).get("created_at", now), "updated_at": now,
             "last_apply": {"request_id": request_id, "job_id": None, "submitted_at": now,
                            "status": "submitting"},
-            "copy_id": claim_request["record"]["stack"]["copy_id"], "owner": stored.get("owner"),
+            "copy_id": claim_request["record"]["copy_id"], "owner": stored.get("owner"),
             "lifetime": stored.get("lifetime"), "lifetime_source": stored.get("lifetime_source"),
             "ttl_seconds": stored.get("ttl_seconds"), "expires_at": stored.get("expires_at"),
             "repo": repo, "dev_branch": template.dev_branch,
-            "canonical": bool((stored.get("stack") or {}).get("canonical")),
+            "canonical": bool(stored.get("canonical")),
         }
         # Ports are held from here on, even if the submission below fails.
         registry.put(record)
@@ -688,7 +697,7 @@ def _release_fresh_claim(store, claimed: dict, compose_project: str) -> None:
         return
     try:
         store.call("release", compose_project=compose_project,
-                   copy_id=(claimed.get("record") or {}).get("stack", {}).get("copy_id"))
+                   copy_id=(claimed.get("record") or {}).get("copy_id"))
     except hosting.HostingError:
         pass
 
@@ -700,31 +709,27 @@ def _owner_checkout(record: dict | None) -> Path:
 
 def _remote_stack(listing: dict, slug: str) -> dict | None:
     for item in listing.get("records") or []:
-        if isinstance(item, dict) and (item.get("stack") or {}).get("slug") == slug:
+        if isinstance(item, dict) and item.get("kind") == "stack" and item.get("slug") == slug:
             return item
     return None
 
 
 def _list_row(local: dict | None, remote_item: dict | None, remote_state: str) -> dict:
+    """One stack: the remote record's fields, plus what only this controller knows."""
     local = local or {}
-    stack = (remote_item or {}).get("stack") or {}
-    row = {key: local.get(key) for key in (
-        "slug", "project", "environment", "ref", "ref_branch", "commit", "hostnames", "ports",
-        "manifest", "template", "updated_at")}
     if remote_item:
-        row.update({"slug": stack.get("slug"), "project": remote_item.get("project"),
-                    "environment": remote_item.get("environment"), "ref": stack.get("ref"),
-                    "ref_branch": stack.get("ref_branch"), "commit": stack.get("commit"),
-                    "hostnames": remote_item.get("hostnames"), "ports": stack.get("ports"),
-                    "template": stack.get("template"), "repo": stack.get("repo")})
-        row.update(_lifetime_fields(remote_item))
-        row["reap"] = remote_item.get("reap_eligibility")
-        row["reaped"] = remote_item.get("reap") if remote_item.get("state") != "active" else None
+        row = {key: remote_item.get(key) for key in RECORD_FIELDS}
     else:
+        # Not claimed on the remote (yet): this controller's view, unclassified.
+        row = {key: None for key in RECORD_FIELDS}
         row.update({key: local.get(key) for key in (
-            "lifetime", "lifetime_source", "ttl_seconds", "expires_at", "owner", "copy_id")})
-        row.update({"canonical": bool(local.get("canonical")), "state": None, "reap": None})
-    row["mine"] = bool(local) and (not remote_item or local.get("copy_id") == stack.get("copy_id"))
+            "project", "environment", "slug", "copy_id", "repo", "ref", "ref_branch", "commit",
+            "dev_branch", "template", "ports", "hostnames", "owner")})
+        row.update({"kind": "stack", "canonical": False, "extended_count": 0,
+                    "compose_project": hosting.compose_project_name(
+                        {"project": local.get("project"), "environment": local.get("environment")})})
+    row["manifest"] = local.get("manifest")
+    row["mine"] = bool(local) and (not remote_item or local.get("copy_id") == remote_item.get("copy_id"))
     row["remote_record"] = remote_state
     row["last_apply"] = _last_apply_view(local) if local else None
     return row
@@ -752,8 +757,7 @@ def _list(args) -> dict:
             seen.add(key)
             stacks.append(_list_row(local.get(key), item, "present"))
         else:
-            targets.append({"project": item.get("project"), "environment": item.get("environment"),
-                            **_lifetime_fields(item), "reap": item.get("reap_eligibility")})
+            targets.append({key: item.get(key) for key in RECORD_FIELDS})
     invalid = {row.get("compose_project") for row in (listing or {}).get("invalid") or []}
     for key, record in local.items():
         if key in seen:
@@ -787,7 +791,7 @@ def _check_owner(remote_item: dict | None, caller: dict, local: dict | None, for
     if not remote_item:
         return
     owner = remote_item.get("owner") or {}
-    copy = (remote_item.get("stack") or {}).get("copy_id")
+    copy = remote_item.get("copy_id")
     if str(owner.get("label", "")).lower() == caller["label"].lower():
         return
     if local and local.get("copy_id") == copy and not force:
@@ -795,7 +799,7 @@ def _check_owner(remote_item: dict | None, caller: dict, local: dict | None, for
         return
     if not force:
         raise StackCommandError(
-            hoststore.NOT_OWNER, f"stack {(remote_item.get('stack') or {}).get('slug')} belongs to "
+            hoststore.NOT_OWNER, f"stack {remote_item.get('slug')} belongs to "
             f"{owner.get('label')}; pass --force-owner to {action} it anyway")
 
 
@@ -845,7 +849,7 @@ def _down(args) -> dict:
             registry.delete(remote_name, slug)
     return {"ok": True, "action": "stack-down", "slug": slug, "remote": remote_name,
             "project": project, "environment": environment,
-            "released_ports": (record or {}).get("ports") or (remote_item or {}).get("stack", {}).get("ports") or {},
+            "released_ports": (record or {}).get("ports") or (remote_item or {}).get("ports") or {},
             "destroy": destroyed, "forced_owner": force and bool(remote_item) and not (
                 str((remote_item.get("owner") or {}).get("label", "")).lower() == caller["label"].lower()),
             "was_reaped": bool(remote_item and remote_item.get("state") == "reaped")}
@@ -885,7 +889,7 @@ def _ttl(args) -> dict:
         if record:
             record.update({key: updated.get(key) for key in (
                 "lifetime", "lifetime_source", "ttl_seconds", "expires_at")})
-            record["canonical"] = bool((updated.get("stack") or {}).get("canonical"))
+            record["canonical"] = bool(updated.get("canonical"))
             registry.put(record)
     return {"ok": True, "action": "stack-ttl", "slug": slug, "remote": remote_name,
             **_lifetime_fields(updated)}

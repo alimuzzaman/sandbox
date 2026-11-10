@@ -167,7 +167,7 @@ def _teardown(home: Path, record: hs.TargetRecord, store: hs.Store, manifest: Ma
     for kind in ("route", "cert", "container", "volume", "network", "image", "runtime"):
         for item in found[kind]:
             manifest.append({"phase": "intent", "kind": kind, "path": item, "compose_project": name,
-                             "reason": record.reap.reason if record.reap else None})
+                             "reason": record.reap_run.reason if record.reap_run else None})
     # Steps run in order; each is safe to repeat after an interruption.
     if found["route"]:
         result = runner(nginx_edge.transaction_command(route, None, "absent", operation="reap",
@@ -228,7 +228,7 @@ def reap(home: Path, *, now: int | None = None, run_id: str | None = None, trigg
                 continue
             if record.state == "active":
                 record = replace(record, state="reaping", updated_at=hs.to_rfc3339(now),
-                                 reap=hs.ReapInfo(run_id, hs.to_rfc3339(now), verdict.reason))
+                                 reap_run=hs.ReapInfo(run_id, hs.to_rfc3339(now), verdict.reason))
                 store.write(record)
                 store.audit("reaping", key, caller, now, run_id=run_id, reason=verdict.reason)
         try:
@@ -242,8 +242,8 @@ def reap(home: Path, *, now: int | None = None, run_id: str | None = None, trigg
         with store.lock():
             records, _invalid = store.load()
             current = records.get(key) or record
-            finished = replace(current, state="reaped", updated_at=hs.to_rfc3339(now), reap=replace(
-                current.reap or record.reap, finished_at=hs.to_rfc3339(time.time()),
+            finished = replace(current, state="reaped", updated_at=hs.to_rfc3339(now), reap_run=replace(
+                current.reap_run or record.reap_run, finished_at=hs.to_rfc3339(time.time()),
                 dns_left=current.dns_mode != "wildcard"))
             store.write(finished)
             store.audit("reaped", key, caller, now, run_id=run_id)

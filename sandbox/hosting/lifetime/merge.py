@@ -60,7 +60,7 @@ def sweep(store, *, remote_records: Iterable[dict], checkouts: Mapping[str, Path
     heads: dict[tuple[str, str], str | None] = {}
     checked, recorded = [], 0
     for item in remote_records:
-        stack = item.get("stack") or {}
+        stack = item  # the flat record (schema_version 1)
         if (item.get("kind") != "stack" or item.get("lifetime") != "temporary"
                 or item.get("state") != "active"):
             continue

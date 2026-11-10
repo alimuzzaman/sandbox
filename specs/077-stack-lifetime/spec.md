@@ -31,6 +31,19 @@ interactive answer was available. Each can be overridden by the owner.
 - Q: Who records merge evidence, given the server holds no Git history of the repo?
   → A: A controller, from its own checkout, when the canonical dev stack is updated
   and on demand (`stack sweep`); the server acts on the recorded evidence or the TTL.
+- Q: Which record fields does the panel use? (agreed with the xspeed-dev orchestrator,
+  final) → A: a flat record with `schema_version` (1), `created_at`/`updated_at`
+  (RFC3339 UTC), `lifetime`, `lifetime_source` (`default|flag|classified`),
+  `ttl_seconds`, `expires_at`, `extended_count`, `owner` `{label, controller}`,
+  `copy_id`, `slug`, `ref`, `ref_branch`, `commit`, `repo`, `canonical`, `state`
+  (`active|reaping|reaped`) and `reap` `{eligible, reason: expired|merged|null,
+  merged_into, merged_at}`. A classified target has null `slug`, `copy_id`, `ref`,
+  `ref_branch` and `ttl_seconds` (unless temporary), `commit`/`repo` when known, and
+  `classified_by` plus `classified_at`.
+- Q: What is the owner label? → A: `--owner` or the git `user.name`; never an email
+  (the panel is shown to every tester). `owner.controller` stays an opaque id.
+- Q: What is unique for hosted? → A: at most one canonical stack per (repo, dev
+  branch, remote), enforced under the store lock.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -242,8 +255,8 @@ same owner and see a refusal naming the cap; a different owner still succeeds.
   expiry instant. The time limit MUST be settable when the stack starts and changeable
   later; changing it sets the expiry to now plus the new limit.
 - **FR-004**: Hosted MUST be allowed only for a stack whose ref is the repo's dev
-  branch, and at most one hosted stack per repo per remote MUST exist; it is the
-  canonical dev stack.
+  branch, and at most one hosted stack per (repo, dev branch) per remote MUST exist;
+  it is the canonical dev stack.
 - **FR-005**: Permanent MUST be allowed for any stack or target and MUST never expire.
 - **FR-006**: The repo's dev branch MUST default to `dev` and MAY be set per template.
 - **FR-007**: The lifetime record MUST be stored on the remote, where server-side
@@ -285,8 +298,9 @@ same owner and see a refusal naming the cap; a different owner still succeeds.
 
 - **FR-018**: A stack MUST be identified on the remote by its name, held by exactly one
   copy. The ref MUST be an attribute, never the identity.
-- **FR-019**: Each stack record MUST name its owner: the controller identity and a
-  human label (the git user email by default, or an explicit owner label).
+- **FR-019**: Each stack record MUST name its owner: the controller identity (opaque)
+  and a human label (the git user name by default, or an explicit owner label). An
+  email address MUST be refused as a label.
 - **FR-020**: Claiming a name or project on a remote MUST be atomic across controllers.
   A start whose name or project is held on that remote by another owner or another
   copy MUST be refused as "stack name taken" and MUST change nothing.
@@ -317,10 +331,14 @@ same owner and see a refusal naming the cap; a different owner still succeeds.
 
 **Panel**
 
-- **FR-026**: The record MUST expose the fields the remote panel shows: lifetime,
-  lifetime source, time limit in seconds, expiry (RFC3339 or null), owner, copy, state
-  and reap eligibility. Field names are provisional until agreed with the xspeed-dev
-  orchestrator.
+- **FR-026**: The record MUST expose the fields agreed with the xspeed-dev
+  orchestrator (see Clarifications): `schema_version`, `created_at`, `updated_at`,
+  `lifetime`, `lifetime_source`, `ttl_seconds`, `expires_at`, `extended_count`,
+  `owner`, `copy_id`, `slug`, `ref`, `ref_branch`, `commit`, `repo`, `canonical`,
+  `state`, `reap` and, for classified targets, `classified_by` and `classified_at`.
+  `stack list --json` MUST return the same fields per row. Records MUST be written to
+  a temporary file in the same directory, flushed to disk, then renamed; a reader
+  that meets a malformed record MUST treat it as unclassified and protected.
 
 **Compatibility**
 

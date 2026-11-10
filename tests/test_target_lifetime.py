@@ -18,8 +18,8 @@ from sandbox.hosting.lifetime import hoststore as hs
 NOW = hs.parse_rfc3339("2026-11-10T10:00:00Z")
 CTRL_A = "a" * 32
 CTRL_B = "b" * 32
-OWNER_A = {"label": "a@example.test", "controller": CTRL_A}
-OWNER_B = {"label": "b@example.test", "controller": CTRL_B}
+OWNER_A = {"label": "alice", "controller": CTRL_A}
+OWNER_B = {"label": "bob", "controller": CTRL_B}
 COMMIT = "c" * 40
 DEV_COMMIT = "d" * 40
 
@@ -31,20 +31,21 @@ def stack_record(slug="demo", *, copy_id="0000000a", owner=OWNER_A, project=None
     project = project or "hub-%s" % slug
     canonical = lifetime == "hosted"
     data = {
-        "schema": 1, "compose_project": hs.compose_project_for(project, "sandbox"),
+        "schema_version": 1, "compose_project": hs.compose_project_for(project, "sandbox"),
         "project": project, "environment": "sandbox", "kind": "stack",
         "lifetime": lifetime, "lifetime_source": "default" if lifetime == "temporary" else "flag",
         "ttl_seconds": ttl if lifetime == "temporary" else None,
         "expires_at": (expires or hs.to_rfc3339(NOW + ttl)) if lifetime == "temporary" else None,
-        "state": state, "owner": dict(owner),
+        "extended_count": 0, "state": state, "owner": dict(owner),
         "created_at": hs.to_rfc3339(NOW), "updated_at": hs.to_rfc3339(NOW),
+        "classified_by": None, "classified_at": None,
         "front_door": "nginx", "dns_mode": "wildcard",
         "hostnames": hostnames if hostnames is not None else ["hub-%s.example.test" % slug],
-        "stack": {"slug": slug, "copy_id": copy_id, "repo": repo, "ref": ref_branch,
-                  "ref_branch": ref_branch, "commit": commit, "dev_branch": dev_branch,
-                  "canonical": canonical, "template": "/checkout/sandbox.hosting.yml",
-                  "ports": ports if ports is not None else {}},
-        "merge": None, "reap": None, "overrides": [],
+        "slug": slug, "copy_id": copy_id, "repo": repo, "ref": ref_branch,
+        "ref_branch": ref_branch, "commit": commit, "dev_branch": dev_branch,
+        "canonical": canonical, "template": "/checkout/sandbox.hosting.yml",
+        "ports": ports if ports is not None else {},
+        "merge": None, "reap_run": None, "overrides": [],
     }
     data.update(extra)
     return data
@@ -91,6 +92,10 @@ class RecordValidationTests(unittest.TestCase):
             "expires_at": dict(expires_at="tomorrow"),
             "state": dict(state="gone"),
             "owner": dict(owner={"label": "", "controller": CTRL_A}),
+            "email owner": dict(owner={"label": "a@example.test", "controller": CTRL_A}),
+            "schema_version": dict(schema_version=2),
+            "extended_count": dict(extended_count=-1),
+            "stack without slug": dict(slug=None),
         }
         for label, change in cases.items():
             with self.subTest(label):
@@ -109,6 +114,30 @@ class RecordValidationTests(unittest.TestCase):
     def test_reaped_requires_reap_info(self):
         self.assertIsInstance(hs.parse_record(stack_record(state="reaped")), hs.Invalid)
 
+    def test_flat_panel_fields(self):
+        data = hs.record_to_dict(parsed(stack_record()), NOW)
+        for key in ("schema_version", "lifetime", "lifetime_source", "ttl_seconds", "expires_at",
+                    "extended_count", "owner", "copy_id", "slug", "ref", "ref_branch", "commit",
+                    "repo", "canonical", "state", "created_at", "updated_at", "reap"):
+            self.assertIn(key, data)
+        self.assertEqual(data["reap"], {"eligible": False, "reason": None, "merged_into": None,
+                                        "merged_at": None})
+        self.assertNotIn("stack", data)
+
+    def test_classified_target_shape(self):
+        data = stack_record()
+        data.update({"kind": "target", "lifetime": "permanent", "lifetime_source": "classified",
+                     "ttl_seconds": None, "expires_at": None, "slug": None, "copy_id": None,
+                     "ref": None, "ref_branch": None, "dev_branch": None, "template": None,
+                     "canonical": False, "ports": {}, "repo": None, "commit": None,
+                     "classified_by": dict(OWNER_B), "classified_at": hs.to_rfc3339(NOW)})
+        record = parsed(data)
+        self.assertEqual(record.classified_by.label, "bob")
+        missing = dict(data, classified_at=None)
+        self.assertIsInstance(hs.parse_record(missing), hs.Invalid)
+        with_slug = dict(data, slug="demo")
+        self.assertIsInstance(hs.parse_record(with_slug), hs.Invalid)
+
     def test_ttl_parsing(self):
         self.assertEqual(hs.parse_ttl("14d"), 14 * 86400)
         self.assertEqual(hs.parse_ttl("36h"), 36 * 3600)
@@ -125,7 +154,7 @@ class EligibilityTests(unittest.TestCase):
         merged = {"merged": True, "commit": COMMIT, "dev_branch": "dev", "dev_commit": DEV_COMMIT,
                   "checked_at": hs.to_rfc3339(NOW), "controller": CTRL_A}
         stale_merge = dict(merged, commit="e" * 40)
-        reap = {"run_id": "r1", "started_at": hs.to_rfc3339(NOW), "reason": "expired"}
+        reap_run = {"run_id": "r1", "started_at": hs.to_rfc3339(NOW), "reason": "expired"}
         cases = [
             ("fresh temporary", stack_record(), (False, "not_expired")),
             ("expired", stack_record(expires=past), (True, "expired")),
@@ -133,8 +162,8 @@ class EligibilityTests(unittest.TestCase):
             ("merge of an older commit", stack_record(merge=stale_merge), (False, "not_expired")),
             ("hosted", stack_record(lifetime="hosted", ref_branch="dev"), (False, "hosted")),
             ("permanent", stack_record(lifetime="permanent"), (False, "permanent")),
-            ("reaping resumes", stack_record(state="reaping", reap=reap), (True, "expired")),
-            ("reaped", stack_record(state="reaped", reap=reap, expires=past), (False, "reaped")),
+            ("reaping resumes", stack_record(state="reaping", reap_run=reap_run), (True, "expired")),
+            ("reaped", stack_record(state="reaped", reap_run=reap_run, expires=past), (False, "reaped")),
         ]
         for label, data, expected in cases:
             with self.subTest(label):
@@ -157,7 +186,7 @@ class ClaimDecisionTests(unittest.TestCase):
         with self.assertRaises(hs.StoreRefusal) as raised:
             claim([held], stack_record(owner=OWNER_B, copy_id="0000000b"), caller=caller(OWNER_B))
         self.assertEqual(raised.exception.code, hs.SLUG_TAKEN)
-        self.assertEqual(raised.exception.holder["owner"], "a@example.test")
+        self.assertEqual(raised.exception.holder["owner"], "alice")
 
     def test_same_owner_other_copy_is_refused(self):
         held = parsed(stack_record(copy_id="0000000a"))
@@ -173,14 +202,14 @@ class ClaimDecisionTests(unittest.TestCase):
         self.assertEqual(decision.stored.stack.commit, "e" * 40)
 
     def test_same_copy_from_another_controller_needs_explicit_copy(self):
-        other_machine = {"label": "a@example.test", "controller": CTRL_B}
+        other_machine = {"label": "alice", "controller": CTRL_B}
         held = parsed(stack_record())
         with self.assertRaises(hs.StoreRefusal) as raised:
             claim([held], stack_record(owner=other_machine), caller=caller(other_machine))
         self.assertEqual(raised.exception.code, hs.SLUG_TAKEN)
         decision = claim([held], stack_record(owner=other_machine), caller=caller(other_machine),
                          explicit_copy=True)
-        self.assertEqual(decision.stored.owner.label, "a@example.test")
+        self.assertEqual(decision.stored.owner.label, "alice")
         self.assertEqual(decision.stored.owner.controller, CTRL_B)
 
     def test_explicit_copy_of_another_owner_is_refused(self):
@@ -199,8 +228,11 @@ class ClaimDecisionTests(unittest.TestCase):
 
     def test_classified_target_project_is_refused(self):
         target = stack_record()
-        target.update({"kind": "target", "stack": None, "lifetime": "permanent",
-                       "ttl_seconds": None, "expires_at": None})
+        target.update({"kind": "target", "lifetime": "permanent", "lifetime_source": "classified",
+                       "ttl_seconds": None, "expires_at": None, "slug": None, "copy_id": None,
+                       "ref": None, "ref_branch": None, "dev_branch": None, "template": None,
+                       "canonical": False, "ports": {}, "classified_by": dict(OWNER_A),
+                       "classified_at": hs.to_rfc3339(NOW)})
         with self.assertRaises(hs.StoreRefusal) as raised:
             claim([parsed(target)], stack_record())
         self.assertEqual(raised.exception.code, hs.PROJECT_TAKEN)
@@ -220,20 +252,20 @@ class ClaimDecisionTests(unittest.TestCase):
         self.assertEqual(decision.stored.expires_at, hs.to_rfc3339(NOW + 7 * 86400))
 
     def test_reaping_is_refused(self):
-        reap = {"run_id": "r1", "started_at": hs.to_rfc3339(NOW), "reason": "expired"}
-        held = parsed(stack_record(state="reaping", reap=reap))
+        reap_run = {"run_id": "r1", "started_at": hs.to_rfc3339(NOW), "reason": "expired"}
+        held = parsed(stack_record(state="reaping", reap_run=reap_run))
         with self.assertRaises(hs.StoreRefusal) as raised:
             claim([held], stack_record())
         self.assertEqual(raised.exception.code, hs.REAPING)
 
     def test_reaped_record_of_same_copy_is_claimed_fresh(self):
-        reap = {"run_id": "r1", "started_at": hs.to_rfc3339(NOW), "reason": "expired",
-                "finished_at": hs.to_rfc3339(NOW)}
-        held = parsed(stack_record(state="reaped", reap=reap, expires=hs.to_rfc3339(NOW - 5)))
+        reap_run = {"run_id": "r1", "started_at": hs.to_rfc3339(NOW), "reason": "expired",
+                    "finished_at": hs.to_rfc3339(NOW)}
+        held = parsed(stack_record(state="reaped", reap_run=reap_run, expires=hs.to_rfc3339(NOW - 5)))
         decision = claim([held], stack_record())
         self.assertTrue(decision.is_new)
         self.assertEqual(decision.stored.state, "active")
-        self.assertIsNone(decision.stored.reap)
+        self.assertIsNone(decision.stored.reap_run)
 
     def test_rerun_keeps_lifetime_unless_flagged(self):
         held = parsed(stack_record(lifetime="permanent"))
@@ -249,6 +281,9 @@ class ClaimDecisionTests(unittest.TestCase):
         other_repo = stack_record("dev2", lifetime="hosted", ref_branch="dev", copy_id="0000000e",
                                   repo="github.com/org/other")
         self.assertTrue(claim([dev], other_repo).is_new)
+        other_dev = stack_record("main", lifetime="hosted", ref_branch="main", dev_branch="main",
+                                 copy_id="0000000f")
+        self.assertTrue(claim([dev], other_dev).is_new)
 
     def test_hosted_stack_rerun_at_a_feature_ref_is_refused(self):
         dev = parsed(stack_record("dev", lifetime="hosted", ref_branch="dev"))
@@ -321,17 +356,20 @@ class HostStoreTests(unittest.TestCase):
         self.assertEqual(record_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(root.stat().st_mode & 0o777, 0o700)
         listed = self.run_op("list")["result"]
-        self.assertEqual([item["stack"]["slug"] for item in listed["records"]], ["demo"])
-        self.assertFalse(listed["records"][0]["reap_eligibility"]["eligible"])
+        self.assertEqual([item["slug"] for item in listed["records"]], ["demo"])
+        self.assertFalse(listed["records"][0]["reap"]["eligible"])
+        self.assertEqual(listed["records"][0]["schema_version"], 1)
         updated = self.run_op("update", compose_project="sandbox-host-hub-demo-sandbox", ttl_seconds=3600)
         self.assertEqual(updated["result"]["record"]["expires_at"], hs.to_rfc3339(NOW + 3600))
+        self.assertEqual(updated["result"]["record"]["extended_count"], 1)
         refused = hs.handle(dict(_request("update", compose_project="sandbox-host-hub-demo-sandbox",
                                           ttl_seconds=3600), caller=OWNER_B), str(self.home))
         self.assertEqual(refused["code"], hs.NOT_OWNER)
         forced = hs.handle(dict(_request("update", compose_project="sandbox-host-hub-demo-sandbox",
                                          ttl_seconds=7200, force_owner=True), caller=OWNER_B),
                            str(self.home))
-        self.assertEqual(forced["result"]["record"]["overrides"][-1]["by"]["label"], "b@example.test")
+        self.assertEqual(forced["result"]["record"]["overrides"][-1]["by"]["label"], "bob")
+        self.assertEqual(forced["result"]["record"]["extended_count"], 2)
         self.assertTrue(self.run_op("release", compose_project="sandbox-host-hub-demo-sandbox")["ok"])
         self.assertFalse(record_file.exists())
         audit = [json.loads(line) for line in (root / "audit.jsonl").read_text().splitlines()]
@@ -369,8 +407,15 @@ class HostStoreTests(unittest.TestCase):
         missing = self.run_op("classify", project="mockups", environment="sandbox", lifetime="permanent")
         self.assertEqual(missing["code"], hs.TARGET_NOT_FOUND)
         (self.home / "runtime" / "hosts" / "mockups" / "sandbox").mkdir(parents=True)
-        done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="permanent")
-        self.assertEqual(done["result"]["record"]["lifetime_source"], "classified")
+        done = self.run_op("classify", project="mockups", environment="sandbox", lifetime="permanent",
+                           commit=COMMIT)
+        record = done["result"]["record"]
+        self.assertEqual(record["lifetime_source"], "classified")
+        self.assertEqual(record["classified_by"], OWNER_A)
+        self.assertEqual((record["slug"], record["copy_id"], record["ttl_seconds"]), (None, None, None))
+        self.assertEqual((record["commit"], record["repo"]), (COMMIT, None))
+        self.assertEqual(self.run_op("update", compose_project="sandbox-host-mockups-sandbox",
+                                     ttl_seconds=3600)["code"], hs.LIFETIME_INVALID)
         self.assertEqual(self.run_op("list")["result"]["unclassified"], [])
         cleared = self.run_op("classify", project="mockups", environment="sandbox", clear=True)
         self.assertTrue(cleared["result"]["removed"])
@@ -385,7 +430,8 @@ class HostStoreTests(unittest.TestCase):
                            commit=COMMIT, evidence=evidence)
         self.assertTrue(done["result"]["recorded"])
         listed = self.run_op("list")["result"]["records"][0]
-        self.assertEqual(listed["reap_eligibility"]["reason"], "merged")
+        self.assertEqual(listed["reap"]["reason"], "merged")
+        self.assertEqual(listed["reap"]["merged_into"], "dev")
 
     def test_policy_round_trip_and_validation(self):
         self.assertEqual(self.run_op("policy")["result"]["policy"], hs.DEFAULT_POLICY)
@@ -395,7 +441,7 @@ class HostStoreTests(unittest.TestCase):
     def test_concurrent_claims_have_one_winner(self):
         context = multiprocessing.get_context("spawn")
         with context.Pool(4) as pool:
-            results = pool.map(_race_claim, [(str(self.home), "%08x" % (index + 1), "u%d@example.test" % index)
+            results = pool.map(_race_claim, [(str(self.home), "%08x" % (index + 1), "user%d" % index)
                                              for index in range(4)])
         winners = [item for item in results if item.get("ok")]
         self.assertEqual(len(winners), 1, results)
@@ -505,8 +551,8 @@ class ReaperTests(unittest.TestCase):
         self.assertGreater(outcome["seq"], last_intent)
         record = self.records()[0]["sandbox-host-hub-demo-sandbox"]
         self.assertEqual(record.state, "reaped")
-        self.assertEqual(record.reap.reason, "expired")
-        self.assertFalse(record.reap.dns_left)
+        self.assertEqual(record.reap_run.reason, "expired")
+        self.assertFalse(record.reap_run.dns_left)
 
     def test_source_is_removed_only_when_no_environment_remains(self):
         source = self.home / "deploy-src" / "hosts" / "hub-demo"
@@ -652,15 +698,15 @@ class NamingTests(unittest.TestCase):
         import re as _re
         pattern = _re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
         accepts = lambda value: bool(pattern.fullmatch(value))
-        self.assertEqual(naming.generate_slug("stack/demo", COMMIT, "a@example.test", set(), accepts), "demo-a-1")
-        self.assertEqual(naming.generate_slug("stack/demo", COMMIT, "a@example.test", {"demo-a-1"}, accepts),
-                         "demo-a-2")
-        self.assertEqual(naming.generate_slug("", COMMIT, "a@example.test", set(), accepts), "ccccccc-a-1")
+        self.assertEqual(naming.generate_slug("stack/demo", COMMIT, "alice", set(), accepts), "demo-alice-1")
+        self.assertEqual(naming.generate_slug("stack/demo", COMMIT, "alice", {"demo-alice-1"}, accepts),
+                         "demo-alice-2")
+        self.assertEqual(naming.generate_slug("", COMMIT, "Alice Example", set(), accepts), "ccccccc-alice-ex-1")
         long_branch = "feature/" + "x" * 40
-        slug = naming.generate_slug(long_branch, COMMIT, "someone.long@example.test", set(), accepts)
+        slug = naming.generate_slug(long_branch, COMMIT, "Someone With A Long Name", set(), accepts)
         self.assertTrue(accepts(slug), slug)
         short = _re.compile(r"^[a-z]{1,4}-[0-9a-f]{4}$")
-        slug = naming.generate_slug("stack/demo", COMMIT, "a@example.test", set(),
+        slug = naming.generate_slug("stack/demo", COMMIT, "alice", set(),
                                     lambda value: bool(short.fullmatch(value)), token=lambda: "beef")
         self.assertEqual(slug, "demo-beef")
 
@@ -670,7 +716,12 @@ class NamingTests(unittest.TestCase):
         with unittest.mock.patch.object(naming, "_git", return_value=""):
             with self.assertRaises(HostingRefusal):
                 naming.owner_label(Path("."), None)
-            self.assertEqual(naming.owner_label(Path("."), "me@example.test"), "me@example.test")
+            self.assertEqual(naming.owner_label(Path("."), "  Alice   Example "), "Alice Example")
+            with self.assertRaises(HostingRefusal) as raised:
+                naming.owner_label(Path("."), "alice@example.test")
+            self.assertEqual(raised.exception.code, "stack_owner_invalid")
+        with unittest.mock.patch.object(naming, "_git", return_value="Alice Example"):
+            self.assertEqual(naming.owner_label(Path("."), None), "Alice Example")
 
 
 class MergeSweepTests(unittest.TestCase):
@@ -708,7 +759,7 @@ class MergeSweepTests(unittest.TestCase):
     def record(self, commit):
         return {"kind": "stack", "lifetime": "temporary", "state": "active",
                 "compose_project": "sandbox-host-hub-demo-sandbox",
-                "stack": {"slug": "demo", "repo": "github.com/org/repo", "dev_branch": "dev", "commit": commit}}
+                "slug": "demo", "repo": "github.com/org/repo", "dev_branch": "dev", "commit": commit}
 
     def sweep(self, commit, confirm=True):
         from sandbox.hosting.lifetime import merge

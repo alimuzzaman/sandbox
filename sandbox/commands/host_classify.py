@@ -6,6 +6,7 @@ the remote without redeploying it. Stacks are managed with `sb host stack ttl`.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import sandbox.core._hosting as hosting
@@ -38,11 +39,30 @@ def _classify(args) -> dict:
     entry = host_stack._entry(getattr(args, "remote", None))
     from sandbox.hosting.front_door import front_door_mode
     store = host_stack._store(entry, host_stack._caller(Path.cwd(), args))
+    known = _known_identity(args.remote, project, environment)
     result = store.call("classify", project=project, environment=environment, lifetime=lifetime,
                         ttl_seconds=ttl, clear=clear, force_owner=bool(getattr(args, "force_owner", False)),
-                        front_door=front_door_mode(entry))
+                        front_door=front_door_mode(entry), **known)
     return {"ok": True, "action": "host-classify", "remote": args.remote, "target": target,
             "record": result.get("record"), "removed": result.get("removed")}
+
+
+def _known_identity(remote_name: str, project: str, environment: str) -> dict:
+    """The commit and hostnames this controller recorded for the target, if any."""
+    try:
+        record = (hosting.load_host_state().get("hosts") or {}).get(f"{remote_name}/{project}/{environment}")
+    except (hosting.HostingError, OSError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    known = {}
+    commit = record.get("commit")
+    if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit):
+        known["commit"] = commit
+    hostnames = record.get("hostnames")
+    if isinstance(hostnames, list) and all(isinstance(item, str) for item in hostnames):
+        known["hostnames"] = hostnames
+    return known
 
 
 def cmd_host_classify(args) -> None:

@@ -11,44 +11,57 @@
 
 ## TargetRecord (remote, `runtime/target-lifetimes/<compose_project>.json`)
 
+Flat, agreed with the xspeed-dev orchestrator (final):
+
 ```json
 {
-  "schema": 1,
+  "schema_version": 1,
   "compose_project": "sandbox-host-<project>-<env>",
   "project": "<project>", "environment": "<env>",
   "kind": "stack | target",
   "lifetime": "temporary", "lifetime_source": "default",
-  "ttl_seconds": 1209600, "expires_at": "2026-11-24T10:00:00Z",
+  "ttl_seconds": 1209600, "expires_at": "2026-11-24T10:00:00Z", "extended_count": 0,
   "state": "active",
-  "owner": {"label": "dev@example.test", "controller": "<32 hex>"},
+  "owner": {"label": "Alice Example", "controller": "<32 hex>"},
   "created_at": "...Z", "updated_at": "...Z",
-  "front_door": "nginx",
-  "dns_mode": "wildcard | exact | unknown",
+  "classified_by": null, "classified_at": null,
+  "slug": "demo", "copy_id": "<8 hex>", "repo": "github.com/org/repo",
+  "ref": "stack/demo", "ref_branch": "stack/demo", "commit": "<40 hex>",
+  "dev_branch": "dev", "canonical": false, "template": "<abs path>",
+  "ports": {"mailpit": 18142},
+  "front_door": "nginx", "dns_mode": "wildcard | exact | unknown",
   "hostnames": ["hub-demo.example.test"],
-  "stack": {
-    "slug": "demo", "copy_id": "<8 hex>", "repo": "github.com/org/repo",
-    "ref": "stack/demo", "ref_branch": "stack/demo", "commit": "<40 hex>",
-    "dev_branch": "dev", "canonical": false, "template": "<abs path>",
-    "ports": {"mailpit": 18142}
-  },
   "merge": {"merged": true, "dev_branch": "dev", "dev_commit": "<40 hex>",
             "checked_at": "...Z", "controller": "<32 hex>", "commit": "<40 hex>"},
-  "reap": {"run_id": "...", "started_at": "...Z", "reason": "expired",
-           "finished_at": "...Z", "dns_left": false},
-  "overrides": [{"action": "down|ttl|lifetime", "by": {"label": "...", "controller": "..."}, "at": "...Z"}]
+  "reap": {"eligible": false, "reason": null, "merged_into": null, "merged_at": null},
+  "reap_run": {"run_id": "...", "started_at": "...Z", "reason": "expired",
+               "finished_at": "...Z", "dns_left": false},
+  "overrides": [{"action": "down|ttl|classify", "by": {"label": "...", "controller": "..."},
+                 "at": "...Z", "owner": "..."}]
 }
 ```
 
+- `reap` is derived: written as of `updated_at`, recomputed at read time by `list`.
+  `reap.reason` is `expired`, `merged` or null.
+- A `kind: target` record (classified from a plain `host apply`) has null `slug`,
+  `copy_id`, `ref`, `ref_branch`, `dev_branch`, `template`, empty `ports`,
+  `canonical: false`, `commit`/`repo` when known, `lifetime_source: classified`,
+  and `classified_by` (owner shape) plus `classified_at`.
+- `owner.label` is a name (`--owner` or git `user.name`); an email is refused.
+- `extended_count` counts TTL changes made with `stack ttl`.
+
 Validation (parse at the boundary; any failure = invalid = protected):
 
-- `compose_project == "sandbox-host-" + project + "-" + environment`; project and
-  environment match `TARGET_PART_RE`; the file name equals `compose_project + ".json"`.
+- `schema_version == 1`; `compose_project == "sandbox-host-" + project + "-" + environment`;
+  project and environment match `TARGET_PART_RE`; the file name equals
+  `compose_project + ".json"`.
 - `lifetime` in Lifetime; `temporary` requires integer `ttl_seconds` in
   [3600, 90 days] and an RFC3339 `expires_at`; `hosted`/`permanent` have both null.
-- `hosted` with `kind: stack` requires `stack.canonical == true` and
-  `stack.ref_branch == stack.dev_branch`.
-- `state` in RecordState; `reaping`/`reaped` require `reap`.
+- A hosted stack is canonical and its `ref_branch == dev_branch`; at most one
+  canonical stack per (`repo`, `dev_branch`) on a remote.
+- `state` in RecordState; `reaping`/`reaped` require `reap_run`.
 - Unknown top-level keys are kept on rewrite.
+- Writes: temp file in the same directory, fsync, rename, fsync of the directory.
 
 ## Eligibility (pure; host and controller)
 
@@ -62,7 +75,7 @@ Hosted, permanent, invalid, unclassified (no file) and `reaped` are never eligib
 
 ## Policy (remote, `policy.json`)
 
-`{"schema": 1, "per_owner": 5, "total": 40, "min_free_bytes": 21474836480}`;
+`{"schema_version": 1, "per_owner": 5, "total": 40, "min_free_bytes": 21474836480}`;
 missing keys take defaults.
 
 ## StackRecord additions (controller registry, version 1, additive)

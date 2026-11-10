@@ -10,6 +10,7 @@ from typing import Callable, Iterable
 from sandbox.core._hosting import HostingRefusal
 
 OWNER_UNKNOWN = "stack_owner_unknown"
+OWNER_INVALID = "stack_owner_invalid"
 _SAFE = re.compile(r"[^a-z0-9-]+")
 _SAFE_SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 _SCP_URL = re.compile(r"^(?:[^@/]+@)?([^:/]+):(.+)$")
@@ -22,10 +23,18 @@ def _git(checkout: Path, *arguments: str) -> str:
 
 
 def owner_label(checkout: Path, explicit: str | None) -> str:
-    label = (explicit or "").strip() or _git(checkout, "config", "user.email")
-    if not label or len(label) > 200 or any(ch.isspace() for ch in label):
-        raise HostingRefusal(OWNER_UNKNOWN, "no owner: set `git config user.email` in the template "
-                             "checkout or pass --owner LABEL (no spaces)")
+    """``--owner`` or the checkout's ``git config user.name``; never an email.
+
+    The label is shown to everyone who can open the remote's panel, so personal
+    data such as an email address is refused rather than stored.
+    """
+    label = " ".join((explicit or "").split()) or " ".join(_git(checkout, "config", "user.name").split())
+    if not label or len(label) > 200:
+        raise HostingRefusal(OWNER_UNKNOWN, "no owner: set `git config user.name` in the template "
+                             "checkout or pass --owner NAME")
+    if "@" in label:
+        raise HostingRefusal(OWNER_INVALID, "the owner label is shown on the remote's panel; use a name, "
+                             "not an email address (--owner NAME)")
     return label
 
 
@@ -70,7 +79,7 @@ def generate_slug(ref_branch: str, commit: str, owner: str, taken: Iterable[str]
     taken = set(taken)
     branch = _part(ref_branch.rsplit("/", 1)[-1], 16) if ref_branch else ""
     branch = branch or "c" + commit[:7]
-    person = _part(owner.split("@", 1)[0], 8) or "user"
+    person = _part(owner, 8) or "user"
     for branch_len, person_len in ((16, 8), (12, 6), (8, 4), (6, 3)):
         stem = f"{branch[:branch_len].strip('-')}-{person[:person_len].strip('-')}"
         for n in range(1, 100):

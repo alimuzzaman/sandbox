@@ -168,11 +168,28 @@ class TargetRecord:
     front_door: str = "nginx"
     dns_mode: str = "unknown"
     hostnames: tuple = ()
-    stack: StackIdentity = None
+    stack: StackIdentity = None      # kind "stack" only
+    commit: str = None               # kind "target": known deployed commit, or None
+    repo: str = None                 # kind "target": known repo, or None
+    extended_count: int = 0
+    classified_by: Owner = None
+    classified_at: str = None
     merge: MergeEvidence = None
-    reap: ReapInfo = None
+    reap_run: ReapInfo = None
     overrides: tuple = ()
     extra: dict = field(default_factory=dict)
+
+    @property
+    def slug(self):
+        return self.stack.slug if self.stack else None
+
+    @property
+    def record_commit(self):
+        return self.stack.commit if self.stack else self.commit
+
+    @property
+    def record_repo(self):
+        return self.stack.repo if self.stack else self.repo
 
 
 @dataclass(frozen=True)
@@ -194,52 +211,76 @@ class Eligibility:
     reason: str
 
 
+_STACK_KEYS = ("slug", "copy_id", "ref", "ref_branch", "dev_branch", "template")
 _KNOWN_KEYS = frozenset((
-    "schema", "compose_project", "project", "environment", "kind", "lifetime",
-    "lifetime_source", "ttl_seconds", "expires_at", "state", "owner", "created_at",
-    "updated_at", "front_door", "dns_mode", "hostnames", "stack", "merge", "reap",
-    "overrides"))
+    "schema_version", "compose_project", "project", "environment", "kind", "lifetime",
+    "lifetime_source", "ttl_seconds", "expires_at", "extended_count", "state", "owner",
+    "created_at", "updated_at", "classified_by", "classified_at", "front_door", "dns_mode",
+    "hostnames", "slug", "copy_id", "repo", "ref", "ref_branch", "commit", "dev_branch",
+    "canonical", "template", "ports", "merge", "reap", "reap_run", "overrides"))
 
 
 # ------------------------------------------------------------------ parse
 
-def _owner(value):
+def _owner(value, name="owner"):
     if not isinstance(value, dict):
-        raise ValueError("owner must be an object")
+        raise ValueError("%s must be an object" % name)
     label, controller = value.get("label"), value.get("controller")
     if not isinstance(label, str) or not label.strip() or len(label) > 200:
-        raise ValueError("owner.label must be a non-empty string")
+        raise ValueError("%s.label must be a non-empty string" % name)
+    if "@" in label:
+        # Labels are shown to everyone on the panel; an email is personal data.
+        raise ValueError("%s.label must be a name, not an email address" % name)
     if not isinstance(controller, str) or not _CONTROLLER_RE.fullmatch(controller):
-        raise ValueError("owner.controller must be 32 lowercase hex characters")
+        raise ValueError("%s.controller must be 32 lowercase hex characters" % name)
     return Owner(label.strip(), controller)
 
 
-def _stack(value):
-    if not isinstance(value, dict):
-        raise ValueError("stack must be an object")
-    text = {}
-    for key in ("slug", "copy_id", "repo", "ref", "ref_branch", "commit", "dev_branch", "template"):
-        item = value.get(key)
-        if not isinstance(item, str):
-            raise ValueError("stack.%s must be a string" % key)
-        text[key] = item
-    if not _SLUG_RE.fullmatch(text["slug"]):
-        raise ValueError("stack.slug is not a safe slug")
-    if not _COPY_RE.fullmatch(text["copy_id"]):
-        raise ValueError("stack.copy_id must be 8 lowercase hex characters")
-    if not _COMMIT_RE.fullmatch(text["commit"]):
-        raise ValueError("stack.commit must be a full commit")
-    if not text["dev_branch"]:
-        raise ValueError("stack.dev_branch must not be empty")
-    canonical = value.get("canonical")
-    if not isinstance(canonical, bool):
-        raise ValueError("stack.canonical must be a boolean")
-    ports = value.get("ports") or {}
+def _ports(value):
+    ports = value if value is not None else {}
     if not isinstance(ports, dict) or not all(
             isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
             for k, v in ports.items()):
-        raise ValueError("stack.ports must map names to integers")
-    return StackIdentity(canonical=canonical, ports=dict(ports), **text)
+        raise ValueError("ports must map names to integers")
+    return dict(ports)
+
+
+def _stack(data):
+    text = {}
+    for key in _STACK_KEYS + ("repo", "commit"):
+        item = data.get(key)
+        if not isinstance(item, str):
+            raise ValueError("a stack record needs a string %s" % key)
+        text[key] = item
+    if not _SLUG_RE.fullmatch(text["slug"]):
+        raise ValueError("slug is not a safe slug")
+    if not _COPY_RE.fullmatch(text["copy_id"]):
+        raise ValueError("copy_id must be 8 lowercase hex characters")
+    if not _COMMIT_RE.fullmatch(text["commit"]):
+        raise ValueError("commit must be a full commit")
+    if not text["dev_branch"] or not text["repo"]:
+        raise ValueError("a stack record needs repo and dev_branch")
+    canonical = data.get("canonical")
+    if not isinstance(canonical, bool):
+        raise ValueError("canonical must be a boolean")
+    return StackIdentity(canonical=canonical, ports=_ports(data.get("ports")), **text)
+
+
+def _target_identity(data):
+    """A classified target: stack identity is null; commit and repo when known."""
+    for key in _STACK_KEYS:
+        if data.get(key) is not None:
+            raise ValueError("a target record has no %s" % key)
+    if data.get("canonical") not in (None, False):
+        raise ValueError("only a stack is canonical")
+    if _ports(data.get("ports")):
+        raise ValueError("a target record has no stack ports")
+    commit, repo = data.get("commit"), data.get("repo")
+    if commit is not None and not (isinstance(commit, str) and _COMMIT_RE.fullmatch(commit)):
+        raise ValueError("commit must be a full commit or null")
+    if repo is not None and (not isinstance(repo, str) or not repo or len(repo) > 300):
+        raise ValueError("repo must be a string or null")
+    return commit, repo
 
 
 def _merge(value):
@@ -256,18 +297,18 @@ def _merge(value):
                          value["dev_commit"], value["checked_at"], str(value.get("controller") or ""))
 
 
-def _reap(value):
+def _reap_run(value):
     if value is None:
         return None
     if not isinstance(value, dict) or not isinstance(value.get("run_id"), str) or not value["run_id"]:
-        raise ValueError("reap.run_id must be a string")
+        raise ValueError("reap_run.run_id must be a string")
     if value.get("reason") not in REAP_REASONS:
-        raise ValueError("reap.reason is unknown")
+        raise ValueError("reap_run.reason is unknown")
     if parse_rfc3339(value.get("started_at")) is None:
-        raise ValueError("reap.started_at must be RFC3339")
+        raise ValueError("reap_run.started_at must be RFC3339")
     finished = value.get("finished_at")
     if finished is not None and parse_rfc3339(finished) is None:
-        raise ValueError("reap.finished_at must be RFC3339")
+        raise ValueError("reap_run.finished_at must be RFC3339")
     return ReapInfo(value["run_id"], value["started_at"], value["reason"], finished,
                     bool(value.get("dns_left")))
 
@@ -282,8 +323,8 @@ def parse_record(data, name=None):
 
 
 def _parse(data, name):
-    if not isinstance(data, dict) or data.get("schema") != SCHEMA:
-        raise ValueError("unknown record schema")
+    if not isinstance(data, dict) or data.get("schema_version") != SCHEMA:
+        raise ValueError("unknown record schema_version")
     project, environment = data.get("project"), data.get("environment")
     if not isinstance(project, str) or not TARGET_PART_RE.fullmatch(project):
         raise ValueError("project is not a valid target part")
@@ -314,17 +355,32 @@ def _parse(data, name):
     for key in ("created_at", "updated_at"):
         if parse_rfc3339(data.get(key)) is None:
             raise ValueError("%s must be RFC3339" % key)
-    stack = _stack(data["stack"]) if kind == "stack" else None
-    if kind == "target" and data.get("stack") is not None:
-        raise ValueError("a target record has no stack identity")
+    extended = data.get("extended_count", 0)
+    if not isinstance(extended, int) or isinstance(extended, bool) or extended < 0:
+        raise ValueError("extended_count must be a non-negative integer")
+    classified_by = data.get("classified_by")
+    classified_at = data.get("classified_at")
+    if source == "classified":
+        classified_by = _owner(classified_by, "classified_by")
+        if parse_rfc3339(classified_at) is None:
+            raise ValueError("a classified record needs an RFC3339 classified_at")
+    elif classified_by is not None or classified_at is not None:
+        raise ValueError("only a classified record has classified_by and classified_at")
+    stack, commit, repo = None, None, None
+    if kind == "stack":
+        stack = _stack(data)
+        if source == "classified":
+            raise ValueError("a stack's lifetime comes from stack up or stack ttl, not classify")
+    else:
+        commit, repo = _target_identity(data)
     if lifetime == "hosted" and stack is not None and not (
             stack.canonical and stack.ref_branch == stack.dev_branch):
         raise ValueError("a hosted stack must be the canonical stack of its dev branch")
     if stack is not None and stack.canonical and lifetime != "hosted":
         raise ValueError("only a hosted stack is canonical")
-    reap = _reap(data.get("reap"))
-    if state in ("reaping", "reaped") and reap is None:
-        raise ValueError("a reaping or reaped record needs reap")
+    reap_run = _reap_run(data.get("reap_run"))
+    if state in ("reaping", "reaped") and reap_run is None:
+        raise ValueError("a reaping or reaped record needs reap_run")
     hostnames = data.get("hostnames") or []
     if not isinstance(hostnames, list) or not all(isinstance(item, str) for item in hostnames):
         raise ValueError("hostnames must be a list of strings")
@@ -344,37 +400,62 @@ def _parse(data, name):
         state=state, owner=_owner(data.get("owner")), created_at=data["created_at"],
         updated_at=data["updated_at"], front_door=front_door, dns_mode=dns_mode,
         hostnames=tuple(sorted(set(item.strip().rstrip(".").lower() for item in hostnames if item.strip()))),
-        stack=stack, merge=_merge(data.get("merge")), reap=reap, overrides=tuple(overrides),
-        extra=extra)
+        stack=stack, commit=commit, repo=repo, extended_count=extended,
+        classified_by=classified_by, classified_at=classified_at,
+        merge=_merge(data.get("merge")), reap_run=reap_run, overrides=tuple(overrides), extra=extra)
 
 
-def record_to_dict(record):
+def _owner_dict(owner):
+    return None if owner is None else {"label": owner.label, "controller": owner.controller}
+
+
+def reap_view(record, now):
+    """The panel's ``reap`` block: eligibility at ``now`` plus merge evidence."""
+    verdict = eligibility(record, now)
+    merge = record.merge
+    merged = merge is not None and merge.merged and merge.commit == record.record_commit
+    return {"eligible": verdict.eligible,
+            "reason": verdict.reason if verdict.reason in REAP_REASONS and verdict.eligible else None,
+            "merged_into": merge.dev_branch if merged else None,
+            "merged_at": merge.checked_at if merged else None}
+
+
+def record_to_dict(record, now=None):
+    """The flat record shape agreed with the panel (``schema_version`` 1).
+
+    ``reap`` is computed at ``now`` (default: the record's ``updated_at``); readers
+    that need the current answer recompute it, as ``view`` does.
+    """
+    stack = record.stack
     data = dict(record.extra)
     data.update({
-        "schema": SCHEMA, "compose_project": record.compose_project, "project": record.project,
-        "environment": record.environment, "kind": record.kind, "lifetime": record.lifetime,
-        "lifetime_source": record.lifetime_source, "ttl_seconds": record.ttl_seconds,
-        "expires_at": record.expires_at, "state": record.state,
-        "owner": {"label": record.owner.label, "controller": record.owner.controller},
-        "created_at": record.created_at, "updated_at": record.updated_at,
-        "front_door": record.front_door, "dns_mode": record.dns_mode,
-        "hostnames": list(record.hostnames),
-        "stack": None if record.stack is None else {
-            "slug": record.stack.slug, "copy_id": record.stack.copy_id, "repo": record.stack.repo,
-            "ref": record.stack.ref, "ref_branch": record.stack.ref_branch,
-            "commit": record.stack.commit, "dev_branch": record.stack.dev_branch,
-            "canonical": record.stack.canonical, "template": record.stack.template,
-            "ports": dict(record.stack.ports)},
+        "schema_version": SCHEMA, "compose_project": record.compose_project,
+        "project": record.project, "environment": record.environment, "kind": record.kind,
+        "lifetime": record.lifetime, "lifetime_source": record.lifetime_source,
+        "ttl_seconds": record.ttl_seconds, "expires_at": record.expires_at,
+        "extended_count": record.extended_count, "state": record.state,
+        "owner": _owner_dict(record.owner), "created_at": record.created_at,
+        "updated_at": record.updated_at, "classified_by": _owner_dict(record.classified_by),
+        "classified_at": record.classified_at, "front_door": record.front_door,
+        "dns_mode": record.dns_mode, "hostnames": list(record.hostnames),
+        "slug": stack.slug if stack else None, "copy_id": stack.copy_id if stack else None,
+        "repo": record.record_repo, "ref": stack.ref if stack else None,
+        "ref_branch": stack.ref_branch if stack else None, "commit": record.record_commit,
+        "dev_branch": stack.dev_branch if stack else None,
+        "canonical": bool(stack.canonical) if stack else False,
+        "template": stack.template if stack else None,
+        "ports": dict(stack.ports) if stack else {},
         "merge": None if record.merge is None else {
             "merged": record.merge.merged, "commit": record.merge.commit,
             "dev_branch": record.merge.dev_branch, "dev_commit": record.merge.dev_commit,
             "checked_at": record.merge.checked_at, "controller": record.merge.controller},
-        "reap": None if record.reap is None else {
-            "run_id": record.reap.run_id, "started_at": record.reap.started_at,
-            "reason": record.reap.reason, "finished_at": record.reap.finished_at,
-            "dns_left": record.reap.dns_left},
+        "reap_run": None if record.reap_run is None else {
+            "run_id": record.reap_run.run_id, "started_at": record.reap_run.started_at,
+            "reason": record.reap_run.reason, "finished_at": record.reap_run.finished_at,
+            "dns_left": record.reap_run.dns_left},
         "overrides": [dict(item) for item in record.overrides],
     })
+    data["reap"] = reap_view(record, parse_rfc3339(record.updated_at) if now is None else now)
     return data
 
 
@@ -399,8 +480,8 @@ def eligibility(record, now):
         return Eligibility(False, "reaped")
     if record.lifetime != "temporary":
         return Eligibility(False, record.lifetime)
-    if record.state == "reaping" and record.reap is not None:
-        return Eligibility(True, record.reap.reason)
+    if record.state == "reaping" and record.reap_run is not None:
+        return Eligibility(True, record.reap_run.reason)
     merge, stack = record.merge, record.stack
     if merge is not None and merge.merged and stack is not None and merge.commit == stack.commit:
         return Eligibility(True, "merged")
@@ -506,9 +587,11 @@ def decide_claim(records, invalid, deployed, draft, *, caller, explicit_copy=Fal
         for record in records.values():
             if (record.compose_project != draft.compose_project and _active(record)
                     and record.stack is not None and record.stack.canonical
-                    and record.stack.repo == draft.stack.repo):
-                raise StoreRefusal(HOSTED_TAKEN, "the canonical hosted stack of %s on this remote is %s"
-                                   % (draft.stack.repo, record.stack.slug), _holder(record))
+                    and record.stack.repo == draft.stack.repo
+                    and record.stack.dev_branch == draft.stack.dev_branch):
+                raise StoreRefusal(HOSTED_TAKEN, "the canonical hosted stack of %s %s on this remote is %s"
+                                   % (draft.stack.repo, draft.stack.dev_branch, record.stack.slug),
+                                   _holder(record))
     others = [record for record in records.values()
               if record.compose_project != draft.compose_project and _active(record)]
     taken_ports = {}
@@ -539,7 +622,8 @@ def decide_claim(records, invalid, deployed, draft, *, caller, explicit_copy=Fal
         draft, lifetime=lifetime, lifetime_source=source, ttl_seconds=ttl if lifetime == "temporary" else None,
         expires_at=expires if lifetime == "temporary" else None, state="active", owner=owner,
         created_at=base.created_at if base else stamp, updated_at=stamp, stack=stack, merge=merge,
-        reap=None, overrides=base.overrides if base else (),
+        reap_run=None, overrides=base.overrides if base else (),
+        extended_count=base.extended_count if base else 0,
         extra=dict(base.extra) if base else dict(draft.extra))
     if isinstance(parse_record(record_to_dict(stored)), Invalid):
         raise StoreRefusal(LIFETIME_INVALID, "the stack's lifetime is not valid: "
@@ -649,6 +733,20 @@ class Store:
             except OSError:
                 pass
             raise
+        self._sync_dir()
+
+    def _sync_dir(self):
+        """Make the rename durable; readers never see a partly written record."""
+        try:
+            descriptor = os.open(str(self.root), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
 
     def delete(self, compose_project):
         try:
@@ -677,7 +775,7 @@ class Store:
         return parse_policy(data)
 
     def set_policy(self, policy):
-        body = {"schema": SCHEMA, "per_owner": policy.per_owner, "total": policy.total,
+        body = {"schema_version": SCHEMA, "per_owner": policy.per_owner, "total": policy.total,
                 "min_free_bytes": policy.min_free_bytes}
         fd, temporary = tempfile.mkstemp(prefix=".policy-", dir=str(self.root))
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -734,15 +832,8 @@ def _now(request):
 
 
 def view(record, now):
-    """The record as the controller and the panel see it."""
-    data = record_to_dict(record)
-    result = eligibility(record, now)
-    merge = record.merge
-    data["reap_eligibility"] = {
-        "eligible": result.eligible, "reason": result.reason if result.eligible else None,
-        "merged_into": merge.dev_branch if merge and merge.merged else None,
-        "merged_at": merge.checked_at if merge and merge.merged else None}
-    return data
+    """The record as the controller and the panel see it, ``reap`` as of ``now``."""
+    return record_to_dict(record, now)
 
 
 def _list(store, request, now):
@@ -793,6 +884,9 @@ def _update(store, request, now):
     record = _existing(store, str(request.get("compose_project") or ""))
     if record.state != "active":
         raise StoreRefusal(REAPING, "%s is %s; it cannot be changed" % (record.compose_project, record.state))
+    if record.kind != "stack":
+        raise StoreRefusal(LIFETIME_INVALID, "%s is a classified target; use sb host classify"
+                           % record.compose_project, _holder(record))
     record = _owned_or_forced(record, caller, bool(request.get("force_owner")), "ttl", now)
     lifetime = request.get("lifetime") or record.lifetime
     if lifetime not in LIFETIMES:
@@ -806,9 +900,10 @@ def _update(store, request, now):
         records, _invalid = store.load()
         for other in records.values():
             if (other.compose_project != record.compose_project and _active(other) and other.stack
-                    and other.stack.canonical and other.stack.repo == stack.repo):
-                raise StoreRefusal(HOSTED_TAKEN, "the canonical hosted stack of %s here is %s"
-                                   % (stack.repo, other.stack.slug), _holder(other))
+                    and other.stack.canonical and other.stack.repo == stack.repo
+                    and other.stack.dev_branch == stack.dev_branch):
+                raise StoreRefusal(HOSTED_TAKEN, "the canonical hosted stack of %s %s here is %s"
+                                   % (stack.repo, stack.dev_branch, other.stack.slug), _holder(other))
     if stack is not None:
         stack = replace(stack, canonical=lifetime == "hosted")
     if lifetime == "temporary":
@@ -822,9 +917,10 @@ def _update(store, request, now):
     else:
         expires = None
     source = "flag" if request.get("lifetime") else record.lifetime_source
+    extended = record.extended_count + (1 if request.get("ttl_seconds") is not None else 0)
     updated = replace(record, lifetime=lifetime, lifetime_source=source,
                       ttl_seconds=ttl if lifetime == "temporary" else None, expires_at=expires,
-                      stack=stack, updated_at=to_rfc3339(now))
+                      stack=stack, updated_at=to_rfc3339(now), extended_count=extended)
     checked = parse_record(record_to_dict(updated))
     if isinstance(checked, Invalid):
         raise StoreRefusal(LIFETIME_INVALID, checked.reason)
@@ -911,6 +1007,16 @@ def _classify(store, request, now):
     elif ttl is not None:
         raise StoreRefusal(TTL_INVALID, "only a temporary target has a TTL")
     stamp = to_rfc3339(now)
+    known = {"commit": request.get("commit"), "repo": request.get("repo")}
+    try:
+        commit, repo = _target_identity(known)
+    except ValueError as exc:
+        raise StoreRefusal(REQUEST_INVALID, str(exc))
+    hostnames = request.get("hostnames")
+    if hostnames is None:
+        hostnames = list(record.hostnames) if record else []
+    if not isinstance(hostnames, list) or not all(isinstance(item, str) for item in hostnames):
+        raise StoreRefusal(REQUEST_INVALID, "hostnames must be a list of strings")
     stored = TargetRecord(
         compose_project=compose_project, project=project, environment=environment, kind="target",
         lifetime=lifetime, lifetime_source="classified",
@@ -919,8 +1025,13 @@ def _classify(store, request, now):
         owner=record.owner if record else caller, created_at=record.created_at if record else stamp,
         updated_at=stamp, front_door=str(request.get("front_door") or (record.front_door if record else "nginx")),
         dns_mode=record.dns_mode if record else "unknown",
-        hostnames=record.hostnames if record else (), overrides=record.overrides if record else (),
-        extra=dict(record.extra) if record else {})
+        hostnames=tuple(sorted(set(item.strip().rstrip(".").lower() for item in hostnames if item.strip()))),
+        commit=commit or (record.commit if record else None), repo=repo or (record.repo if record else None),
+        extended_count=record.extended_count if record else 0, classified_by=caller, classified_at=stamp,
+        overrides=record.overrides if record else (), extra=dict(record.extra) if record else {})
+    checked = parse_record(record_to_dict(stored))
+    if isinstance(checked, Invalid):
+        raise StoreRefusal(LIFETIME_INVALID, checked.reason)
     store.write(stored)
     store.audit("classify", compose_project, caller, now, lifetime=lifetime, ttl_seconds=ttl)
     return {"record": view(stored, now)}

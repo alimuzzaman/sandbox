@@ -59,7 +59,8 @@ confirmed canonical up `sweep` (the merge-sweep result).
 | `stack_expired` | re-up of an expired temporary stack without `--ttl` |
 | `stack_reaping` | the record is being reaped |
 | `stack_not_owner` | `down`/`ttl`/`classify` on a record another owner holds without `--force-owner`; `--copy` with a different owner label |
-| `stack_owner_unknown` | no `--owner` and no `git config user.email` |
+| `stack_owner_unknown` | no `--owner` and no `git config user.name` |
+| `stack_owner_invalid` | the owner label is an email address |
 | `stack_limit_reached` | per-owner cap, remote-wide cap or free-disk minimum |
 | `stack_record_unavailable` | the host store program failed or returned no result |
 | `stack_record_invalid` | the record exists but fails validation (classify/ttl refuse it) |

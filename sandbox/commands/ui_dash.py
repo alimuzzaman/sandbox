@@ -139,7 +139,7 @@ def _remote_view(name: str, deep: bool) -> tuple[int, dict]:
         return 404, {"error": "no such remote"}
     try:
         if local:
-            from sandbox.resources import host_inventory
+            from sandbox.remote_runtime import host_inventory
             inventory = remote_core.redact_structure(
                 host_inventory._hosted_inventory_snapshot(deep=deep))
         else:

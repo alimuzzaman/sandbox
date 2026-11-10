@@ -27,7 +27,7 @@ from dependencies import ToolDependencies
 
 if str(SANDBOX_ROOT) not in sys.path:
     sys.path.insert(0, str(SANDBOX_ROOT))
-from sandbox.resources.host_inventory import (  # noqa: E402  (shared with `sb web`)
+from sandbox.remote_runtime.host_inventory import (  # noqa: E402  (shared with `sb web`)
     _DIAGNOSTICS_MAX_PROBE_ROWS, _DIAGNOSTICS_PROBE_TIMEOUT_SECONDS, _DIAGNOSTICS_SCHEMA_VERSION,
     _diagnostic_process_snapshot, _hosted_inventory_snapshot, _job_counts, _memory_snapshot,
 )

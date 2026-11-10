@@ -138,6 +138,22 @@ def fetch_upstream(root: Path, branch: str, *, timeout: float) -> None:
         raise GitError(short_detail(result.stderr))
 
 
+def recent_ref_values(root: Path, ref_name: str, *, limit: int, timeout: float) -> list[str]:
+    """The newest ``limit`` values ``ref_name`` held, newest first, from its reflog.
+
+    An empty list when there is no reflog (``core.logAllRefUpdates`` off) or git
+    cannot read it; callers treat that as "no evidence" and fail closed.
+    """
+    try:
+        result = run(root, "reflog", "show", "--format=%H", f"-n{int(limit)}", ref_name,
+                     "--", timeout=timeout)
+    except GitError:
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def fast_forward(root: Path, revision: str, *, timeout: float) -> None:
     result = run(root, "merge", "--ff-only", "--quiet", revision, timeout=timeout)
     if result.returncode != 0:

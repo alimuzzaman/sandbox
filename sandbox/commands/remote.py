@@ -1765,9 +1765,9 @@ def _choose_control_transport(args, as_json: bool) -> str:
     if explicit in {"https", "tailscale"}:
         return explicit
     if as_json or _arg_true(args, "yes") or not sys.stdin.isatty():
-        return "https"
-    ans = input("Use Tailscale private control plane instead of public HTTPS? [y/N] ")
-    return "tailscale" if ans.strip().lower() in {"y", "yes"} else "https"
+        return "tailscale"
+    ans = input("Use Tailscale private control plane? [Y/n] ")
+    return "https" if ans.strip().lower() in {"n", "no"} else "tailscale"
 
 
 def _ssh_host(ssh_target: str) -> str:
@@ -1980,6 +1980,8 @@ def _cmd_provision(args, as_json: bool) -> None:
     if not ssh_target:
         die(f"remote '{name}' has no ssh connection string configured")
     control_transport = _choose_control_transport(args, as_json)
+    switching = (bool(entry.get("provisioned")) and entry.get("control_transport") == "https"
+                 and control_transport == "tailscale")
     public_host = None
     if control_transport == "https":
         public_host = _control_host(args, entry, ssh_target, as_json)
@@ -1998,6 +2000,8 @@ def _cmd_provision(args, as_json: bool) -> None:
         }
         if prior is not None:
             result["previous_provision_log"] = prior
+        if switching:
+            result["transport_switch"] = _transport_switch_plan(name, entry)
         if as_json:
             print(json.dumps(result))
         else:
@@ -2056,7 +2060,16 @@ def _cmd_provision(args, as_json: bool) -> None:
         _record_provision_event(journal, "bootstrap_failed", status="failed", detail=detail)
         die(f"provisioning '{name}' failed: {detail}")
     _record_provision_event(journal, "bootstrap_complete")
-    token = sr.mint_bearer_token()
+    if switching:
+        try:
+            _record_provision_event(journal, "transport_switch_retiring_https_unit")
+            _retire_https_control_unit(entry)
+        except (RuntimeError, subprocess.SubprocessError, OSError) as e:
+            _record_provision_event(journal, "transport_switch_failed", status="failed", detail=str(e))
+            die(f"could not switch '{name}' to Tailscale control: "
+                f"{sr.redact_ssh_connection(str(e), entry)}")
+    # A switch keeps the token: other controllers and clients already hold it.
+    token = (entry.get("bearer_token") if switching else None) or sr.mint_bearer_token()
     port = sr.DEFAULT_MCP_PORT
     entry = sr.get_remote(name)
     try:
@@ -2101,6 +2114,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     _record_provision_event(journal, "complete", status="complete")
     result = {"ok": True, "name": name, "provisioned": True,
              "control_transport": control_transport, "control_url": control_url,
+             **({"transport_switch": _transport_switch_plan(name, entry)} if switching else {}),
              "tailscale_host": tailscale_ip, "mcp_port": port,
              "provision_log": _provision_log_summary(journal),
              "network_range": _network_range_hint(sr.get_remote(name) or entry), "error": None}
@@ -2112,6 +2126,55 @@ def _cmd_provision(args, as_json: bool) -> None:
               "see docs/remote-hosting.md for client configuration")
         if result["network_range"].get("state") == "proposed":
             print(f"  development range proposal: {result['network_range']['assign_command']}")
+
+
+def _transport_switch_plan(name: str, entry: dict) -> dict:
+    """What `provision --control tailscale` does to a remote that has public HTTPS control."""
+    return {
+        "from": "https", "to": "tailscale",
+        "keeps_token": bool(entry.get("bearer_token")),
+        "stops_and_sets_aside": sr.REMOTE_MCP_SERVICE,
+        "backup_dir": "~/.sandbox/removed-units",
+        "follow_up": [
+            f"./sb remote rebind-host {name} --confirm",
+            f"./sb remote edge {name} --remove-route <old control route> --confirm",
+        ],
+    }
+
+
+def _retire_https_control_unit(entry: dict) -> None:
+    """Stop and set aside the Sandbox-owned HTTPS control unit before a Tailscale one replaces it.
+
+    Its ownership marker is proven against the recorded HTTPS registration, so a
+    foreign unit is never touched. Safe to rerun: a unit already set aside, or
+    one already serving Tailscale for this remote, needs nothing.
+    """
+    status = sr.remote_mcp_service_status(entry)
+    if status.get("probe_state", "complete") != "complete":
+        raise RuntimeError(status.get("probe_error") or "remote_service_probe_unavailable")
+    if status.get("ownership") == "missing":
+        return
+    if status.get("ownership") != "proven":
+        address = sr.resolve_tailscale_ip(entry)
+        port = entry.get("mcp_port") or sr.DEFAULT_MCP_PORT
+        switched = sr.remote_mcp_service_status({
+            **entry, "control_transport": "tailscale", "tailscale_host": address,
+            "control_url": f"http://{address}:{port}"})
+        if switched.get("ownership") == "proven":
+            return
+        raise RuntimeError("transport_switch_unit_not_owned: the existing control unit could not "
+                           "be proven to be Sandbox's, so it was left untouched")
+    unit = sr.REMOTE_MCP_SERVICE
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    res = sr.ssh_run(entry, (
+        f"systemctl --user stop {unit} && "
+        f"{{ systemctl --user disable {unit} >/dev/null 2>&1 || true; }} && "
+        "umask 077 && mkdir -p $HOME/.sandbox/removed-units && "
+        f"mv -f $HOME/.config/systemd/user/{unit} $HOME/.sandbox/removed-units/{unit}.{stamp} && "
+        "systemctl --user daemon-reload"), timeout=60)
+    if res.returncode != 0:
+        raise RuntimeError("transport_switch_unit_not_retired: could not stop and set aside the "
+                           "HTTPS control unit")
 
 
 def _cmd_up(args, as_json: bool) -> None:

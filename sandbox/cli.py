@@ -925,8 +925,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--resume", action="store_true",
         help="for `remote coverage --enable`: resume an interrupted or expired-lease operation")
     remote_p.add_argument("--control", choices=["https", "tailscale"], default=None,
-        help="control-plane transport for 'provision'/'up' (default: ask in "
-             "interactive use, HTTPS in --json/non-interactive mode)")
+        help="control-plane transport for 'provision'/'up' (default: Tailscale; "
+             "use --control https for public HTTPS)")
     remote_p.add_argument("--control-host", default=None,
         help="public hostname for HTTPS control, e.g. sandbox-control.example.com")
     remote_p.add_argument("--front-door", dest="front_door", choices=["caddy", "nginx"], default=None,
@@ -947,7 +947,7 @@ Per-project (each plugin carries its own sandbox.config.json):
              "for hosted sites; 0 clears it (spec 066)")
     remote_p.add_argument("--ipv6", default=None, help="public IPv6 address for hosted DNS records")
     remote_p.add_argument("--yes", action="store_true",
-        help="accept the default HTTPS control-plane choice without prompting")
+        help="accept the default Tailscale control-plane choice without prompting")
     remote_p.add_argument("--plan", action="store_true",
         help="for protected remote service actions: show the no-write plan")
     remote_p.add_argument("--confirm", action="store_true",

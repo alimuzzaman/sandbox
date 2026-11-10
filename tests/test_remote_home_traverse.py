@@ -23,7 +23,7 @@ TEST_ROOT = Path.home()
 
 
 class TraverseOnlyAncestors:
-    """Patch os.open so every directory above `home` refuses a read open.
+    """Patch os.open so every directory between / and `home` refuses a read open.
 
     A real traverse-only directory refuses O_RDONLY but allows O_PATH. The
     flag is faked so the test also runs where O_PATH does not exist; the real
@@ -46,7 +46,7 @@ class TraverseOnlyAncestors:
     def __call__(self, path, flags, *args, dir_fd=None, **kwargs):
         full = self.full(path, dir_fd)
         inside = full == self.home or full.startswith(self.home + "/")
-        if not flags & FAKE_O_PATH:
+        if not flags & FAKE_O_PATH and full != "/":
             if not inside:
                 raise PermissionError(13, "Permission denied", path)
             self.read_opens.append(full)

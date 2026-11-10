@@ -1020,6 +1020,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         metavar="HOSTNAME",
         help="extra hostname the exposed instance also answers on (repeatable); "
              "defaults to the project's sandbox.config.json `aliases`")
+    deploy_p.add_argument("--stack", default=None, metavar="SLUG",
+        help="with --expose, record this site as part of the `sb host stack` SLUG on "
+             "--remote, so the web panel lists it under that stack")
     deploy_p.add_argument("--prune-routes", action="store_true",
         help="with --expose, delete remote routes pointing at this instance's "
              "port that are not the current domain or an alias")

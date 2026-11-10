@@ -4538,7 +4538,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 local_images_digest: str | None = None,
                 active_image_lease=None,
                 allow_record_overwrite: bool = False,
-                before_effects=None) -> dict:
+                before_effects=None, summary_recorder=None) -> dict:
     # Validate genuine retained child/source evidence before secret publication or effects.
     from sandbox.delivery.context import require_delivery_capabilities
     require_delivery_capabilities(['delivery_outcomes_v1',
@@ -4547,7 +4547,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         if active_image_lease is None:
             raise hosting.HostingError("local image engine lock is unavailable")
         active_image_lease.require()
-    _durable_host_context(validated["project_root"])
+    durable_context = _durable_host_context(validated["project_root"])
     machine_identity = _authenticated_machine_identity(remote_name)
     if recovery_repository is None:
         raise hosting.HostingError("recovery_receipt_unavailable")
@@ -4700,6 +4700,9 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         overlay_snapshot=source_snapshot,
     )
     attempt.checkpoint('source', 'source_publish', state='configured')
+    if summary_recorder is not None:
+        # Spec 073: the panel on the remote reads this; best-effort, never fails the apply.
+        summary_recorder.started(home, sha, (durable_context or {}).get("request_id"))
     runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
     apply_log = f"{runtime_dir}/apply.log"
     state["hosts"][key] = {
@@ -5107,6 +5110,8 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     }
     if progress is not None:
         result["apply_log"] = apply_log
+    if summary_recorder is not None:
+        summary_recorder.finished(True)
     return result
 
 
@@ -7814,7 +7819,12 @@ def cmd_host(cfg, args) -> None:
                 with _hold_controller_awake(), _local_image_apply_lease(
                         validated, args.remote,
                         getattr(args, "local_images", None)) as active_image_lease:
-                    result = _apply_host(
+                    from sandbox.hosting.panel_records import SummaryRecorder, stack_record_for
+                    summary_recorder = SummaryRecorder(
+                        validated, args.remote, runtime,
+                        run_remote=lambda command: _remote_checked(current_entry, command, timeout=30),
+                        stack_record=stack_record_for(validated, args.remote))
+                    result = summary_recorder.run(lambda: _apply_host(
                         validated, current_entry, args.remote, runtime, state,
                         bool(getattr(args, "allow_zone_ssl_change", False)), branch, progress,
                         recovery_repository=recovery_repository,
@@ -7824,7 +7834,8 @@ def cmd_host(cfg, args) -> None:
                         active_image_lease=active_image_lease,
                         allow_record_overwrite=bool(getattr(args, "allow_record_overwrite", False)),
                         before_effects=prepare_coverage,
-                    )
+                        summary_recorder=summary_recorder,
+                    ))
 
                 binding_known = True
                 if current_zone:

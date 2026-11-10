@@ -1,7 +1,7 @@
 // App store: the polled data, transient busy flags, and cached usage. The
 // "current view" is NOT stored here — it derives from the URL (see router.ts).
 
-import type { AppData, Usage, RemoteInventory } from "./types";
+import type { AppData, Usage, RemoteInventory, HostingView } from "./types";
 
 export const store: {
   data: AppData;
@@ -9,6 +9,8 @@ export const store: {
   usage: Usage | null;
   remote: Record<string, RemoteInventory>;
   remoteBusy: Record<string, boolean>;
+  hosting: HostingView | null;
+  hostingError: string | null;
   sync: { refreshing: boolean; lastCompleted: number | null; error: string | null };
   paused: boolean;                // pause the refresh tick while a job streams
 } = {
@@ -20,6 +22,8 @@ export const store: {
   usage: null,
   remote: {},
   remoteBusy: {},
+  hosting: null,
+  hostingError: null,
   sync: { refreshing: false, lastCompleted: null, error: null },
   paused: false,
 };

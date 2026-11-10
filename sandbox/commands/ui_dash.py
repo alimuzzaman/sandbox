@@ -151,6 +151,68 @@ def _remote_view(name: str, deep: bool) -> tuple[int, dict]:
     return 200, inventory
 
 
+# Stacks and hosted sites (spec 073). One health cache per `sb web` process,
+# so every viewer and refresh shares the same bounded probes.
+_HOSTING_HEALTH = None
+_HOSTING_HEALTH_LOCK = threading.Lock()
+_CADDY_ROUTE_DIR = Path("/etc/caddy/conf.d")
+
+
+def _hosting_health():
+    global _HOSTING_HEALTH
+    from sandbox.hosting.panel_health import HealthCache
+    with _HOSTING_HEALTH_LOCK:
+        if _HOSTING_HEALTH is None:
+            _HOSTING_HEALTH = HealthCache()
+        return _HOSTING_HEALTH
+
+
+def _instance_route_file_names() -> list[str]:
+    """Names of this host's Caddy instance route files. Their contents are never read."""
+    try:
+        return sorted(path.name for path in _CADDY_ROUTE_DIR.glob("sandbox-instance-*.caddy"))[:500]
+    except OSError:
+        return []
+
+
+def _hosting_view() -> tuple[int, dict]:
+    """The read-only stacks and hosted sites view: this server's records, then the controller's."""
+    import sandbox.core._hosting as hosting_core
+    import sandbox.core._remote as remote_core
+    from sandbox.core import _paths
+    from sandbox.hosting import panel_records, panel_view, stack_registry
+
+    try:
+        sources, partial, known = [], [], []
+        if _hosts_control_service():
+            sources.append(panel_view.server_source(
+                panel_records.read_server_records(_paths.RUNTIME_DIR)))
+            try:
+                rows = list(_core().registry_all().values())
+            except Exception:
+                rows = []
+                partial.append("instance_registry_unavailable")
+            known = panel_view.known_sites(rows, _instance_route_file_names())
+        try:
+            stack_data = stack_registry.read()
+        except Exception:
+            stack_data = {}
+            partial.append("stack_registry_unavailable")
+        try:
+            host_state = hosting_core.load_host_state()
+        except Exception:
+            host_state = {}
+            partial.append("hosting_state_unavailable")
+        if stack_data.get("stacks") or host_state.get("hosts"):
+            from sandbox.commands.host_stack import _last_apply_view
+            sources.append(panel_view.controller_records(stack_data, host_state, _last_apply_view))
+        view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot)
+        view["partial_reasons"] = partial + view["partial_reasons"]
+        return 200, remote_core.redact_structure(view)
+    except Exception:
+        return 500, {"ok": False, "error": "hosting view unavailable"}
+
+
 
 def cmd_dashboard(cfg, args) -> None:
     from sandbox.commands.instances_cmd import cmd_instances
@@ -244,6 +306,11 @@ def cmd_web(cfg, args) -> None:
                     "domains_ready": domains_ready(),
                     "remotes": _remote_summary_rows(),
                 }))
+            if path == "/api/hosting":
+                if u.query:
+                    return self._send(400, json.dumps({"error": "no query parameters are supported"}))
+                code, view = _hosting_view()
+                return self._send(code, json.dumps(view), no_store=True)
             if path == "/api/remotes":
                 return self._send(200, json.dumps({
                     "remotes": _remote_summary_rows(),

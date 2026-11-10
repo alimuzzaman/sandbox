@@ -3,7 +3,7 @@
 
 import { $ } from "./dom";
 import { store } from "./state";
-import { fetchData, fetchRemotes, fetchUsage, fetchRemote } from "./api";
+import { fetchData, fetchRemotes, fetchUsage, fetchRemote, fetchHosting } from "./api";
 import { navigate, initRouter, onRoute, currentRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
@@ -18,6 +18,7 @@ import {
   plugFilter, copyText, loadUsageThenRender, setActionDeps,
 } from "./actions";
 import { doCreate, submitCreate, initCreateView } from "./pages/create";
+import { hostingStillChecking } from "./pages/hosting";
 import type { SbApi } from "./types";
 
 // ---- data refresh scheduler ----
@@ -49,6 +50,34 @@ function loadRemote(name: string, mode: "fast" | "deep" = "fast"): Promise<void>
   remoteInFlight.set(name, request);
   return request;
 }
+
+// Stacks and hosted sites: one request at a time. While health checks are
+// still running on the server, look again a few times, then fall back to the
+// normal poll.
+let hostingInFlight: Promise<void> | null = null;
+let hostingFollowUps = 0;
+let hostingTimer = 0;
+function loadHosting(): Promise<void> {
+  if (hostingInFlight) return hostingInFlight;
+  hostingInFlight = (async () => {
+    try {
+      store.hosting = await fetchHosting();
+      store.hostingError = null;
+    } catch (error) {
+      store.hostingError = error instanceof Error ? error.message : "Hosting view unavailable";
+    } finally {
+      hostingInFlight = null;
+      renderDetail(false);
+    }
+    window.clearTimeout(hostingTimer);
+    if (currentRoute().page === "hosting" && hostingStillChecking() && hostingFollowUps < 3) {
+      hostingFollowUps++;
+      hostingTimer = window.setTimeout(() => { void loadHosting(); }, 5000);
+    }
+  })();
+  return hostingInFlight;
+}
+function refreshHosting(): void { hostingFollowUps = 0; void loadHosting(); }
 
 async function performRefresh(): Promise<void> {
   if (store.paused) return;
@@ -87,6 +116,7 @@ async function performRefresh(): Promise<void> {
     if (route.page === "remote" || route.page === "remote-instance") {
       await loadRemote(route.name);
     }
+    if (route.page === "hosting") await loadHosting();
     store.sync.lastCompleted = Date.now();
   } catch (error) {
     store.sync.error = error instanceof Error ? error.message : "Refresh failed";
@@ -166,7 +196,7 @@ function showHelp(): void {
 
 // ---- expose the inline-handler surface ----
 const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
-  navigate, goHome, selectInstance, selectRemote, refreshRemote, refreshHosts, showUsage, showHelp, openTerminal,
+  navigate, goHome, selectInstance, selectRemote, refreshRemote, refreshHosts, refreshHosting, showUsage, showHelp, openTerminal,
   submitCreate,
   doCreate, doDelete, doFocus, doServer, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter: () => plugFilter(activeInstanceName()),
@@ -215,6 +245,7 @@ function boot(): void {
   onRoute((route) => {
     render();
     if (route.page === "create") initCreateView();
+    if (route.page === "hosting") refreshHosting();
     if (route.page === "remote" || route.page === "remote-instance" || route.page === "home" || route.page === "local-host") {
       void refresh();
     }

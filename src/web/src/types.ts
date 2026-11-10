@@ -42,6 +42,45 @@ export interface RemoteInventory {
   storage?: { status: string; attribution_status: string; capacity?: { total_bytes?: number; used_bytes?: number; available_bytes?: number } | null; category_outcomes?: Array<Record<string, unknown>> };
 }
 
+// GET /api/hosting: stacks and hosted sites (spec 073). Read-only.
+export type HealthStatus = "checking" | "up" | "up_login" | "redirect" | "client_error" |
+  "server_error" | "unreachable" | "not_checked";
+export interface HostingHealth { status: HealthStatus; http_status: number | null; checked_at: number | null }
+export interface HostingServer {
+  hostname: string;
+  url: string | null;
+  origin: "route" | "linked" | "matched_by_name";
+  mode: "serve" | "redirect";
+  target: string | null;
+  primary: boolean;
+  state: "serving" | "redirecting" | "applying" | "failed" | "instance_not_found" | "unknown";
+  ref: { branch: string | null; commit: string | null };
+  instance: string | null;
+  health: HostingHealth;
+}
+export interface HostingApply { status: string; started_at: number | null; finished_at: number | null; request_id: string | null }
+export interface HostingStack {
+  key: string; remote: string; source: "this-server" | "controller";
+  slug: string; project: string; environment: string;
+  ref: string; ref_branch: string; commit: string; template: string;
+  ports: Record<string, number>; mailpit_port: number | null; loopback_port: number | null;
+  created_at: number | null; ttl_expires_at: number | null;
+  last_apply: HostingApply;
+  servers: HostingServer[];
+}
+export interface HostingTarget {
+  key: string; remote: string; source: "this-server" | "controller";
+  project: string; environment: string; commit: string | null; loopback_port: number | null;
+  last_apply: HostingApply | null; recorded: boolean;
+  servers: HostingServer[];
+}
+export interface HostingView {
+  ok: boolean; generated_at: number;
+  sources: Array<"this-server" | "controller">;
+  stacks: HostingStack[]; targets: HostingTarget[];
+  partial_reasons: string[];
+}
+
 export interface ActionResult {
   ok?: boolean;
   output?: string;
@@ -98,6 +137,7 @@ export interface SbApi {
   selectRemote(name: string): void;
   refreshRemote(name: string, deep?: boolean): void;
   refreshHosts(): void;
+  refreshHosting(): void;
   submitCreate(): void;
   showUsage(): void;
   showHelp(): void;

@@ -226,5 +226,5 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/073-secrets-unset-copy/plan.md
+at specs/074-host-exec/plan.md
 <!-- SPECKIT END -->

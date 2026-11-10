@@ -62,10 +62,10 @@ on xspeed-dev through `sb job-start --remote xspeed-dev`, inside Haiku helpers, 
 
 - [x] T022 Document stray reclaim, its protections and the migrate requirement in `docs/resource-monitoring.md` and CLAUDE.md gotcha 23
 - [x] T023 Mark spec 077 R10 as followed up by spec 080 in `specs/077-stack-lifetime/research.md`
-- [ ] T024 Run the touched suites on xspeed-dev (Haiku helper) and compare with the T002 baseline
+- [x] T024 Run the touched suites on xspeed-dev (Haiku helper) and compare with the T002 baseline
 - [x] T025 Dry `sb resources plan --remote xspeed-dev --tier safe --json` for evidence (read-only, no cleanup)
-- [ ] T026 Luna review of the head; fix or answer every finding; second fresh Luna review of the final head
-- [ ] T027 Commit, push `fix/reap-stray-containers`, hand back to the orchestrator
+- [x] T026 Luna review of the head; fix or answer every finding; second fresh Luna review of the final head
+- [x] T027 Commit, push `fix/reap-stray-containers`, hand back to the orchestrator
 
 ## Dependencies
 

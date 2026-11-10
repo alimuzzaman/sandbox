@@ -102,7 +102,8 @@ def _remote_summary_rows() -> list[dict]:
     """
     import sandbox.core._remote as remote_core
 
-    return [
+    registered = remote_core.list_remotes()
+    rows = [
         {
             "name": name,
             "provisioned": bool(entry.get("provisioned")),
@@ -110,8 +111,44 @@ def _remote_summary_rows() -> list[dict]:
                 entry.get("control_url") and entry.get("bearer_token")
             ),
         }
-        for name, entry in sorted(remote_core.list_remotes().items())
+        for name, entry in sorted(registered.items())
     ]
+    if THIS_SERVER not in registered and _hosts_control_service():
+        rows.insert(0, {"name": THIS_SERVER, "provisioned": True,
+                        "control_ready": True, "local": True})
+    return rows
+
+
+# On a Sandbox remote, the dashboard also shows the host it runs on, built
+# in-process like the control service's /inventory, so no token is needed.
+THIS_SERVER = "this-server"
+
+
+def _hosts_control_service() -> bool:
+    """True where `sb remote provision` installed a control service for this account."""
+    return (Path.home() / ".sandbox" / "mcp-remote.env").exists()
+
+
+def _remote_view(name: str, deep: bool) -> tuple[int, dict]:
+    """One remote's dashboard inventory, or this host's own on a Sandbox remote."""
+    import sandbox.core._remote as remote_core
+
+    entry = remote_core.get_remote(name)
+    local = entry is None and name == THIS_SERVER and _hosts_control_service()
+    if entry is None and not local:
+        return 404, {"error": "no such remote"}
+    try:
+        if local:
+            from sandbox.resources import host_inventory
+            inventory = remote_core.redact_structure(
+                host_inventory._hosted_inventory_snapshot(deep=deep))
+        else:
+            inventory = remote_core.remote_inventory(entry, mode="deep" if deep else "fast")
+    except RuntimeError as exc:
+        return 503, {"ok": False, "inventory_schema": 1, "transport": "control",
+                     "evidence_status": "unavailable", "partial_reasons": [str(exc)]}
+    inventory["name"] = name
+    return 200, inventory
 
 
 
@@ -218,24 +255,12 @@ def cmd_web(cfg, args) -> None:
                     name = remote_core.validate_remote_name(name)
                 except ValueError:
                     return self._send(400, json.dumps({"error": "invalid remote name"}))
-                entry = remote_core.get_remote(name)
-                if not entry:
-                    return self._send(404, json.dumps({"error": "no such remote"}))
                 deep = qs.get("deep") == ["1"]
                 if qs and any(key != "deep" or values != ["1"]
                              for key, values in qs.items()):
                     return self._send(400, json.dumps({"error": "only deep=1 is supported"}))
-                try:
-                    inventory = remote_core.remote_inventory(
-                        entry, mode="deep" if deep else "fast",
-                    )
-                except RuntimeError as exc:
-                    return self._send(503, json.dumps({
-                        "ok": False, "inventory_schema": 1, "transport": "control",
-                        "evidence_status": "unavailable", "partial_reasons": [str(exc)],
-                    }))
-                inventory["name"] = name
-                return self._send(200, json.dumps(inventory), no_store=True)
+                code, inventory = _remote_view(name, deep)
+                return self._send(code, json.dumps(inventory), no_store=(code == 200))
             if path.startswith("/api/job/"):
                 jid = path.rsplit("/", 1)[-1]
                 offset = int((qs.get("offset") or ["0"])[0])

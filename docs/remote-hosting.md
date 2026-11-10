@@ -1490,6 +1490,12 @@ the server's tailnet IPv4 address only, so nothing is opened on the public addre
 # open http://<server>.<tailnet>.ts.net:8780 from any device on the tailnet
 ```
 
+On a server where `sb remote provision` installed the control service, the dashboard's
+remote list starts with **this-server**: the same apps, containers, jobs, memory, disk and
+storage view a controller gets for this remote, built locally from the same code as the
+control service's `/inventory`, so it needs no control token. A registered remote named
+`this-server` takes its place.
+
 There is no login. Every device on the tailnet gets full control: a shell in any
 container, stop, reset and delete, and instance login links. Restrict who can reach the
 port with tailnet access rules. The dashboard accepts a request only when it comes from

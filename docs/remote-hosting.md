@@ -1729,9 +1729,10 @@ published name changes nothing.
    removal or a rollback to no block, nothing may listen, or the handshake
    for the name must present a certificate the name never had. Each leaf is
    recorded in the name's directory before any journal or chain write that
-   could install it; the last 64 are kept, with the current and previous
-   chains, and a leaf ages out only after later commits each proved a newer
-   state was served. The response body
+   could install it, failed attempts included; the last 64 are kept, with
+   the current and previous chains. An older entry can age out because a new
+   leaf is recorded only from a proven state, whose certificate is the
+   current chain and is always kept. The response body
    never counts as proof of an unload. A name directory that never reached
    an activation (no certificate, history, journal or backup) needs no
    proof, since nginx cannot have loaded a block without its certificate;

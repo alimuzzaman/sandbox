@@ -745,10 +745,14 @@ def _known_leaves(name_fd, paths):
 def _remember_leaf(name_fd, chain, paths):
     """Record ``chain``'s leaf, keeping the current and previous chains' leaves.
 
-    Only the last LEAF_HISTORY leaves are kept, plus the current and previous
-    chains' leaves. That is enough: commit records a leaf only after _settle
-    proved nginx serves what is on disk, so a leaf is dropped only after more
-    than LEAF_HISTORY later commits each proved a newer state was served.
+    Only the last LEAF_HISTORY recorded leaves are kept, plus the current and
+    previous chains' leaves. A leaf counts as a candidate: it is recorded
+    before its install is tested, so failed attempts take history slots too.
+    Dropping an old candidate is still safe because commit records a leaf only
+    when there is no journal (nothing was ever installed), the journal is
+    ``loaded`` (set only after a proof) or _settle has just proved what nginx
+    serves; that proven state is the current chain, which is always kept. A dropped leaf is therefore neither on disk nor what nginx was
+    last proven to serve.
     """
     leaf = _leaf_sha(chain)
     if leaf is None:

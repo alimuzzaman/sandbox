@@ -1129,11 +1129,13 @@ class RoundSixTests(Base):
 
     def test_remove_cleans_up_after_a_crash_before_the_first_install(self):
         self.crash_after_first_journal()
-        self.host.reload_accepted = False
+        self.host.reload_ok = False
         result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
-        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertEqual((result["ok"], result.get("code")), (False, "reload_failed"))
         self.assertTrue(self.name_dir.exists())
-        self.host.reload_accepted = True
+        # The other site's certificate is not one this name ever recorded, so
+        # it proves the unload once nginx reloads.
+        self.host.reload_ok = True
         result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
         self.assertTrue(result["ok"], result)
         self.assertFalse(self.name_dir.exists())

@@ -317,6 +317,11 @@ class LifetimeCache:
         due: list[str] = []
         clock = self._clock()
         with self._lock:
+            # Keep only the remotes asked for now (and any still in flight), so a
+            # long-lived panel never holds more than about 2 x max_remotes entries.
+            if len(self._results) > self._max:
+                keep = set(wanted) | self._in_flight
+                self._results = {name: value for name, value in self._results.items() if name in keep}
             for remote in wanted:
                 cached = self._results.get(remote)
                 if cached is None:

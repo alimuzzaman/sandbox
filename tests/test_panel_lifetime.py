@@ -290,6 +290,16 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(sorted(result), ["r0", "r1"])
         self.assertEqual(len(self.jobs), 2)
 
+    def test_results_for_remotes_no_longer_asked_for_are_dropped(self):
+        cache = self.cache(max_remotes=2)
+        for batch in (["r0", "r1"], ["r2", "r3"], ["r4", "r5"]):
+            cache.snapshot(batch, NOW)
+            while self.jobs:
+                self.jobs.pop()()
+        cache.snapshot(["r4", "r5"], NOW)
+        self.assertLessEqual(len(cache._results), 4)
+        self.assertEqual(sorted(cache.snapshot(["r4", "r5"], NOW)), ["r4", "r5"])
+
     def test_remote_names_are_validated(self):
         result = self.cache().snapshot(["ok-remote", "bad name", "-x", "../y"], NOW)
         self.assertEqual(list(result), ["ok-remote"])

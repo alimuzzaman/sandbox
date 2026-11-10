@@ -462,6 +462,8 @@ class SummaryRecorder:
         self._write()
 
     def run(self, apply: Callable[[], object]):
+        if self._running:  # nested: the outermost run owns the deferred finish
+            return apply()
         self._running, self._pending = True, None
         try:
             result = apply()

@@ -236,6 +236,18 @@ class ApplyOutcomeTest(unittest.TestCase):
         recorder.run(apply)
         self.assertEqual([json.loads(decoded_payload(c))["last_apply"]["status"] for c in commands], ["applying"])
 
+    def test_nested_run_keeps_the_outer_deferral(self):
+        recorder, commands = self.recorder()
+
+        def apply():
+            recorder.started("/h", COMMIT, None)
+            recorder.run(lambda: None)  # a nested run must not end the outer deferral
+            recorder.finished(False)
+            return {"delivery": delivery()}
+        recorder.run(apply)
+        self.assertEqual([json.loads(decoded_payload(c))["last_apply"]["status"] for c in commands],
+                         ["applying", "unverified"])
+
     def test_summary_parser_accepts_unverified_and_validates_reason(self):
         base = json.loads(pr.encode_record(pr.build_target_summary(
             validated(), "xspeed-dev", RUNTIME, commit=COMMIT,

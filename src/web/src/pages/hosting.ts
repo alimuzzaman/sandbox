@@ -5,7 +5,8 @@
 import { esc } from "../dom";
 import { store } from "../state";
 import { theme } from "../theme";
-import type { HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget } from "../types";
+import { hostingAnchor, hostingTargetPath } from "../router";
+import type { HostedTargets, HostingApply, HostingHealth, HostingServer, HostingStack, HostingTarget } from "../types";
 
 const when = (epoch: number | null | undefined): string =>
   epoch ? new Date(epoch * 1000).toLocaleString() : "unknown";
@@ -92,10 +93,42 @@ function sourceNote(source: string, remote: string): string {
   return remote === "this-server" ? "this server" : `this server · recorded as ${remote}`;
 }
 
+function cardAnchor(row: { source: string; remote: string; project: string; environment: string }): string {
+  return hostingAnchor(row.source === "this-server" ? "this-server" : row.remote, row.project, row.environment);
+}
+
+const usageBytes = (value: number): string => {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let n = Math.max(0, value), unit = 0;
+  while (n >= 1024 && unit < units.length - 1) { n /= 1024; unit++; }
+  return `${n.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
+};
+
+// Hosted targets on one host, with the containers attributed to each, for the
+// host pages. `remote` is the inventory's name ("this-server" on a server).
+// `hosted` is undefined when that host's inventory predates hosted targets.
+export function hostedTargetsSection(remote: string, hosted: HostedTargets | undefined, loading = false): string {
+  const head = `<div class="mb-3 flex items-center justify-between gap-3"><h2 class="text-[14px] font-semibold">Hosted targets</h2><span class="text-[11px] ${theme.quiet}">projects run with <code>sb host apply</code>; separate from Sandbox instances</span></div>`;
+  if (!hosted) {
+    const text = loading ? "Loading this host's inventory…" : "This host's inventory does not report hosted targets yet (its control service needs an update).";
+    return `<section>${head}<div class="${theme.panel} p-4 text-[12px] ${theme.quiet}">${esc(text)}</div></section>`;
+  }
+  const rows = hosted.rows.map(row => `<tr class="border-t border-neutral-200 dark:border-neutral-800">
+    <td class="p-3 text-[12px] font-medium"><a data-link class="text-blue-700 hover:underline dark:text-blue-300" href="${esc(hostingTargetPath(remote, row.project, row.environment))}">${esc(row.project)} <span class="font-normal ${theme.quiet}">· ${esc(row.environment)}</span></a></td>
+    <td class="p-3 text-[12px]">${row.stack_slug ? esc(row.stack_slug) : `<span class="${theme.quiet}">—</span>`}</td>
+    <td class="p-3 text-[12px]">${row.running ? "running" : `<span class="${theme.quiet}">no running containers</span>`}</td>
+    <td class="p-3 text-[12px] tabular-nums">${esc(String(row.container_count))}</td>
+    <td class="p-3 text-[12px] tabular-nums">${esc(usageBytes(row.memory_used_bytes))}</td>
+    <td class="p-3 text-[12px] tabular-nums">${esc(String(row.cpu_percent))}%</td>
+    <td class="p-3 text-[12px] ${theme.quiet}">${esc(row.last_apply_status || (row.recorded ? "unknown" : "not recorded"))}</td></tr>`).join("");
+  const body = rows || `<tr><td colspan="7" class="p-4 text-[12px] ${theme.quiet}">No hosted targets on this host.</td></tr>`;
+  return `<section>${head}<div class="overflow-x-auto ${theme.panel}"><table class="w-full min-w-[640px] text-left"><thead><tr>${["Target", "Stack", "State", "Containers", "RAM", "CPU", "Last apply"].map(label => `<th scope="col" class="p-3 ${theme.label}">${label}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div></section>`;
+}
+
 function stackCard(stack: HostingStack): string {
   const otherPorts = Object.entries(stack.ports).filter(([name]) => name !== "mailpit")
     .map(([name, port]) => `${name} ${port}`).join(", ");
-  return `<section class="${theme.panel} overflow-hidden" aria-labelledby="stack-${esc(stack.key)}">
+  return `<section id="${esc(cardAnchor(stack))}" class="${theme.panel} scroll-mt-4 overflow-hidden" aria-labelledby="stack-${esc(stack.key)}">
     <header class="flex flex-col gap-2 border-b border-neutral-200 px-5 py-4 dark:border-neutral-800 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0"><div class="${theme.label}">Stack</div>
         <h2 id="stack-${esc(stack.key)}" class="mt-1 truncate text-[18px] font-semibold">${esc(stack.slug)}</h2>
@@ -115,7 +148,7 @@ function stackCard(stack: HostingStack): string {
 
 function targetRow(target: HostingTarget): string {
   const note = target.recorded ? "" : `<p class="px-5 pb-4 text-[12px] ${theme.quiet}">Applied before this panel recorded details; its hostnames appear after its next <code>sb host apply</code>.</p>`;
-  return `<section class="${theme.panel} overflow-hidden">
+  return `<section id="${esc(cardAnchor(target))}" class="${theme.panel} scroll-mt-4 overflow-hidden">
     <header class="flex flex-col gap-2 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0"><div class="${theme.label}">Hosted site</div>
         <h3 class="mt-1 truncate text-[15px] font-semibold">${esc(target.project)} <span class="font-normal ${theme.quiet}">· ${esc(target.environment)}</span></h3>

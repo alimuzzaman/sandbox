@@ -127,6 +127,110 @@ class RequestGateTest(unittest.TestCase):
                                               host=f"{TAILNET}:8765", origin=origin))
 
 
+LISTED = "sandbox.example.test"
+
+
+class AllowHostGateTest(unittest.TestCase):
+    """`sb web --allow-host NAME`: a tailnet-only proxy name (spec 076)."""
+
+    def allowed(self, host, origin=None, bound=TAILNET, peer="100.100.1.2", names=frozenset({LISTED})):
+        return ui_dash._web_request_allowed(peer, bound, host, origin, names)
+
+    def test_a_listed_name_is_allowed_on_the_tailnet(self):
+        self.assertTrue(self.allowed(LISTED))
+        self.assertTrue(self.allowed(LISTED, origin=f"https://{LISTED}"))
+        # The proxy on this machine connects from the tailnet address too.
+        self.assertTrue(self.allowed(LISTED, peer=TAILNET))
+
+    def test_an_unlisted_name_is_refused(self):
+        for host in ("other.example.test", f"evil.{LISTED}", f"{LISTED}.evil.example"):
+            with self.subTest(host=host):
+                self.assertFalse(self.allowed(host))
+        self.assertFalse(self.allowed(LISTED, names=frozenset()))
+
+    def test_a_listed_name_needs_its_own_https_origin(self):
+        for origin in ("https://evil.example.test", f"http://{LISTED}", f"https://{LISTED}:8443",
+                       f"https://{TAILNET}:8765", "null", "http://localhost:5173"):
+            with self.subTest(origin=origin):
+                self.assertFalse(self.allowed(LISTED, origin=origin))
+
+    def test_a_loopback_bound_server_ignores_the_list(self):
+        self.assertFalse(self.allowed(LISTED, bound="127.0.0.1", peer="127.0.0.1"))
+        self.assertFalse(self.allowed(LISTED, bound="0.0.0.0", peer="100.100.1.2"))
+
+    def test_forwarding_headers_are_never_consulted(self):
+        import re
+        source = Path(ui_dash.__file__).read_text()
+        headers = re.findall(r'headers\.get\(\s*"([^"]+)"', source)
+        self.assertIn("Host", headers)
+        self.assertFalse([name for name in headers if "forward" in name.lower()])
+
+    def test_the_flag_takes_dns_names_only(self):
+        self.assertEqual(ui_dash._web_allowed_names([LISTED.upper() + "."]), frozenset({LISTED}))
+        for bad in ("*.example.test", "203.0.113.5", "localhost", "intranet", "a/b", "host:443"):
+            with self.subTest(bad=bad), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                ui_dash._web_allowed_names([bad])
+
+    def test_the_cli_declares_it_repeatable(self):
+        import re
+        source = Path(ui_dash.__file__).parents[1].joinpath("cli.py").read_text()
+        self.assertRegex(source, re.compile(r'web\.add_argument\("--allow-host", action="append"'))
+
+
+class AllowHostRouteTest(unittest.TestCase):
+    """Drive the real handler; the socket is loopback, the bound address is set per test."""
+
+    def serve(self, bound):
+        import threading
+        from http.server import ThreadingHTTPServer
+        captured = {}
+
+        class Capture(FakeServer):
+            def __init__(self, address, handler):
+                captured["handler"] = handler
+        args = SimpleNamespace(port=8765, exact_port=True, open=False, host=["127.0.0.1"],
+                               allow_host=[LISTED])
+        with mock.patch("http.server.ThreadingHTTPServer", Capture), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            ui_dash.cmd_web({}, args)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), captured["handler"])
+        self.port = server.server_address[1]
+        server.server_address = (bound, self.port)  # what the gate reads as the bound address
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+    def post(self, host, origin=None):
+        import http.client
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {"Host": host, "Content-Type": "application/json", "Content-Length": "2"}
+        if origin:
+            headers["Origin"] = origin
+        connection.request("POST", "/api/not-a-route", body=b"{}", headers=headers)
+        status = connection.getresponse().status
+        connection.close()
+        return status
+
+    def test_tailnet_bound_listed_name_passes_the_gate(self):
+        self.serve(TAILNET)
+        self.assertEqual(self.post(LISTED, origin=f"https://{LISTED}"), 404)  # past the gate
+
+    def test_tailnet_bound_cross_origin_post_with_a_listed_host_is_forbidden(self):
+        self.serve(TAILNET)
+        self.assertEqual(self.post(LISTED, origin="https://evil.example.test"), 403)
+        self.assertEqual(self.post(LISTED, origin=f"http://{LISTED}"), 403)
+
+    def test_tailnet_bound_unlisted_name_is_forbidden(self):
+        self.serve(TAILNET)
+        self.assertEqual(self.post("other.example.test", origin="https://other.example.test"), 403)
+
+    def test_loopback_bound_server_ignores_the_flag(self):
+        self.serve("127.0.0.1")
+        self.assertEqual(self.post(LISTED, origin=f"https://{LISTED}"), 403)
+        self.assertEqual(self.post(LISTED), 403)
+
+
 class BridgeStartTest(unittest.TestCase):
     def hosts(self, platform, gateway="172.17.0.1", returncode=0, error=None):
         inspect = SimpleNamespace(returncode=returncode, stdout=f"{gateway}\n", stderr="")

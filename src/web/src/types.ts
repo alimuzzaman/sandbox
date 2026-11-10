@@ -39,8 +39,18 @@ export interface RemoteInventory {
   containers?: { status: string; rows?: ResourceRow[] };
   per_instance_usage?: Array<{ name: string; attribution_status: string; container_count: number; memory_used_bytes: number; cpu_percent: number }>;
   unattributed_containers?: ResourceRow[];
+  hosted_targets?: HostedTargets;
   storage?: { status: string; attribution_status: string; capacity?: { total_bytes?: number; used_bytes?: number; available_bytes?: number } | null; category_outcomes?: Array<Record<string, unknown>> };
 }
+
+// `sb host apply` targets on a host, with their containers (spec 076).
+export interface HostedTargetUsage {
+  key: string; project: string; environment: string; compose_project: string;
+  stack_slug: string | null; recorded: boolean; last_apply_status: string | null;
+  attribution_status: string; container_count: number; running: boolean;
+  memory_used_bytes: number; cpu_percent: number;
+}
+export interface HostedTargets { total: number; running: number; rows: HostedTargetUsage[] }
 
 // GET /api/hosting: stacks and hosted sites (spec 076). Read-only.
 export type HealthStatus = "checking" | "up" | "up_login" | "redirect" | "client_error" |

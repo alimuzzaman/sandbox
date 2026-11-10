@@ -84,6 +84,56 @@ def _diagnostic_process_snapshot() -> dict:
     }
 
 
+def _container_key(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def _hosted_target_usage(records: dict, container_rows: list) -> tuple[list[dict], set[str]]:
+    """Attribute ``sandbox-host-<project>-<environment>-*`` containers to hosted targets.
+
+    ``records`` is ``panel_records.read_server_records``. A container goes to the
+    target with the longest matching Compose project prefix, so one target's
+    name cannot take a sibling's containers. Returns the rows and the names of
+    the containers they claimed.
+    """
+    targets = []
+    for target in list(records.get("targets") or ()) + list(records.get("legacy") or ()):
+        project, environment = str(target["project"]), str(target["environment"])
+        compose = str(target.get("compose_project") or f"sandbox-host-{project}-{environment}")
+        stack = target.get("stack") if isinstance(target.get("stack"), dict) else None
+        last_apply = target.get("last_apply") if isinstance(target.get("last_apply"), dict) else None
+        targets.append({
+            "key": f"{project}/{environment}", "project": project, "environment": environment,
+            "compose_project": compose, "stack_slug": stack.get("slug") if stack else None,
+            "recorded": "compose_project" in target,
+            "last_apply_status": last_apply.get("status") if last_apply else None,
+            "_prefix": _container_key(compose) + "-", "_matched": [],
+        })
+    by_length = sorted(targets, key=lambda row: -len(row["_prefix"]))
+    claimed = set()
+    for row in container_rows:
+        name = str(row.get("name") or "")
+        key = _container_key(name)
+        owner = next((target for target in by_length if key.startswith(target["_prefix"])), None)
+        if owner is not None:
+            owner["_matched"].append(row)
+            claimed.add(name)
+    usage = []
+    for target in targets:
+        matched = target.pop("_matched")
+        target.pop("_prefix")
+        usage.append({
+            **target,
+            "attribution_status": "compose_project" if matched else "unknown",
+            "container_count": len(matched),
+            "running": bool(matched),
+            "memory_used_bytes": sum(int(row.get("memory_used_bytes") or 0) for row in matched),
+            "cpu_percent": round(sum(float(row.get("cpu_percent") or 0) for row in matched), 2),
+        })
+    usage.sort(key=lambda row: row["key"])
+    return usage, claimed
+
+
 def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
     """Build a secret-free, bounded dashboard view of this hosted Sandbox."""
     from sandbox.core._config import load_config
@@ -110,12 +160,22 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
     container_view = diagnostics.get("containers") or {"status": "unavailable", "rows": []}
     container_rows = container_view.get("rows") if isinstance(container_view, dict) else []
     container_rows = container_rows if isinstance(container_rows, list) else []
+    try:
+        from sandbox.core import _paths
+        from sandbox.hosting import panel_records
+        records = panel_records.read_server_records(_paths.RUNTIME_DIR)
+        partial.extend(records["partial_reasons"][:20])
+        hosted, attributed_names = _hosted_target_usage(records, container_rows)
+    except Exception:
+        hosted, attributed_names = [], set()
+        partial.append("hosted_target_inventory_unavailable")
     per_instance = []
-    attributed_names = set()
     for instance in instances:
         needle = instance["name"].lower().replace("_", "-")
         matched = []
         for row in container_rows:
+            if str(row.get("name") or "") in attributed_names:
+                continue  # a hosted target's container, never a dev instance's
             name = str(row.get("name") or "")
             normalized = name.lower().replace("_", "-")
             if needle and (normalized == needle or normalized.startswith(needle + "-")
@@ -176,6 +236,8 @@ def _hosted_inventory_snapshot(*, deep: bool = False) -> dict:
         "host": host, "jobs": jobs,
         "process_view": diagnostics.get("process_view"), "containers": container_view,
         "per_instance_usage": per_instance,
+        "hosted_targets": {"total": len(hosted), "running": sum(1 for row in hosted if row["running"]),
+                           "rows": hosted},
         "unattributed_containers": unattributed,
         "storage": storage,
         "scan_mode": "deep" if deep else "fast",

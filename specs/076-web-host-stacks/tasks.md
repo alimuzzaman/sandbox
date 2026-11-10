@@ -71,7 +71,12 @@
 - [x] T028 Visual check: run the panel locally against a fixture `SANDBOX_HOME`, take screenshots into /Users/alim/Sites/git/.scratch/sandbox/web-host-stacks/ and downscale them
 - [x] T029 Non-author review by Luna (secret exposure, read-only-ness); fix or answer every finding
 
-## Dependencies
+## Phase 9: Follow-ups from the server owner (2026-11-10)
+
+- [x] T030 Count hosted targets apart from instances and attribute their `sandbox-host-<project>-<environment>-*` containers in `_hosted_inventory_snapshot` (sandbox/remote_runtime/host_inventory.py), tested in tests/test_host_inventory_hosted.py
+- [x] T031 Show hosted targets on the host pages with links to their `/hosting` cards (src/web/src/pages/remote.ts, hosts.ts, hosting.ts, main.ts)
+- [x] T032 `sb web --allow-host NAME` (repeatable), honoured only on a tailnet address, with Origin `https://NAME` (sandbox/cli.py, sandbox/commands/ui_dash.py), tested in tests/test_web_tailscale.py
+
 
 T002 → T004/T005 → (T006–T011) → (T012–T017) → (T018–T020) → (T021–T023) → T024 → T025–T029. US1 and US2 share `panel_view.py`, so their view tasks are sequential. The TS tasks (T011, T020, T023, T024) can run in parallel with Python tests once the payload shape (data-model.md) is fixed.
 

@@ -685,6 +685,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bind only --port (no scan); used by the snapshot-bridge auto-start")
     web.add_argument("--open", action="store_true",
         help="open the dashboard in your browser on start")
+    web.add_argument("--allow-host", action="append", default=None, metavar="NAME",
+        help="also accept this host name (repeatable), e.g. a tailnet-only proxy name; "
+             "honoured only on a tailnet address, with Origin https://NAME")
 
     mcp_p = sub.add_parser("mcp",
         help="Run the MCP server over stdio (register: claude mcp add --scope user sandbox -- ./sb mcp)")

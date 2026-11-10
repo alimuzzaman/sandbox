@@ -2,7 +2,7 @@
 // initialise the router, and start the single-flight refresh scheduler.
 
 import { $ } from "./dom";
-import { store } from "./state";
+import { store, thisServer } from "./state";
 import { fetchData, fetchRemotes, fetchUsage, fetchRemote, fetchHosting } from "./api";
 import { navigate, initRouter, onRoute, currentRoute, hostContext, instancePath, remotePath } from "./router";
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
@@ -68,6 +68,7 @@ function loadHosting(): Promise<void> {
     } finally {
       hostingInFlight = null;
       renderDetail(false);
+      scrollToHostingAnchor();
     }
     window.clearTimeout(hostingTimer);
     if (currentRoute().page === "hosting" && hostingStillChecking() && hostingFollowUps < 3) {
@@ -77,7 +78,19 @@ function loadHosting(): Promise<void> {
   })();
   return hostingInFlight;
 }
-function refreshHosting(): void { hostingFollowUps = 0; void loadHosting(); }
+function refreshHosting(): void { hostingFollowUps = 0; scrolledHash = ""; void loadHosting(); }
+
+// A host page links to one card as /hosting#<anchor>; scroll to it once per visit.
+let scrolledHash = "";
+function scrollToHostingAnchor(): void {
+  if (currentRoute().page !== "hosting" || !location.hash || location.hash === scrolledHash) return;
+  let id = "";
+  try { id = decodeURIComponent(location.hash.slice(1)); } catch { return; }
+  const card = document.getElementById(id);
+  if (!card) return;
+  scrolledHash = location.hash;
+  card.scrollIntoView({ block: "start" });
+}
 
 async function performRefresh(): Promise<void> {
   if (store.paused) return;
@@ -118,6 +131,9 @@ async function performRefresh(): Promise<void> {
     const route = currentRoute();
     if (route.page === "remote" || route.page === "remote-instance") {
       await loadRemote(route.name);
+    } else if (route.page === "local-host" && thisServer()) {
+      // On a Sandbox server, /host/local lists the server's hosted targets.
+      await loadRemote(thisServer()!.name);
     }
     store.sync.lastCompleted = Date.now();
   } catch (error) {

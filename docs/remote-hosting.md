@@ -1753,6 +1753,22 @@ the bridge. Put it behind `tailscale serve` only if your setup keeps the browser
 and `Origin` intact; listening on the tailnet address directly needs neither `sudo` nor
 `tailscale serve`.
 
+To reach it under your own name, such as an HTTPS proxy on the server's tailnet address
+that forwards to the dashboard with the browser's `Host` intact, list that name with
+`--allow-host` (repeatable):
+
+```bash
+./sb web --host tailscale --port 8780 --exact-port --allow-host sandbox.example.test
+```
+
+A listed name passes the host check only while the dashboard listens on a tailnet
+address; on loopback or any other address the flag is ignored and a warning is printed.
+A request under a listed name must carry no `Origin` or exactly `https://<that name>`, so
+a cross-site post with a listed `Host` is still refused. Unlisted names keep getting 403.
+`X-Forwarded-Host` and other forwarding headers are never read. The proxy itself must
+listen on the tailnet address only, since every request it forwards arrives from this
+machine.
+
 #### Stacks and hosted sites
 
 The **Stacks & sites** page (`/hosting`, data at `GET /api/hosting`) is read-only. It lists
@@ -1789,6 +1805,15 @@ process and capped at 64 hostnames per round. The page never waits for it: rows 
 "checking" until a result arrives. Only hostnames from Sandbox's own records are probed,
 never wildcards and never anything a request names. A hostname that is tailnet-only,
 such as a `mail-<slug>` route, reads "unreachable" from anywhere outside the tailnet.
+
+The host pages count hosted targets apart from Sandbox instances. The host inventory
+(`/inventory` from the control service, and **this-server** in `sb web` on a server) has a
+`hosted_targets` block: one row per target under `runtime/hosts/`, with its stack slug,
+last apply status and the containers named `sandbox-host-<project>-<environment>-*`
+(the longest matching Compose project wins). Those containers count toward their target,
+not toward any instance or the unattributed list. Each row links to its card on
+`/hosting`. On a server, `/host/local` shows the same rows. A controller sees them for a
+registered remote only after `sb remote service migrate` installs this code there.
 
 ## 8. CLI + MCP surface
 

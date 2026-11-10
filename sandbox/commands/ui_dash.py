@@ -62,11 +62,31 @@ def _web_bind_host(value: str) -> str:
     return address
 
 
-def _web_request_allowed(peer, bound_host, host_header, origin) -> bool:
+def _web_allowed_names(values) -> frozenset[str]:
+    """`--allow-host` names: plain DNS names, never an IP, loopback name or wildcard."""
+    from sandbox.core._hosting import HostingError, normalize_hostname
+    names = set()
+    for value in values or []:
+        try:
+            name = normalize_hostname(str(value), wildcard=False)
+        except HostingError:
+            die(f"--allow-host must be a host name, got {value!r}")
+        if _ip(name) is not None or name in _LOOPBACK_NAMES or "." not in name:
+            die(f"--allow-host must be a DNS name such as sandbox.example.test, got {value!r}")
+        names.add(name)
+    return frozenset(names)
+
+
+def _web_request_allowed(peer, bound_host, host_header, origin,
+                         allowed_names: frozenset[str] = frozenset()) -> bool:
     """Dashboard access: this machine, or any tailnet device when listening on the tailnet.
 
     The Host and Origin checks stop a web page in the operator's browser from
     driving the dashboard through DNS rebinding or a cross-site form post.
+    ``allowed_names`` (`sb web --allow-host`) adds operator-chosen names, for a
+    tailnet-only proxy in front of the dashboard. They count only on a
+    tailnet-bound address, and their Origin must be exactly ``https://<Host>``.
+    Forwarding headers such as X-Forwarded-Host are never read.
     """
     if not (_is_loopback_peer(peer) or (_is_tailnet_ip(bound_host) and _is_tailnet_ip(peer))):
         return False
@@ -74,7 +94,9 @@ def _web_request_allowed(peer, bound_host, host_header, origin) -> bool:
         name = urlsplit(f"//{host_header}").hostname if host_header else None
     except ValueError:
         return False
-    if not name or not (name in _LOOPBACK_NAMES or _ip(name) is not None or name.endswith(".ts.net")):
+    listed = bool(name) and name in allowed_names and _is_tailnet_ip(bound_host)
+    if not name or not (name in _LOOPBACK_NAMES or _ip(name) is not None
+                        or name.endswith(".ts.net") or listed):
         return False
     if origin is None:
         return True
@@ -85,6 +107,8 @@ def _web_request_allowed(peer, bound_host, host_header, origin) -> bool:
         return False
     if parts.scheme not in ("http", "https") or not origin_name:
         return False
+    if listed:
+        return parts.scheme == "https" and parts.netloc.lower() == host_header.lower()
     if parts.netloc.lower() == host_header.lower():
         return True
     # The desktop app's proxy and the web dev server run on this machine and
@@ -235,6 +259,9 @@ def cmd_web(cfg, args) -> None:
         requested_hosts = [requested_hosts]
     hosts = list(dict.fromkeys(_web_bind_host(value) for value in requested_hosts))
     host = hosts[0]
+    allowed_names = _web_allowed_names(getattr(args, "allow_host", None))
+    if allowed_names and not any(map(_is_tailnet_ip, hosts)):
+        info("--allow-host is ignored: it applies only while listening on a tailnet address")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):     # quiet — don't spam the console
@@ -273,7 +300,8 @@ def cmd_web(cfg, args) -> None:
             # and may be reached from a container via the docker host-gateway,
             # so they are NOT restricted this way.
             return _web_request_allowed(self.client_address[0], self.server.server_address[0],
-                                        self.headers.get("Host"), self.headers.get("Origin"))
+                                        self.headers.get("Host"), self.headers.get("Origin"),
+                                        allowed_names)
 
         def do_DELETE(self):
             if self.path.startswith("/api/instance/"):

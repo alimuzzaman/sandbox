@@ -72,6 +72,11 @@ export function instancePath(name: string, console = false): string {
 }
 export const localHostPath = (): string => "/host/local";
 export const hostingPath = (): string => "/hosting";
+// One hosted target's card on /hosting. Server-side rows use "this-server".
+export const hostingAnchor = (remote: string, project: string, environment: string): string =>
+  `hosting-${remote}/${project}/${environment}`;
+export const hostingTargetPath = (remote: string, project: string, environment: string): string =>
+  `${hostingPath()}#${encodeURIComponent(hostingAnchor(remote, project, environment))}`;
 export const remotePath = (name: string): string => `/remote/${encodeURIComponent(name)}`;
 export const remoteInstancePath = (name: string, instance: string): string =>
   `${remotePath(name)}/instance/${encodeURIComponent(instance)}`;

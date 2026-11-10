@@ -8,7 +8,7 @@ with an `origin/latest` baseline.
 
 ## Phase 1: Setup
 
-- [ ] T001 Record the `origin/latest` baseline: run the touched test files on xspeed-dev at the merge base, and save the report under `/Users/alim/Sites/git/.scratch/sandbox/share-links/baseline.txt`
+- [x] T001 Record the `origin/latest` baseline: run the touched test files on xspeed-dev at the merge base, and save the report under `/Users/alim/Sites/git/.scratch/sandbox/share-links/baseline.txt`
 
 ## Phase 2: Foundational (types)
 
@@ -60,10 +60,10 @@ with an `origin/latest` baseline.
 ## Phase 7: Polish
 
 - [x] T023 Docs: `docs/login-service.md` (share section, owner view through the tailnet, the stack page, the panel button), the `indexing` field in `docs/remote-hosting.md`, a CLAUDE.md gotcha, and the sandbox-cli skill
-- [ ] T024 Run the full touched-test set on xspeed-dev and compare it with the baseline
+- [x] T024 Run the full touched-test set on xspeed-dev and compare it with the baseline
 - [x] T025 Self-review `git diff origin/latest..HEAD` and trace token recipients, verification semantics and races
-- [ ] T026 Fresh Sol review on `codex_office` (`gpt-6.1-sol`, high, read-only); fix until it says safe
-- [ ] T027 Push `feat/hosted-share-links`, check `@{upstream}`, and write the handback
+- [x] T026 Fresh Sol review on `codex_office` (`gpt-6.1-sol`, high, read-only); fix until it says safe
+- [x] T027 Push `feat/hosted-share-links`, check `@{upstream}`, and write the handback
 
 ## Dependencies
 

@@ -582,7 +582,7 @@ def retained_secret_program() -> str:
     return (f"MAX_FILE={MAX_FILE}\nMAX_TOTAL={MAX_TOTAL}\n"
             "from pathlib import Path\n_NAME=re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\\Z')\n"
             + "\n".join(inspect.getsource(function) for function in (
-                _directory_fd, _owned_directory, _retained_secret_bytes,
+                _open_walk_dir, _directory_fd, _owned_directory, _retained_secret_bytes,
                 _read_exact_file, retained_secret_material,
                 candidate_secret_environment, retained_candidate_secret_environment)))
 
@@ -668,5 +668,5 @@ def candidate_program() -> str:
               "_VARIABLE=re.compile(r'[A-Z][A-Z0-9_]{0,127}\\Z')\n"
               f"_ENV={_ENV!r}\n")
     return header + "\n".join(inspect.getsource(function) for function in (
-        _directory_fd, _owned_directory, _publish_at, publish_candidate, materialize_secrets,
+        _open_walk_dir, _directory_fd, _owned_directory, _publish_at, publish_candidate, materialize_secrets,
         render_candidate, _candidate_main)) + "\n_candidate_main()\n"

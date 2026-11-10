@@ -96,9 +96,9 @@
 
 - [x] T025 [P] Document `site_gate` in docs/login-service.md: declaration, mockup example with placeholder hosts, edge forwarding, contract, CLI, limits
 - [x] T026 [P] Update skills/sandbox-cli/SKILL.md and .agents/skills/sandbox-cli/SKILL.md with mint, list and revoke
-- [ ] T027 Run both suites, plus `tests.test_hosting`, on the remote through a Haiku helper; compare any failure with the baseline controller checkout
-- [ ] T028 Luna review of the head (link leakage, replay, cookie scope, open proxy and Host tricks, websocket without a session); fix or answer every finding, then re-review
-- [ ] T029 Commit, `git push -u origin feat/login-site-gate`, and verify the upstream is `origin/feat/login-site-gate`
+- [x] T027 Run both suites, plus `tests.test_hosting`, on the remote through a Haiku helper; compare any failure with the baseline controller checkout
+- [x] T028 Luna review of the head (link leakage, replay, cookie scope, open proxy and Host tricks, websocket without a session); fix or answer every finding, then re-review
+- [x] T029 Commit, `git push -u origin feat/login-site-gate`, and verify the upstream is `origin/feat/login-site-gate`
 
 ## Dependencies
 

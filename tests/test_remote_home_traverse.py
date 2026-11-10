@@ -14,14 +14,16 @@ from sandbox.core._remote import _REMOTE_HOME_NORMALIZE_PROGRAM
 from sandbox.transports.remote_hosting_images import _INODE_EXEC
 
 FAKE_O_PATH = 0x40000000  # a bit no real open flag uses on the test host
+REAL_O_PATH = getattr(os, "O_PATH", 0)  # what the fake becomes for the real open
 
 
 class TraverseOnlyAncestors:
     """Patch os.open so every directory above `home` refuses a read open.
 
-    A real traverse-only directory refuses O_RDONLY but allows O_PATH; the
-    test host may lack O_PATH, so it is faked and stripped before the real
-    open.
+    A real traverse-only directory refuses O_RDONLY but allows O_PATH. The
+    flag is faked so the test also runs where O_PATH does not exist; the real
+    open gets the host's O_PATH back, since a real ancestor (such as a 0711
+    /home) may itself be traverse-only.
     """
 
     def __init__(self, home: Path):
@@ -45,7 +47,9 @@ class TraverseOnlyAncestors:
             self.read_opens.append(full)
         if dir_fd is not None:
             kwargs["dir_fd"] = dir_fd
-        descriptor = self.real_open(path, flags & ~FAKE_O_PATH, *args, **kwargs)
+        if flags & FAKE_O_PATH:
+            flags = (flags & ~FAKE_O_PATH) | REAL_O_PATH
+        descriptor = self.real_open(path, flags, *args, **kwargs)
         self.paths[descriptor] = full
         return descriptor
 

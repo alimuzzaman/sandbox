@@ -70,6 +70,9 @@ LOCK_WAIT_SECONDS = 30
 LEASE_SECONDS_MAX = 3600
 COMMAND_TIMEOUT_SECONDS = 30
 MAX_TEXT_BYTES = 65536
+# Recorded leaves per name. Bounded so leaves.json stays far below
+# MAX_TEXT_BYTES; see _remember_leaf for why the bound is safe.
+LEAF_HISTORY = 64
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 _TOKEN = re.compile(r"[0-9a-f]{32}")
 _TAILNET = ipaddress.ip_network("100.64.0.0/10")
@@ -718,8 +721,9 @@ def _served(ip, fqdn, *, timeout=3):
 
 
 def _known_leaves(name_fd, paths):
-    """Every leaf this name has ever had installed (recorded before each chain
-    write), plus whatever chains are on disk now."""
+    """The leaves recorded for this name (each one before any journal or chain
+    write that could install it; the last LEAF_HISTORY are kept), plus whatever
+    chains are on disk now."""
     leaves = set()
     if name_fd is None:
         return leaves
@@ -739,6 +743,13 @@ def _known_leaves(name_fd, paths):
 
 
 def _remember_leaf(name_fd, chain, paths):
+    """Record ``chain``'s leaf, keeping the current and previous chains' leaves.
+
+    Only the last LEAF_HISTORY leaves are kept, plus the current and previous
+    chains' leaves. That is enough: commit records a leaf only after _settle
+    proved nginx serves what is on disk, so a leaf is dropped only after more
+    than LEAF_HISTORY later commits each proved a newer state was served.
+    """
     leaf = _leaf_sha(chain)
     if leaf is None:
         return
@@ -747,7 +758,7 @@ def _remember_leaf(name_fd, chain, paths):
         recorded = json.loads(raw) if raw else []
     except ValueError:
         recorded = []
-    recorded = [item for item in recorded if isinstance(item, str) and item != leaf][-63:] \
+    recorded = [item for item in recorded if isinstance(item, str) and item != leaf][-(LEAF_HISTORY - 1):] \
         if isinstance(recorded, list) else []
     for name in ("fullchain.pem", "fullchain.prev.pem"):
         existing = _read(name_fd, name, paths, mode=0o644)
@@ -1113,9 +1124,12 @@ def commit(payload, paths, runner, lock_wait):
                       "had_block": current_block is not None,
                       "had_chain": current_chain is not None,
                       "chain_changed": desired_chain != current_chain}
-            _set_journal(name_fd, record)
+            # The new leaf joins the history before any journal can exist, so a
+            # crash at any later point leaves a state whose unload is provable.
             if desired_chain != current_chain:
                 _remember_leaf(name_fd, desired_chain, paths)
+            _set_journal(name_fd, record)
+            if desired_chain != current_chain:
                 _write(name_fd, "fullchain.pem", desired_chain, 0o644)
             if desired_block != current_block:
                 _write(conf_fd, FILE_PREFIX + fqdn + ".conf", desired_block, 0o600)

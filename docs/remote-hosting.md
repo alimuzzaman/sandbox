@@ -1727,8 +1727,11 @@ published name changes nothing.
    `/.well-known/sandbox-tailnet-activation`, the block's own marker (a digest
    of the block's text, so every version of the block has its own). After a
    removal or a rollback to no block, nothing may listen, or the handshake
-   for the name must present a certificate the name never had (every leaf
-   ever installed for it is recorded in its directory). The response body
+   for the name must present a certificate the name never had. Each leaf is
+   recorded in the name's directory before any journal or chain write that
+   could install it; the last 64 are kept, with the current and previous
+   chains, and a leaf ages out only after later commits each proved a newer
+   state was served. The response body
    never counts as proof of an unload. A name directory that never reached
    an activation (no certificate, history, journal or backup) needs no
    proof, since nginx cannot have loaded a block without its certificate;

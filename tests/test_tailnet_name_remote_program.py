@@ -1086,5 +1086,92 @@ class RoundFiveTests(Base):
         self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
         self.assertTrue(self.name_dir.exists())
 
+
+class _Crash(BaseException):
+    """A process death: not an Exception, so main() cannot turn it into a refusal."""
+
+
+class RoundSixTests(Base):
+    def crash_after_first_journal(self):
+        """Re-review 8 NEW-1: the first add dies right after its journal is
+        durable, before any chain or block is written, beside another HTTPS site."""
+        self.host.loaded = {"other.example.test": (b"server {}", b"")}
+        self.assertTrue(self.reserve()["ok"])
+        chain = self.sign(self.csr())
+        real = rp._set_journal
+
+        def set_journal(name_fd, record):
+            real(name_fd, record)
+            raise _Crash()
+        with mock.patch.object(rp, "_set_journal", set_journal):
+            with self.assertRaises(_Crash):
+                self.commit(block=block(), chain=chain)
+        self.assertEqual(self.journal_state(), "written")
+        self.assertFalse(self.conf.exists())
+        self.assertFalse((self.name_dir / "fullchain.pem").exists())
+        self.assertIn(rp._leaf_sha(chain.encode()),
+                      json.loads((self.name_dir / "leaves.json").read_text()))
+        return chain
+
+    def journal_state(self):
+        return json.loads((self.name_dir / "activation.json").read_text())["state"]
+
+    def test_add_finishes_after_a_crash_before_the_first_install(self):
+        chain = self.crash_after_first_journal()
+        self.host.reload_accepted = False
+        result = self.commit(block=block(), chain=chain)
+        self.assertFalse(result["ok"], result)
+        self.host.reload_accepted = True
+        result = self.commit(block=block(), chain=chain)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.journal_state(), "loaded")
+        self.assertTrue(self.conf.exists())
+
+    def test_remove_cleans_up_after_a_crash_before_the_first_install(self):
+        self.crash_after_first_journal()
+        self.host.reload_accepted = False
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertTrue(self.name_dir.exists())
+        self.host.reload_accepted = True
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(self.name_dir.exists())
+
+    def test_the_leaf_is_recorded_before_the_journal(self):
+        self.assertTrue(self.reserve()["ok"])
+        chain = self.sign(self.csr())
+        order = []
+        real_remember, real_journal = rp._remember_leaf, rp._set_journal
+
+        def remember(name_fd, c, paths):
+            order.append("leaf")
+            return real_remember(name_fd, c, paths)
+
+        def journal(name_fd, record):
+            order.append(record["state"])
+            return real_journal(name_fd, record)
+        with mock.patch.object(rp, "_remember_leaf", remember), \
+                mock.patch.object(rp, "_set_journal", journal):
+            self.assertTrue(self.commit(block=block(), chain=chain)["ok"])
+        self.assertEqual(order[:2], ["leaf", "written"])
+
+    def test_leaf_history_keeps_the_last_entries_and_the_chains(self):
+        """Re-review 8 NEW-2: the history is bounded, never the chains on disk."""
+        chain = self.publish()
+        ours = rp._leaf_sha(chain.encode())
+        old = [f"{i:064x}" for i in range(rp.LEAF_HISTORY + 5)]
+        (self.name_dir / "leaves.json").write_text(json.dumps(old))
+        name_fd = os.open(str(self.name_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            rp._remember_leaf(name_fd, self.sign(self.csr(), days=60).encode(), self.paths)
+        finally:
+            os.close(name_fd)
+        kept = json.loads((self.name_dir / "leaves.json").read_text())
+        self.assertLessEqual(len(kept), rp.LEAF_HISTORY + 2)
+        self.assertIn(ours, kept, "the current chain's leaf is never dropped")
+        self.assertNotIn(old[0], kept)
+        self.assertIn(old[-1], kept)
+
 if __name__ == "__main__":
     unittest.main()

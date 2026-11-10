@@ -621,6 +621,16 @@ class Gate:
         store = self.sites.get(via.get("entry")) if isinstance(via, dict) else None
         return store is not None and store.stack_link_alive(via.get("link"))
 
+    def current(self, name, record):
+        """Whether ``record`` is still this entry's token and its stack link is alive.
+
+        Checked after the body arrives and right before a grant: a newer link for the
+        entry, or a revoke of the stack link, beats a sign-in that was still being posted.
+        """
+        now = self.record(name)
+        return (now is not None and hmac.compare_digest(now["token_sha256"], record["token_sha256"])
+                and self.bound(record))
+
     def _used_marker(self, digest):
         return self.state_dir / "used" / digest
 
@@ -1168,14 +1178,15 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         email = record.get("email")
         if entry["mode"] == "magic_link" and not (isinstance(email, str) and _ADDRESS.fullmatch(email)):
             return self._fail(403, "invalid_link")
-        # The body can arrive long after dispatch checked the cutoff and the stack link.
-        if not gate.enabled() or not gate.bound(record):
+        # The body can arrive long after dispatch loaded the record: recheck the cutoff,
+        # that the record is still the entry's current one, and its stack link.
+        if not gate.enabled() or not gate.current(name, record):
             return self._answer_not_found()
         if not gate.claim(digest):
             return self._fail(410, "link_used")
         gate.log(f"consumed entry={name}")
         if entry["mode"] == "inbox_gate":
-            if not gate.bound(record):
+            if not gate.current(name, record):
                 return self._answer_not_found()
             return self._start_session(name, entry)
         return self._exchange_magic_link(name, entry, email, record)
@@ -1194,8 +1205,8 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         except SignInFailure as failure:
             self.gate.log(f"signin_failed entry={name} code={failure.code}")
             return self._fail(failure.status, failure.code)
-        # The exchange waits on mail; a revoke of the stack link meanwhile still wins.
-        if not self.gate.enabled() or not self.gate.bound(record):
+        # The exchange waits on mail; a newer link or a stack revoke meanwhile still wins.
+        if not self.gate.enabled() or not self.gate.current(name, record):
             return self._answer_not_found()
         self._reply(303, b"", [("Location", link)])
 

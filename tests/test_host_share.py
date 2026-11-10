@@ -480,7 +480,7 @@ class StackPageTests(unittest.TestCase):
         self.assertIn("'cccccccccccccccccccccccccccccccc'", plugin)
         self.assertIn("INSERT IGNORE INTO ' . $wpdb->options", plugin)
         self.assertIn("if ( 1 !== $claimed )", plugin)
-        self.assertIn("( is_multisite() && ! is_main_site() )", plugin)
+        self.assertIn("get_current_blog_id() !== (int) get_main_site_id( get_main_network_id() )", plugin)
         self.assertNotIn("add_site_option", plugin)
         self.assertIn("X-Robots-Tag: noindex, nofollow, noarchive", plugin)
         self.assertIn(f"$exp > $now + {share.SIGN_IN_SECONDS}", plugin)

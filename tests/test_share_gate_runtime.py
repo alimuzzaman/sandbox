@@ -486,6 +486,24 @@ class StackPageTests(_Gate):
         self.assertIn(b" 404 ", sock.recv(4096).split(b"\r\n", 1)[0])
         self.assertFalse((self.state_dir / "used" / hashlib.sha256(token.encode()).hexdigest()).exists())
 
+    def test_a_sign_in_posted_slowly_across_a_newer_view_is_refused(self):
+        # Token A's headers, then a reload of the stack page mints B, then A's body.
+        cookie, _link_id = self.stack_cookie()
+        pattern = rf'href="https://{re.escape(QA_HOST)}/__sandbox/login/qa#sandbox_autologin=([A-Za-z0-9_-]+)"'
+        token = re.search(pattern, self.view(cookie)[1].decode()).group(1)
+        form = urllib.parse.urlencode({"token": token}).encode()
+        sock = __import__("socket").create_connection(("127.0.0.1", self.public.server_address[1]), timeout=10)
+        self.addCleanup(sock.close)
+        sock.sendall((f"POST /__sandbox/login/qa HTTP/1.1\r\nHost: {QA_HOST}\r\n"
+                      "Content-Type: application/x-www-form-urlencoded\r\n"
+                      f"Content-Length: {len(form)}\r\n\r\n").encode())
+        time.sleep(0.5)
+        newer = re.search(pattern, self.view(cookie)[1].decode()).group(1)
+        self.assertNotEqual(newer, token)
+        sock.sendall(form)
+        self.assertIn(b" 404 ", sock.recv(4096).split(b"\r\n", 1)[0])
+        self.assertFalse((self.state_dir / "used" / hashlib.sha256(token.encode()).hexdigest()).exists())
+
     def test_a_spent_one_use_stack_link_keeps_its_sign_in_links(self):
         token, link_id = self.mint(kind="stack", scope=share.STACK_PAGE_PATH, stack=dict(self.STACK), uses=1)
         response, _ = self.open(token)

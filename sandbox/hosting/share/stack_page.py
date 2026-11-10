@@ -172,8 +172,9 @@ add_action( 'init', static function () {{
     $until = {int(expires_at)};
     $now = time();
     // One blog only, so one options table holds every claimed nonce: on a multisite the
-    // same token cannot be spent again under another blog's path or domain.
-    if ( $now >= $until || ( is_multisite() && ! is_main_site() ) ) {{
+    // same token cannot be spent again under another blog or another network's main site.
+    if ( $now >= $until || ( is_multisite()
+            && get_current_blog_id() !== (int) get_main_site_id( get_main_network_id() ) ) ) {{
         status_header( 404 );
         exit;
     }}

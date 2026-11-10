@@ -15,11 +15,15 @@ from __future__ import annotations
 import re
 import time
 from itertools import islice
-from typing import Callable, Iterable, Literal, TypedDict
+from typing import TYPE_CHECKING, Callable, Iterable, Literal, Mapping, TypedDict
 from urllib.parse import urlsplit
 
+from sandbox.hosting import panel_lifetime as pl
 from sandbox.hosting import panel_records as pr
 from sandbox.hosting.panel_health import NOT_CHECKED, HealthResult
+
+if TYPE_CHECKING:
+    from typing import NotRequired
 
 Source = Literal["this-server", "controller"]
 Origin = Literal["route", "linked", "matched_by_name"]
@@ -54,6 +58,7 @@ class ApplyView(TypedDict):
     started_at: int | None
     finished_at: int | None
     request_id: str | None
+    reason: NotRequired[str]
 
 
 class StackView(TypedDict):
@@ -73,6 +78,8 @@ class StackView(TypedDict):
     created_at: int | None
     ttl_expires_at: int | None
     last_apply: ApplyView
+    compose_project: str
+    lifetime: pl.LifetimeView
     servers: list[ServerRow]
 
 
@@ -86,6 +93,9 @@ class TargetView(TypedDict):
     loopback_port: int | None
     last_apply: ApplyView | None
     recorded: bool
+    compose_project: str
+    lifetime: pl.LifetimeView
+    stack_slug: str | None  # from the lifetime record when there is no summary
     servers: list[ServerRow]
 
 
@@ -95,6 +105,7 @@ class HostingView(TypedDict):
     sources: list[Source]
     stacks: list[StackView]
     targets: list[TargetView]
+    lifetimes: list[pl.LifetimeRow]
     partial_reasons: list[str]
 
 
@@ -280,8 +291,11 @@ def known_sites(registry_rows: Iterable[dict], route_file_names: Iterable[str]) 
 def _apply_view(last: pr.LastApply | None) -> ApplyView | None:
     if last is None:
         return None
-    return {"status": last["status"], "started_at": last["started_at"] or None,
-            "finished_at": last["finished_at"], "request_id": last["request_id"]}
+    view: ApplyView = {"status": last["status"], "started_at": last["started_at"] or None,
+                       "finished_at": last["finished_at"], "request_id": last["request_id"]}
+    if last.get("reason"):
+        view["reason"] = last["reason"]  # type: ignore[typeddict-item]
+    return view
 
 
 def _route_state(last: pr.LastApply | None, mode: str) -> RowState:
@@ -291,6 +305,7 @@ def _route_state(last: pr.LastApply | None, mode: str) -> RowState:
         return "applying"
     if last["status"] == "failed":
         return "failed"
+    # "succeeded" and "unverified" both mean the apply ran: the route is in place.
     return "redirecting" if mode == "redirect" else "serving"
 
 
@@ -310,10 +325,21 @@ def _zones(slug: str, hostnames: Iterable[str]) -> set[str]:
     return {host.split(marker, 1)[1] for host in hostnames if marker in host and not host.startswith("*.")}
 
 
+def _compose_project(project: str, environment: str) -> str:
+    return f"sandbox-host-{project}-{environment}"
+
+
+LifetimeSources = Mapping[str, "pl.LifetimeListing | None"]
+
+
 def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = None,
                health: HealthLookup | None = None,
+               lifetimes: LifetimeSources | None = None,
                clock: Callable[[], float] = time.time) -> HostingView:
+    """``lifetimes`` maps ``"this-server"`` (this server's records) and each
+    controller remote name to its spec 077 listing; ``None`` means not loaded."""
     known = known or []
+    lifetimes = lifetimes or {}
     partial: list[str] = []
     chosen: dict[tuple[str, str, str], tuple[Source, pr.TargetSummary]] = {}
     legacy: dict[tuple[str, str], pr.LegacyTarget] = {}
@@ -321,6 +347,26 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
     for source in sources:
         for reason in source["partial_reasons"]:
             pr.add_reason(partial, reason)
+    for listing in lifetimes.values():
+        for reason in (listing or {}).get("partial_reasons") or []:
+            pr.add_reason(partial, reason)
+
+    def lifetime_source(source: Source, remote: str) -> pl.LifetimeListing | None:
+        return lifetimes.get("this-server" if source == "this-server" else remote)
+
+    lifetime_rows: list[pl.LifetimeRow] = []
+    carded: set[tuple[str, str]] = set()
+
+    def lifetime_for(source: Source, remote: str, project: str, environment: str, name: str,
+                     compose_project: str) -> pl.LifetimeView:
+        view = pl.lookup(lifetime_source(source, remote), compose_project)
+        key = ("this-server" if source == "this-server" else remote, compose_project)
+        if key not in carded:
+            carded.add(key)
+            lifetime_rows.append({**view, "remote": remote, "source": source, "project": project,  # type: ignore[typeddict-item]
+                                  "environment": environment, "compose_project": compose_project,
+                                  "name": name, "card": True})
+        return view
         for target in source["targets"]:
             key = (target["remote"], target["project"], target["environment"])
             if key not in chosen or (source["source"] == "this-server" and chosen[key][0] != "this-server"):
@@ -395,6 +441,7 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
                               ref={"branch": None, "commit": None}, instance=site["instance"])
             add(row, probe, servers)
         ports = dict(stack.get("ports") or {})
+        compose_project = target["compose_project"]
         stacks.append({
             "key": f"{target['remote']}/{stack['slug']}", "remote": target["remote"], "source": source,
             "slug": stack["slug"], "project": target["project"], "environment": target["environment"],
@@ -404,6 +451,9 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
             "mailpit_port": ports.get("mailpit"), "loopback_port": target["loopback_port"],
             "created_at": stack.get("created_at"), "ttl_expires_at": stack.get("ttl_expires_at"),
             "last_apply": _apply_view(target["last_apply"]),  # type: ignore[typeddict-item]
+            "compose_project": compose_project,
+            "lifetime": lifetime_for(source, target["remote"], target["project"], target["environment"],
+                                     stack["slug"], compose_project),
             "servers": servers,
         })
 
@@ -413,22 +463,49 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
             continue
         servers = []
         route_rows(target, {"branch": None, "commit": target["commit"]}, servers)
+        name = f"{target['project']} · {target['environment']}"
+        lifetime = lifetime_for(source, target["remote"], target["project"], target["environment"],
+                                name, target["compose_project"])
         targets.append({
             "key": f"{target['remote']}/{target['project']}/{target['environment']}",
             "remote": target["remote"], "source": source, "project": target["project"],
             "environment": target["environment"], "commit": target["commit"],
             "loopback_port": target["loopback_port"], "last_apply": _apply_view(target["last_apply"]),
-            "recorded": True, "servers": servers,
+            "recorded": True, "compose_project": target["compose_project"], "lifetime": lifetime,
+            "stack_slug": lifetime["slug"] if lifetime["kind"] == "stack" else None,
+            "servers": servers,
         })
     recorded_pairs = {(target["project"], target["environment"])
                       for source, target in chosen.values() if source == "this-server"}
     for (project, environment), item in sorted(legacy.items()):
         if (project, environment) in recorded_pairs:
             continue
+        compose_project = _compose_project(project, environment)
+        lifetime = pl.lookup(lifetimes.get("this-server"), compose_project)
+        stack_slug = lifetime["slug"] if lifetime["kind"] == "stack" else None
+        lifetime = lifetime_for("this-server", "this-server", project, environment,
+                                stack_slug or f"{project} · {environment}", compose_project)
         targets.append({"key": f"this-server/{project}/{environment}", "remote": "this-server",
                         "source": "this-server", "project": project, "environment": environment,
-                        "commit": None, "loopback_port": None, "last_apply": None, "recorded": False,
-                        "servers": []})
+                        "commit": lifetime["commit"], "loopback_port": None, "last_apply": None,
+                        "recorded": False, "compose_project": compose_project, "lifetime": lifetime,
+                        "stack_slug": stack_slug, "servers": []})
+
+    # Lifetime records with no card of their own (a copy whose summary is gone,
+    # or a target only the record knows) are still listed, never hidden.
+    for key, listing in sorted(lifetimes.items()):
+        if not listing or not listing.get("available"):
+            continue
+        source: Source = "this-server" if key == "this-server" else "controller"
+        for compose_project, view in sorted(listing["records"].items()):
+            if (key, compose_project) in carded:
+                continue
+            carded.add((key, compose_project))
+            pair = pl.identity(listing, compose_project) or ("", "")
+            name = view["slug"] or (f"{pair[0]} · {pair[1]}" if pair[0] else compose_project)
+            lifetime_rows.append({**view, "remote": key, "source": source, "project": pair[0],  # type: ignore[typeddict-item]
+                                  "environment": pair[1], "compose_project": compose_project,
+                                  "name": name, "card": False})
 
     if health is not None and probes:
         results = health(probes)
@@ -438,4 +515,5 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
                     row["health"] = dict(results[hostname])  # type: ignore[typeddict-item]
     present = sorted({source["source"] for source in sources})
     return {"ok": True, "generated_at": int(clock()), "sources": present,  # type: ignore[typeddict-item]
-            "stacks": stacks, "targets": targets, "partial_reasons": partial}
+            "stacks": stacks, "targets": targets, "lifetimes": pl.order(lifetime_rows),
+            "partial_reasons": partial}

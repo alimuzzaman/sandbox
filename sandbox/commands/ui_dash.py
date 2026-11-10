@@ -11,6 +11,7 @@ import types as _types
 from contextlib import contextmanager
 import io
 import threading
+import time
 from contextlib import redirect_stdout, redirect_stderr
 
 
@@ -198,6 +199,20 @@ def _hosting_health():
         return _HOSTING_HEALTH
 
 
+_HOSTING_LIFETIMES = None
+
+
+def _hosting_lifetimes():
+    """One per-remote `sb host stack list` cache per `sb web` process (controller side)."""
+    global _HOSTING_LIFETIMES
+    from sandbox.core import _paths
+    from sandbox.hosting.panel_lifetime import LifetimeCache, stack_list_fetcher
+    with _HOSTING_HEALTH_LOCK:
+        if _HOSTING_LIFETIMES is None:
+            _HOSTING_LIFETIMES = LifetimeCache(stack_list_fetcher(_paths.ENTRY))
+        return _HOSTING_LIFETIMES
+
+
 def _instance_route_file_names() -> list[str]:
     """Names of this host's Caddy instance route files. Their contents are never read."""
     try:
@@ -211,13 +226,15 @@ def _hosting_view() -> tuple[int, dict]:
     import sandbox.core._hosting as hosting_core
     import sandbox.core._remote as remote_core
     from sandbox.core import _paths
-    from sandbox.hosting import panel_records, panel_view, stack_registry
+    from sandbox.hosting import panel_lifetime, panel_records, panel_view, stack_registry
 
     try:
-        sources, partial, known = [], [], []
+        sources, partial, known, lifetimes = [], [], [], {}
+        now = int(time.time())
         if _hosts_control_service():
             sources.append(panel_view.server_source(
                 panel_records.read_server_records(_paths.RUNTIME_DIR)))
+            lifetimes["this-server"] = panel_lifetime.read_server(_paths.RUNTIME_DIR, now)
             try:
                 rows = list(_core().registry_all().values())
             except Exception:
@@ -236,8 +253,14 @@ def _hosting_view() -> tuple[int, dict]:
             partial.append("hosting_state_unavailable")
         if stack_data.get("stacks") or host_state.get("hosts"):
             from sandbox.commands.host_stack import _last_apply_view
-            sources.append(panel_view.controller_records(stack_data, host_state, _last_apply_view))
-        view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot)
+            controller = panel_view.controller_records(stack_data, host_state, _last_apply_view)
+            sources.append(controller)
+            # Lifetimes per remote come from `sb host stack list --remote R --json`,
+            # fetched in the background; the page never waits for a remote.
+            remotes = sorted({target["remote"] for target in controller["targets"]})
+            lifetimes.update(_hosting_lifetimes().snapshot(remotes, now))
+        view = panel_view.build_view(sources, known=known, health=_hosting_health().snapshot,
+                                     lifetimes=lifetimes)
         view["partial_reasons"] = partial + view["partial_reasons"]
         return 200, remote_core.redact_structure(view)
     except Exception:

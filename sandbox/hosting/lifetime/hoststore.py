@@ -47,6 +47,9 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 _TTL_RE = re.compile(r"([1-9][0-9]{0,4})([hdw])\Z")
 _TTL_UNITS = {"h": 3600, "d": 86400, "w": 7 * 86400}
 _FILE_SUFFIX = ".json"
+# Store.peek bounds: a viewer (the `sb web` panel) reads at most this much.
+PEEK_MAX_FILES = 500
+PEEK_MAX_BYTES = 256 * 1024
 
 # Refusal codes (the controller maps them one to one).
 SLUG_TAKEN = "stack_slug_taken"
@@ -715,6 +718,57 @@ class Store:
             else:
                 records[key] = parsed
         return records, invalid
+
+    def peek(self, now, max_files=PEEK_MAX_FILES, max_bytes=PEEK_MAX_BYTES):
+        """Read-only listing for viewers such as the `sb web` panel.
+
+        Takes no lock and writes nothing (no ``.lock``, no chmod, no mkdir).
+        Skips nothing silently: a symlink, a non-regular file, an oversized,
+        partly written or invalid record is listed under ``invalid``, so a
+        viewer shows it as protected. A file replaced while it is read may
+        show as invalid for one call; it is never reported as reapable.
+        Returns ``{"records": [view...], "invalid": [{compose_project, reason}],
+        "truncated": bool}``.
+        """
+        records, invalid, truncated = [], [], False
+        try:
+            entries = sorted(os.scandir(str(self.root)), key=lambda entry: entry.name)
+        except OSError:
+            return {"records": records, "invalid": invalid, "truncated": truncated}
+        seen = 0
+        for entry in entries:
+            name = entry.name
+            if not name.startswith("sandbox-host-") or not name.endswith(_FILE_SUFFIX):
+                continue
+            if seen >= max_files:
+                truncated = True
+                break
+            seen += 1
+            key = name[:-len(_FILE_SUFFIX)]
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    raise ValueError("not a regular file")
+                fd = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                try:
+                    data = b""
+                    while len(data) <= max_bytes:
+                        chunk = os.read(fd, max_bytes + 1 - len(data))
+                        if not chunk:
+                            break
+                        data += chunk
+                finally:
+                    os.close(fd)
+                if len(data) > max_bytes:
+                    raise ValueError("record is too large")
+                parsed = parse_record(json.loads(data.decode("utf-8")), name)
+            except (OSError, UnicodeError, ValueError) as exc:
+                invalid.append({"compose_project": key, "reason": ("unreadable: %s" % exc)[:200]})
+                continue
+            if isinstance(parsed, Invalid):
+                invalid.append({"compose_project": key, "reason": parsed.reason})
+            else:
+                records.append(view(parsed, now))
+        return {"records": records, "invalid": invalid, "truncated": truncated}
 
     def write(self, record):
         target = self.path(record.compose_project)

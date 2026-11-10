@@ -1448,6 +1448,14 @@ executes one workflow cell per durable child. A blocked preflight is a no-side-
 effect result; pass each exact compatibility ID with `--accept-difference` only
 when the semantic divergence is intentional and reviewable.
 
+On a shared host, cap the container each job runs in with repeatable
+`--container-limit KEY=VALUE`: `memory=2g` (memory and swap), `cpus=2`,
+`pids=512` and `cgroup-parent=NAME.slice` (a systemd slice that caps every CI
+container together). Nothing else about the container can be set this way; an
+unknown key, a malformed value or a repeated key stops the run before anything
+starts. `act` runs one job at a time per host, so a second run waits for the
+first.
+
 ## Hermes remote defaults
 
 `sb hermes` stores no provider credentials in project configuration. It uses an

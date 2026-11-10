@@ -828,6 +828,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     ci_p.add_argument("--workspace", default="ci", help="named reusable CI workspace")
     ci_p.add_argument("--accept-difference", dest="accepted_differences", action="append", default=None,
         help="named act compatibility difference accepted for this preflight (repeatable)")
+    ci_p.add_argument("--container-limit", dest="container_limits", action="append", default=None,
+        metavar="KEY=VALUE",
+        help="cap each act job container (repeatable): memory=2g, cpus=2, pids=512 or "
+             "cgroup-parent=NAME.slice")
 
     pcheck = sub.add_parser("plugin-check",
         help="Run WordPress.org's Plugin Check, gated by a committed baseline "

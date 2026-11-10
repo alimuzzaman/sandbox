@@ -442,11 +442,45 @@ def _act_binary() -> str | None:
     return shutil.which("act")
 
 
+_CONTAINER_LIMITS = {
+    # key: (value pattern, docker options it becomes)
+    "memory": (r"[1-9][0-9]{0,5}[kmg]", lambda v: [f"--memory={v}", f"--memory-swap={v}"]),
+    "cpus": (r"(?:[1-9][0-9]{0,2}(?:\.[0-9]{1,2})?|0\.[0-9]{1,2})", lambda v: [f"--cpus={v}"]),
+    "pids": (r"[1-9][0-9]{0,6}", lambda v: [f"--pids-limit={v}"]),
+    "cgroup-parent": (r"[A-Za-z0-9_][A-Za-z0-9_.@-]{0,62}\.slice", lambda v: [f"--cgroup-parent={v}"]),
+}
+
+
+def _container_limit_options(limits) -> list[str]:
+    """Docker options for `--container-limit KEY=VALUE`, from a closed list.
+
+    The operator caps the job container a workflow runs in; nothing else about
+    the container can be set this way. A value outside its pattern, an unknown
+    key or a repeated key is an error, so a typo never runs uncapped.
+    """
+    import re
+    options, seen = [], set()
+    for item in limits or ():
+        key, sep, value = str(item).partition("=")
+        if not sep or key not in _CONTAINER_LIMITS:
+            raise ValueError(f"--container-limit takes one of {', '.join(_CONTAINER_LIMITS)} "
+                             f"as KEY=VALUE, not {item!r}")
+        if key in seen:
+            raise ValueError(f"--container-limit {key} is given twice")
+        pattern, build = _CONTAINER_LIMITS[key]
+        if not re.fullmatch(pattern, value):
+            raise ValueError(f"--container-limit {key}={value!r} is not a valid value")
+        seen.add(key)
+        options += build(value)
+    return options
+
+
 def _run_cell_with_act(entry: dict, spec: dict, root: Path,
                        patched_workflow_path: Path, secrets_path: Path,
                        allow_deploy: bool, timeout: int,
                        extra_act_args: list[str] | None = None,
-                       *, runtime: str = "sandbox", event: str | None = None) -> dict:
+                       *, runtime: str = "sandbox", event: str | None = None,
+                       container_limits: tuple[str, ...] | list[str] | None = None) -> dict:
     """Execute one matrix cell's job via `act` against its own ephemeral
     sandbox instance. `act` handles the FULL step semantics (matrix, if:,
     needs, services:, composite/reusable actions) — this function's only job
@@ -504,7 +538,8 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
            # successful `run:` output file disappears before collection.
            "--bind",
            "--secret-file", str(secrets_path),
-           "--container-options", "--add-host=host.docker.internal:host-gateway",
+           "--container-options", " ".join(["--add-host=host.docker.internal:host-gateway",
+                                            *_container_limit_options(container_limits)]),
            "--pull=false"]
     for k, v in cell.items():
         cmd += ["--matrix", f"{k}:{v}"]
@@ -662,6 +697,8 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 command += ["--matrix-filter", f"{key}={value}"]
             for difference in getattr(args, "accepted_differences", None) or ():
                 command += ["--accept-difference", difference]
+            for limit in getattr(args, "container_limits", None) or ():
+                command += ["--container-limit", limit]
             accepted_compatibility = tuple({"id": value, "accepted": True,
                     "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
                     "detail": "caller accepted compatibility difference"} for value in
@@ -919,6 +956,11 @@ def cmd_ci(cfg, args) -> None:
     strict_provision = bool(getattr(args, "strict_provision", False))
     label_prefix = getattr(args, "label_prefix", None) or "ci"
     timeout = int(getattr(args, "timeout", 900) or 900)
+    container_limits = tuple(getattr(args, "container_limits", None) or ())
+    try:
+        _container_limit_options(container_limits)  # refuse a bad limit before anything runs
+    except ValueError as exc:
+        die(str(exc))
 
     all_secrets_needed = _runtime_secrets_needed(jobs, allow_deploy)
     if getattr(args, "list_secrets", False):
@@ -1019,7 +1061,8 @@ def cmd_ci(cfg, args) -> None:
             cfg, root, specs,
             worker_fn=lambda entry, spec: _run_cell_with_act(
                 entry, spec, Path(root), patched_path, secrets_path,
-                allow_deploy, timeout, runtime=runtime, event=event),
+                allow_deploy, timeout, runtime=runtime, event=event,
+                container_limits=container_limits),
             concurrency=concurrency, keep_on_fail=keep_on_fail,
             strict_provision=strict_provision, on_progress=_progress,
             provision_instance=provision_instance, teardown_instance=teardown_instance)

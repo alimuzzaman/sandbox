@@ -296,6 +296,62 @@ class TestActInvocation(unittest.TestCase):
         self.assertNotIn("WP_BASE_URL=", command)
         self.assertNotIn("SANDBOX_INSTANCE=", command)
 
+class TestContainerLimits(unittest.TestCase):
+    def options(self, *limits):
+        return ci._container_limit_options(limits)
+
+    def test_each_limit_becomes_its_docker_option(self):
+        self.assertEqual(self.options("memory=2g", "cpus=2", "pids=512", "cgroup-parent=miu-ci.slice"),
+                         ["--memory=2g", "--memory-swap=2g", "--cpus=2", "--pids-limit=512",
+                          "--cgroup-parent=miu-ci.slice"])
+        self.assertEqual(self.options("cpus=0.5"), ["--cpus=0.5"])
+        self.assertEqual(self.options(), [])
+
+    def test_anything_outside_the_list_is_refused(self):
+        for bad in ("privileged=true", "memory", "memory=2g --privileged", "memory=0g",
+                    "cpus=two", "cgroup-parent=../escape", "cgroup-parent=miu-ci",
+                    "pids=-1", "volume=/:/host"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.options(bad)
+
+    def test_a_repeated_key_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.options("memory=2g", "memory=4g")
+
+    @patch("sandbox.commands.ci._core")
+    @patch("sandbox.commands.ci.subprocess.run")
+    @patch("sandbox.commands.ci._act_binary", return_value="act")
+    def test_limits_reach_the_job_container_with_the_host_gateway(self, _act, run, core):
+        core.return_value.project_lock.return_value = nullcontext()
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with __import__("tempfile").TemporaryDirectory() as temp:
+            root = Path(temp)
+            ci._run_cell_with_act(
+                {}, {"cell": {}, "job_id": "build"}, root, root / "workflow.yml",
+                root / "secrets.env", False, 30, runtime="none",
+                container_limits=("memory=2g", "cpus=2", "cgroup-parent=miu-ci.slice"))
+        command = run.call_args.args[0]
+        self.assertEqual(command.count("--container-options"), 1)
+        value = command[command.index("--container-options") + 1]
+        self.assertEqual(value, "--add-host=host.docker.internal:host-gateway --memory=2g "
+                                "--memory-swap=2g --cpus=2 --cgroup-parent=miu-ci.slice")
+
+    @patch("sandbox.commands.ci._core")
+    @patch("sandbox.commands.ci.subprocess.run")
+    @patch("sandbox.commands.ci._act_binary", return_value="act")
+    def test_without_limits_the_options_are_unchanged(self, _act, run, core):
+        core.return_value.project_lock.return_value = nullcontext()
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with __import__("tempfile").TemporaryDirectory() as temp:
+            root = Path(temp)
+            ci._run_cell_with_act(
+                {}, {"cell": {}, "job_id": "build"}, root, root / "workflow.yml",
+                root / "secrets.env", False, 30, runtime="none")
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--container-options") + 1],
+                         "--add-host=host.docker.internal:host-gateway")
+
+
 class TestRuntimeSecrets(unittest.TestCase):
     def test_skipped_deploy_secrets_do_not_block_safe_run(self):
         jobs = [{"steps": [

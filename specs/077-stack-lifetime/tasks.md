@@ -61,9 +61,9 @@ run only on xspeed-dev through `sb job-start --remote xspeed-dev`, by a Haiku he
 ## Phase 8: Polish
 
 - [x] T025 Docs: `docs/remote-hosting.md` (lifetimes, identity, reaping, limits), `skills/sandbox-cli/SKILL.md` and its `.agents` mirror, `CLAUDE.md` gotcha (record store, no-record-is-protected, reaper needs migrate)
-- [ ] T026 Run the suites on xspeed-dev (Haiku helper) and compare failures with an `origin/latest` baseline
-- [ ] T027 Luna review of the final head on `codex_office`; fix or answer every finding
-- [ ] T028 Hand-back note to the orchestrator (head SHA, files, tests, review, limits, panel field status, stray-container finding)
+- [x] T026 Run the suites on xspeed-dev (Haiku helper) and compare failures with an `origin/latest` baseline
+- [x] T027 Luna review of the final head on `codex_office`; fix or answer every finding
+- [x] T028 Hand-back note to the orchestrator (head SHA, files, tests, review, limits, panel field status, stray-container finding)
 
 ## Dependencies
 

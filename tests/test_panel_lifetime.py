@@ -300,6 +300,16 @@ class CacheTest(unittest.TestCase):
         self.assertLessEqual(len(cache._results), 4)
         self.assertEqual(sorted(cache.snapshot(["r4", "r5"], NOW)), ["r4", "r5"])
 
+    def test_fetches_in_flight_are_capped_across_snapshots(self):
+        cache = self.cache(max_remotes=2)
+        cache.snapshot(["r0", "r1"], NOW)
+        cache.snapshot(["r2", "r3"], NOW)  # earlier fetches have not finished
+        self.assertEqual(len(self.jobs), 2)
+        while self.jobs:
+            self.jobs.pop()()
+        cache.snapshot(["r2", "r3"], NOW)
+        self.assertEqual(len(self.jobs), 2)
+
     def test_remote_names_are_validated(self):
         result = self.cache().snapshot(["ok-remote", "bad name", "-x", "../y"], NOW)
         self.assertEqual(list(result), ["ok-remote"])

@@ -333,7 +333,8 @@ class LifetimeCache:
                     if not parsed["available"]:
                         parsed = unavailable(f"lifetime_unavailable:{remote}")
                     out[remote] = parsed
-                if (cached is None or clock - cached[0] >= self._ttl) and remote not in self._in_flight:
+                if ((cached is None or clock - cached[0] >= self._ttl) and remote not in self._in_flight
+                        and len(self._in_flight) < self._max):
                     self._in_flight.add(remote)
                     due.append(remote)
         for remote in due:

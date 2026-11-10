@@ -541,10 +541,15 @@ Tiers are strictly nested and the nesting is asserted by tests.
   (`unplanned_bound_container:<id>`) or a planned one whose fingerprint changed
   (restarted, new mount, label or network, or replaced;
   `container_evidence_changed:<id>`) fails the candidate with
-  `stack_teardown_incomplete` before anything is touched. Each planned stray is
-  then written to the manifest (`kind: stray_container`, with its fingerprint),
-  stopped, and removed (`docker rm`, never `-f`, never a prune), before the
-  Compose project and then the checkout. A stray already gone counts as removed,
+  `stack_teardown_incomplete` before anything is touched. An inspect that
+  leaves any requested ID unaccounted for (neither returned nor reported gone)
+  refuses as well. Each planned stray is then inspected once more and written
+  to the manifest (`kind: stray_container`, with its fingerprint), stopped,
+  inspected again, and removed (`docker rm`, never `-f`, never a prune), before
+  the Compose project and then the checkout. Docker has no compare-and-remove,
+  so the gap between each fresh inspect and its stop or remove is the one
+  window left; a restart in it fails the remove, which refuses a running
+  container. A stray already gone counts as removed,
   so a rerun after a crash converges; a stop or remove failure keeps the
   checkout and names the container. A plan made before this change names no
   strays, and the host refuses an unlabeled bound container as before. The

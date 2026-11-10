@@ -256,12 +256,28 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
         if present is None:
             return refuse("bound_list_failed")
 
-        def vanished(code, err):
-            # A container removed between two engine calls is not evidence of
-            # anything; any other inspect error is.
-            messages = [line.strip() for line in str(err or "").splitlines() if line.strip()]
-            return code != 0 and bool(messages) and all(
-                "no such object" in line.lower() for line in messages)
+        def missing(err):
+            # IDs a "No such object" error names; None for any other error.
+            # A container removed between two engine calls is not evidence
+            # of anything, but only once that exact ID is reported gone.
+            named = set()
+            for line in str(err or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                lowered = line.lower()
+                if "no such object" not in lowered and "no such container" not in lowered:
+                    return None
+                named.add(line.rsplit(" ", 1)[-1].strip())
+            return named
+
+        def reconciled(code, err, requested, seen):
+            gone = missing(err) if code != 0 else set()
+            if gone is None or (code != 0 and not gone):
+                return None
+            if any(item not in seen and item not in gone for item in requested):
+                return None
+            return gone
 
         bound = []
         alive = set()
@@ -270,8 +286,7 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
             batch = present[offset:offset + 100]
             code, out, err = run(["docker", "inspect", "--format",
                                   "{{json .Id}} {{json .Mounts}}"] + batch, 60)
-            if code != 0 and not vanished(code, err):
-                return refuse("bound_list_failed")
+            seen = set()
             for line in str(out or "").splitlines():
                 if not line.strip():
                     continue
@@ -283,23 +298,28 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
                     return refuse("bound_list_failed")
                 if not isinstance(identity, str) or not isinstance(mounts, list):
                     return refuse("bound_list_failed")
-                alive.add(identity)
+                seen.add(identity)
                 for mount in mounts:
                     source = str((mount or {}).get("Source") or "") if isinstance(mount, dict) else ""
                     if source and (source.rstrip("/") == root or source.startswith(root + "/")):
                         bound.append(identity)
                         break
+            if reconciled(code, err, batch, seen) is None:
+                return refuse("bound_list_failed")
+            alive.update(seen)
         inspected = []
         if bound:
             code, out, err = run(["docker", "inspect"] + bound, 60)
-            if code != 0 and not vanished(code, err):
-                return refuse("bound_inspect_failed")
             try:
                 inspected = json.loads(out or "[]")
             except ValueError:
                 return refuse("bound_inspect_failed")
             if not isinstance(inspected, list) or not all(isinstance(r, dict) for r in inspected):
                 return refuse("bound_inspect_failed")
+            gone = reconciled(code, err, bound, {r.get("Id") for r in inspected})
+            if gone is None:
+                return refuse("bound_inspect_failed")
+            alive.difference_update(gone)
         matched = []
         for found in inspected:
             identity = found.get("Id")
@@ -322,17 +342,47 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
                 # Still on the host but no longer bound (or no longer judged
                 # as the same container): not what the operator reviewed.
                 return refuse("container_evidence_changed:" + identity)
+
+        def current(identity):
+            # Docker has no compare-and-remove, so each mutation is preceded
+            # by a fresh inspect of that one container; what is left is the
+            # gap between this inspect and the engine call that follows.
+            code, out, err = run(["docker", "inspect", identity], 30)
+            if code != 0:
+                gone = missing(err)
+                return "absent" if gone is not None and identity in gone else None
+            try:
+                rows = json.loads(out or "[]")
+            except ValueError:
+                return None
+            if (not isinstance(rows, list) or len(rows) != 1
+                    or not isinstance(rows[0], dict) or rows[0].get("Id") != identity):
+                return None
+            verdict = assess_stray_container(rows[0], checkout)
+            if verdict["owned"] and verdict["fingerprint"] == planned[identity]:
+                return "match"
+            return "changed"
+
         for identity in planned:
             if identity not in matched:
                 result["strays_removed"].append(identity)
                 continue
-            record("stray_container", identity, fingerprint=planned[identity])
-            code, _out, err = run(["docker", "stop", "-t", "5", identity], 30)
-            if code != 0 and "no such container" not in str(err).lower():
-                return refuse("stray_stop_failed:" + identity)
-            code, _out, err = run(["docker", "rm", identity], 30)
-            if code != 0 and "no such container" not in str(err).lower():
-                return refuse("stray_rm_failed:" + identity)
+            for step in ("stop", "rm"):
+                state = current(identity)
+                if state == "absent":
+                    break
+                if state is None:
+                    return refuse("stray_inspect_failed:" + identity)
+                if state != "match":
+                    return refuse("container_evidence_changed:" + identity)
+                if step == "stop":
+                    record("stray_container", identity, fingerprint=planned[identity])
+                    argv = ["docker", "stop", "-t", "5", identity]
+                else:
+                    argv = ["docker", "rm", identity]
+                code, _out, err = run(argv, 30)
+                if code != 0 and "no such container" not in str(err).lower():
+                    return refuse("stray_" + step + "_failed:" + identity)
             result["strays_removed"].append(identity)
         ids = []
     if ids:

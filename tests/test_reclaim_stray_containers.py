@@ -436,6 +436,74 @@ class StrayTeardownTest(unittest.TestCase):
                        [planned(container()) for _ in range(MAX_STRAYS_PER_CHECKOUT + 1)]):
             self.assert_refused(Engine(container()), strays, "invalid_planned_strays")
 
+    def test_change_after_validation_is_caught_before_stop(self):
+        record = container()
+        engine = Engine(record)
+        original = engine.__call__
+        served = []
+
+        def racing(argv, timeout):
+            reply = original(argv, timeout)
+            if argv[:2] == ["docker", "inspect"] and "--format" not in argv:
+                served.append(argv)
+                if len(served) == 1:
+                    engine.containers[ID]["NetworkSettings"]["Networks"]["user_net"] = {}
+            return reply
+        result = teardown_workspace_stack(racing, WS, [ID], strays=[planned(record)],
+                                          checkout=CHECKOUT)
+        self.assertFalse(result["ok"])
+        self.assertIn("container_evidence_changed:" + ID, result["failures"])
+        self.assertEqual(engine.mutations(), [])
+
+    def test_restart_between_stop_and_rm_is_caught(self):
+        record = container()
+        engine = Engine(record)
+        original = engine.__call__
+
+        def restarting(argv, timeout):
+            reply = original(argv, timeout)
+            if argv[:2] == ["docker", "stop"]:
+                engine.containers[ID]["State"].update(Running=True, StartedAt="2026-11-10T10:00:00Z")
+            return reply
+        result = teardown_workspace_stack(restarting, WS, [ID], strays=[planned(record)],
+                                          checkout=CHECKOUT)
+        self.assertFalse(result["ok"])
+        self.assertIn("container_evidence_changed:" + ID, result["failures"])
+        self.assertNotIn(["docker", "rm", ID], engine.calls)
+
+    def test_inspect_that_omits_an_id_is_refused(self):
+        plan = planned(container())
+        engine = Engine(container())
+        original = engine.__call__
+
+        def lossy(argv, timeout):
+            if argv[:3] == ["docker", "inspect", "--format"]:
+                return 1, "", "Error: No such object: " + OTHER
+            return original(argv, timeout)
+        recorded = []
+        result = teardown_workspace_stack(lossy, WS, [ID], record=lambda *a, **k: recorded.append(a),
+                                          strays=[plan], checkout=CHECKOUT)
+        self.assertFalse(result["ok"])
+        self.assertIn("bound_list_failed", result["failures"])
+        self.assertEqual(engine.mutations(), [])
+        self.assertEqual(recorded, [])
+
+    def test_container_gone_between_listing_and_inspect_counts_as_absent(self):
+        engine = Engine(container())
+        original = engine.__call__
+
+        def vanishing(argv, timeout):
+            if argv == ["docker", "ps", "-aq", "--no-trunc"]:
+                reply = original(argv, timeout)
+                engine.containers.clear()
+                return reply
+            return original(argv, timeout)
+        result = teardown_workspace_stack(vanishing, WS, [ID], strays=[planned(container())],
+                                          checkout=CHECKOUT)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["strays_removed"], [ID])
+        self.assertEqual(engine.mutations(), [])
+
     def test_planned_stray_already_absent_counts_as_removed(self):
         engine = Engine()
         result = self.teardown(engine, [planned(container())])

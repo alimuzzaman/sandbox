@@ -24,9 +24,12 @@ Submit through the current controller as one job with `--cancel-on-stall`:
 ## Live check after migrate (orchestrator)
 
 1. `sb job-list --remote xspeed-dev --json`: `slots.max_parallel` is 4.
-2. Queue five short jobs (`sleep 20`) on distinct workspaces with `--cancel-on-stall`,
-   noting their acceptance order. Poll only the newest one every 30 s.
-3. Expected: the first four start at once; the fifth starts within about 20-30 s of
-   the first one finishing, with no other client reading status.
-4. `job-status` of a queued job shows a `queue.position` that counts older
-   startable jobs host-wide.
+2. Queue five jobs of `sleep 30` on distinct workspaces with `--cancel-on-stall`, in a
+   known order, and read no status while they run.
+3. After they finish, read each job's `accepted_at`, `started_at`, `finished_at`.
+4. Expected: jobs 1-4 start at once. Job 5 starts within 5 seconds of the first of 1-4
+   finishing (release-driven drain from that job's supervisor), and in every case within
+   30 seconds (the service tick).
+5. Repeat step 2 while polling only job 5 every 10 seconds: job 5 still starts no
+   earlier than the first finish (it never jumps ahead of 1-4).
+6. A queued job's `queue.position` counts older candidates host-wide.

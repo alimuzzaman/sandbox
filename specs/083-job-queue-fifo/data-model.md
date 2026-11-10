@@ -15,17 +15,18 @@ No schema change. The feature reads existing registry tables in a new order.
 
 ## Workspace lease (table `workspace_leases`, existing)
 
-A job is waiting on its own workspace when a lease with its namespace, project and
-label is held by an active job.
+A job is waiting on its own workspace when the admission sharing rule
+(`workspace_compatible`) refuses it. Candidate definition: `contracts/admission.md`.
 
 ## Host slot (table `host_capacity_leases`, existing)
 
 Held slots are counted against the current `max_parallel` (Part 1).
 
-## Admission refusal kinds (in memory, `JobScheduler.last_refusal`)
+## Admission refusal kinds (on the exception as `.kind`, and per thread as `JobScheduler.last_refusal`)
 
 | Kind | Meaning | Drain reaction |
 |---|---|---|
+| `admitted` | Another caller already admitted this job | continue; leave the job alone |
 | `workspace` | The job's own workspace is busy | continue with the next job |
 | `order` | An older eligible job is waiting | continue (the older job comes first in drain order) |
 | `capacity` | No free slot | stop |

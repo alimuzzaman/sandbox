@@ -1,55 +1,88 @@
 # Contract: host admission order
 
 Internal contract between the scheduler, the job service and the remote service. No CLI
-flag, MCP tool or payload key changes.
+flag, MCP tool or payload key changes. This file is the single definition of a
+*candidate*; the other artifacts link here.
+
+## Candidate (an older job that blocks a younger one)
+
+A queued job C blocks the admission of job J when all of these hold, evaluated inside
+J's admission transaction:
+
+1. `C.lifecycle = 'queued'` and `(C.accepted_at, C.job_id) < (J.accepted_at, J.job_id)`.
+2. C is not an aggregate: `C.kind` is not `matrix` or `plan`, and no row has
+   `parent_job_id = C.job_id`.
+3. `C.queue_reason = 'workspace_or_capacity_busy'` (dependency, sync-generation and
+   policy reasons are not candidates; a drain or status read re-records the reason once
+   it observes the wait is over).
+4. C holds no lease itself (an admitted job is never a candidate).
+5. The workspace-sharing rule `acquire` applies (`workspace_compatible`, shared code)
+   would let C take its workspace now, with C's own `parallel_safe` (or isolated mode),
+   `sync_generation_id` and `source_access`.
+
+Host-wide conditions (slots, floor, policy) are not part of the test: they stop J too.
 
 ## `JobScheduler.acquire(row, parallel_safe=False)`
 
-Inside one immediate transaction, in this order:
+Inside one immediate transaction, in this order. Each refusal raises `WorkspaceBusy`
+(or its subclass) with `.kind`, and stores the kind in the calling thread's
+`last_refusal`:
 
 1. Reap terminal leases (unchanged).
-2. Policy invalid: raise `SchedulerPolicyInvalid` (`last_refusal = "policy"`).
-3. Floor unavailable: raise `WorkspaceBusy` (`last_refusal = "floor"`).
-4. Own workspace incompatible: raise `WorkspaceBusy` (`last_refusal = "workspace"`).
-5. **New**: an older eligible queued job exists: raise `WorkspaceBusy`
-   (`last_refusal = "order"`, `queue_reason` stays `workspace_or_capacity_busy`).
-6. Held slots >= `max_parallel`: raise `WorkspaceBusy` (`last_refusal = "capacity"`).
-7. Insert the workspace and slot leases (unchanged). `last_refusal = None`.
+2. **New**: J already holds a lease, or J's lifecycle is not `accepted`/`queued`:
+   kind `admitted`. The caller leaves J alone (FR-015).
+3. Policy invalid: `SchedulerPolicyInvalid`, kind `policy`.
+4. Floor unavailable: kind `floor`.
+5. J's own workspace incompatible (`workspace_compatible`): kind `workspace`.
+6. **New**: a candidate older than J exists: kind `order`.
+7. Held slots >= `max_parallel`: kind `capacity`.
+8. Insert the workspace and slot leases (unchanged); `last_refusal = None`.
 
-Eligibility is defined in research R2. The row being admitted is never its own blocker.
+`queue_reason` values are unchanged: refusals 2-7 keep `workspace_or_capacity_busy`, or
+the policy code for 3.
 
-## `JobScheduler.queued_in_order(limit)`
+## `JobScheduler.queued_in_order(limit=500)`
 
-Returns the ids of queued, non-aggregate jobs ordered by `(accepted_at, job_id)`, at most
-`limit`.
+Ids of queued, non-aggregate jobs ordered by `(accepted_at, job_id)`.
 
 ## `JobScheduler.free_slots()`
 
-`max_parallel` minus held slots of active jobs, floored at 0, using the last loaded
-policy (no config read).
+`max_parallel` minus slots held by active jobs, floored at 0. It refreshes the policy
+first, so a fresh scheduler is never read with a stale limit.
 
-## `JobService.drain_queue(limit=50) -> list[str]`
+## `JobScheduler.record_queue_reason(job_id, reason)`
+
+Updates `queue_reason` of a job that is still `queued`, nothing else; a no-op otherwise.
+
+## `JobService.drain_queue(limit=500) -> list[str]`
 
 - Returns the ids of jobs that left `queued` during this pass.
-- No-op (returns `[]`) without a scheduler, or when called re-entrantly.
-- For each id from `queued_in_order`: stop if `free_slots() == 0`; call
-  `get(id, reconcile=False)`, suppressing per-job errors; then stop if `last_refusal`
-  is `capacity`, `floor` or `policy`.
-- Safe to run concurrently from several processes; the gate in `acquire` keeps order
-  and the slot limit.
+- No-op (returns `[]`) without a scheduler, or when already draining in this thread.
+- Walks `queued_in_order(limit)`. Before each job: stop if `free_slots() == 0`. Calls
+  the admission path of `get(id, reconcile=False)`, suppressing per-job errors. After
+  it: stop if this thread's `last_refusal` is `capacity`, `floor` or `policy`;
+  otherwise continue (`workspace`, `order`, `admitted`, dependency waits, launch
+  failures).
+- Safe to run concurrently from several threads and processes; the gate in `acquire`
+  keeps order and the slot limit, and kind `admitted` stops double admission.
+
+## Status read of a queued job (`JobService.get`)
+
+Outside a drain, `get` of a queued job runs `drain_queue()` and then returns that job's
+fresh snapshot. It never calls `acquire` for that job directly.
 
 ## Drain triggers
 
 | Trigger | Where |
 |---|---|
 | End of `reconcile_startup` | `JobService.reconcile_startup` |
+| Status read of a queued job (outside a drain) | `JobService.get` |
 | Terminal job released on a status read | `JobService.get` |
 | Cancel released a lease | `JobService.cancel` |
-| Order refusal on a status read (not inside a drain) | `JobService.get` |
-| Supervisor released its leases | `sandbox/jobs/supervisor.py`, through `context.drain_after_release`, default registry only |
+| Supervisor released its leases | `sandbox/jobs/supervisor.py` via `context.drain_after_release`, default registry only |
 | Every 20 s | remote service tick in `mcp/wp-server/server.py` |
 
 ## Queue details
 
-`queue_details(row)["position"]` = 1 + count of older eligible queued jobs, host-wide.
-Keys unchanged: `reason`, `position`, `blocking_jobs`, `namespace`.
+`queue_details(row)["position"]` = 1 + the number of candidates older than the row
+(host-wide). Keys unchanged: `reason`, `position`, `blocking_jobs`, `namespace`.

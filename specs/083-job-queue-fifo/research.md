@@ -12,35 +12,33 @@
   skip it still race); ordering only inside the drain (a status read in another process
   could still win).
 
-## R2. Which older jobs block a younger one ("eligible")
+## R2. Which older jobs block a younger one ("candidate")
 
-- **Decision**: An older queued job blocks if, all of: `lifecycle='queued'`;
-  `queue_reason='workspace_or_capacity_busy'`; it is not an aggregate (`kind` not matrix
-  or plan, and no child rows); and its own workspace (namespace, project, label) has no
-  lease held by an active job. Order key `(accepted_at, job_id)`, host-wide.
-- **Rationale**: Dependency and sync waits carry their own reasons, so the reason
-  filter excludes them. A job whose workspace is leased is waiting on its own workspace
-  (FR-003). With no lease on its workspace, the only things that could stop it are
-  host-wide (slots, floor, policy), and those stop the younger job too.
-- **Trade-off**: A parallel-safe older job that could share a leased workspace counts
-  as not eligible, so a younger job may start before it. That is conservative (never
-  blocks wrongly) and rare.
-- **No stuck head**: an older eligible job that the drain tries but cannot start does
-  not freeze the host. Every exception inside `get()`'s admission block (sync claim,
-  `acquire`, commit, `_launch`) moves that job to `failed` (`supervisor_launch_failed`),
-  so it stops being eligible. Only a registry read error before that block leaves it
-  queued, and such an error affects every job equally. An admitted job holds a lease on
-  its own workspace, so it stops counting as eligible before its lifecycle changes.
-- **Alternatives**: evaluating each older job's full compatibility in Python inside the
-  transaction (duplicates `acquire`'s rules and is slower).
+- **Decision**: the candidate test in `contracts/admission.md`, evaluated in Python
+  inside the admission transaction with the same `workspace_compatible` rule `acquire`
+  uses for the job itself. Order key `(accepted_at, job_id)`, host-wide.
+- **Rationale**: Reusing the admission rule makes "could start right now" exact for
+  exclusive, parallel-safe and sync-generation jobs (FR-002, US2 AS3). Dependency, sync
+  and policy waits carry their own reasons; drains and status reads re-record a reason
+  once they observe the wait has ended.
+- **No stuck head**: every exception inside `get()`'s admission block moves the job to
+  `failed`, so a broken candidate stops being one. Only a registry read error before
+  that block leaves it queued, and that affects every job equally. An admitted job holds
+  a lease, so it is never a candidate.
+- **Alternatives**: a pure SQL predicate (cannot express parallel-safe sharing without
+  duplicating the rule; rejected after analyze finding I2).
 
 ## R3. What drives admission
 
-- **Decision**: `JobService.drain_queue(limit=50)` walks queued jobs oldest-first
+- **Decision**: `JobService.drain_queue(limit=500)` walks queued jobs oldest-first
   (`queued_in_order`) and calls `get(job_id, reconcile=False)` for each, which runs the
   existing admission and launch path. It stops when the scheduler records a host-wide
-  refusal (slots, floor, policy) or no slot is free. A per-instance re-entrancy flag
-  stops nested drains.
+  refusal (slots, floor, policy) or no slot is free. The refusal kind and the
+  re-entrancy flag are thread-local, because the remote service shares one
+  `JobService` across request threads.
+- **Status reads**: outside a drain, a status read of a queued job runs the drain
+  instead of admitting that job directly, so stale reasons cannot let a poller jump
+  ahead (analyze I1).
 - **Triggers**: end of `reconcile_startup` (every job command builds dependencies, so
   each `sb job-*` invocation drains); after `get()` releases a terminal job; after
   `cancel()`; after an order refusal in `get()` outside a drain; the supervisor after it
@@ -88,3 +86,11 @@
 - **Decision**: Out of scope; open owner question (plan). Evidence: job `06a20412` on
   xspeed-dev reported `process_alive: true`, an owned descendant, `stalled: true`, a
   supervisor heartbeat until the manual cancel, and `cancel_on_stall` false.
+
+## R9. One job reached by two callers
+
+- **Decision**: `acquire` refuses with kind `admitted` when the job already holds a
+  lease or is no longer `accepted`/`queued`, inside the transaction.
+- **Rationale**: Today a parallel-safe job reached by two callers fails the second
+  insert on the unique slot row, and the generic error path then releases the winner's
+  leases and marks the job failed. More drains make that race likelier (analyze I4).

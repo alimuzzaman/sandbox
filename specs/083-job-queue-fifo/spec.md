@@ -24,6 +24,16 @@
   every execution profile. The feedback text ("no process on the host") is
   contradicted by the recorded evidence.
 
+## Clarifications
+
+### Session 2026-11-11
+
+- Q: Does an older parallel-safe job that could share a leased workspace block younger jobs? → A: Yes. "Could start right now" uses the same workspace-sharing rule as admission itself, so FR-002 holds for parallel-safe jobs too.
+- Q: May the periodic drain apply every existing reconciliation outcome, including `missing_supervisor_identity` for a running row with no durable supervisor identity? → A: Yes. The drain reuses startup reconciliation unchanged; that rule already runs on every job command today, so only its frequency changes.
+- Q: May read commands (status, list, MCP job tools) reconcile and drain? → A: Yes. They already reconcile on start; they now also start queued jobs oldest-first. A read never starts a job out of order.
+- Q: When does a job waiting on a dependency become a candidate? → A: Once a drain or status read has observed its dependencies complete. Every drain pass re-checks and records the reason of each queued job it visits.
+- Q: Does the 2026-11-10 slot-holding incident get fixed by this feature? → A: No. Those jobs were live but silent, not process-gone (see Background). The default for `cancel_on_stall` stays an open decision for the repository owner; the feature description's "supervisor process was gone" is corrected by the recorded evidence.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Older queued jobs start first (Priority: P1)
@@ -154,9 +164,11 @@ acceptance order across projects, and they start in that order.
 - **FR-001**: The host MUST offer a free slot to queued jobs in acceptance order
   (acceptance time, then job id) across all projects and workspaces on that host.
 - **FR-002**: A queued job MUST NOT be admitted while an older queued job that could
-  start right now is waiting. "Could start right now" means its workspace rules allow
-  it, its dependencies are complete, its sync generation is ready, and it is not
-  expired.
+  start right now is waiting. "Could start right now" (a *candidate*) means: not an
+  aggregate parent; its recorded wait is for a slot or its workspace, not for a
+  dependency, sync generation or policy; and the workspace-sharing rule used by
+  admission would let it take its workspace now. The single definition lives in
+  `contracts/admission.md`.
 - **FR-003**: An older queued job that cannot start for a reason of its own (workspace,
   dependency, sync generation) MUST NOT prevent a younger startable job from taking a
   free slot.
@@ -168,22 +180,26 @@ acceptance order across projects, and they start in that order.
 - **FR-006**: The long-lived host service MUST also attempt admission on a fixed
   interval (default 20 seconds) as a backstop when no release event reaches it.
 - **FR-007**: Reading a queued job's status MUST NOT admit that job ahead of an older
-  startable job; it may trigger the same oldest-first drain.
+  candidate. Outside a drain, a status read of a queued job runs the oldest-first drain
+  instead of admitting that job directly. Read commands may reconcile and drain.
 - **FR-008**: Admission MUST stay serialized so that no job starts twice and the
   number of held slots never exceeds the host's current `max_parallel`, under any
   interleaving of drains, status reads, submissions and cancellations, including from
   separate processes on the same host.
 - **FR-009**: A drain MUST be safe to re-run at any time, and a drain interrupted part
   way MUST leave every job in a valid state.
-- **FR-010**: The periodic drain MUST also end running jobs whose supervisor (and,
-  where recorded, child) is proved gone, using the same proof as today's startup
-  reconciliation, and release their slots. A stale heartbeat alone MUST NOT end a job.
+- **FR-010**: The periodic drain MUST also run today's startup reconciliation unchanged,
+  which ends running jobs whose supervisor or child is proved gone, or whose running row
+  has no durable supervisor identity, and releases their slots. A stale heartbeat alone
+  MUST NOT end a job.
 - **FR-011**: A queued job's reported position MUST count only older queued jobs that
   could start right now, host-wide, so it matches the order in which jobs start.
 - **FR-012**: When no slot is free, the drain MUST leave queued jobs queued with their
   current reason and touch nothing else.
 - **FR-013**: The change SHOULD NOT alter controller-facing payload keys. If any key
   changes, the control protocol version MUST be bumped and the recorded shapes updated.
+- **FR-015**: A job already admitted by one caller MUST NOT be admitted, failed or
+  released by a second caller that raced it; the second caller leaves it alone.
 - **FR-014**: Existing reasons a job waits (`workspace_or_capacity_busy`, dependency,
   sync generation, policy error codes) MUST keep their current values.
 

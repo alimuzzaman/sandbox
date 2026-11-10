@@ -11,12 +11,12 @@ which client polls. Three pieces:
 
 1. **An order gate inside `JobScheduler.acquire`.** It runs in the same immediate SQLite
    transaction that already serializes slot assignment. A job may take a slot only if no
-   older *eligible* queued job exists on the host. Eligible means it could take a free
-   slot right now: queued with the capacity reason, not an aggregate parent, and no
-   active lease on its own workspace.
+   older *candidate* exists on the host (definition: `contracts/admission.md`). The same
+   transaction refuses a job another caller already admitted.
 2. **A drain, `JobService.drain_queue()`.** It offers free slots to queued jobs
    oldest-first through the existing per-job admission path in `get()`, and stops at the
-   first host-wide refusal (slots, floor, policy). It runs at the end of every
+   first host-wide refusal (slots, floor, policy). A status read of a queued job runs
+   the drain instead of admitting itself. It also runs at the end of every
    `reconcile_startup` (so on every `sb` job command and service start), after every
    release inside the service, after an order refusal on a status read, from a finished
    job's supervisor (only for the host's real registry), and on a 20-second tick in the
@@ -25,7 +25,7 @@ which client polls. Three pieces:
    the existing `reconcile_startup` proof. Running jobs whose supervisor is proved gone
    become `interrupted` / `supervisor_lost` and release their slot; then the tick drains.
 
-Queue `position` becomes the count of older eligible jobs host-wide plus one, so it
+Queue `position` becomes the count of older candidates host-wide plus one, so it
 matches start order. No payload key changes are planned, so no protocol bump.
 
 ## Technical Context
@@ -47,7 +47,8 @@ runs via `controller-44bcdba/sb job-start --remote xspeed-dev --cancel-on-stall`
 **Project Type**: CLI plus a long-lived control service
 
 **Performance Goals**: a freed slot is taken within 30 s with the service running
-(SC-002); one drain pass handles at most 50 queued jobs
+(SC-002); one drain pass visits at most 500 queued jobs and stops at the first
+host-wide refusal
 
 **Constraints**: admission stays serialized by the immediate transaction; no new lock
 file; no change to `sandbox/resources/*`, hosting job paths or the other files the brief
@@ -62,8 +63,8 @@ puts off limits
 | I Per-project instance model | Not affected (no instance resolution change) |
 | II Registry single source of truth | Not affected; job registry stays authoritative, no new state file |
 | III Single entry, modular package | Code stays in `sandbox/jobs`, `sandbox/application`, `mcp/wp-server`; no new top-level entry |
-| IV Live-stack verification | Unit and concurrency tests plus a run on xspeed-dev; the post-migrate evidence comes from the orchestrator's live check (quickstart) |
-| V Idempotency and docs-with-code | The drain is re-runnable by design (FR-009); `docs/remote-job-runtime.md` and CHANGELOG change in the same commits |
+| IV Live-stack verification | Before merge: the tests run as a job on xspeed-dev (a live host). The behaviour itself needs the migrated runtime, and migrate belongs to the orchestrator, so T022 is the orchestrator's post-migrate live check with recorded timestamps (quickstart). Justified in Complexity Tracking |
+| V Idempotency and docs-with-code | The drain is re-runnable by design (FR-009); each story's commit carries its `docs/remote-job-runtime.md` and CHANGELOG change |
 | VI Parity before removal | Nothing removed; admission on status read stays, only its order changes |
 
 Gate: PASS. Re-checked after Phase 1 design: PASS (no new storage, no removal).
@@ -106,9 +107,10 @@ owns the per-job launch path). The service tick only composes them.
 | Choice | Why needed | Simpler alternative rejected because |
 |---|---|---|
 | Order gate inside `acquire` and a separate drain | The gate guarantees order under every race; the drain is what actually admits the head | A drain alone cannot stop a racing status read in another process from taking the slot first; a gate alone leaves the head unadmitted until someone reads it |
+| Live behaviour check after merge (T022) | The admission change only runs on a host after `sb remote service migrate`, which the orchestrator owns | Migrating xspeed-dev from this branch would act on a shared live host without that authority |
 | Fresh dependencies per tick | The service's shared connection is used from many threads; a tick on it could interleave transactions | Reusing the cached service connection risks nested `BEGIN` errors under load |
 
-## Open question for the owner (not in scope)
+## Open question for the owner (not in scope; owner: repository owner, raised 2026-11-11)
 
 Every built-in execution profile has `cancelOnStall: false`. The 2026-11-10 slot-holders
 were live-but-silent, not process-gone, so this feature would not have freed them. Turning

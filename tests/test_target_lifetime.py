@@ -422,7 +422,9 @@ class HostStoreTests(unittest.TestCase):
         bad.write_text("{again")
         released = self.run_op("release", compose_project="sandbox-host-mockups-sandbox", force_owner=True)
         self.assertTrue(released["result"]["released"])
+        self.assertNotEqual(released["result"]["kept"], done["result"]["kept"])  # same second, both kept
         self.assertEqual((root / released["result"]["kept"]).read_text(), "{again")
+        self.assertEqual(kept.read_text(), "{not json")
         self.assertFalse(bad.exists())
 
     def test_host_store_parses_as_python_3_8(self):

@@ -758,13 +758,19 @@ class Store:
     def set_aside(self, compose_project, now):
         """Keep an invalid record's bytes under a name ``load`` ignores; return that name."""
         source = self.path(compose_project)
-        kept = source.with_name("%s.invalid-%d" % (source.name, int(now)))
-        try:
-            os.replace(str(source), str(kept))
-        except FileNotFoundError:
-            return None
-        self._sync_dir()
-        return kept.name
+        base = "%s.invalid-%d" % (source.name, int(now))
+        for attempt in range(1000):
+            kept = source.with_name(base if attempt == 0 else "%s-%d" % (base, attempt))
+            try:
+                os.link(str(source), str(kept))  # never replaces an earlier kept file
+            except FileExistsError:
+                continue
+            except FileNotFoundError:
+                return None
+            os.unlink(str(source))
+            self._sync_dir()
+            return kept.name
+        raise StoreRefusal(REQUEST_INVALID, "too many kept copies of %s" % source.name)
 
     def audit(self, op, compose_project, caller, now, **detail):
         line = {"op": op, "compose_project": compose_project, "at": to_rfc3339(now),

@@ -6,6 +6,8 @@ Placeholders only: example.test, 203.0.113.x (public), 100.64.0.x (tailnet).
 from __future__ import annotations
 
 import datetime as dt
+import errno
+import hashlib
 import io
 import json
 import os
@@ -29,7 +31,8 @@ if str(REPO) not in sys.path:
 from sandbox.hosting import front_door  # noqa: E402
 from sandbox.hosting.front_door import FrontDoorError  # noqa: E402
 from sandbox.hosting.tailnet_names import models as m  # noqa: E402
-from sandbox.hosting.tailnet_names import render, service, state, verify  # noqa: E402
+from sandbox.hosting.tailnet_names import broker as broker_mod  # noqa: E402
+from sandbox.hosting.tailnet_names import render, service, state, verify, x509  # noqa: E402
 from sandbox.hosting.tailnet_names.broker import Broker  # noqa: E402
 from sandbox.secrets import SecretBrokerError  # noqa: E402
 
@@ -163,6 +166,19 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"ssl_certificate_key /etc/nginx/sandbox-tailnet/{FQDN}/privkey.pem;", text)
         self.assertEqual(text.count(f'if ($host != "{FQDN}") {{ return 444; }}'), 2)
 
+    def test_the_block_serves_a_marker_derived_from_its_own_text(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "tn_remote", REPO / "sandbox/hosting/tailnet_names/_remote_main.py")
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        text = self.block()
+        self.assertEqual(text.count(render.MARKER_PATH), 1)
+        marker = remote._marker_of(text.encode())
+        self.assertIsNotNone(marker)
+        self.assertNotEqual(marker, remote._marker_of(self.block(http2=False).encode()))
+        self.assertIsNone(remote._marker_of(text.replace("8025", "8026").encode()))
+
     def test_old_nginx_uses_listen_http2(self):
         text = self.block(http2=False)
         self.assertIn(f"listen {TAILNET_IP}:443 ssl http2;", text)
@@ -185,59 +201,119 @@ class RenderTests(unittest.TestCase):
                                 m.Upstream("127.0.0.1", 1), TAILNET_IP, http2_directive=True)
 
 
-class FakeSecretService:
-    def __init__(self, *, output="", exit_code=0, error=None, on_run=None):
-        self.calls = []
-        self.output, self.exit_code, self.error, self.on_run = output, exit_code, error, on_run
+class ModelHardeningTests(unittest.TestCase):
+    def test_config_takes_a_lego_digest_and_refuses_unknown_keys(self):
+        digest = "0f" * 32
+        self.assertEqual(config(lego_sha256=digest).lego_sha256, digest)
+        for bad in ({"lego_sha256": "0F" * 32}, {"lego_sha256": "abc"}, {"token": "x"},
+                    {"cloudflare_api_token": MARKER}):
+            with self.subTest(bad=bad), self.assertRaises(m.TailnetNameError) as caught:
+                config(**bad)
+            self.assertEqual(caught.exception.code, m.CONFIG_INVALID)
+            self.assertNotIn(MARKER, str(caught.exception))
 
-    def run(self, source, key, argv, *, destination, timeout_seconds=300,
-            max_output_bytes=1_048_576, surface="cli"):
-        self.calls.append({"source": source, "key": key, "argv": list(argv),
-                           "destination": destination, "timeout": timeout_seconds,
-                           "surface": surface})
-        if self.error:
-            raise self.error
-        if self.on_run:
-            self.on_run(list(argv))
-        return {"ok": True, "operation": "run",
-                "result": {"exit_code": self.exit_code, "termination": "exited",
-                           "output": self.output, "truncated": False}}
+    def test_record_parse_is_strict(self):
+        good = m.TailnetNameRecord(FQDN, "example.test", "127.0.0.1:8025", TAILNET_IP,
+                                   dns_record_id="c" * 32, lease_token="d" * 32).as_dict()
+        self.assertEqual(m.TailnetNameRecord.parse(good).lease_token, "d" * 32)
+        for key, value in (("fqdn", "app.other.test"), ("state", "gone"),
+                           ("upstream", "203.0.113.5:80"), ("tailnet_ip", PUBLIC_IP),
+                           ("dns_record_id", "../x"), ("lease_token", "short"),
+                           ("cert_not_after", "tomorrow"), ("steps", {"dns": 1})):
+            with self.subTest(key=key), self.assertRaises(m.TailnetNameError) as caught:
+                m.TailnetNameRecord.parse(dict(good, **{key: value}))
+            self.assertEqual(caught.exception.code, m.STATE_CORRUPT)
+
+    def test_inventory_row_carries_ownership_and_activation(self):
+        row = m.RemoteInventoryEntry.parse({"fqdn": FQDN, "block_present": True,
+                                            "block_managed": False, "dir_unsafe": True,
+                                            "activation": "written"})
+        self.assertEqual((row.block_managed, row.dir_unsafe, row.dir_present, row.activation),
+                         (False, True, True, "written"))
+
+
+# ---------------------------------------------------------------------------
+# Broker: fixed use profiles and a pinned lego (F2)
+# ---------------------------------------------------------------------------
+
+class FakeSecrets:
+    """Stands in for build_secret_service: records the profiles it is given."""
+
+    def __init__(self, *, output="", exit_code=0, error=None, on_run=None):
+        self.output, self.exit_code, self.error, self.on_run = output, exit_code, error, on_run
+        self.built: list[dict] = []
+        self.calls: list[dict] = []
+
+    def __call__(self, extra_profiles):
+        self.built.append(extra_profiles)
+        owner = self
+
+        class _Service:
+            def use_profile(self, name, *, surface):
+                profile = extra_profiles[name]
+                seen = {"name": name, "surface": surface, "profile": profile}
+                if name == "sandbox-tailnet-name-dns":
+                    path = Path(profile["argv"][3])
+                    seen["request"] = json.loads(path.read_text())
+                    seen["request_mode"] = stat.S_IMODE(path.stat().st_mode)
+                if name == "sandbox-tailnet-name-lego":
+                    seen["csr"] = Path(profile["argv"][profile["argv"].index("--csr") + 1]).read_text()
+                owner.calls.append(seen)
+                if owner.error:
+                    raise owner.error
+                if owner.on_run:
+                    owner.on_run(profile["argv"])
+                return {"ok": True, "operation": "use",
+                        "result": {"exit_code": owner.exit_code, "termination": "exited",
+                                   "output": owner.output, "truncated": False}}
+        return _Service()
+
+
+def pinned(path="/opt/lego"):
+    return lambda cfg: (path, "0f" * 32)
 
 
 class BrokerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "acme"
+        self.root = Path(self.tmp.name) / "tn" / "acme"
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_dns_runs_the_shipped_child_with_the_token_destination(self):
-        fake = FakeSecretService(output='noise\n{"result": "created", "record_id": "%s"}\n' % ("a" * 32))
-        result = Broker(lambda: fake, acme_root=self.root).dns(
-            config(), {"op": "ensure", "zone": "example.test", "name": FQDN, "ip": TAILNET_IP})
+    def broker(self, fake, pin=None):
+        return Broker(fake, acme_root=self.root, pin=pin or pinned())
+
+    def test_dns_runs_the_fixed_profile_on_a_private_request_file(self):
+        fake = FakeSecrets(output='noise\n{"result": "created", "record_id": "%s"}\n' % ("a" * 32))
+        request = {"op": "ensure", "zone": "example.test", "name": FQDN, "ip": TAILNET_IP}
+        result = self.broker(fake).dns(config(), request)
         self.assertEqual(result.result, "created")
-        call = fake.calls[0]
-        self.assertEqual((call["source"], call["key"], call["destination"], call["surface"]),
-                         ("personal", "EXAMPLE_CF_API_TOKEN", m.DNS_TOKEN_DESTINATION, "cli"))
-        self.assertEqual(call["argv"][:2], [sys.executable, "-I"])
-        self.assertTrue(call["argv"][2].endswith("tailnet_names/cloudflare_child.py"))
-        self.assertEqual(json.loads(call["argv"][3])["name"], FQDN)
+        [call] = fake.calls
+        profile = call["profile"]
+        self.assertEqual((call["name"], call["surface"]), (broker_mod.DNS_PROFILE, "cli"))
+        self.assertEqual((profile["source"], profile["key"], profile["destination"], profile["mcp"]),
+                         ("personal", "EXAMPLE_CF_API_TOKEN", m.DNS_TOKEN_DESTINATION, False))
+        self.assertEqual(profile["argv"][:2], [sys.executable, "-I"])
+        self.assertTrue(profile["argv"][2].endswith("tailnet_names/cloudflare_child.py"))
+        self.assertEqual((call["request"], call["request_mode"]), (request, 0o600))
+        self.assertFalse(Path(profile["argv"][3]).exists(), "the request file is removed")
+        self.assertEqual(len(profile["argv"]), 4, "per-call data never rides in argv")
 
     def test_broker_refusal_maps_without_detail_leak(self):
-        fake = FakeSecretService(error=SecretBrokerError("key_missing", "secret key does not exist"))
+        fake = FakeSecrets(error=SecretBrokerError("key_missing", "secret key does not exist"))
         with self.assertRaises(m.TailnetNameError) as caught:
-            Broker(lambda: fake, acme_root=self.root).dns(config(), {"op": "inspect"})
+            self.broker(fake).dns(config(), {"op": "inspect"})
         self.assertEqual(caught.exception.code, m.SECRET_UNAVAILABLE)
         self.assertIn("key_missing", str(caught.exception))
 
     def test_dns_child_without_result_is_a_dns_failure(self):
-        fake = FakeSecretService(output="Traceback\n", exit_code=1)
+        fake = FakeSecrets(output="Traceback\n", exit_code=1)
         with self.assertRaises(m.TailnetNameError) as caught:
-            Broker(lambda: fake, acme_root=self.root).dns(config(), {"op": "inspect"})
+            self.broker(fake).dns(config(), {"op": "inspect"})
         self.assertEqual(caught.exception.code, m.DNS_FAILED)
 
-    def test_issue_runs_lego_in_csr_mode_and_reads_the_bundle(self):
+    def test_issue_runs_the_pinned_lego_with_a_fixed_argv(self):
         stale = self.root / "certificates" / (FQDN + ".crt")
         stale.parent.mkdir(parents=True)
         stale.write_text("stale")
@@ -245,49 +321,196 @@ class BrokerTests(unittest.TestCase):
         def on_run(argv):
             self.assertFalse(stale.exists(), "old output must be cleared before lego runs")
             stale.write_text("-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----\n")
-        fake = FakeSecretService(on_run=on_run)
-        chain = Broker(lambda: fake, acme_root=self.root).issue(
-            config(), FQDN, "-----BEGIN CERTIFICATE REQUEST-----\nx\n", lego="/opt/lego")
+        fake = FakeSecrets(on_run=on_run)
+        csr = "-----BEGIN CERTIFICATE REQUEST-----\nx\n"
+        chain = self.broker(fake).issue(config(), FQDN, csr, "/opt/lego")
         self.assertIn("new", chain)
-        argv = fake.calls[0]["argv"]
-        csr = str(self.root / "csr" / (FQDN + ".csr"))
-        self.assertEqual(argv, ["/opt/lego", "run", "--accept-tos", "--email", "ops@example.test",
-                                "--server", m.ACME_SERVERS["letsencrypt"], "--dns", "cloudflare",
-                                "--csr", csr, "--path", str(self.root)])
+        [call] = fake.calls
+        self.assertEqual(call["name"], broker_mod.LEGO_PROFILE)
+        self.assertEqual(call["profile"]["argv"], [
+            "/opt/lego", "run", "--accept-tos", "--email", "ops@example.test",
+            "--server", m.ACME_SERVERS["letsencrypt"], "--dns", "cloudflare",
+            "--csr", str(self.root / "csr" / "request.csr"), "--path", str(self.root)])
+        self.assertEqual(call["csr"], csr)
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
-        self.assertEqual(fake.calls[0]["destination"], m.DNS_TOKEN_DESTINATION)
+        self.assertEqual(self.broker(fake).cached_chain(FQDN), chain)
+
+    def test_issue_refuses_when_the_pin_changed(self):
+        fake = FakeSecrets()
+        with self.assertRaises(m.TailnetNameError) as caught:
+            self.broker(fake, pin=pinned("/opt/other")).issue(config(), FQDN, "csr", "/opt/lego")
+        self.assertEqual(caught.exception.code, m.ACME_CLIENT_UNTRUSTED)
+        self.assertEqual(fake.calls, [])
 
     def test_issue_failure_reports_a_bounded_tail(self):
         output = "\n".join(f"line {i}" for i in range(50))
-        fake = FakeSecretService(output=output, exit_code=1)
+        fake = FakeSecrets(output=output, exit_code=1)
         with self.assertRaises(m.TailnetNameError) as caught:
-            Broker(lambda: fake, acme_root=self.root).issue(config(), FQDN, "csr", lego="/opt/lego")
+            self.broker(fake).issue(config(), FQDN, "csr", "/opt/lego")
         self.assertEqual(caught.exception.code, m.CERTIFICATE_FAILED)
         self.assertIn("line 49", str(caught.exception))
         self.assertNotIn("line 40", str(caught.exception))
 
-    def test_find_lego(self):
-        broker = Broker(lambda: None, acme_root=self.root)
-        self.assertIsNone(broker.find_lego(config(lego="/nonexistent/lego")))
-        tool = Path(self.tmp.name) / "lego"
-        tool.write_text("#!/bin/sh\n")
-        tool.chmod(0o755)
-        self.assertEqual(broker.find_lego(config(lego=str(tool))), str(tool))
+
+class LegoPinTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name) / "bin"
+        self.dir.mkdir()
+        self.tool = self.dir / "lego"
+        self.tool.write_text("#!/bin/sh\necho 'lego version 5.1.0 linux/amd64'\n")
+        self.tool.chmod(0o755)
+        self.digest = hashlib.sha256(self.tool.read_bytes()).hexdigest()
+        self.probes: list[dict] = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def runner(self, version="lego version 5.1.0 linux/amd64", rc=0):
+        def run(argv, **kwargs):
+            self.probes.append({"argv": argv, **kwargs})
+            return SimpleNamespace(returncode=rc, stdout=version + "\n", stderr="")
+        return run
+
+    def pin(self, runner=None, **cfg):
+        with mock.patch.object(broker_mod, "_check_ownership"):
+            return broker_mod.pin_lego(config(lego=str(self.tool), **cfg),
+                                       runner=runner or self.runner())
+
+    def test_missing_lego_refuses(self):
+        with self.assertRaises(m.TailnetNameError) as caught:
+            broker_mod.pin_lego(config(lego="/nonexistent/lego"))
+        self.assertEqual(caught.exception.code, m.ACME_CLIENT_MISSING)
+
+    def test_an_arbitrary_executable_is_not_trusted_without_a_digest(self):
+        with self.assertRaises(m.TailnetNameError) as caught:
+            self.pin()
+        self.assertEqual(caught.exception.code, m.ACME_CLIENT_UNTRUSTED)
+        self.assertEqual(self.probes, [], "nothing untrusted is executed")
+
+    def test_a_recorded_digest_trusts_it_and_a_mismatch_does_not(self):
+        real, digest = self.pin(lego_sha256=self.digest)
+        self.assertEqual((real, digest), (os.path.realpath(self.tool), self.digest))
+        [probe] = self.probes
+        self.assertEqual(probe["argv"], [real, "--version"])
+        self.assertEqual(probe["env"], {"PATH": "/usr/bin:/bin"}, "the probe never sees the token")
+        self.assertEqual(probe["stdin"], subprocess.DEVNULL)
+        with self.assertRaises(m.TailnetNameError) as caught:
+            self.pin(lego_sha256="0f" * 32)
+        self.assertEqual(caught.exception.code, m.ACME_CLIENT_UNTRUSTED)
+
+    def test_the_version_probe_must_report_lego_5(self):
+        for runner in (self.runner("lego version 4.21.0"), self.runner("hello"),
+                       self.runner(rc=1)):
+            with self.subTest(), self.assertRaises(m.TailnetNameError) as caught:
+                self.pin(runner=runner, lego_sha256=self.digest)
+            self.assertEqual(caught.exception.code, m.ACME_CLIENT_UNTRUSTED)
+
+    def test_a_symlink_is_resolved_before_any_check(self):
+        link = Path(self.tmp.name) / "lego-link"
+        link.symlink_to(self.tool)
+        with mock.patch.object(broker_mod, "_check_ownership") as checked:
+            broker_mod.pin_lego(config(lego=str(link), lego_sha256=self.digest),
+                                runner=self.runner())
+        self.assertEqual(checked.call_args[0][0], Path(os.path.realpath(self.tool)))
+
+    def test_ownership_refuses_writable_or_foreign_paths(self):
+        os.chmod(self.dir, 0o777)
+        with self.assertRaises(m.TailnetNameError) as caught:
+            broker_mod._check_ownership(self.tool, os.getuid())
+        self.assertEqual(caught.exception.code, m.ACME_CLIENT_UNTRUSTED)
+        os.chmod(self.dir, 0o755)
+        if os.getuid() != 0:
+            with self.assertRaises(m.TailnetNameError):
+                broker_mod._check_ownership(self.tool, os.getuid() + 1)
+
+
+class SecretFactoryTests(unittest.TestCase):
+    def test_profiles_are_injected_before_the_service_is_built(self):
+        from sandbox.commands import host_tailnet_name as cli
+        descriptor = {"secrets": {"sources": {"personal": {"type": "file"}},
+                                  "useProfiles": {"deploy": {"source": "personal"}}}}
+        built = {}
+
+        def build(**kwargs):
+            built.update(kwargs)
+            return "service"
+        with mock.patch("sandbox.secrets.service.load_secret_project_descriptor",
+                        return_value=descriptor), \
+                mock.patch("sandbox.secrets.context.build_secret_service", side_effect=build):
+            factory = cli.secret_service_factory("/tmp")
+            self.assertEqual(factory({broker_mod.DNS_PROFILE: {"argv": ["x"]}}), "service")
+            profiles = built["config"]["secrets"]["useProfiles"]
+            self.assertEqual(set(profiles), {"deploy", broker_mod.DNS_PROFILE})
+            self.assertEqual(set(descriptor["secrets"]["useProfiles"]), {"deploy"},
+                             "the project's descriptor is not mutated")
+            descriptor["secrets"]["useProfiles"][broker_mod.LEGO_PROFILE] = {}
+            with self.assertRaises(m.TailnetNameError) as caught:
+                factory({broker_mod.LEGO_PROFILE: {"argv": ["x"]}})
+            self.assertEqual(caught.exception.code, m.SECRET_UNAVAILABLE)
 
 
 class StateTests(unittest.TestCase):
     def test_put_load_drop_and_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = state.StateStore(Path(tmp), "r1")
+            self.assertEqual(store.load(), {})
             record = m.TailnetNameRecord(FQDN, "example.test", "127.0.0.1:8025", TAILNET_IP)
             store.put(record)
             self.assertEqual(store.load()[FQDN].upstream, "127.0.0.1:8025")
             path = Path(tmp) / "r1.json"
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            path.write_text(json.dumps({"version": 1, "names": {"bad": {"fqdn": 3}, FQDN: record.as_dict()}}))
-            self.assertEqual(list(store.load()), [FQDN])
             store.drop(FQDN)
             self.assertEqual(store.load(), {})
+
+    def test_corrupt_state_fails_closed(self):
+        record = m.TailnetNameRecord(FQDN, "example.test", "127.0.0.1:8025", TAILNET_IP).as_dict()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = state.StateStore(Path(tmp), "r1")
+            path = Path(tmp) / "r1.json"
+            for content in ("not json", json.dumps({"version": 2, "names": {}}),
+                            json.dumps({"version": 1, "names": []}),
+                            json.dumps({"version": 1, "names": {"bad": {"fqdn": 3}, FQDN: record}}),
+                            json.dumps({"version": 1, "names": {"other.example.test": record}})):
+                with self.subTest(content=content[:40]):
+                    path.write_text(content)
+                    with self.assertRaises(m.TailnetNameError) as caught:
+                        store.load()
+                    self.assertEqual(caught.exception.code, m.STATE_CORRUPT)
+            # Re-review 12 NEW-2: undecodable bytes are corrupt state, not a crash.
+            path.write_bytes(b'{"version": 1, "names": {"\xff": 1}}')
+            with self.assertRaises(m.TailnetNameError) as caught:
+                store.load()
+            self.assertEqual(caught.exception.code, m.STATE_CORRUPT)
+            self.assertNotIn("\\xff", caught.exception.detail)
+
+    def test_a_write_is_durable_in_its_directory(self):
+        """Re-review 11 NEW-2: temp fsync, then rename, then directory fsync."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = state.StateStore(Path(tmp) / "tailnet-names", "box")
+            store._ensure_root()
+            root_ino = os.stat(store.root).st_ino
+            events = []
+            real_fsync, real_replace = os.fsync, os.replace
+
+            def fsync(fd):
+                events.append(("fsync", os.fstat(fd).st_ino))
+                return real_fsync(fd)
+
+            def replace(src, dst, **kwargs):
+                events.append(("replace", os.path.basename(dst)))
+                return real_replace(src, dst, **kwargs)
+            with mock.patch.object(state.os, "fsync", fsync), \
+                    mock.patch.object(state.os, "replace", replace):
+                store._write({})
+            renamed = events.index(("replace", "box.json"))
+            dirs = {root_ino, os.stat(tmp).st_ino}
+            self.assertTrue(any(kind == "fsync" and ino not in dirs
+                                for kind, ino in events[:renamed]),
+                            "the temp file is fsynced before the rename")
+            self.assertIn(("fsync", root_ino), events[renamed:])
+            self.assertIn(("fsync", os.stat(tmp).st_ino), events[:renamed],
+                          "the state directory's own entry is synced too")
 
     def test_lock_is_exclusive_and_non_blocking(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -305,8 +528,35 @@ class StateTests(unittest.TestCase):
             state.StateStore(Path(tmp), "../x")
 
 
+# ---------------------------------------------------------------------------
+# Certificates and probes (F1)
+# ---------------------------------------------------------------------------
+
 def _openssl(*args, cwd):
-    subprocess.run(["openssl", *args], cwd=cwd, check=True, capture_output=True, timeout=60)
+    from tests.subprocess_support import run_test_process
+    res = run_test_process(["openssl", *args], cwd=cwd, capture_output=True, timeout=60)
+    if res.returncode != 0:
+        raise AssertionError(res.stderr)
+
+
+_CERTS: dict = {}
+
+
+def make_cert(name: str, *, san: str | None = None, days: int = 90) -> tuple[str, str, str]:
+    """(cert path, key path, leaf sha256) of a self-signed certificate."""
+    key = (name, san, days)
+    if key not in _CERTS:
+        d = tempfile.mkdtemp()
+        args = ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                "-nodes", "-keyout", "k.pem", "-out", "c.pem", "-days", str(days),
+                "-subj", "/CN=" + name]
+        if san:
+            args += ["-addext", "subjectAltName=" + san]
+        _openssl(*args, cwd=d)
+        cert = os.path.join(d, "c.pem")
+        der = ssl.PEM_cert_to_DER_cert(Path(cert).read_text())
+        _CERTS[key] = (cert, os.path.join(d, "k.pem"), hashlib.sha256(der).hexdigest())
+    return _CERTS[key]
 
 
 class _TlsServer:
@@ -337,25 +587,39 @@ class _TlsServer:
         self.thread.join(5)
 
 
+class X509Tests(unittest.TestCase):
+    def test_parse_leaf_reads_san_cn_and_expiry(self):
+        cert, _key, _sha = make_cert(FQDN, san="DNS:%s,DNS:*.lab.example.test" % FQDN, days=30)
+        leaf = x509.parse_leaf(x509.first_der(Path(cert).read_text()))
+        self.assertEqual(set(leaf.names), {FQDN, "*.lab.example.test"})
+        days = (leaf.not_after - dt.datetime.now(dt.timezone.utc)).days
+        self.assertIn(days, (28, 29, 30))
+        cn_only, _k, _s = make_cert("cn.example.test")
+        self.assertIn("cn.example.test",
+                      x509.parse_leaf(x509.first_der(Path(cn_only).read_text())).names)
+        for bad in (b"", b"\x30\x03\x02\x01", b"garbage"):
+            with self.assertRaises(ValueError):
+                x509.parse_leaf(bad)
+
+    def test_dns_sans_take_precedence_over_the_subject_cn(self):
+        """Re-review R5: CN=<fqdn> with SANs for other names is not valid for <fqdn>."""
+        cert, _key, _sha = make_cert(FQDN, san="DNS:other.example.test")
+        leaf = x509.parse_leaf(x509.first_der(Path(cert).read_text()))
+        self.assertEqual(leaf.names, ("other.example.test",))
+        self.assertFalse(x509.covers(leaf.names, FQDN))
+
+    def test_covers_exact_and_single_label_wildcards(self):
+        self.assertTrue(x509.covers((FQDN,), FQDN))
+        self.assertTrue(x509.covers(("*.example.test",), FQDN))
+        self.assertFalse(x509.covers(("*.example.test",), "a.b.example.test"))
+        self.assertFalse(x509.covers(("*.example.test",), "example.test"))
+        self.assertFalse(x509.covers(("other.example.test",), FQDN))
+        self.assertTrue(x509.covers(("APP.Example.Test",), FQDN))
+
+
 class VerifyTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
-        d = cls.tmp.name
-        _openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-                 "-nodes", "-keyout", "k.pem", "-out", "c.pem", "-days", "1", "-subj", "/CN=" + FQDN,
-                 cwd=d)
-        cls.cert, cls.key = os.path.join(d, "c.pem"), os.path.join(d, "k.pem")
-        der = ssl.PEM_cert_to_DER_cert(Path(cls.cert).read_text())
-        import hashlib
-        cls.sha = hashlib.sha256(der).hexdigest()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tmp.cleanup()
-
-    def probe(self, status=200, send_request=True):
-        server = _TlsServer(self.cert, self.key, status)
+    def probe(self, cert, status=200, send_request=True):
+        server = _TlsServer(cert[0], cert[1], status)
         try:
             return verify.probe("127.0.0.1", FQDN, port=server.port, timeout=5,
                                 send_request=send_request)
@@ -363,105 +627,221 @@ class VerifyTests(unittest.TestCase):
             server.close()
 
     def test_tailnet_probe_matches_fingerprint_and_status(self):
-        result = self.probe()
-        self.assertEqual((result.handshake, result.leaf_sha256, result.http_status),
-                         (True, self.sha, 200))
-        self.assertEqual(verify.tailnet_outcome(result, self.sha).status, "done")
+        ours = make_cert(FQDN, san="DNS:" + FQDN)
+        result = self.probe(ours)
+        self.assertEqual((result.category, result.leaf_sha256, result.http_status),
+                         ("handshake", ours[2], 200))
+        self.assertEqual(result.leaf_names, (FQDN,))
+        self.assertEqual(verify.tailnet_outcome(result, ours[2]).status, "done")
         self.assertEqual(verify.tailnet_outcome(result, "0" * 64).code, m.TAILNET_PROBE_FAILED)
-        bad = self.probe(status=502)
-        self.assertEqual(verify.tailnet_outcome(bad, self.sha).code, m.TAILNET_PROBE_FAILED)
+        bad = self.probe(ours, status=502)
+        self.assertEqual(verify.tailnet_outcome(bad, ours[2]).code, m.TAILNET_PROBE_FAILED)
 
-    def test_public_probe(self):
-        ours = self.probe(send_request=False)
-        outcome, exposed = verify.public_outcome(ours, self.sha)
-        self.assertTrue(exposed)
-        self.assertEqual(outcome.code, m.PUBLIC_EXPOSED)
-        outcome, exposed = verify.public_outcome(ours, "0" * 64)
-        self.assertFalse(exposed)
-        self.assertEqual(outcome.status, "done")
+    def test_public_probe_fails_on_any_certificate_valid_for_the_name(self):
+        ours = make_cert(FQDN, san="DNS:" + FQDN)
+        verdict = verify.public_outcome(self.probe(ours, send_request=False), ours[2], FQDN)
+        self.assertEqual((verdict.outcome.code, verdict.exposed, verdict.ours),
+                         (m.PUBLIC_EXPOSED, True, True))
+        for other in (make_cert("x.example.test", san="DNS:" + FQDN),
+                      make_cert("w.example.test", san="DNS:*.example.test")):
+            with self.subTest(other=other[2][:8]):
+                verdict = verify.public_outcome(self.probe(other, send_request=False), ours[2],
+                                                FQDN)
+                self.assertEqual((verdict.outcome.code, verdict.exposed, verdict.ours),
+                                 (m.PUBLIC_EXPOSED, True, False))
+        for unrelated in (make_cert("other.example.test", san="DNS:other.example.test"),
+                          make_cert(FQDN, san="DNS:other.example.test")):
+            verdict = verify.public_outcome(self.probe(unrelated, send_request=False), ours[2],
+                                            FQDN)
+            self.assertEqual((verdict.outcome.status, verdict.exposed), ("done", False))
+
+    def test_a_refused_connection_passes_and_a_timeout_does_not(self):
         closed = socket.socket()
         closed.bind(("127.0.0.1", 0))
         port = closed.getsockname()[1]
         closed.close()
         refused = verify.probe("127.0.0.1", FQDN, port=port, timeout=2, send_request=False)
-        self.assertFalse(refused.connected)
-        outcome, exposed = verify.public_outcome(refused, self.sha)
-        self.assertEqual((outcome.status, exposed), ("done", False))
+        self.assertEqual(refused.category, "refused")
+        verdict = verify.public_outcome(refused, "0" * 64, FQDN)
+        self.assertEqual((verdict.outcome.status, verdict.exposed), ("done", False))
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(1)  # accepts TCP, never answers TLS
+        try:
+            stalled = verify.probe("127.0.0.1", FQDN, port=silent.getsockname()[1], timeout=1,
+                                   send_request=False)
+        finally:
+            silent.close()
+        self.assertEqual(stalled.category, "timeout")
+        verdict = verify.public_outcome(stalled, "0" * 64, FQDN)
+        self.assertEqual((verdict.outcome.status, verdict.outcome.code),
+                         ("failed", m.PUBLIC_PROBE_INCONCLUSIVE))
+
+    def test_categories_are_distinct_and_only_refusals_pass(self):
+        self.assertEqual(verify._connect_category(ConnectionRefusedError()), "refused")
+        self.assertEqual(verify._connect_category(ConnectionResetError()), "reset")
+        self.assertEqual(verify._connect_category(socket.timeout()), "timeout")
+        self.assertEqual(verify._connect_category(socket.gaierror()), "dns")
+        self.assertEqual(verify._connect_category(OSError(errno.EHOSTUNREACH, "x")), "unreachable")
+        self.assertEqual(verify._connect_category(OSError(errno.EACCES, "x")), "error")
+        self.assertEqual(verify._tls_category(ssl.SSLZeroReturnError()), "closed")
+        alert = ssl.SSLError(1, "[SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error")
+        self.assertEqual(verify._tls_category(alert), "tls_alert")
+        self.assertEqual(verify._tls_category(ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER]")),
+                         "tls_error")
+        for category in ("refused", "reset", "closed", "tls_alert"):
+            verdict = verify.public_outcome(verify.ProbeResult(category), None, FQDN)
+            self.assertEqual(verdict.outcome.status, "done", category)
+        for category in ("timeout", "unreachable", "dns", "tls_error", "error"):
+            verdict = verify.public_outcome(verify.ProbeResult(category), None, FQDN)
+            self.assertEqual((verdict.outcome.status, verdict.outcome.code),
+                             ("failed", m.PUBLIC_PROBE_INCONCLUSIVE), category)
+        undecodable = verify.ProbeResult("handshake", "ee" * 32, None)
+        self.assertEqual(verify.public_outcome(undecodable, "ab" * 32, FQDN).outcome.code,
+                         m.PUBLIC_PROBE_INCONCLUSIVE)
 
 
 # ---------------------------------------------------------------------------
 # Service flows over fakes
 # ---------------------------------------------------------------------------
 
-LEAF_SHA = "ab" * 32
 FUTURE = "2027-02-08T00:00:00Z"
 SOON = "2026-11-20T00:00:00Z"
+CHAIN = "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n"
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 class FakeRemote:
-    """The remote program, nginx route transaction and preflight, in memory."""
+    """The remote program (leases, ownership, journal) in memory."""
 
     def __init__(self):
         self.blocks: dict[str, str] = {}
-        self.certs: dict[str, dict] = {}
+        self.chains: dict[str, dict] = {}
         self.keys: set[str] = set()
+        self.activation: dict[str, str] = {}
+        self.leases: dict[str, str] = {}
+        self.foreign_block: set[str] = set()
+        self.foreign_dir: set[str] = set()
+        self.unsafe_dir: set[str] = set()
+        self.mismatch: set[str] = set()
         self.locks: list[str] = []
         self.bound = True
-        self.calls: list[tuple] = []
-        self.reject_nginx = False
-        self.install_error: str | None = None
+        self.calls: list[tuple[str, dict]] = []
+        self.reloads = 0
+        self.commit_error: str | None = None
+        self.remove_error: str | None = None
         self.preflight_error: FrontDoorError | None = None
 
-    # remote program
+    def actions(self, *names):
+        return [action for action, _ in self.calls if not names or action in names]
+
+    def payloads(self, action):
+        return [payload for name, payload in self.calls if name == action]
+
     def call(self, entry, action, payload):
-        self.calls.append(("program", action, json.dumps(payload, sort_keys=True)))
+        self.calls.append((action, json.loads(json.dumps(payload))))
+        fqdn = payload.get("fqdn")
         if action == "inspect":
-            names = [payload["fqdn"]] if payload.get("fqdn") else sorted(
-                {n[len("tailnet-"):] for n in self.blocks} | set(self.certs))
+            names = [fqdn] if fqdn else sorted(set(self.blocks) | set(self.keys)
+                                               | self.foreign_block | self.foreign_dir)
             return {"ok": True, "tailnet_ip_bound": self.bound, "locks_held": list(self.locks),
                     "inventory": [self._row(n) for n in names]}
+        if action == "reserve":
+            holder = self.leases.get(fqdn)
+            if holder and holder != payload["token"]:
+                return {"ok": False, "code": "busy", "detail": "another run holds this name"}
+            self.leases[fqdn] = payload["token"]
+            return {"ok": True}
+        if action == "release":
+            if self.leases.get(fqdn) == payload["token"]:
+                del self.leases[fqdn]
+            return {"ok": True}
+        if self.leases.get(fqdn) != payload.get("token"):
+            return {"ok": False, "code": "lease_lost"}
+        if action == "extend":
+            return {"ok": True}
+        if action == "settle":
+            assert payload.get("jobs_probe") == {"home": "/home/u/sandbox"}, payload
+            if self.activation.get(fqdn) not in (None, "loaded"):
+                # The interrupted candidate is restored away; nginx -t passes again.
+                self.activation[fqdn] = "loaded"
+                self.blocks.pop(fqdn, None)
+                self.preflight_error = None
+                return {"ok": True, "settled": "restored"}
+            return {"ok": True, "settled": None}
         if action == "csr":
-            self.keys.add(payload["fqdn"])
+            if fqdn in self.foreign_dir:
+                return {"ok": False, "code": "unmanaged"}
+            self.keys.add(fqdn)
             return {"ok": True, "csr": "-----BEGIN CERTIFICATE REQUEST-----\n"}
-        if action == "install":
-            if self.install_error:
-                return {"ok": False, "code": self.install_error, "detail": "nginx -t failed"}
-            self.certs[payload["fqdn"]] = {"not_after": FUTURE, "sha": LEAF_SHA}
-            return {"ok": True, "changed": True, "not_after": FUTURE, "sha256": LEAF_SHA}
-        if action == "remove_cert":
-            self.certs.pop(payload["fqdn"], None)
-            self.keys.discard(payload["fqdn"])
-            return {"ok": True, "removed": True}
+        if action == "commit":
+            assert payload.get("jobs_probe") == {"home": "/home/u/sandbox"}, payload
+            if self.commit_error:
+                return {"ok": False, "code": self.commit_error, "detail": "refused"}
+            chain = payload.get("chain") or (self.chains.get(fqdn) or {}).get("pem")
+            if chain in self.mismatch:
+                return {"ok": False, "code": "certificate_mismatch"}
+            block = payload.get("block") or self.blocks.get(fqdn)
+            same = (self.activation.get(fqdn) == "loaded" and self.blocks.get(fqdn) == block
+                    and (self.chains.get(fqdn) or {}).get("pem") == chain)
+            if not same:
+                self.blocks[fqdn] = block
+                if payload.get("chain"):
+                    self.chains[fqdn] = {"pem": chain, "not_after": FUTURE, "sha": sha(chain)}
+                self.activation[fqdn] = "loaded"
+                self.reloads += 1
+            current = self.chains[fqdn]
+            return {"ok": True, "changed": not same, "settled": None,
+                    "not_after": current["not_after"], "sha256": current["sha"],
+                    "generation": self.generation(fqdn)}
+        if action == "remove":
+            if self.remove_error:
+                return {"ok": False, "code": self.remove_error}
+            if fqdn in self.foreign_block or fqdn in self.foreign_dir:
+                return {"ok": False, "code": "unmanaged"}
+            removed = self.blocks.pop(fqdn, None) is not None
+            if removed:
+                self.reloads += 1
+            if payload.get("keep_directory"):
+                return {"ok": True, "block_removed": removed, "directory_removed": False}
+            had_dir = fqdn in self.keys
+            self.keys.discard(fqdn)
+            self.chains.pop(fqdn, None)
+            self.activation.pop(fqdn, None)
+            return {"ok": True, "block_removed": removed, "directory_removed": had_dir}
         raise AssertionError(action)
 
+    def generation(self, fqdn):
+        return sha((self.blocks.get(fqdn) or "") + "\0" + ((self.chains.get(fqdn) or {}).get("pem") or ""))
+
+    def served(self, fqdn):
+        return (self.chains.get(fqdn) or {}).get("sha") if fqdn in self.blocks else None
+
     def _row(self, fqdn):
-        block = self.blocks.get("tailnet-" + fqdn)
-        cert = self.certs.get(fqdn)
-        return {"fqdn": fqdn, "block_present": block is not None,
-                "header": render.parse_header(block) if block else None,
-                "cert_present": cert is not None, "key_present": fqdn in self.keys,
-                "cert_not_after": cert and cert["not_after"], "cert_sha256": cert and cert["sha"],
-                "cert_names": [fqdn] if cert else [], "key_matches": True if cert else None}
+        block = self.blocks.get(fqdn)
+        chain = self.chains.get(fqdn)
+        row = {"fqdn": fqdn, "block_present": block is not None or fqdn in self.foreign_block,
+               "block_managed": block is not None and fqdn not in self.foreign_block,
+               "header": render.parse_header(block) if block else None,
+               "dir_present": fqdn in self.keys or fqdn in self.foreign_dir,
+               "dir_managed": fqdn in self.keys and fqdn not in self.foreign_dir,
+               "dir_unsafe": fqdn in self.unsafe_dir,
+               "cert_present": chain is not None, "key_present": fqdn in self.keys,
+               "cert_not_after": chain and chain["not_after"], "cert_sha256": chain and chain["sha"],
+               "cert_names": [fqdn] if chain else [], "key_matches": True if chain else None,
+               "activation": self.activation.get(fqdn),
+               "generation": self.generation(fqdn) if self.activation.get(fqdn) == "loaded"
+               else None}
+        return row
 
     def preflight(self, entry, declared, own_file):
-        self.calls.append(("preflight", tuple(declared), own_file))
+        self.calls.append(("preflight", {"declared": list(declared), "own_file": own_file}))
         if self.preflight_error:
             raise self.preflight_error
         return {"version": [1, 26, 0], "realip": True}
-
-    def apply_route(self, entry, name, content):
-        self.calls.append(("apply_route", name, content))
-        if self.reject_nginx:
-            raise FrontDoorError("front_door_validate_failed", "nginx -t failed; restored")
-        if self.blocks.get(name) == content:
-            return {"state": "unchanged"}
-        self.blocks[name] = content
-        return {"state": "changed"}
-
-    def remove_route(self, entry, name):
-        self.calls.append(("remove_route", name))
-        self.blocks.pop(name, None)
-        return {"state": "removed"}
 
 
 class FakeDns:
@@ -490,7 +870,8 @@ class FakeDns:
             if row is None:
                 return m.DnsResult("absent")
             if row["id"] != request["record_id"] or row["content"] != request["ip"] or row["proxied"]:
-                return m.DnsResult("conflict", row["id"], row["content"], row["proxied"])
+                return m.DnsResult("conflict", row["id"], row["content"], row["proxied"],
+                                   code="record_changed")
             del self.records[request["name"]]
             return m.DnsResult("deleted", row["id"])
         raise AssertionError(op)
@@ -502,17 +883,22 @@ class ServiceTestCase(unittest.TestCase):
         self.remote = FakeRemote()
         self.dns = FakeDns()
         self.issued: list[tuple] = []
+        self.cached: str | None = None
         self.jobs_active = False
         self.jobs_error = False
-        self.public_leaf: str | None = None  # None: handshake refused
+        self.public: verify.ProbeResult | None = verify.ProbeResult("refused")
+        self.public_after_removal: verify.ProbeResult | None = None
         self.tailnet_status = 200
+        self.sleeps: list[float] = []
+        self.lego_error: m.TailnetNameError | None = None
+        self.tokens = iter(f"{i:032x}" for i in range(1, 1000))
         self.store = state.StateStore(Path(self.tmp.name), "r1")
         self.deps = service.Deps(
-            remote_call=self.remote.call, preflight=self.remote.preflight,
-            apply_route=self.remote.apply_route, remove_route=self.remote.remove_route,
-            dns=self.dns, issue=self._issue, find_lego=lambda cfg: "/opt/lego",
-            active_jobs=self._jobs, probe=self._probe, store=lambda remote: self.store,
-            now=lambda: NOW)
+            remote_call=self.remote.call, preflight=self.remote.preflight, dns=self.dns,
+            issue=self._issue, cached_chain=lambda fqdn: self.cached, find_lego=self._lego,
+            active_jobs=self._jobs, jobs_probe=lambda entry: {"home": "/home/u/sandbox"},
+            probe=self._probe, store=lambda remote: self.store, now=lambda: NOW,
+            new_token=lambda: next(self.tokens), sleep=self.sleeps.append)
         self.ctx = service.Context(config(), target())
         self.name = m.TailnetName(FQDN, "example.test")
         self.upstream = m.Upstream("127.0.0.1", 8025)
@@ -520,9 +906,14 @@ class ServiceTestCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def _lego(self, cfg):
+        if self.lego_error:
+            raise self.lego_error
+        return "/opt/lego"
+
     def _issue(self, cfg, fqdn, csr, lego):
         self.issued.append((fqdn, lego))
-        return "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----\n"
+        return CHAIN.replace("leaf", f"leaf{len(self.issued)}")
 
     def _jobs(self, remote):
         if self.jobs_error:
@@ -531,10 +922,15 @@ class ServiceTestCase(unittest.TestCase):
 
     def _probe(self, address, fqdn, *, send_request):
         if address == TAILNET_IP:
-            return verify.ProbeResult(True, True, LEAF_SHA, self.tailnet_status, None)
-        if self.public_leaf is None:
-            return verify.ProbeResult(True, False, None, None, "handshake refused")
-        return verify.ProbeResult(True, True, self.public_leaf, None, None)
+            return verify.ProbeResult("handshake", self.remote.served(fqdn), (fqdn,),
+                                      self.tailnet_status)
+        if self.public_after_removal is not None and self.remote.actions("remove"):
+            return self.public_after_removal
+        return self.public
+
+    def exposed(self, ours=True):
+        leaf = self.remote.served(FQDN) if ours else "ee" * 32
+        return verify.ProbeResult("handshake", leaf, (FQDN,))
 
     def add(self, **kw):
         return service.add(self.ctx, self.deps, self.name, self.upstream, **kw)
@@ -549,295 +945,566 @@ class AddTests(ServiceTestCase):
         self.assertTrue(result.ok, result.envelope())
         self.assertEqual(self.steps(result), [
             ("preflight", "done"), ("gate", "done"), ("dns", "done"), ("certificate", "done"),
-            ("install", "done"), ("gate", "done"), ("server_block", "done"),
-            ("verify_tailnet", "done"), ("verify_public", "done")])
+            ("activate", "done"), ("verify_tailnet", "done"), ("verify_public", "done")])
         self.assertEqual(self.dns.records[FQDN]["content"], TAILNET_IP)
         self.assertEqual(self.issued, [(FQDN, "/opt/lego")])
-        install = [c for c in self.remote.calls if c[:2] == ("program", "install")][0]
-        self.assertFalse(json.loads(install[2])["reload"], "a fresh name has no block to reload")
-        block = self.remote.blocks["tailnet-" + FQDN]
-        self.assertIn(f"listen {TAILNET_IP}:443 ssl;", block)
+        self.assertEqual(self.remote.actions("reserve", "csr", "commit", "release"),
+                         ["reserve", "csr", "commit", "release"])
+        self.assertIn(f"listen {TAILNET_IP}:443 ssl;", self.remote.blocks[FQDN])
         record = self.store.load()[FQDN]
-        self.assertEqual((record.state, record.dns_record_id, record.dns_adopted, record.cert_sha256),
-                         ("published", "c" * 32, False, LEAF_SHA))
-        preflight = [c for c in self.remote.calls if c[0] == "preflight"][0]
-        self.assertEqual(preflight[1:], ((FQDN,), "/etc/nginx/conf.d/sandbox-tailnet-" + FQDN + ".conf"))
+        self.assertEqual((record.state, record.upstream, record.dns_record_id, record.dns_adopted),
+                         ("published", "127.0.0.1:8025", "c" * 32, False))
+        self.assertEqual(record.cert_sha256, self.remote.served(FQDN))
+        self.assertEqual(record.lease_token, f"{1:032x}")
+        self.assertEqual(self.remote.leases, {}, "the lease is released")
 
-    def test_rerun_skips_every_step_and_writes_nothing(self):
-        self.assertTrue(self.add().ok)
-        self.remote.calls.clear()
-        self.dns.requests.clear()
-        self.issued.clear()
+    def test_rerun_skips_and_reuses_the_lease_token(self):
+        self.add()
+        reloads = self.remote.reloads
         result = self.add()
-        self.assertTrue(result.ok)
-        statuses = dict((s, st) for s, st in self.steps(result) if s != "gate")
-        self.assertEqual(statuses, {"preflight": "done", "dns": "skipped", "certificate": "skipped",
-                                    "install": "skipped", "server_block": "skipped",
-                                    "verify_tailnet": "done", "verify_public": "done"})
-        self.assertEqual(self.issued, [])
-        self.assertFalse([c for c in self.remote.calls if c[:2] in (("program", "csr"),
-                                                                     ("program", "install"))])
-        self.assertEqual([r["op"] for r in self.dns.requests], ["ensure"])
+        self.assertTrue(result.ok, result.envelope())
+        self.assertEqual(self.steps(result), [
+            ("preflight", "done"), ("gate", "done"), ("dns", "skipped"),
+            ("certificate", "skipped"), ("activate", "skipped"), ("verify_tailnet", "done"),
+            ("verify_public", "done")])
+        self.assertEqual(len(self.issued), 1)
+        self.assertEqual(self.remote.reloads, reloads)
+        tokens = {p["token"] for p in self.remote.payloads("reserve")}
+        self.assertEqual(tokens, {f"{1:032x}"})
+
+    def test_an_unproven_activation_is_reconciled_not_skipped(self):
+        """F8: a block on disk without a loaded journal is tested and reloaded."""
+        self.add()
+        reloads = self.remote.reloads
+        self.remote.activation[FQDN] = "written"
+        result = self.add()
+        self.assertTrue(result.ok, result.envelope())
+        self.assertIn(("activate", "done"), self.steps(result))
+        self.assertEqual(self.remote.reloads, reloads + 1)
 
     def test_identical_existing_record_is_adopted(self):
         self.dns.records[FQDN] = {"id": "d" * 32, "content": TAILNET_IP, "proxied": False}
         result = self.add()
-        self.assertTrue(result.ok)
-        self.assertIn(("dns", "skipped"), self.steps(result))
-        record = self.store.load()[FQDN]
-        self.assertEqual((record.dns_record_id, record.dns_adopted), ("d" * 32, True))
+        self.assertTrue(result.ok, result.envelope())
+        self.assertTrue(self.store.load()[FQDN].dns_adopted)
 
-    def test_conflicting_record_refuses_before_any_remote_write(self):
-        for row in ({"id": "e" * 32, "content": "100.64.0.99", "proxied": False},
-                    {"id": "e" * 32, "content": TAILNET_IP, "proxied": True}):
-            with self.subTest(row=row):
-                self.remote.calls.clear()
-                self.dns.records[FQDN] = dict(row)
-                result = self.add()
-                self.assertFalse(result.ok)
-                self.assertEqual(result.code, m.DNS_CONFLICT)
-                self.assertEqual(self.steps(result)[-1], ("dns", "refused"))
-                self.assertFalse([c for c in self.remote.calls
-                                  if c[0] == "apply_route" or c[:2] == ("program", "csr")])
-                self.assertEqual(self.dns.records[FQDN], row)
-
-    def test_nginx_rejection_reports_and_leaves_no_block(self):
-        self.remote.reject_nginx = True
+    def test_conflicting_record_refuses_before_any_certificate_work(self):
+        self.dns.records[FQDN] = {"id": "d" * 32, "content": "100.64.0.99", "proxied": False}
         result = self.add()
-        self.assertFalse(result.ok)
-        self.assertEqual(result.code, m.NGINX_REJECTED)
-        self.assertEqual(self.steps(result)[-1], ("server_block", "failed"))
-        self.assertNotIn("tailnet-" + FQDN, self.remote.blocks)
-        self.assertEqual(self.store.load()[FQDN].state, "publishing")
+        self.assertEqual((result.ok, result.code), (False, m.DNS_CONFLICT))
+        self.assertEqual(self.remote.actions("csr", "commit"), [])
+        self.assertEqual(self.issued, [])
+
+    def test_a_live_lease_held_by_another_run_refuses(self):
+        """F7: two controllers on one name serialize through the remote lease."""
+        self.remote.leases[FQDN] = "f" * 32
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, m.BUSY))
+        self.assertEqual(self.dns.requests, [])
+        self.assertEqual(self.remote.leases[FQDN], "f" * 32, "another run's lease is kept")
+
+    def test_a_lost_lease_stops_the_run(self):
+        original = self.remote.call
+
+        def steal(entry, action, payload):
+            if action == "commit":
+                self.remote.leases[FQDN] = "f" * 32
+            return original(entry, action, payload)
+        self.deps.remote_call = steal
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, m.BUSY))
+        self.assertNotIn(FQDN, self.remote.blocks)
+
+    def test_remote_gate_and_nginx_refusals_map_to_codes(self):
+        for remote_code, code in (("gate_unavailable", m.GATE_UNAVAILABLE), ("busy", m.BUSY),
+                                  ("nginx_rejected", m.NGINX_REJECTED),
+                                  ("reload_failed", m.RELOAD_FAILED),
+                                  ("unmanaged", m.UNMANAGED),
+                                  ("path_unsafe", m.REMOTE_PATH_UNSAFE)):
+            with self.subTest(remote_code=remote_code):
+                self.remote.commit_error = remote_code
+                result = self.add()
+                self.assertEqual((result.ok, result.code), (False, code))
+                self.assertEqual(self.store.load()[FQDN].steps["activate"], "failed")
 
     def test_busy_gate_refuses_without_waiting(self):
-        for setup, code in ((lambda: setattr(self, "jobs_active", True), m.BUSY),
-                            (lambda: self.remote.locks.append("/run/lock/sandbox-docker-pool.lock"),
-                             m.BUSY),
-                            (lambda: setattr(self, "jobs_error", True), m.GATE_UNAVAILABLE)):
-            with self.subTest(code=code):
-                self.jobs_active = self.jobs_error = False
-                self.remote.locks.clear()
-                setup()
+        self.remote.locks = ["/run/lock/sandbox-docker-pool.lock"]
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, m.BUSY))
+        self.assertEqual(self.dns.requests, [])
+        self.remote.locks = []
+        self.jobs_active = True
+        self.assertEqual(self.add().code, m.BUSY)
+        self.jobs_active, self.jobs_error = False, True
+        self.assertEqual(self.add().code, m.GATE_UNAVAILABLE)
+        self.assertEqual(self.remote.actions("reserve"), [])
+
+    def test_foreign_or_unsafe_remote_paths_refuse_before_dns(self):
+        """F4: Sandbox never adopts a block or directory it did not write."""
+        for attr, code in (("foreign_block", m.UNMANAGED), ("foreign_dir", m.UNMANAGED),
+                           ("unsafe_dir", m.REMOTE_PATH_UNSAFE)):
+            with self.subTest(attr=attr):
+                remote = FakeRemote()
+                getattr(remote, attr).add(FQDN)
+                self.deps.remote_call = remote.call
                 result = self.add()
-                self.assertFalse(result.ok)
-                self.assertEqual(result.code, code)
-                self.assertEqual(self.steps(result)[-1], ("gate", "refused"))
-                self.assertEqual(self.dns.requests, [])
+                self.assertEqual((result.ok, result.code), (False, code))
+                self.assertEqual(remote.actions("reserve", "csr", "commit"), [])
+        self.assertEqual(self.dns.requests, [])
 
     def test_unbound_tailnet_address_and_preflight_conflict_refuse(self):
         self.remote.bound = False
-        result = self.add()
-        self.assertEqual((result.ok, result.code), (False, m.TAILNET_ADDRESS_UNBOUND))
+        self.assertEqual(self.add().code, m.TAILNET_ADDRESS_UNBOUND)
         self.remote.bound = True
-        self.remote.preflight_error = FrontDoorError("front_door_hostname_conflict", "served")
+        self.remote.preflight_error = FrontDoorError("front_door_conflict", "name served elsewhere")
+        self.assertEqual(self.add().code, "front_door_conflict")
+        self.assertEqual(self.dns.requests, [])
+
+    def test_add_settles_its_own_interrupted_activation_before_preflight(self):
+        """Re-review 12 NEW-1: a crash left this name's candidate block failing
+        nginx -t; the rerun settles that transaction, then preflights again."""
+        self.remote.keys.add(FQDN)
+        self.remote.blocks[FQDN] = "candidate"
+        self.remote.activation[FQDN] = "written"
+        self.remote.preflight_error = FrontDoorError("config_invalid", "nginx -t failed")
         result = self.add()
-        self.assertEqual((result.ok, result.code), (False, "front_door_hostname_conflict"))
+        self.assertTrue(result.ok, result.envelope())
+        self.assertEqual(self.remote.actions("preflight", "settle")[:3],
+                         ["preflight", "settle", "preflight"])
+        self.assertEqual(self.remote.leases, {}, "the settle lease is released")
+
+    def test_an_unrelated_invalid_config_still_refuses_add(self):
+        self.remote.preflight_error = FrontDoorError("config_invalid", "nginx -t failed")
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, "config_invalid"))
+        self.assertEqual(self.remote.actions("settle", "reserve"), [])
         self.assertEqual(self.dns.requests, [])
 
     def test_upstream_differs_needs_replace(self):
-        self.assertTrue(self.add().ok)
+        self.add()
         self.upstream = m.Upstream("127.0.0.1", 9000)
         result = self.add()
         self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
-        self.assertIn("8025", self.remote.blocks["tailnet-" + FQDN])
         result = self.add(replace_upstream=True)
-        self.assertTrue(result.ok)
-        self.assertIn(("server_block", "done"), self.steps(result))
-        self.assertIn("proxy_pass http://127.0.0.1:9000;", self.remote.blocks["tailnet-" + FQDN])
-        self.assertEqual(self.store.load()[FQDN].upstream, "127.0.0.1:9000")
+        self.assertTrue(result.ok, result.envelope())
+        self.assertIn("127.0.0.1:9000", self.remote.blocks[FQDN])
 
-    def test_public_exposure_removes_the_block(self):
-        self.public_leaf = LEAF_SHA
+    def test_public_exposure_removes_only_the_block(self):
+        self.public = None
+        self.deps.probe = lambda address, fqdn, *, send_request: (
+            self._probe(address, fqdn, send_request=send_request) if address == TAILNET_IP
+            else self.exposed() if FQDN in self.remote.blocks else verify.ProbeResult("refused"))
         result = self.add()
         self.assertEqual((result.ok, result.code), (False, m.PUBLIC_EXPOSED))
-        self.assertNotIn("tailnet-" + FQDN, self.remote.blocks)
-        self.assertIn(("remove_route", "tailnet-" + FQDN), self.remote.calls)
-        self.assertEqual(self.store.load()[FQDN].steps.get("server_block"), "removed")
+        [removal] = self.remote.payloads("remove")
+        self.assertTrue(removal["keep_directory"])
+        self.assertNotIn(FQDN, self.remote.blocks)
+        self.assertIn(FQDN, self.remote.keys)
+        self.assertIn("no longer served", result.error)
+        self.assertEqual(self.store.load()[FQDN].steps["activate"], "removed")
+
+    def test_another_certificate_for_the_name_is_exposure(self):
+        """F1: any public leaf valid for the name fails, not only ours."""
+        self.public = self.exposed(ours=False)
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, m.PUBLIC_EXPOSED))
+        self.assertIn("something else serves it", result.error)
 
     def test_exposure_with_failed_removal_is_recorded_as_such(self):
-        self.public_leaf = LEAF_SHA
-
-        def failing_remove(entry, name):
-            raise FrontDoorError("front_door_reload_failed", "reload failed")
-        self.deps.remove_route = failing_remove
+        self.public = self.exposed(ours=False)
+        self.remote.remove_error = "nginx_rejected"
         result = self.add()
-        self.assertEqual((result.ok, result.code), (False, m.PUBLIC_EXPOSED))
-        self.assertIn("may still be exposed", result.error)
-        self.assertEqual(self.store.load()[FQDN].steps.get("server_block"), "remove_failed")
+        self.assertEqual(result.code, m.PUBLIC_EXPOSED)
+        self.assertIn("FAILED", result.error)
+        self.assertEqual(self.store.load()[FQDN].steps["activate"], "remove_failed")
 
-    def test_exposure_after_renewal_removes_and_records(self):
+    def test_an_inconclusive_public_probe_fails_and_keeps_the_block(self):
+        """F1: a timeout is not a refusal."""
+        for category in ("timeout", "unreachable", "dns", "error"):
+            with self.subTest(category=category):
+                self.public = verify.ProbeResult(category)
+                result = self.add()
+                self.assertEqual((result.ok, result.code), (False, m.PUBLIC_PROBE_INCONCLUSIVE))
+                self.assertIn(FQDN, self.remote.blocks)
+                self.assertEqual(self.store.load()[FQDN].state, "publishing")
+        self.assertEqual(self.remote.actions("remove"), [])
+
+    def test_a_certificate_not_for_the_name_passes(self):
+        self.public = verify.ProbeResult("handshake", "ee" * 32, ("other.example.test",))
         self.assertTrue(self.add().ok)
-        self.public_leaf = LEAF_SHA
-        result = service.renew(self.ctx, self.deps, self.name, force=True)
-        self.assertEqual(result.results[0].code, m.PUBLIC_EXPOSED)
-        self.assertNotIn("tailnet-" + FQDN, self.remote.blocks)
-        self.assertEqual(self.store.load()[FQDN].steps.get("server_block"), "removed")
 
-    def test_other_certificate_on_public_address_passes(self):
-        self.public_leaf = "ff" * 32
-        self.assertTrue(self.add().ok)
-
-    def test_tailnet_probe_failure_keeps_the_name_and_rerun_repeats_verify(self):
+    def test_tailnet_probe_retries_then_fails_and_rerun_repeats_verify(self):
         self.tailnet_status = 502
         result = self.add()
         self.assertEqual((result.ok, result.code), (False, m.TAILNET_PROBE_FAILED))
-        self.assertIn("tailnet-" + FQDN, self.remote.blocks)
+        self.assertEqual(len(self.sleeps), service.TAILNET_ATTEMPTS - 1)
         self.assertEqual(self.store.load()[FQDN].state, "publishing")
         self.tailnet_status = 200
         result = self.add()
-        self.assertTrue(result.ok)
+        self.assertTrue(result.ok, result.envelope())
         self.assertEqual(self.store.load()[FQDN].state, "published")
 
     def test_no_public_address_is_not_ok(self):
         self.ctx = service.Context(config(), target(public_ip=None))
         result = self.add()
         self.assertEqual((result.ok, result.code), (False, m.PUBLIC_PROBE_UNAVAILABLE))
-        self.assertIn(("verify_public", "not_run"), self.steps(result))
 
     def test_interruption_then_rerun_finishes(self):
-        def boom(*_a, **_k):
-            raise KeyboardInterrupt
-        original = self.deps.apply_route
-        self.deps.apply_route = boom
-        with self.assertRaises(KeyboardInterrupt):
-            self.add()
-        record = self.store.load()[FQDN]
-        self.assertEqual(record.steps.get("install"), "done")
-        self.deps.apply_route = original
-        self.issued.clear()
-        result = self.add()
-        self.assertTrue(result.ok)
-        self.assertEqual(self.issued, [], "the installed certificate is reused")
-
-    def test_dns_provider_failure_is_recorded(self):
         self.dns.fail = True
         result = self.add()
         self.assertEqual((result.ok, result.code), (False, m.DNS_FAILED))
-        self.assertEqual(self.store.load()[FQDN].steps.get("dns"), "failed")
+        self.assertEqual(self.store.load()[FQDN].steps["dns"], "failed")
+        self.assertEqual(self.remote.leases, {})
+        self.dns.fail = False
+        self.assertTrue(self.add().ok)
 
-    def test_missing_lego_refuses_first(self):
-        self.deps.find_lego = lambda cfg: None
-        result = self.add()
-        self.assertEqual((result.ok, result.code), (False, m.ACME_CLIENT_MISSING))
+    def test_missing_or_untrusted_lego_refuses_first(self):
+        for code in (m.ACME_CLIENT_MISSING, m.ACME_CLIENT_UNTRUSTED):
+            with self.subTest(code=code):
+                self.lego_error = m.TailnetNameError(code, "no")
+                result = self.add()
+                self.assertEqual((result.ok, result.code), (False, code))
         self.assertEqual(self.remote.calls, [])
 
-    def test_install_failure(self):
-        self.remote.install_error = "certificate_mismatch"
+    def test_a_cached_chain_is_reused_and_replaced_when_the_remote_rejects_it(self):
+        cert, _key, _sha = make_cert(FQDN, san="DNS:" + FQDN)
+        self.cached = Path(cert).read_text()
+        self.deps.now = lambda: dt.datetime.now(dt.timezone.utc)
         result = self.add()
-        self.assertEqual((result.ok, result.code), (False, m.INSTALL_FAILED))
-        self.assertFalse([c for c in self.remote.calls if c[0] == "apply_route"])
+        self.assertTrue(result.ok, result.envelope())
+        self.assertEqual(self.issued, [])
+        self.remote = FakeRemote()
+        self.deps.remote_call = self.remote.call
+        self.remote.mismatch.add(self.cached)
+        self.store.drop(FQDN)
+        result = self.add()
+        self.assertTrue(result.ok, result.envelope())
+        self.assertEqual(len(self.issued), 1)
 
-    def test_token_marker_never_reaches_outputs_state_or_argv(self):
-        """SC-004: a marker configured as the key name's value never leaks."""
+    def test_a_cached_chain_for_another_name_is_not_reused(self):
+        cert, _key, _sha = make_cert("other.example.test", san="DNS:other.example.test")
+        self.cached = Path(cert).read_text()
+        self.deps.now = lambda: dt.datetime.now(dt.timezone.utc)
+        self.assertTrue(self.add().ok)
+        self.assertEqual(len(self.issued), 1)
+
+    def test_a_stale_zone_refuses_before_any_api_call(self):
+        """F6: today's zones are checked before any DNS, ACME or remote mutation."""
+        self.add()
+        mutations = len(self.remote.actions("reserve", "csr", "commit", "remove"))
+        requests = len(self.dns.requests)
+        self.ctx = service.Context(config(zones=["lab.example.test"]), target())
+        for result in (self.add(), service.remove(self.ctx, self.deps, self.name),
+                       service.renew(self.ctx, self.deps, self.name, force=True).results[0]):
+            self.assertEqual((result.ok, result.code), (False, m.ZONE_NOT_ALLOWED))
+        self.assertEqual(len(self.dns.requests), requests)
+        self.assertEqual(len(self.remote.actions("reserve", "csr", "commit", "remove")),
+                         mutations)
+        self.assertEqual(len(self.issued), 1)
+
+    def test_a_record_saved_under_another_zone_refuses(self):
+        self.ctx = service.Context(config(zones=["example.test", "lab.example.test"]), target())
+        self.name = m.TailnetName("a.lab.example.test", "lab.example.test")
+        self.assertTrue(self.add().ok)
+        path = Path(self.tmp.name) / "r1.json"
+        raw = json.loads(path.read_text())
+        raw["names"][self.name.fqdn]["zone"] = "example.test"
+        path.write_text(json.dumps(raw))
+        requests = len(self.dns.requests)
+        result = service.remove(self.ctx, self.deps, self.name)
+        self.assertEqual((result.ok, result.code), (False, m.ZONE_NOT_ALLOWED))
+        self.assertEqual(len(self.dns.requests), requests)
+        self.assertIn(self.name.fqdn, self.remote.blocks)
+
+    def test_corrupt_state_refuses_before_any_remote_call(self):
+        (Path(self.tmp.name) / "r1.json").write_text("{broken")
         result = self.add()
-        blob = json.dumps(result.envelope()) + json.dumps(self.remote.calls) + \
-            json.dumps(self.dns.requests) + (Path(self.tmp.name) / "r1.json").read_text()
-        self.assertNotIn(MARKER, blob)
+        self.assertEqual((result.ok, result.code), (False, m.STATE_CORRUPT))
+        self.assertEqual(self.remote.actions("reserve", "csr", "commit"), [])
+        self.assertEqual(self.dns.requests, [])
 
 
 class ListRenewRemoveTests(ServiceTestCase):
     def test_list_merges_inventory_and_state_with_drift(self):
-        self.assertTrue(self.add().ok)
-        self.remote.blocks["tailnet-other.example.test"] = render.render_block(
-            m.TailnetName("other.example.test", "example.test"), self.upstream, TAILNET_IP,
+        self.add()
+        self.remote.blocks["b.example.test"] = render.render_block(
+            m.TailnetName("b.example.test", "example.test"), self.upstream, TAILNET_IP,
             http2_directive=True)
-        self.store.put(m.TailnetNameRecord("gone.example.test", "example.test",
-                                           "127.0.0.1:1", TAILNET_IP, state="published"))
-        rows = {row["fqdn"]: row for row in service.list_names(self.ctx, self.deps).envelope()["names"]}
-        self.assertEqual(rows[FQDN]["upstream"], "127.0.0.1:8025")
-        self.assertEqual(rows[FQDN]["cert_not_after"], FUTURE)
-        self.assertEqual(rows[FQDN]["days_remaining"], 90)
-        self.assertFalse(rows[FQDN]["renewal_due"])
-        self.assertEqual(rows[FQDN]["drift"], [])
-        self.assertIn("not_recorded", rows["other.example.test"]["drift"])
-        self.assertIn("block_missing", rows["gone.example.test"]["drift"])
+        self.remote.activation["b.example.test"] = "written"
+        self.remote.foreign_block.add("c.example.test")
+        names = {row["fqdn"]: row for row in service.list_names(self.ctx, self.deps).names}
+        self.assertEqual(names[FQDN]["drift"], [])
+        self.assertFalse(names[FQDN]["renewal_due"])
+        self.assertIn("not_recorded", names["b.example.test"]["drift"])
+        self.assertIn("activation_written", names["b.example.test"]["drift"])
+        self.assertIn("unmanaged_block", names["c.example.test"]["drift"])
+        ctx = service.Context(config(zones=["lab.example.test"]), target())
+        names = {row["fqdn"]: row for row in service.list_names(ctx, self.deps).names}
+        self.assertIn("zone_not_allowed", names[FQDN]["drift"])
 
     def test_renew_not_due_is_skipped_and_force_reissues(self):
-        self.assertTrue(self.add().ok)
-        self.issued.clear()
+        self.add()
         result = service.renew(self.ctx, self.deps, self.name)
+        self.assertEqual(result.results[0].steps[0].code, m.NOT_DUE)
         self.assertTrue(result.ok)
-        self.assertEqual(result.results[0].steps[-1].code, m.NOT_DUE)
-        self.assertEqual(self.issued, [])
         result = service.renew(self.ctx, self.deps, self.name, force=True)
         self.assertTrue(result.ok, result.envelope())
-        self.assertEqual(len(self.issued), 1)
-        install = [c for c in self.remote.calls if c[:2] == ("program", "install")][-1]
-        self.assertTrue(json.loads(install[2])["reload"])
+        self.assertEqual(len(self.issued), 2)
+        [commit] = self.remote.payloads("commit")[-1:]
+        self.assertIsNone(commit["block"])
 
-    def test_renew_all_renews_only_due_names(self):
-        self.assertTrue(self.add().ok)
-        other = m.TailnetName("other.example.test", "example.test")
-        self.assertTrue(service.add(self.ctx, self.deps, other, self.upstream).ok)
-        self.remote.certs["other.example.test"]["not_after"] = SOON
-        self.issued.clear()
+    def test_renew_reconciles_an_unproven_activation(self):
+        """F8: renew never skips a name whose loaded state is not proven."""
+        self.add()
+        reloads = self.remote.reloads
+        for state_ in ("tested", None):
+            with self.subTest(activation=state_):
+                if state_ is None:
+                    self.remote.activation.pop(FQDN)
+                else:
+                    self.remote.activation[FQDN] = state_
+                result = service.renew(self.ctx, self.deps, self.name)
+                self.assertTrue(result.ok, result.envelope())
+                self.assertEqual(self.remote.activation[FQDN], "loaded")
+        self.assertEqual(self.remote.reloads, reloads + 2)
+        self.assertEqual(len(self.issued), 1, "a current certificate is not reissued")
+
+    def test_renew_all_renews_only_due_names_and_reports_disallowed_zones(self):
+        self.add()
+        self.remote.chains[FQDN]["not_after"] = SOON
+        other = m.TailnetName("b.example.test", "example.test")
+        service.add(self.ctx, self.deps, other, self.upstream)
+        self.remote.blocks["x.other.test"] = render.render_block(
+            m.TailnetName("x.other.test", "other.test"), self.upstream, TAILNET_IP,
+            http2_directive=True)
+        issued = len(self.issued)
         result = service.renew(self.ctx, self.deps, None, all_names=True)
-        self.assertTrue(result.ok, result.envelope())
-        self.assertEqual(self.issued, [("other.example.test", "/opt/lego")])
-        self.assertEqual(len(result.envelope()["results"]), 2)
+        by_name = {r.fqdn: r for r in result.results}
+        self.assertEqual(by_name["x.other.test"].code, m.ZONE_NOT_ALLOWED)
+        self.assertEqual(by_name["b.example.test"].steps[0].code, m.NOT_DUE)
+        self.assertTrue(by_name[FQDN].ok, by_name[FQDN].envelope())
+        self.assertEqual(len(self.issued), issued + 1)
 
-    def test_renew_install_failure_is_reported(self):
-        self.assertTrue(self.add().ok)
-        self.remote.install_error = "nginx_rejected"
+    def test_renew_commit_failure_is_reported(self):
+        self.add()
+        self.remote.commit_error = "nginx_rejected"
         result = service.renew(self.ctx, self.deps, self.name, force=True)
-        self.assertFalse(result.ok)
         self.assertEqual(result.results[0].code, m.NGINX_REJECTED)
 
     def test_renew_unknown_name(self):
         result = service.renew(self.ctx, self.deps, self.name)
-        self.assertEqual((result.ok, result.results[0].code), (False, m.NOT_FOUND))
+        self.assertEqual(result.results[0].code, m.NOT_FOUND)
 
     def test_remove_in_order_and_rerun(self):
-        self.assertTrue(self.add().ok)
-        self.remote.calls.clear()
+        self.add()
         result = service.remove(self.ctx, self.deps, self.name)
         self.assertTrue(result.ok, result.envelope())
-        self.assertEqual([s for s, _ in self.steps(result)],
-                         ["preflight", "gate", "remove_block", "remove_certificate", "remove_dns"])
-        order = [c[0] if c[0] != "program" else c[1] for c in self.remote.calls]
-        self.assertLess(order.index("remove_route"), order.index("remove_cert"))
-        self.assertEqual(self.dns.records, {})
-        self.assertNotIn(FQDN, self.store.load())
-        again = service.remove(self.ctx, self.deps, self.name)
-        self.assertEqual((again.ok, again.code), (False, m.NOT_FOUND))
+        self.assertEqual(self.steps(result), [
+            ("preflight", "done"), ("gate", "done"), ("remove_block", "done"),
+            ("remove_certificate", "done"), ("remove_dns", "done")])
+        self.assertEqual(self.remote.payloads("remove")[-1]["jobs_probe"],
+                         {"home": "/home/u/sandbox"})
+        self.assertNotIn(FQDN, self.dns.records)
+        self.assertEqual(self.store.load(), {})
+        self.assertEqual(service.remove(self.ctx, self.deps, self.name).code, m.NOT_FOUND)
+
+    def test_remove_refuses_foreign_paths_and_leaves_them(self):
+        self.add()
+        self.remote.foreign_block.add(FQDN)
+        result = service.remove(self.ctx, self.deps, self.name)
+        self.assertEqual((result.ok, result.code), (False, m.UNMANAGED))
+        self.assertIn(FQDN, self.dns.records)
 
     def test_remove_leaves_a_record_it_no_longer_owns(self):
-        self.assertTrue(self.add().ok)
+        self.add()
         self.dns.records[FQDN]["content"] = "100.64.0.99"
         result = service.remove(self.ctx, self.deps, self.name)
         self.assertEqual((result.ok, result.code), (False, m.DNS_NOT_OWNED))
         self.assertIn(FQDN, self.dns.records)
-        self.assertNotIn("tailnet-" + FQDN, self.remote.blocks)
-        self.assertEqual(self.store.load()[FQDN].state, "removing")
+        self.assertIn(FQDN, self.store.load())
 
     def test_remove_resumes_after_partial_run(self):
-        self.assertTrue(self.add().ok)
-        self.remote.remove_route(None, "tailnet-" + FQDN)
-        self.store.put(m.TailnetNameRecord(**{**self.store.load()[FQDN].as_dict(),
-                                              "state": "removing"}))
+        self.add()
+        self.dns.fail = True
+        self.assertEqual(service.remove(self.ctx, self.deps, self.name).code, m.DNS_FAILED)
+        self.dns.fail = False
         result = service.remove(self.ctx, self.deps, self.name)
-        self.assertTrue(result.ok)
+        self.assertTrue(result.ok, result.envelope())
         self.assertIn(("remove_block", "skipped"), self.steps(result))
-        self.assertIn(("remove_dns", "done"), self.steps(result))
 
     def test_remove_without_a_recorded_record_leaves_dns(self):
-        self.assertTrue(self.add().ok)
+        self.add()
         self.store.drop(FQDN)
         result = service.remove(self.ctx, self.deps, self.name)
         self.assertEqual((result.ok, result.code), (False, m.DNS_NOT_OWNED))
         self.assertIn(FQDN, self.dns.records)
 
+    def test_remove_while_another_run_holds_the_lease(self):
+        self.add()
+        self.remote.leases[FQDN] = "f" * 32
+        result = service.remove(self.ctx, self.deps, self.name)
+        self.assertEqual((result.ok, result.code), (False, m.BUSY))
+        self.assertIn(FQDN, self.remote.blocks)
+
+    def test_renew_does_not_skip_a_name_that_failed_verification(self):
+        """Re-review N1: NOT_DUE needs a verified activation, not just a loaded one."""
+        self.public = verify.ProbeResult("timeout")
+        self.assertEqual(self.add().code, m.PUBLIC_PROBE_INCONCLUSIVE)
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertEqual(result.results[0].code, m.PUBLIC_PROBE_INCONCLUSIVE)
+        self.assertEqual(len(self.issued), 1, "a current certificate is not reissued")
+        self.public = verify.ProbeResult("refused")
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertNotEqual(result.results[0].steps[0].code, m.NOT_DUE)
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertEqual(result.results[0].steps[0].code, m.NOT_DUE)
+
+    def test_renew_verifies_after_a_crash_between_commit_and_verify(self):
+        calls = {"n": 0}
+
+        def crash(address, fqdn, *, send_request):
+            calls["n"] += 1
+            raise KeyboardInterrupt("simulated crash")
+        self.deps.probe = crash
+        with self.assertRaises(KeyboardInterrupt):
+            self.add()
+        self.assertEqual(self.store.load()[FQDN].steps["verify"], "pending")
+        self.deps.probe = self._probe
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertIn("verify_public", [step.step for step in result.results[0].steps])
+        self.assertEqual(self.store.load()[FQDN].state, "published")
+
+    def test_renew_does_not_trust_a_stale_activation(self):
+        self.add()
+        self.remote.activation[FQDN] = "stale"
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertNotEqual(result.results[0].steps[0].code, m.NOT_DUE)
+
+    def test_remove_holds_the_lease_through_the_dns_delete(self):
+        """Re-review N2: no other controller can publish between the remote
+        removal and the DNS delete."""
+        self.add()
+        seen = {}
+        dns = self.deps.dns
+
+        def checking(cfg, request):
+            if request["op"] == "delete":
+                other = self.remote.call(None, "reserve", {"fqdn": FQDN, "token": "f" * 32,
+                                                           "seconds": 600})
+                seen["other"] = other
+            return dns(cfg, request)
+        self.deps.dns = checking
+        result = service.remove(self.ctx, self.deps, self.name)
+        self.assertTrue(result.ok, result.envelope())
+        self.assertEqual(seen["other"]["code"], "busy")
+        self.assertEqual(self.remote.leases, {}, "released after the DNS step")
+
+    def test_policy_is_decided_from_the_remote_as_it_is_under_the_lease(self):
+        """Re-review N6: a replacement made by another controller just before
+        this run took the lease is not silently undone."""
+        self.add()
+        call = self.remote.call
+        theirs = render.render_block(self.name, m.Upstream("127.0.0.1", 9000), TAILNET_IP,
+                                     http2_directive=True)
+
+        def racing(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks[FQDN] = theirs
+            return call(entry, action, payload)
+        self.deps.remote_call = racing
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, m.UPSTREAM_DIFFERS))
+        self.assertEqual(self.remote.blocks[FQDN], theirs)
+        self.assertEqual(self.remote.leases, {})
+
+
+    def test_a_run_whose_lease_was_taken_over_does_not_touch_dns(self):
+        """Re-review R2: the lease is re-proved right before the DNS delete."""
+        self.add()
+        call = self.remote.call
+
+        def takeover(entry, action, payload):
+            data = call(entry, action, payload)
+            if action == "remove":
+                self.remote.leases[FQDN] = "f" * 32  # expired, then taken by another run
+            return data
+        self.deps.remote_call = takeover
+        requests = len(self.dns.requests)
+        result = service.remove(self.ctx, self.deps, self.name)
+        self.assertEqual((result.ok, result.code), (False, m.BUSY))
+        self.assertEqual(len(self.dns.requests), requests)
+        self.assertIn(FQDN, self.dns.records)
+        self.assertIn(FQDN, self.store.load())
+
+    def test_dns_and_issuance_re_prove_the_lease_first(self):
+        call = self.remote.call
+        order = []
+
+        def watch(entry, action, payload):
+            order.append(action)
+            return call(entry, action, payload)
+        self.deps.remote_call = watch
+        dns = self.deps.dns
+        issue = self.deps.issue
+        self.deps.dns = lambda cfg, request: (order.append("DNS"), dns(cfg, request))[1]
+        self.deps.issue = lambda *a: (order.append("ISSUE"), issue(*a))[1]
+        self.assertTrue(self.add().ok)
+        for side_effect in ("DNS", "ISSUE"):
+            self.assertEqual(order[order.index(side_effect) - 1], "extend", order)
+
+    def test_an_inconclusive_check_after_cleanup_is_not_reported_as_safe(self):
+        """Re-review R6."""
+        def probe(address, fqdn, *, send_request):
+            if address == TAILNET_IP:
+                return self._probe(address, fqdn, send_request=send_request)
+            return self.exposed() if FQDN in self.remote.blocks else verify.ProbeResult("timeout")
+        self.deps.probe = probe
+        result = self.add()
+        self.assertEqual(result.code, m.PUBLIC_EXPOSED)
+        self.assertIn("inconclusive", result.error)
+        self.assertNotIn("no longer served", result.error)
+
+
+    def test_renew_decides_not_due_from_the_remote_under_the_lease(self):
+        """Re-review 3 NEW-2: a change made just before the lease is seen."""
+        self.add()
+        call = self.remote.call
+        theirs = render.render_block(self.name, m.Upstream("127.0.0.1", 9000), TAILNET_IP,
+                                     http2_directive=True)
+
+        def replaced(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks[FQDN] = theirs
+                self.remote.activation[FQDN] = "written"
+            return call(entry, action, payload)
+        self.deps.remote_call = replaced
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertNotEqual(result.results[0].steps[0].code, m.NOT_DUE)
+        self.assertEqual(self.remote.activation[FQDN], "loaded")
+
+        def removed(entry, action, payload):
+            if action == "reserve":
+                self.remote.blocks.pop(FQDN, None)
+            return call(entry, action, payload)
+        self.deps.remote_call = removed
+        result = service.renew(self.ctx, self.deps, self.name)
+        self.assertEqual(result.results[0].code, m.NOT_FOUND)
+        self.assertEqual(self.remote.leases, {})
+
 
 class CliTests(unittest.TestCase):
     def _main(self, *argv: str) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as home:
-            env = {"HOME": home, "SANDBOX_HOME": home, "PATH": os.environ.get("PATH", ""),
-                   "PYTHONPATH": str(REPO), "SANDBOX_AUTO_UPDATE": "0"}
+            from tests.subprocess_support import run_test_process
+            env = {"HOME": home, "SANDBOX_HOME": home, "PYTHONPATH": str(REPO),
+                   "SANDBOX_AUTO_UPDATE": "0"}
             code = ("import sys; sys.argv = ['sb', *sys.argv[1:]]\n"
                     "from sandbox.cli import main\nmain()\n")
-            return subprocess.run([sys.executable, "-c", code, *argv], cwd=home, env=env,
-                                  capture_output=True, text=True, timeout=120, check=False)
+            return run_test_process([sys.executable, "-c", code, *argv], cwd=home, env=env,
+                                    capture_output=True, text=True, timeout=120, check=False)
 
     def test_add_without_configuration_refuses_with_json(self):
         result = self._main("host", "tailnet-name", "add", FQDN, "--remote", "nosuch",

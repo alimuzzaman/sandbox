@@ -1495,8 +1495,8 @@ the record, releasing the ports. A destroy failure keeps all of them
 (`stack_destroy_failed`). `list` shows slug, project, ref and commit, hostnames,
 ports, and the last apply's status and time from the durable job.
 
-The stack record's `commit` is the commit the last completed apply deployed, the
-host's `recorded_revision` for it. `up` records the commit it asks for as
+The stack record's `commit` is the commit requested by the last apply that
+completed, which the host records as its `recorded_revision`. `up` records the commit it asks for as
 `last_apply.commit` and keeps `commit` at the previously delivered one (null before
 the first delivery, shown as `not delivered`). `sb host apply` moves `commit` to
 `last_apply.commit` when it completes, the same point that makes its durable job, and

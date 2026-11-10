@@ -5256,7 +5256,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
 
 
 def _record_stack_delivery(validated: dict, remote_name: str, delivery: dict | None) -> None:
-    """Move the `sb host stack` record to the commit this apply delivered.
+    """Move the `sb host stack` record to this completed apply's commit.
 
     Called where the apply completes, the same point that makes its durable job
     (and so ``last_apply.status``) succeed. By then the runtime was freshly

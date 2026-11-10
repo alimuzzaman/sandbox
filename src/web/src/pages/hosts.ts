@@ -1,5 +1,5 @@
 import { esc } from "../dom";
-import { store } from "../state";
+import { localHostName, localHostStatus, otherRemotes, remoteLabel, store } from "../state";
 import { instancePath, localHostPath, remotePath } from "../router";
 import { theme } from "../theme";
 
@@ -24,10 +24,12 @@ function hostIcon(kind: HostKind, ready = true): string {
 export function sidebarHostSelector(active = "all"): string {
   const activeRemote = store.data.remotes.find(remote => remote.name === active);
   const currentKind: HostKind = active === "local" ? "local" : activeRemote ? "remote" : "all";
-  const currentName = currentKind === "local" ? "Local host" : activeRemote?.name || "All hosts";
+  const currentName = currentKind === "local" ? localHostName()
+    : activeRemote ? remoteLabel(activeRemote.name) : "All hosts";
   const currentReady = currentKind !== "remote" || !!activeRemote?.control_ready;
   const currentStatus = currentKind === "all" ? "Host overview"
-    : currentKind === "local" ? "This machine"
+    : currentKind === "local" ? localHostStatus()
+    : activeRemote?.local ? "Memory, disk and containers"
     : currentReady ? "Remote available" : "Remote unavailable";
   const optionClass = "flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-[13px] hover:bg-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:hover:bg-neutral-800";
   const option = (href: string, name: string, kind: HostKind, ready: boolean, status: string, selected: boolean): string =>
@@ -35,8 +37,9 @@ export function sidebarHostSelector(active = "all"): string {
       ${hostIcon(kind, ready)}<span class="min-w-0 flex-1"><span class="block truncate font-medium">${esc(name)}</span><span class="block truncate text-[10px] text-neutral-400">${esc(status)}</span></span>
     </a>`;
   const remotes = store.data.remotes.map(remote => option(
-    remotePath(remote.name), remote.name, "remote", remote.control_ready,
-    remote.control_ready ? "Remote available" : "Remote unavailable", active === remote.name,
+    remotePath(remote.name), remoteLabel(remote.name), "remote", remote.control_ready,
+    remote.local ? "Memory, disk and containers"
+      : remote.control_ready ? "Remote available" : "Remote unavailable", active === remote.name,
   )).join("");
   return `<details class="group relative" id="hostSelector">
     <summary aria-label="Choose host. Current host: ${esc(currentName)}" class="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-neutral-200/60 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:hover:bg-neutral-900">
@@ -46,7 +49,7 @@ export function sidebarHostSelector(active = "all"): string {
     </summary>
     <nav aria-label="Hosts" class="absolute left-0 right-0 z-50 mt-1 max-h-64 space-y-0.5 overflow-auto rounded-lg border border-neutral-200 bg-white p-2 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
       ${option("/", "All hosts", "all", true, "Host overview", active === "all")}
-      ${option(localHostPath(), "Local host", "local", true, "This machine", active === "local")}${remotes}
+      ${option(localHostPath(), localHostName(), "local", true, localHostStatus(), active === "local")}${remotes}
     </nav>
   </details>`;
 }
@@ -85,12 +88,13 @@ export function hostsView(): string {
     const note = busy ? "Refreshing host inventory…" : data
       ? `${data.evidence_status} ${data.scan_mode || "fast"} evidence`
       : remote.control_ready ? "Waiting for first inventory" : "Control service unavailable";
-    return hostCard(remote.name, remotePath(remote.name), "Remote host", remote.control_ready,
+    return hostCard(remoteLabel(remote.name), remotePath(remote.name),
+      remote.local ? "This server" : "Remote host", remote.control_ready,
       total, running, memory, note);
   }).join("");
-  const remoteInstances = store.data.remotes.reduce((sum, remote) =>
+  const remoteInstances = otherRemotes().reduce((sum, remote) =>
     sum + (store.remote[remote.name]?.instances?.total || 0), 0);
-  const knownHosts = 1 + store.data.remotes.length;
+  const knownHosts = 1 + otherRemotes().length;
   const status = store.sync.refreshing ? "Refreshing inventories…" : store.sync.lastCompleted
     ? `Updated ${new Date(store.sync.lastCompleted).toLocaleTimeString()}` : "Loading inventories…";
 
@@ -101,10 +105,10 @@ export function hostsView(): string {
       <div class="flex flex-wrap items-center justify-end gap-3"><div role="status" class="text-[12px] ${store.sync.error ? "text-red-700 dark:text-red-300" : theme.quiet}">${esc(store.sync.error || status)}</div><button class="${theme.button}" onclick="sb.refreshHosts()">Refresh remote hosts</button></div>
     </div></header>
     <section class="${theme.panel} grid grid-cols-2 gap-px overflow-hidden bg-neutral-200 p-0 dark:bg-neutral-800 sm:grid-cols-4">
-      ${[["Hosts", knownHosts], ["Known instances", localTotal + remoteInstances], ["Local running", localRunning], ["Remote hosts", store.data.remotes.length]].map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${label}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${value}</div></div>`).join("")}
+      ${[["Hosts", knownHosts], ["Known instances", localTotal + remoteInstances], ["Local running", localRunning], ["Remote hosts", otherRemotes().length]].map(([label, value]) => `<div class="bg-white p-4 dark:bg-neutral-900"><div class="${theme.label}">${label}</div><div class="mt-1 text-[24px] font-semibold tabular-nums">${value}</div></div>`).join("")}
     </section>
     <section><div class="mb-3 flex items-center justify-between"><h2 class="text-[14px] font-semibold">Available hosts</h2><span class="text-[11px] ${theme.quiet}">Select a host to inspect its instances</span></div>
-      <div class="grid gap-4 lg:grid-cols-2">${hostCard("Local host", localHostPath(), "This machine", true, String(localTotal), String(localRunning), "—", "Open local instances and lifecycle controls")}${remoteCards}</div>
+      <div class="grid gap-4 lg:grid-cols-2">${hostCard(localHostName(), localHostPath(), localHostStatus(), true, String(localTotal), String(localRunning), "—", "Open local instances and lifecycle controls")}${remoteCards}</div>
     </section>
   </div></div>`;
 }

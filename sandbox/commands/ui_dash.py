@@ -19,6 +19,78 @@ from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
 
+import ipaddress
+from urllib.parse import urlsplit
+
+_TAILNET_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+_LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1"}
+
+
+def _ip(value):
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _is_tailnet_ip(value) -> bool:
+    address = _ip(value)
+    return address is not None and any(address in network for network in _TAILNET_NETWORKS)
+
+
+def _is_loopback_peer(value) -> bool:
+    address = _ip(value)
+    if address is not None and getattr(address, "ipv4_mapped", None):
+        address = address.ipv4_mapped
+    return address is not None and address.is_loopback
+
+
+def _web_bind_host(value: str) -> str:
+    """The address `sb web` listens on: an IP literal, or `tailscale` for this machine's tailnet IPv4."""
+    if value != "tailscale":
+        if _ip(value) is None:
+            die("--host must be an IP address or 'tailscale'")
+        return value
+    try:
+        result = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True,
+                                timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    address = result.stdout.strip() if result is not None and result.returncode == 0 else ""
+    if not _is_tailnet_ip(address):
+        die("tailscale_unavailable: this machine has no Tailscale address; is Tailscale running?")
+    return address
+
+
+def _web_request_allowed(peer, bound_host, host_header, origin) -> bool:
+    """Dashboard access: this machine, or any tailnet device when listening on the tailnet.
+
+    The Host and Origin checks stop a web page in the operator's browser from
+    driving the dashboard through DNS rebinding or a cross-site form post.
+    """
+    if not (_is_loopback_peer(peer) or (_is_tailnet_ip(bound_host) and _is_tailnet_ip(peer))):
+        return False
+    try:
+        name = urlsplit(f"//{host_header}").hostname if host_header else None
+    except ValueError:
+        return False
+    if not name or not (name in _LOOPBACK_NAMES or _ip(name) is not None or name.endswith(".ts.net")):
+        return False
+    if origin is None:
+        return True
+    try:
+        parts = urlsplit(origin)
+        origin_name = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not origin_name:
+        return False
+    if parts.netloc.lower() == host_header.lower():
+        return True
+    # The desktop app's proxy and the web dev server run on this machine and
+    # forward a loopback Origin; never trust one from a tailnet device's browser.
+    return origin_name in _LOOPBACK_NAMES and _is_loopback_peer(peer)
+
 
 def _remote_summary_rows() -> list[dict]:
     """Return the lightweight remote list used by the dashboard rail.
@@ -30,7 +102,8 @@ def _remote_summary_rows() -> list[dict]:
     """
     import sandbox.core._remote as remote_core
 
-    return [
+    registered = remote_core.list_remotes()
+    rows = [
         {
             "name": name,
             "provisioned": bool(entry.get("provisioned")),
@@ -38,8 +111,44 @@ def _remote_summary_rows() -> list[dict]:
                 remote_core.control_ready(entry)
             ),
         }
-        for name, entry in sorted(remote_core.list_remotes().items())
+        for name, entry in sorted(registered.items())
     ]
+    if THIS_SERVER not in registered and _hosts_control_service():
+        rows.insert(0, {"name": THIS_SERVER, "provisioned": True,
+                        "control_ready": True, "local": True})
+    return rows
+
+
+# On a Sandbox remote, the dashboard also shows the host it runs on, built
+# in-process like the control service's /inventory, so no token is needed.
+THIS_SERVER = "this-server"
+
+
+def _hosts_control_service() -> bool:
+    """True where `sb remote provision` installed a control service for this account."""
+    return (Path.home() / ".sandbox" / "mcp-remote.env").exists()
+
+
+def _remote_view(name: str, deep: bool) -> tuple[int, dict]:
+    """One remote's dashboard inventory, or this host's own on a Sandbox remote."""
+    import sandbox.core._remote as remote_core
+
+    entry = remote_core.get_remote(name)
+    local = entry is None and name == THIS_SERVER and _hosts_control_service()
+    if entry is None and not local:
+        return 404, {"error": "no such remote"}
+    try:
+        if local:
+            from sandbox.resources import host_inventory
+            inventory = remote_core.redact_structure(
+                host_inventory._hosted_inventory_snapshot(deep=deep))
+        else:
+            inventory = remote_core.remote_inventory(entry, mode="deep" if deep else "fast")
+    except RuntimeError as exc:
+        return 503, {"ok": False, "inventory_schema": 1, "transport": "control",
+                     "evidence_status": "unavailable", "partial_reasons": [str(exc)]}
+    inventory["name"] = name
+    return 200, inventory
 
 
 
@@ -54,10 +163,16 @@ def cmd_dashboard(cfg, args) -> None:
     curses.wrapper(_dash_run, cfg)
 
 def cmd_web(cfg, args) -> None:
-    """Serve a local browser dashboard for the sandbox (localhost only)."""
+    """Serve the browser dashboard: this machine only by default, or the tailnet with `--host tailscale`."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import socket
 
     port = getattr(args, "port", None) or 8765
+    requested_hosts = getattr(args, "host", None) or ["127.0.0.1"]
+    if isinstance(requested_hosts, str):
+        requested_hosts = [requested_hosts]
+    hosts = list(dict.fromkeys(_web_bind_host(value) for value in requested_hosts))
+    host = hosts[0]
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):     # quiet — don't spam the console
@@ -90,11 +205,13 @@ def cmd_web(cfg, args) -> None:
             return self._send(code, json.dumps(data))
 
         def _local(self):
-            # The dashboard routes are unauthenticated, so they're restricted to
-            # loopback clients. The /api/instance/ bridge routes are token-gated
-            # (see _bridge_handle) and may be reached from a container via the
-            # docker host-gateway, so they are NOT loopback-restricted.
-            return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+            # The dashboard routes have no login, so they're restricted to this
+            # machine, or to tailnet devices when listening on the tailnet. The
+            # /api/instance/ bridge routes are token-gated (see _bridge_handle)
+            # and may be reached from a container via the docker host-gateway,
+            # so they are NOT restricted this way.
+            return _web_request_allowed(self.client_address[0], self.server.server_address[0],
+                                        self.headers.get("Host"), self.headers.get("Origin"))
 
         def do_DELETE(self):
             if self.path.startswith("/api/instance/"):
@@ -138,24 +255,12 @@ def cmd_web(cfg, args) -> None:
                     name = remote_core.validate_remote_name(name)
                 except ValueError:
                     return self._send(400, json.dumps({"error": "invalid remote name"}))
-                entry = remote_core.get_remote(name)
-                if not entry:
-                    return self._send(404, json.dumps({"error": "no such remote"}))
                 deep = qs.get("deep") == ["1"]
                 if qs and any(key != "deep" or values != ["1"]
                              for key, values in qs.items()):
                     return self._send(400, json.dumps({"error": "only deep=1 is supported"}))
-                try:
-                    inventory = remote_core.remote_inventory(
-                        entry, mode="deep" if deep else "fast",
-                    )
-                except RuntimeError as exc:
-                    return self._send(503, json.dumps({
-                        "ok": False, "inventory_schema": 1, "transport": "control",
-                        "evidence_status": "unavailable", "partial_reasons": [str(exc)],
-                    }))
-                inventory["name"] = name
-                return self._send(200, json.dumps(inventory), no_store=True)
+                code, inventory = _remote_view(name, deep)
+                return self._send(code, json.dumps(inventory), no_store=(code == 200))
             if path.startswith("/api/job/"):
                 jid = path.rsplit("/", 1)[-1]
                 offset = int((qs.get("offset") or ["0"])[0])
@@ -205,21 +310,33 @@ def cmd_web(cfg, args) -> None:
     # Bind the requested port; if it's busy (a previous `./sb web` still up, or
     # anything else), auto-pick the next free one instead of crashing.
     requested = port
-    # Bind 0.0.0.0 so the snapshot bridge is reachable from a container via the
-    # docker host-gateway (Linux as well as Docker Desktop). Safe: dashboard
-    # routes are loopback-gated (_local), and the /api/instance/ bridge routes
-    # are per-instance-token-gated. `--exact-port` (used by the bridge auto-start)
+    # The snapshot-bridge auto-start also listens on the Docker gateway so a
+    # container can reach it via the docker host-gateway; dashboard routes stay
+    # gated by _local, and the /api/instance/ bridge routes are
+    # per-instance-token-gated. `--exact-port` (used by the bridge auto-start)
     # binds only the requested port instead of scanning, so the bridge never
-    # lands on a different port than the mu-plugin expects.
+    # lands on a different port than the mu-plugin expects. Every address
+    # shares one port.
     exact = getattr(args, "exact_port", False)
-    httpd = None
+
+    def server_class(address):
+        if ":" not in address:
+            return ThreadingHTTPServer
+        return type("ThreadingHTTPServerV6", (ThreadingHTTPServer,),
+                    {"address_family": socket.AF_INET6})
+
+    servers = []
     for cand in range(requested, requested + (1 if exact else 20)):
         try:
-            httpd = ThreadingHTTPServer(("0.0.0.0", cand), Handler)
+            for address in hosts:
+                servers.append(server_class(address)((address, cand), Handler))
             port = cand
             break
         except OSError:
-            continue
+            for server in servers:
+                server.server_close()
+            servers = []
+    httpd = servers[0] if servers else None
     if httpd is None:
         die(f"couldn't bind port {requested}"
             + ("" if exact else f"–{requested+19}")
@@ -227,16 +344,21 @@ def cmd_web(cfg, args) -> None:
     if port != requested:
         info(f"port {requested} was busy — using {port} instead "
              f"(another `./sb web` may already be running).")
-    url = f"http://127.0.0.1:{port}"
-    ok(f"Sandbox web UI: {url}  (dashboard: localhost only — Ctrl-C to stop)")
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::") else (f"[{host}]" if ":" in host else host)
+    url = f"http://{shown}:{port}"
+    reach = "any device on your tailnet" if any(map(_is_tailnet_ip, hosts)) else "this machine only"
+    ok(f"Sandbox web UI: {url}  (dashboard: {reach}, full control — Ctrl-C to stop)")
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     if getattr(args, "open", False):
         run([opener, url], check=False)
+    for extra in servers[1:]:
+        threading.Thread(target=extra.serve_forever, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         info("shutting down web UI")
-        httpd.shutdown()
+        for server in servers:
+            server.shutdown()
 
 register({
     'dashboard': cmd_dashboard,

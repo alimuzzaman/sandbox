@@ -48,6 +48,35 @@ def _bridge_port_up() -> bool:
         s.close()
 
 
+def _bridge_hosts() -> list[str]:
+    """Where the bridge listens: loopback, plus the Docker gateway on Linux.
+
+    Containers reach the bridge as host.docker.internal (`host-gateway`). On
+    Linux that is the default bridge network's gateway, so listening there
+    keeps the bridge off public addresses; Docker Desktop forwards it to
+    loopback. If the gateway can't be read, the bridge stays on loopback.
+    """
+    hosts = ["127.0.0.1"]
+    if not sys.platform.startswith("linux"):
+        return hosts
+    import ipaddress
+    try:
+        result = subprocess.run(
+            ["docker", "network", "inspect", "bridge", "--format",
+             "{{range .IPAM.Config}}{{.Gateway}}{{end}}"],
+            capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return hosts
+    try:
+        gateway = ipaddress.IPv4Address(result.stdout.strip()) if result.returncode == 0 else None
+    except ValueError:
+        gateway = None
+    private = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    if gateway is not None and any(gateway in ipaddress.ip_network(net) for net in private):
+        hosts.append(str(gateway))
+    return hosts
+
+
 def _ensure_bridge_server() -> None:
     """Start the `sb web` snapshot bridge on BRIDGE_PORT if it isn't already
     running (idempotent, FR-014). Verifies any existing listener is actually our
@@ -74,7 +103,8 @@ def _ensure_bridge_server() -> None:
         return  # another start is already in flight
     try:
         subprocess.Popen(
-            [str(ENTRY), "web", "--port", str(BRIDGE_PORT), "--exact-port"],
+            [str(ENTRY), "web", *[arg for host in _bridge_hosts() for arg in ("--host", host)],
+             "--port", str(BRIDGE_PORT), "--exact-port"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True)
         for _ in range(20):           # hold the lock until it's accepting (≤~6s)

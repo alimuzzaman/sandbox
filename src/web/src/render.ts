@@ -2,7 +2,7 @@
 // the current Route (URL), not by stored selection state.
 
 import { $, esc } from "./dom";
-import { store } from "./state";
+import { localHostName, store } from "./state";
 import { currentRoute, hostContext, instancePath, remoteInstancePath, type Route } from "./router";
 import { instanceView } from "./pages/instance";
 import { usageView } from "./pages/usage";
@@ -132,8 +132,9 @@ export function renderSidebar(forceHost = false): void {
   } else {
     total = localItems.length;
     running = localItems.filter(item => item.running).length;
-    markup = groupLabel("Local host") + (localItems.length ? localItems.map(listItem).join("") : `<div class="px-3 py-2 text-[11px] text-neutral-400">No local instances</div>`);
+    markup = groupLabel(localHostName()) + (localItems.length ? localItems.map(listItem).join("") : `<div class="px-3 py-2 text-[11px] text-neutral-400">No local instances</div>`);
     for (const remote of store.data.remotes) {
+      if (remote.local) continue; // the same machine as the local group above
       const rows = store.remote[remote.name]?.instances?.rows || [];
       total += rows.length;
       running += rows.filter(row => row.running).length;

@@ -674,7 +674,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     sub.add_parser("ui", help="Alias for dashboard")
 
     web = sub.add_parser("web",
-        help="Serve a local browser dashboard (localhost)")
+        help="Serve the browser dashboard (this machine only, or the tailnet with --host tailscale)")
+    web.add_argument("--host", action="append", default=None,
+        help="address to listen on: an IP, or 'tailscale' for this machine's tailnet "
+             "address, which gives every tailnet device full control; repeat to listen "
+             "on several (default 127.0.0.1)")
     web.add_argument("--port", type=int, default=8765,
         help="port to listen on (default 8765)")
     web.add_argument("--exact-port", action="store_true",

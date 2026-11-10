@@ -347,6 +347,14 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
     for source in sources:
         for reason in source["partial_reasons"]:
             pr.add_reason(partial, reason)
+        for target in source["targets"]:
+            key = (target["remote"], target["project"], target["environment"])
+            if key not in chosen or (source["source"] == "this-server" and chosen[key][0] != "this-server"):
+                chosen[key] = (source["source"], target)
+        for item in source["legacy"]:
+            legacy[(item["project"], item["environment"])] = item
+        links.extend((source["source"], link) for link in source["links"])
+
     for listing in lifetimes.values():
         for reason in (listing or {}).get("partial_reasons") or []:
             pr.add_reason(partial, reason)
@@ -367,13 +375,6 @@ def build_view(sources: list[SourceRecords], *, known: list[KnownSite] | None = 
                                   "environment": environment, "compose_project": compose_project,
                                   "name": name, "card": True})
         return view
-        for target in source["targets"]:
-            key = (target["remote"], target["project"], target["environment"])
-            if key not in chosen or (source["source"] == "this-server" and chosen[key][0] != "this-server"):
-                chosen[key] = (source["source"], target)
-        for item in source["legacy"]:
-            legacy[(item["project"], item["environment"])] = item
-        links.extend((source["source"], link) for link in source["links"])
 
     known_instances = {site["instance"] for site in known if site["instance"]}
     route_hosts = {route["hostname"] for _, target in chosen.values() for route in target["routes"]}

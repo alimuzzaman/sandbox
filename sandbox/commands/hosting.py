@@ -7392,6 +7392,12 @@ def _cmd_host_heal(args) -> None:
 
 
 def cmd_host(cfg, args) -> None:
+    if args.action == "exec":
+        from sandbox.commands.host_exec import cmd_host_exec
+        cmd_host_exec(args)
+        return
+    if getattr(args, "exec_argv", None) is not None:
+        die("arguments after -- are only accepted by `host exec`")
     if getattr(args, "initializer", None) is not None and args.action != "diagnose":
         die("--initializer is only available with `host diagnose`")
     image_action = getattr(args, "image_action", None)
@@ -7504,6 +7510,23 @@ def cmd_host(cfg, args) -> None:
     if (args.action not in {"validate", "secrets", "image"}
             and not getattr(args, "remote", None)):
         die("--remote is required for host plan, status, diagnose, apply, recover, retire-delivery, logs, sync, and login-url")
+    if args.action in {"logs", "status", "diagnose"} and (
+            getattr(args, "target", None) or getattr(args, "name", None)):
+        # Spec 072: a recorded stack resolves to its rendered manifest, never
+        # the template in the current directory (feedback da5d522e).
+        from sandbox.hosting import target_resolution
+        try:
+            resolved = target_resolution.resolve(
+                args.remote, target=getattr(args, "target", None),
+                name=getattr(args, "name", None), project_dir=args.project_dir,
+                environment=args.environment)
+        except hosting.HostingError as exc:
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "code": getattr(exc, "code", None) or "host_target_invalid",
+                                  "error": getattr(exc, "detail", None) or str(exc)}, sort_keys=True))
+                raise SystemExit(1)
+            die(str(exc))
+        args.project_dir, args.environment = resolved.project_dir, resolved.environment
     try:
         validated = hosting.validate_manifest(args.project_dir or ".", args.environment)
         # Preserve command provenance separately from the manifest's source root.

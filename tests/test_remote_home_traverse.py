@@ -15,6 +15,11 @@ from sandbox.transports.remote_hosting_images import _INODE_EXEC
 
 FAKE_O_PATH = 0x40000000  # a bit no real open flag uses on the test host
 REAL_O_PATH = getattr(os, "O_PATH", 0)  # what the fake becomes for the real open
+# Both programs refuse a group- or world-writable ancestor, so the tree goes
+# under the user's home rather than the checkout (a umask-0002 host leaves the
+# checkout's parents at 0775). On a host whose /home is 0711 this also crosses
+# a real traverse-only ancestor.
+TEST_ROOT = Path.home()
 
 
 class TraverseOnlyAncestors:
@@ -65,7 +70,7 @@ def run_program(source, argv):
 
 class HomeNormalizeTests(unittest.TestCase):
     def test_crosses_traverse_only_ancestors_and_tightens_home(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent.parent) as directory:
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
             home = Path(directory).resolve() / "home" / "alim" / "sandbox"
             (home / "runtime").mkdir(parents=True)
             for path in (Path(directory).resolve(), home.parent.parent, home.parent):
@@ -81,7 +86,7 @@ class HomeNormalizeTests(unittest.TestCase):
             self.assertEqual(guard.read_opens, [str(home), str(home / "runtime")])
 
     def test_still_refuses_a_group_writable_ancestor(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent.parent) as directory:
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
             home = Path(directory).resolve() / "home" / "alim" / "sandbox"
             home.mkdir(parents=True)
             home.parent.chmod(0o771)
@@ -95,7 +100,7 @@ class HomeNormalizeTests(unittest.TestCase):
 
 class ImageStageTraverseTests(unittest.TestCase):
     def test_inode_exec_crosses_traverse_only_ancestors(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent.parent) as directory:
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
             home = Path(directory).resolve() / "home" / "alim" / "sandbox"
             revision = "c" * 40
             helper_bytes = b"print('helper')\n"

@@ -1379,13 +1379,13 @@ _MEMBER_ACCESS_FILE = "runtime/control-access.json"
 
 
 def _member_access_setting(entry: dict, home: str) -> bool | None:
-    """The owner's switch on the server: True, False, or None when it can't be read."""
+    """The owner's switch on the server: True (also when absent), False, or None if unreadable."""
     path = shlex.quote(f"{home}/{_MEMBER_ACCESS_FILE}")
-    result = sr.ssh_run(entry, f"cat {path} 2>/dev/null || true", timeout=15)
+    result = sr.ssh_run(entry, f"test ! -e {path} || cat {path}", timeout=15)
     if result.returncode != 0:
         return None
     if not (result.stdout or "").strip():
-        return False
+        return True
     try:
         document = json.loads(result.stdout)
     except ValueError:
@@ -1407,8 +1407,9 @@ def _member_access_probe(entry: dict) -> str:
 def _cmd_tailnet_access(args, as_json: bool) -> None:
     """`sb remote tailnet-access <status|enable|disable> <name> [--confirm]`.
 
-    When enabled, the control service admits any node Tailscale resolves on its
-    tailnet without the token, so `sb remote join` works for every member.
+    On by default: the control service admits any node Tailscale resolves on
+    its tailnet without the token, so `sb remote join` works for every member.
+    `disable` restricts it to the token.
     """
     operation, name = getattr(args, "name", None), getattr(args, "ssh_url", None)
     if operation not in {"status", "enable", "disable"} or not name:
@@ -1499,8 +1500,8 @@ def _first_ssh_login(target: str, port) -> str:
 def _cmd_join(args, as_json: bool) -> None:
     """`sb remote join <name> <user>@<tailnet address or name>`: use a server someone else provisioned.
 
-    Access comes from tailnet membership, so nothing secret is exchanged. The
-    server's owner must have run `sb remote tailnet-access enable`.
+    Access comes from tailnet membership, so nothing secret is exchanged. It
+    is on by default for Tailscale remotes unless the owner turned it off.
     """
     name, target = getattr(args, "name", None), getattr(args, "ssh_url", None)
     if not name or not target:
@@ -1526,7 +1527,7 @@ def _cmd_join(args, as_json: bool) -> None:
         inventory = sr._remote_control_request(entry, "/inventory", timeout=15)
     except RuntimeError as exc:
         die(f"join_refused: the control service on {address} did not admit this machine ({exc}). "
-            f"Ask the owner to run `./sb remote tailnet-access enable <their name for it> --confirm`.")
+            f"Its owner may have run `./sb remote tailnet-access disable`, or the service predates tailnet access.")
     if inventory.get("inventory_schema") != 1:
         die(f"join_refused: {address} did not answer as a Sandbox control service")
     ssh_login = _first_ssh_login(f"{user}@{address}", parts.get("port"))

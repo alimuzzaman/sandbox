@@ -1,6 +1,6 @@
 """Who may call the control service, and a record of who did.
 
-Access is the bearer token, or, once the owner turns it on, any node that
+Access is the bearer token, or, unless the owner turned it off, any node that
 Tailscale resolves on this tailnet (`ControlGate`, `MemberAccess`).
 Attribution never refuses or fails a request, and no token, header, body or
 tool argument is ever written.
@@ -116,9 +116,10 @@ class Whois:
 class MemberAccess:
     """The owner's switch for tailnet member access, in `runtime/control-access.json`.
 
-    `sb remote tailnet-access` writes it over SSH. It is re-read whenever it
-    changes, so no restart is needed. Anything unexpected (missing,
-    malformed, a symlink, someone else's file, writable by others) means off.
+    On by default: a missing file means members are admitted. `sb remote
+    tailnet-access` writes it over SSH, and it is re-read whenever it changes,
+    so no restart is needed. A file that is malformed, a symlink, someone
+    else's, or writable by others means off.
     """
 
     def __init__(self, home):
@@ -129,6 +130,8 @@ class MemberAccess:
     def enabled(self) -> bool:
         try:
             descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return True
         except OSError:
             return False
         try:
@@ -156,7 +159,7 @@ class MemberAccess:
 
 
 class ControlGate:
-    """Admit the bearer token, or a tailnet node Tailscale resolves when members are allowed."""
+    """Admit the bearer token, or a tailnet node Tailscale resolves unless members are turned off."""
 
     def __init__(self, token: str, members: MemberAccess | None, whois: Whois | None):
         self.expected = f"Bearer {token}".encode()

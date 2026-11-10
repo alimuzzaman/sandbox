@@ -154,9 +154,11 @@ class TailnetAccessCommandTest(unittest.TestCase):
 
         def ssh_run(_entry, command, timeout=30, **_kwargs):
             commands.append(command)
-            if command.startswith("cat "):
+            if command.startswith("test ! -e "):
                 if self.state["setting"] is None:
                     return SimpleNamespace(returncode=1, stdout="", stderr="")
+                if self.state["setting"] == "absent":
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
                 return SimpleNamespace(returncode=0, stdout=json.dumps({"tailnet_members": self.state["setting"]}),
                                        stderr="")
             if write_rc == 0:
@@ -176,7 +178,14 @@ class TailnetAccessCommandTest(unittest.TestCase):
         })
 
     def writes(self):
-        return [item for item in self.commands if not item.startswith("cat ")]
+        return [item for item in self.commands if not item.startswith("test ! -e ")]
+
+    def test_no_file_means_on(self):
+        code, result = self.command("status", setting="absent", probe="admitted")
+        self.assertEqual((code, result["setting"], result["members"]), (0, True, "admitted"))
+        code, result = self.command("enable", setting="absent", confirm=True, probe="admitted")
+        self.assertEqual((code, result["status"]), (0, "already_enabled"))
+        self.assertEqual(self.writes(), [])
 
     def test_status_reads_the_setting_and_what_the_service_does(self):
         code, result = self.command("status", setting=True, probe="admitted")

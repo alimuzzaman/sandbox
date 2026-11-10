@@ -1506,23 +1506,27 @@ not detected.
 
 ### Sharing a remote with everyone on the tailnet
 
-For a remote whose control connection is Tailscale, the owner can let every node on
-the tailnet use it, with no token to hand out. Removing someone from the tailnet removes
-their access.
+For a remote whose control connection is Tailscale, every node on the tailnet may use
+it by default, with no token to hand out. Removing someone from the tailnet removes
+their access. The owner can restrict it to the token with `tailnet-access disable`.
 
 ```bash
 # Owner, on the controller that provisioned the remote:
-./sb remote tailnet-access enable myvps --confirm --json
-./sb remote tailscale-ssh enable myvps --confirm --json   # deploys use Tailscale SSH
+./sb remote tailnet-access status myvps --json             # on unless disabled
+./sb remote tailnet-access disable myvps --confirm --json  # token only
+./sb remote tailscale-ssh enable myvps --confirm --json    # deploys use Tailscale SSH
 
 # Each teammate, on a machine signed in to the same tailnet:
 ./sb remote join myvps alim@myvps.tailnet-name.ts.net --json
 ```
 
 `tailnet-access` writes `$SANDBOX_HOME/runtime/control-access.json` on the remote over
-SSH (mode 0600). The control service re-reads it when it changes, so no restart is
-needed, but a service older than this feature ignores it: `members: refused` after
-`enable` means `./sb remote service migrate myvps --confirm` is due. The service then
+SSH (mode 0600); with no file, member access is on. The control service re-reads it when
+it changes, so no restart is needed. A file that is malformed, a symlink, another user's
+or writable by others means off. A service older than this feature admits only the
+token: `members: refused` while the setting is on means
+`./sb remote service migrate myvps --confirm` is due, and migrating an existing Tailscale
+remote turns member access on. The service then
 admits a request without the token only when it arrives on its tailnet address and
 `tailscale whois` resolves the caller; the owner's token keeps working. Callers are
 recorded by Tailscale login in `runtime/logs/control-access.jsonl`. Public HTTPS

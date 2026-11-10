@@ -47,18 +47,18 @@ class Home(unittest.TestCase):
 
 
 class MemberAccessTest(Home):
-    def test_off_unless_the_owner_turned_it_on(self):
+    def test_on_unless_the_owner_turned_it_off(self):
         members = access.MemberAccess(self.home)
-        self.assertFalse(members.enabled())
-        self.switch(True)
-        self.assertTrue(members.enabled())
-
-    def test_a_change_takes_effect_without_a_restart(self):
-        members = access.MemberAccess(self.home)
-        self.switch(True)
         self.assertTrue(members.enabled())
         self.switch(False)
         self.assertFalse(members.enabled())
+
+    def test_a_change_takes_effect_without_a_restart(self):
+        members = access.MemberAccess(self.home)
+        self.switch(False)
+        self.assertFalse(members.enabled())
+        self.switch(True)
+        self.assertTrue(members.enabled())
 
     def test_anything_unexpected_means_off(self):
         cases = {"writable by others": dict(mode=0o666), "not JSON": dict(content="yes"),
@@ -91,12 +91,12 @@ class ControlGateTest(Home):
         self.assertEqual(self.admit(self.gate(run), f"Bearer {TOKEN}"), {"via": "token"})
         self.assertEqual(run.calls, 0)
 
-    def test_a_tailnet_member_is_admitted_once_the_owner_allows_it(self):
+    def test_a_tailnet_member_is_admitted_unless_the_owner_turned_it_off(self):
         gate = self.gate()
-        self.assertIsNone(self.admit(gate))
-        self.switch(True)
         self.assertEqual(self.admit(gate), {"via": "tailnet", "login": "teammate@example.test",
                                             "node": "laptop"})
+        self.switch(False)
+        self.assertIsNone(self.admit(gate))
 
     def test_a_wrong_token_from_a_member_still_gets_member_access(self):
         self.switch(True)
@@ -144,11 +144,11 @@ class ServerWiringTest(Home):
             return TestClient(app, client=(peer, 50000)).get(
                 "/inventory", headers={**headers, "Host": "100.64.0.9:9174"})
 
-    def test_a_member_reaches_the_control_service_only_when_allowed(self):
+    def test_a_member_reaches_the_control_service_unless_turned_off(self):
         app = self.app()
-        self.assertEqual(self.get(app).status_code, 401)
-        self.switch(True)
         self.assertEqual(self.get(app).status_code, 200)
+        self.switch(False)
+        self.assertEqual(self.get(app).status_code, 401)
 
     def test_the_owner_token_still_works(self):
         self.assertEqual(self.get(self.app(), token=TOKEN).status_code, 200)

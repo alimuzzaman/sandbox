@@ -188,8 +188,25 @@ def ref_value(root: Path, ref_name: str, *, timeout: float) -> str | None:
     return parse_revision(_value(root, "rev-parse", "--verify", "-q", ref_name, timeout=timeout))
 
 
+def current_branch(root: Path, *, timeout: float) -> str | None:
+    """Short name of the checked-out branch, ``None`` when detached."""
+    try:
+        return _value(root, "symbolic-ref", "-q", "--short", "HEAD", timeout=timeout)
+    except GitError:
+        return None
+
+
+def valid_branch_name(root: Path, name: str, *, timeout: float) -> bool:
+    try:
+        return run(root, "check-ref-format", "--branch", name, timeout=timeout).returncode == 0
+    except GitError:
+        return False
+
+
 def tree_matches(root: Path, revision: str, *, timeout: float) -> bool:
-    """True when both the index and the work tree equal ``revision``."""
+    """True when the index and the tracked files in the work tree equal
+    ``revision``. Untracked files are not compared; ``read-tree`` never
+    overwrites them."""
     cached = run(root, "diff", "--cached", "--quiet", revision, "--", timeout=timeout)
     files = run(root, "diff", "--quiet", "--", timeout=timeout)
     return cached.returncode == 0 and files.returncode == 0

@@ -86,15 +86,25 @@ def _recover(root: Path, lock_dir: Path, policy: Policy) -> Decision | None:
             return None
         branch, old, new = entry
         resolved = Path(root).resolve()
+        # Only ever act on the branch that is checked out here, under a name
+        # git accepts; anything else is not a rollback of this checkout.
+        if (not gitops.valid_branch_name(resolved, branch, timeout=policy.git_timeout)
+                or gitops.current_branch(resolved, timeout=policy.git_timeout) != branch):
+            _drop_journal(journal)
+            return None
         try:
             finished = gitops.finish_rollback(resolved, branch, old, new,
                                               timeout=policy.git_timeout)
         except GitError as exc:
             head = gitops.read_head(resolved, timeout=policy.git_timeout)
+            # Fail closed: a partly written tree is never guessed at. Once the
+            # tracked files match the old revision again, the next run clears
+            # the journal by itself (docs/controller-auto-update.md).
             return Stranded(head, (
                 f"sb: an interrupted controller rollback to {short(old)} could not be "
                 f"finished ({exc}); {resolved} is at {short(head)}. "
-                f"Recover with: git -C {resolved} status"))
+                f"Recover with: git -C {resolved} status (journal: {journal}); "
+                "see docs/controller-auto-update.md, 'Stranded checkout'."))
         _drop_journal(journal)
         if not finished:
             return None

@@ -466,6 +466,38 @@ class InterruptedRollbackTests(EngineCase):
         self.assertIn("interrupted controller rollback", decision.notice)
         self.assertTrue(journal.exists())
 
+    def test_journal_for_another_branch_is_dropped_without_touching_it(self):
+        c2 = self.updated_to_c2()
+        self.repos.git(self.repos.ctl, "branch", "-q", "other", c2)
+        journal = self.journal(self.repos.c1, c2, branch="other")
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.git(self.repos.ctl, "rev-parse", "refs/heads/other"), c2)
+        self.assertEqual(self.repos.head(), c2)
+
+    def test_journal_with_an_invalid_branch_name_is_dropped(self):
+        c2 = self.updated_to_c2()
+        journal = self.journal(self.repos.c1, c2, branch="bad..name")
+        self.assertEqual(self.run_engine(), NoAction(SkipReason.NO_HINT))
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.head(), c2)
+
+    def test_stranded_recovery_clears_itself_once_the_files_are_fixed(self):
+        c2 = self.updated_to_c2()
+        journal = self.journal(self.repos.c1, c2)
+        self.repos.git(self.repos.ctl, "update-ref", "refs/heads/main", self.repos.c1, c2)
+        (self.repos.ctl / "a.txt").write_text("edited after the crash\n", encoding="utf-8")
+        self.repos.git(self.repos.ctl, "add", "a.txt")
+        stranded = self.run_engine()
+        self.assertIsInstance(stranded, Stranded)
+        self.assertIn(str(journal), stranded.notice)
+        # The documented manual repair: put tracked files back at the old revision.
+        self.repos.git(self.repos.ctl, "restore", "--staged", "--worktree",
+                       f"--source={self.repos.c1}", ":/")
+        self.assertIsInstance(self.run_engine(), Recovered)
+        self.assertFalse(journal.exists())
+        self.assertEqual(self.repos.head(), self.repos.c1)
+
     def test_malformed_journal_is_dropped(self):
         path = engine.journal_path(self.repos.ctl, self.lock_dir)
         path.parent.mkdir(parents=True, exist_ok=True)

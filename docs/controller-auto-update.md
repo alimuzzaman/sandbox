@@ -90,6 +90,22 @@ dropped. If the rollback cannot complete, `sb` prints where the checkout is and
 `git -C <root> status`, and exits 1 without running the command (set
 `SANDBOX_AUTO_UPDATE=0` to run commands while you repair it).
 
+### Stranded checkout
+
+When a rollback cannot finish (local edits in the way, or a kill during the
+recovery itself left a partly written tree), every remote-capable command
+exits 1 with the checkout path and the journal path, rather than guess. To
+repair:
+
+1. `git -C <root> status` and `git -C <root> diff` to see what differs. The
+   branch already names the old revision.
+2. Keep any edits of your own elsewhere, then put the tracked files back at
+   that revision: `git -C <root> restore --staged --worktree --source=HEAD :/`.
+3. Run the command again. With branch and files agreeing, `sb` clears the
+   journal itself and re-runs.
+
+`SANDBOX_AUTO_UPDATE=0` runs commands without the check while you repair.
+
 A kill during the forward `git merge --ff-only` can leave a partly updated
 work tree, as with any interrupted git checkout. The next run sees it as
 uncommitted changes and refuses to update until `git status` is clean.

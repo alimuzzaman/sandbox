@@ -1,6 +1,7 @@
 """Transport-neutral, audit-first secret inspection and use orchestration."""
 from __future__ import annotations
 
+import hmac
 import secrets as secure_random
 import string
 from collections.abc import Callable, Mapping, Sequence
@@ -371,10 +372,13 @@ class SecretService:
             result["kind"] = hint
         return result
 
-    def _operate(self, operation, source, keys, surface, callback, *, profile=None, input_channel=None):
+    def _operate(self, operation, source, keys, surface, callback, *, profile=None,
+                 input_channel=None, destination=None):
+        # Only copy names a destination; other events keep their exact shape.
+        extra = {} if destination is None else {"destination": destination}
         correlation, failure = _bounded_call(lambda: self.audit.intent(
             operation, source, list(keys), surface=surface,
-            profile=profile, input_channel=input_channel,
+            profile=profile, input_channel=input_channel, **extra,
         ))
         if failure is not None:
             raise failure
@@ -385,7 +389,7 @@ class SecretService:
             _, audit_failure = _bounded_call(lambda: self.audit.outcome(
                 correlation, operation, source, list(keys), surface=surface,
                 decision=decision, reason_code=failure.code, profile=profile,
-                input_channel=input_channel,
+                input_channel=input_channel, **extra,
             ))
             if audit_failure is not None:
                 raise audit_failure
@@ -398,7 +402,7 @@ class SecretService:
         _, failure = _bounded_call(lambda: self.audit.outcome(
             correlation, operation, source, list(keys), surface=surface,
             decision="succeeded", reason_code=success_reason, profile=profile,
-            revision=revision, count=count, input_channel=input_channel,
+            revision=revision, count=count, input_channel=input_channel, **extra,
         ))
         if failure is not None:
             raise failure
@@ -662,7 +666,7 @@ class SecretService:
 
     def set(self, source: str, key: str, value: str, *, intent="either",
             expected_revision=None, validation_profile=None, input_channel="tty",
-            surface="cli") -> dict:
+            surface="cli", skip_unchanged: bool = False) -> dict:
         if self._is_provider_source(source):
             raise SecretBrokerError(
                 "update_denied", "provider sources do not accept secret-value updates",
@@ -687,6 +691,7 @@ class SecretService:
             action, revision = update_source(
                 safe, key=key, value=value, revision_key=load_revision_key(self.revision_key_path),
                 intent=intent, expected_revision=expected_revision,
+                skip_unchanged=skip_unchanged,
             )
             return success("set", source=source, key=key, action=action, revision=revision,
                            validation=checked, correlation_id=correlation)
@@ -774,6 +779,7 @@ class SecretService:
         intent = kwargs.get("intent", "either")
         expected_revision = kwargs.get("expected_revision")
         validation_profile = kwargs.get("validation_profile")
+        skip_unchanged = bool(kwargs.get("skip_unchanged", False))
         def perform(correlation):
             if self.registry.policy(source).format != "dotenv":
                 raise SecretBrokerError(
@@ -792,12 +798,130 @@ class SecretService:
             action, revision = update_source(
                 safe, key=key, value=self._entry_value(record),
                 revision_key=load_revision_key(self.revision_key_path), intent=intent,
-                expected_revision=expected_revision,
+                expected_revision=expected_revision, skip_unchanged=skip_unchanged,
             )
             return success("set", source=source, key=key, action=action, revision=revision,
                            validation=checked, correlation_id=correlation)
         return self._operate("set", source, (key,), "cli", perform,
                              profile=validation_profile, input_channel="reference")
+
+    def unset(self, source: str, key: str, *, expected_revision=None,
+              surface: str = "cli") -> dict:
+        """Remove one dotenv assignment without reading out any value (spec 073).
+
+        A missing key refuses with ``key_missing``; a rerun after success
+        therefore refuses and leaves the source untouched.
+        """
+        if self._is_provider_source(source):
+            raise SecretBrokerError(
+                "update_denied", "provider sources do not accept secret-value updates",
+            )
+        self._validate_source_key(source, key)
+        if surface != "cli":
+            raise SecretBrokerError("update_denied", "secret updates require the local CLI")
+
+        def perform(correlation):
+            import time
+            from .ownership.continuity import capture
+            from .writer import remove_keys
+            if self.registry.policy(source).format != "dotenv":
+                raise SecretBrokerError(
+                    "update_unsupported", "secret updates are not supported for this format",
+                )
+            safe, info = self.registry.read_with_stat(source)
+            revision_key = load_revision_key(self.revision_key_path)
+            current = opaque_revision(revision_key, safe.content)
+            if expected_revision is not None and not (
+                    isinstance(expected_revision, str) and expected_revision.isascii()
+                    and hmac.compare_digest(expected_revision, current)):
+                raise SecretBrokerError("revision_conflict", "secret source revision no longer matches")
+            try:
+                document = parse_document(safe.content)
+            except SecretParseError as exc:
+                code = "duplicate_key" if exc.code == "duplicate_key" else "syntax_unsupported"
+                raise SecretBrokerError(code, "secret source syntax cannot be updated") from None
+            if key not in document.entries:
+                raise SecretBrokerError("key_missing", "secret key does not exist")
+            expected = capture(source, info, document.entries, now_ns=time.time_ns())
+            if not expected.reliable:
+                raise SecretBrokerError(
+                    "continuity_unreliable", "secret source metadata cannot prove continuity",
+                )
+            try:
+                # remove_keys refuses symlinked parents; the read above already
+                # followed them, and continuity (dev/ino) binds the same file.
+                import os
+                path = safe.policy.path
+                remove_keys(type(path)(os.path.realpath(path.parent)) / path.name,
+                            (key,), expected=expected)
+            except SecretBrokerError as exc:
+                mapped = {
+                    "source_changed": ("revision_conflict", "secret source changed before update"),
+                    "cleanup_ineligible": ("key_missing", "secret key does not exist"),
+                    "source_unsupported": ("syntax_unsupported", "secret source syntax cannot be updated"),
+                    "journal_locked": ("journal_locked", "secret source update lock is held"),
+                }.get(exc.code)
+                if mapped is None:
+                    raise
+                failure = SecretBrokerError(mapped[0], mapped[1], retryable=exc.retryable)
+            else:
+                failure = None
+            if failure is not None:
+                raise failure
+            remaining = b"".join(record.raw for record in document.records
+                                 if getattr(record, "key", None) != key)
+            return success("unset", source=source, key=key, action="removed",
+                           revision=opaque_revision(revision_key, remaining),
+                           correlation_id=correlation)
+
+        return self._operate("unset", source, (key,), surface, perform)
+
+    def copy_to_remote(self, source: str, key: str, request, sink, *,
+                       surface: str = "cli") -> dict:
+        """Hand one local value to a remote broker's own ``set`` (spec 073).
+
+        Every argument refusal precedes audit intent and any read. The value
+        goes only to ``sink.put``; neither the payload nor audit carries it.
+        """
+        from .remote_copy import COPY_ACTIONS, RemoteSetRequest
+        if self._is_provider_source(source):
+            raise SecretBrokerError(
+                "update_denied", "provider sources do not support secret copying",
+            )
+        self._validate_source_key(source, key)
+        if surface != "cli":
+            raise SecretBrokerError("update_denied", "secret copying requires the local CLI")
+        if not isinstance(request, RemoteSetRequest):
+            raise SecretBrokerError("input_invalid", "remote secret request is invalid")
+        if not callable(getattr(sink, "put", None)):
+            raise SecretBrokerError("input_invalid", "remote secret sink is invalid")
+
+        def perform(correlation):
+            _, document = self._document(source)
+            record = document.entries.get(key)
+            if record is None:
+                raise SecretBrokerError("key_missing", "secret key does not exist")
+            value = self._entry_value(record)
+            try:
+                size = len(value.encode("utf-8"))
+            except UnicodeEncodeError:
+                size = MAX_VALUE_BYTES + 1
+            if not value or size > MAX_VALUE_BYTES or any(
+                    character in value for character in "\r\n\x00"):
+                raise SecretBrokerError(
+                    "input_invalid", "secret value cannot travel as one stdin line",
+                )
+            result = sink.put(request, value)
+            action = getattr(result, "action", None)
+            if action not in COPY_ACTIONS:
+                raise SecretBrokerError("remote_failed", "the remote secret update answer is invalid")
+            return success("copy", source=source, key=key, remote=request.remote,
+                           target_source=request.target_source, target_key=request.target_key,
+                           action=action, remote_revision=getattr(result, "revision", None),
+                           reason_code=action, correlation_id=correlation)
+
+        return self._operate("copy", source, (key,), surface, perform,
+                             input_channel="remote_stdin", destination=request.destination)
 
     def generate(self, source: str, key: str, profile: str, **kwargs) -> dict:
         if self._is_provider_source(source):

@@ -545,7 +545,7 @@ Tiers are strictly nested and the nesting is asserted by tests.
   leaves any requested ID unaccounted for (neither returned nor reported gone)
   refuses as well. Each planned stray is then inspected once more and written
   to the manifest (`kind: stray_container`, with its fingerprint), stopped,
-  inspected again, and removed (`docker rm`, never `-f`, never a prune), before
+  inspected again (it must now be stopped), and removed (`docker rm`, never `-f`, never a prune), before
   the Compose project and then the checkout. Docker has no compare-and-remove,
   so the gap between each fresh inspect and its stop or remove is the one
   window left; a restart in it fails the remove, which refuses a running

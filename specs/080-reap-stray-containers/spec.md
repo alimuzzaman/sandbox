@@ -291,10 +291,13 @@ or anything on the host is touched. Run it with `--tier tmp`; it proceeds.
 
 ## Assumptions
 
-- The job that created a stray is known only when the container carries Sandbox's job
-  label; most strays (docker-generated name, no labels) record no job, in which case
-  the workspace's own job evidence (already required to be terminal and idle for a
-  reclaimable workspace) is the job check.
+- Sandbox puts no job label on containers, and any container with a Sandbox label is
+  protected outright, which is stricter than "its job is terminal". For an unlabeled
+  stray the creating job is a job of that checkout, so the workspace's job evidence is
+  the job check: any non-terminal job on the checkout protects it at plan time
+  (`active_job`), and the host re-reads the job registry right before teardown and
+  skips the checkout if a job became active or the registry is unreadable
+  (`job_active_since_plan`).
 - A Sandbox instance or hosted target is recognised by its Compose project label or
   Sandbox labels; an unlabeled container is neither.
 - The per-candidate container limit is small (on the order of ten); a workspace with

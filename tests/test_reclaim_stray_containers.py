@@ -471,6 +471,21 @@ class StrayTeardownTest(unittest.TestCase):
         self.assertIn("container_evidence_changed:" + ID, result["failures"])
         self.assertNotIn(["docker", "rm", ID], engine.calls)
 
+    def test_still_running_after_stop_is_not_removed(self):
+        record = container()
+        engine = Engine(record)
+        original = engine.__call__
+
+        def ignoring_stop(argv, timeout):
+            if argv[:2] == ["docker", "stop"]:
+                return 0, argv[-1], ""
+            return original(argv, timeout)
+        result = teardown_workspace_stack(ignoring_stop, WS, [ID], strays=[planned(record)],
+                                          checkout=CHECKOUT)
+        self.assertFalse(result["ok"])
+        self.assertIn("stray_still_running:" + ID, result["failures"])
+        self.assertNotIn(["docker", "rm", ID], engine.calls)
+
     def test_inspect_that_omits_an_id_is_refused(self):
         plan = planned(container())
         engine = Engine(container())

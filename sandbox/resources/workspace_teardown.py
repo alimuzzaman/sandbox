@@ -343,7 +343,7 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
                 # as the same container): not what the operator reviewed.
                 return refuse("container_evidence_changed:" + identity)
 
-        def current(identity):
+        def current(identity, stopped=False):
             # Docker has no compare-and-remove, so each mutation is preceded
             # by a fresh inspect of that one container; what is left is the
             # gap between this inspect and the engine call that follows.
@@ -359,20 +359,24 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
                     or not isinstance(rows[0], dict) or rows[0].get("Id") != identity):
                 return None
             verdict = assess_stray_container(rows[0], checkout)
-            if verdict["owned"] and verdict["fingerprint"] == planned[identity]:
-                return "match"
-            return "changed"
+            if not verdict["owned"] or verdict["fingerprint"] != planned[identity]:
+                return "changed"
+            if stopped and (rows[0].get("State") or {}).get("Running") is not False:
+                return "running"
+            return "match"
 
         for identity in planned:
             if identity not in matched:
                 result["strays_removed"].append(identity)
                 continue
             for step in ("stop", "rm"):
-                state = current(identity)
+                state = current(identity, stopped=step == "rm")
                 if state == "absent":
                     break
                 if state is None:
                     return refuse("stray_inspect_failed:" + identity)
+                if state == "running":
+                    return refuse("stray_still_running:" + identity)
                 if state != "match":
                     return refuse("container_evidence_changed:" + identity)
                 if step == "stop":

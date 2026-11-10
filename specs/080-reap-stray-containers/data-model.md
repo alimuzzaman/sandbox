@@ -36,7 +36,7 @@ listed in `stop_containers` only and the host refuses it as before.
 | Field | Notes |
 |---|---|
 | `strays_removed` | ids removed or found absent |
-| `failures` | adds `container_evidence_changed:<id>`, `unplanned_bound_container:<id>`, `invalid_planned_strays`, `stray_inspect_failed:<id>`, `stray_stop_failed:<id>`, `stray_rm_failed:<id>`, `bound_list_failed`, `bound_inspect_failed` |
+| `failures` | adds `container_evidence_changed:<id>`, `unplanned_bound_container:<id>`, `invalid_planned_strays`, `stray_inspect_failed:<id>`, `stray_stop_failed:<id>`, `stray_still_running:<id>`, `stray_rm_failed:<id>`, `bound_list_failed`, `bound_inspect_failed` |
 
 ## Manifest intent (stray)
 

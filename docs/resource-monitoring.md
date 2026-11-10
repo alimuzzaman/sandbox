@@ -398,18 +398,23 @@ Plans expire after 15 minutes, bind to one host identity, and store internal
 locators only in owner-readable records under
 `$SANDBOX_HOME/runtime/resource-plans/`.
 
-Plan kinds are separate: `cache` and `stale` belong to `resources cleanup`,
-while `safe`, `tmp`, and `all` belong to `workspace reap`. Passing a plan from
-the other operation returns `plan_kind_mismatch` before target comparison or
-any host mutation.
+Plan kinds are separate. A `cache` or `stale` plan (`resources plan --scope`)
+is applied with `resources cleanup --plan-id ID` and no `--tier`. A `safe`,
+`tmp`, or `all` plan (`resources plan --tier T`, or a `workspace reap` dry run)
+is applied with `resources cleanup --tier T --plan-id ID`, naming the same tier
+it was planned with. A plan of the other kind, or a tier plan given a different
+`--tier`, returns `plan_kind_mismatch` before the plan is begun, before target
+comparison, and before any host mutation.
 
 ## Apply a reviewed plan
 
-Confirmation is mandatory:
+Confirmation is mandatory. For a `cache` or `stale` plan:
 
 ```sh
 ./sb resources cleanup --plan-id PLAN_ID --confirm --json
 ```
+
+A tier plan needs its tier: see [Plan and apply](#plan-and-apply).
 
 Apply accepts no caller-supplied paths or engine IDs. It loads the stored plan,
 checks target identity and expiry, re-observes every candidate, and uses only
@@ -520,6 +525,30 @@ Tiers are strictly nested and the nesting is asserted by tests.
   the retention window. A running container produces the `LIVE` class — which
   keeps it out of `safe` — but an idle keepalive container cannot outvote an
   explicit release or an expired window.
+- **Stray containers (spec 080).** A workspace checkout can be held by a
+  container a job started without Compose (a browser-test container with a
+  docker-generated name). The plan lists it under `remove_containers`, with its
+  image, mounts, networks, state, creation and start times and a fingerprint,
+  only when every mount is a bind whose source (as written and resolved) is the
+  checkout or below it, it has no named or anonymous volume or tmpfs mount, it
+  uses only the default bridge network, its restart policy is none, and it has
+  no Compose, stack, swarm or Sandbox label and no `sandbox-` name. Any other
+  bound container keeps the workspace in `skipped` with
+  `bound_container_protected` and `protected_containers` naming the rule; a
+  container of another Compose project gives `foreign_compose_project`, and
+  more than 10 strays give `too_many_stray_containers`. Before acting, the host
+  lists every container bound to the checkout again: an unplanned one
+  (`unplanned_bound_container:<id>`) or a planned one whose fingerprint changed
+  (restarted, new mount, label or network, or replaced;
+  `container_evidence_changed:<id>`) fails the candidate with
+  `stack_teardown_incomplete` before anything is touched. Each planned stray is
+  then written to the manifest (`kind: stray_container`, with its fingerprint),
+  stopped, and removed (`docker rm`, never `-f`, never a prune), before the
+  Compose project and then the checkout. A stray already gone counts as removed,
+  so a rerun after a crash converges; a stop or remove failure keeps the
+  checkout and names the container. A plan made before this change names no
+  strays, and the host refuses an unlabeled bound container as before. The
+  remote probe applies this only after `sb remote service migrate`.
 - **Root-owned trees.** Removal escalates once through bounded
   `sudo -n timeout -k 1 N rm -rf --` and then re-stats the path. If anything
   remains, the outcome is `failed` with `partial_removal_detected` and its bytes

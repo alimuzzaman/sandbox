@@ -26,15 +26,17 @@ entry is a workspace checkout. Records are de-duplicated by `id` per entry.
 
 `protected_containers`: list of `{id, name, reason}` for a workspace kept because a
 bound container is not owned; `reason` of the row is `bound_container_protected`.
-Additional reasons: `foreign_compose_project`, `stray_evidence_unavailable`,
-`too_many_stray_containers`.
+Container reasons add `foreign_compose_project`; a row with more than
+`MAX_STRAYS_PER_CHECKOUT` owned strays has reason `too_many_stray_containers`. A
+record without `stray` evidence (an older probe) keeps today's behaviour: it is
+listed in `stop_containers` only and the host refuses it as before.
 
 ## Teardown result additions
 
 | Field | Notes |
 |---|---|
 | `strays_removed` | ids removed or found absent |
-| `failures` | adds `container_evidence_changed:<id>`, `stray_stop_failed:<id>`, `stray_rm_failed:<id>`, `bound_list_failed`, `bound_inspect_failed` |
+| `failures` | adds `container_evidence_changed:<id>`, `unplanned_bound_container:<id>`, `invalid_planned_strays`, `stray_stop_failed:<id>`, `stray_rm_failed:<id>`, `bound_list_failed`, `bound_inspect_failed` |
 
 ## Manifest intent (stray)
 

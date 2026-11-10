@@ -249,6 +249,10 @@ Apply only after the user explicitly authorizes the reviewed plan:
 sb resources cleanup --plan-id PLAN_ID --confirm --json
 ```
 
+That form is for `cache` and `stale` plans. A tier plan is applied with the
+tier it was planned with, `sb resources cleanup --tier T --plan-id PLAN_ID
+--confirm`; any other pairing is refused with `plan_kind_mismatch`.
+
 Do not supply paths or engine identifiers outside the plan. Never retry a
 timed-out remote cleanup automatically; rescan and create a new plan.
 

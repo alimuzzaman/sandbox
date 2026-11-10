@@ -256,6 +256,8 @@ or anything on the host is touched. Run it with `--tier tmp`; it proceeds.
 - **FR-012**: A remote runs the new behavior only after its runtime is migrated; the
   docs MUST say so, and an older runtime MUST keep refusing as today rather than act on
   fields it does not check.
+  A container record without the new evidence (from an older probe) MUST be
+  planned as today, and the host MUST refuse it as today.
 - **FR-013**: A base deployment (a checkout without the workspace marker) MUST keep
   today's behavior; stray reclaim applies to workspace checkouts only.
 

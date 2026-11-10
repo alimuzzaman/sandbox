@@ -63,8 +63,9 @@
   mode only when the field is present; without it (older controller) the legacy
   refusal of unlabeled containers stays. An older runtime ignores the field and
   refuses as today. The probe adds a `stray` object to container records; an older
-  controller ignores it, and a new controller treats a record without it as protected
-  (`stray_evidence_unavailable`). `sandbox/resources/remote.py` is not in the protocol
+  controller ignores it, and a new controller plans a record without it as today (listed in
+  `stop_containers` only, refused by the host), so a new controller against an
+  older runtime behaves exactly as before. `sandbox/resources/remote.py` is not in the protocol
   shape sources, so no `CONTROL_PROTOCOL_SPOKEN` bump.
 
 ## R7. Plan-id forms

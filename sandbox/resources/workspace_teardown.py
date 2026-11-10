@@ -7,6 +7,132 @@ function body, and take every side effect as an argument.
 from __future__ import annotations
 
 DEFAULT_FINISHED_JOB_IDLE_SECONDS = 6 * 3600
+# Spec 080: a workspace with more bound strays than this is left for review.
+MAX_STRAYS_PER_CHECKOUT = 10
+
+
+def owns_compose_project(workspace, project):
+    """Whether compose ``project`` belongs to workspace checkout ``workspace``.
+
+    ``sandbox-<workspace>``, a ``sandbox-<workspace>-<label>`` instance of it,
+    or a truncation of that name that still carries the full ``-workspace-``
+    marker plus 8 hash characters; never a hosted ``sandbox-host-*`` project.
+    """
+    marker = "-workspace-"
+    if (not isinstance(workspace, str) or marker not in workspace
+            or not isinstance(project, str) or not project.startswith("sandbox-")
+            or project.startswith("sandbox-host-")):
+        return False
+    segment = project[len("sandbox-"):]
+    if segment == workspace or segment.startswith(workspace + "-"):
+        return True
+    minimum = workspace.index(marker) + len(marker) + 8
+    return len(segment) >= minimum and workspace.startswith(segment)
+
+
+def assess_stray_container(container, checkout):
+    """Decide whether one unlabeled container is a stray owned by ``checkout``.
+
+    ``container`` is one ``docker inspect`` object (or the same keys from a
+    format template). Returns ``{"owned", "reason", "evidence", "fingerprint"}``:
+    ``owned`` is true only when the container has no Compose, stack, swarm or
+    Sandbox label and no ``sandbox-`` name, every mount is a bind whose source
+    (as written and resolved) is ``checkout`` or below it, it uses only the
+    default bridge network, and its restart policy is none. ``reason`` names
+    the first rule that protects it. ``fingerprint`` hashes the evidence the
+    cleanup compares before acting (spec 080 research R4); it leaves out the
+    running state so a stop that a crash interrupted still matches.
+    """
+    import hashlib
+    import json
+    import os
+
+    def verdict(reason, evidence=None, fingerprint=None):
+        return {"owned": reason is None, "reason": reason,
+                "evidence": evidence or {}, "fingerprint": fingerprint}
+
+    def section(name):
+        value = container.get(name)
+        return value if isinstance(value, dict) else None
+
+    def inside(path, root):
+        return path == root or path.startswith(root.rstrip("/") + "/")
+
+    if not isinstance(container, dict) or not isinstance(checkout, str):
+        return verdict("invalid_record")
+    identity = container.get("Id")
+    name = container.get("Name")
+    config, host, state = section("Config"), section("HostConfig"), section("State")
+    settings = section("NetworkSettings")
+    mounts = container.get("Mounts")
+    if (not isinstance(identity, str) or not identity or not isinstance(name, str)
+            or config is None or host is None or state is None or settings is None
+            or not isinstance(mounts, list) or not os.path.isabs(checkout)
+            or os.path.normpath(checkout) != checkout.rstrip("/")):
+        return verdict("invalid_record")
+    labels = config.get("Labels") or {}
+    networks = settings.get("Networks") or {}
+    restart = host.get("RestartPolicy") or {}
+    if (not isinstance(labels, dict) or not isinstance(networks, dict)
+            or not isinstance(restart, dict)):
+        return verdict("invalid_record")
+    display = name.lstrip("/")
+    mount_rows = []
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            return verdict("invalid_record")
+        mount_rows.append({
+            "type": mount.get("Type"), "source": mount.get("Source"),
+            "destination": mount.get("Destination"), "name": mount.get("Name"),
+            "rw": mount.get("RW"),
+        })
+    evidence = {
+        "id": identity, "name": display, "image": config.get("Image"),
+        "created": container.get("Created"), "started_at": state.get("StartedAt"),
+        "restart_count": container.get("RestartCount"),
+        "running": state.get("Running") is True,
+        "network_mode": host.get("NetworkMode"), "networks": sorted(networks),
+        "mounts": [{"type": row["type"], "source": row["source"],
+                    "destination": row["destination"]} for row in mount_rows],
+    }
+    fingerprint = hashlib.sha256(json.dumps({
+        "id": identity, "name": name, "created": container.get("Created"),
+        "config_image": config.get("Image"), "image": container.get("Image"),
+        "labels": labels,
+        "mounts": sorted(mount_rows, key=lambda row: json.dumps(row, sort_keys=True)),
+        "network_mode": host.get("NetworkMode"), "networks": sorted(networks),
+        "restart_policy": restart.get("Name"), "started_at": state.get("StartedAt"),
+        "restart_count": container.get("RestartCount"),
+    }, sort_keys=True, default=str).encode()).hexdigest()
+    for key in labels:
+        lowered = str(key).lower()
+        if lowered.startswith(("com.docker.compose.", "com.docker.stack.",
+                               "com.docker.swarm.")):
+            return verdict("compose_project", evidence, fingerprint)
+    if (any("sandbox" in str(key).lower() for key in labels)
+            or display.startswith("sandbox-")):
+        return verdict("sandbox_identity", evidence, fingerprint)
+    if not mount_rows:
+        return verdict("no_mounts", evidence, fingerprint)
+    root = checkout.rstrip("/")
+    resolved_root = os.path.realpath(root)
+    for row in mount_rows:
+        if row["type"] == "volume":
+            return verdict("named_volume", evidence, fingerprint)
+        if row["type"] != "bind":
+            return verdict("unsupported_mount", evidence, fingerprint)
+        source = row["source"]
+        if (not isinstance(source, str) or not os.path.isabs(source)
+                or os.path.normpath(source) != source.rstrip("/")
+                or not inside(source.rstrip("/"), root)
+                or not inside(os.path.realpath(source), resolved_root)):
+            return verdict("bind_outside_checkout", evidence, fingerprint)
+    if (host.get("NetworkMode") not in ("default", "bridge")
+            or any(net != "bridge" for net in networks)):
+        return verdict("non_default_network", evidence, fingerprint)
+    if restart.get("Name") not in (None, "", "no"):
+        return verdict("restart_policy", evidence, fingerprint)
+    return verdict(None, evidence, fingerprint)
 
 
 def job_workspace_references(jobs, *, now, idle_seconds):
@@ -63,8 +189,18 @@ def job_workspace_references(jobs, *, now, idle_seconds):
     }
 
 
-def teardown_workspace_stack(run, workspace, container_ids, *, record=None):
+def teardown_workspace_stack(run, workspace, container_ids, *, record=None,
+                             strays=None, checkout=None):
     """Remove the compose project(s) exclusively owned by one workspace.
+
+    Spec 080: ``strays`` (a list, possibly empty, of the plan's
+    ``remove_containers``) and ``checkout`` (the planned path) switch on the
+    reviewed-plan mode. Every container bound to the checkout is listed fresh;
+    an unplanned or changed unlabeled one, or a foreign project, refuses the
+    whole workspace before anything is touched. Each planned stray is then
+    recorded, stopped and removed, and only then is the project torn down.
+    With ``strays`` None (an older plan) any unlabeled bound container still
+    refuses, as before.
 
     ``run(argv, timeout) -> (code, stdout, stderr)``. Only a workspace
     checkout (``<repo>-workspace-<hash>``) owns a stack. Its projects are every
@@ -82,21 +218,12 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None):
               "volumes_removed": [], "volumes_kept_shared": [],
               "networks_removed": [], "networks_kept": [], "failures": []}
 
-    record = record or (lambda kind, locator: None)
-    marker = "-workspace-"
-    if not isinstance(workspace, str) or marker not in workspace:
+    record = record or (lambda kind, locator, **extra: None)
+    if not isinstance(workspace, str) or "-workspace-" not in workspace:
         return result
-    minimum = workspace.index(marker) + len(marker) + 8
 
     def owned(project):
-        if not isinstance(project, str) or not project.startswith("sandbox-"):
-            return False
-        if project.startswith("sandbox-host-"):
-            return False
-        segment = project[len("sandbox-"):]
-        if segment == workspace or segment.startswith(workspace + "-"):
-            return True
-        return len(segment) >= minimum and workspace.startswith(segment)
+        return owns_compose_project(workspace, project)
 
     def lines(code, out):
         return [line.strip() for line in str(out or "").splitlines() if line.strip()] \
@@ -104,6 +231,110 @@ def teardown_workspace_stack(run, workspace, container_ids, *, record=None):
 
     ids = [item for item in container_ids or () if isinstance(item, str) and item]
     projects = []
+    if strays is not None:
+        # Spec 080: judge every container bound to the checkout now, before
+        # any mutation, against the reviewed plan.
+        def refuse(reason):
+            result["ok"] = False
+            result["failures"].append(reason)
+            return result
+
+        result["strays_removed"] = []
+        planned = {}
+        # 10 is MAX_STRAYS_PER_CHECKOUT; this body is shipped without globals.
+        if (not isinstance(strays, list) or len(strays) > 10
+                or not isinstance(checkout, str) or not checkout.startswith("/")):
+            return refuse("invalid_planned_strays")
+        for item in strays:
+            if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                    or not item["id"] or not isinstance(item.get("fingerprint"), str)
+                    or not item["fingerprint"] or item["id"] in planned):
+                return refuse("invalid_planned_strays")
+            planned[item["id"]] = item["fingerprint"]
+        code, out, _err = run(["docker", "ps", "-aq", "--no-trunc"], 30)
+        present = lines(code, out)
+        if present is None:
+            return refuse("bound_list_failed")
+
+        def vanished(code, err):
+            # A container removed between two engine calls is not evidence of
+            # anything; any other inspect error is.
+            messages = [line.strip() for line in str(err or "").splitlines() if line.strip()]
+            return code != 0 and bool(messages) and all(
+                "no such object" in line.lower() for line in messages)
+
+        bound = []
+        alive = set()
+        root = checkout.rstrip("/")
+        for offset in range(0, len(present), 100):
+            batch = present[offset:offset + 100]
+            code, out, err = run(["docker", "inspect", "--format",
+                                  "{{json .Id}} {{json .Mounts}}"] + batch, 60)
+            if code != 0 and not vanished(code, err):
+                return refuse("bound_list_failed")
+            for line in str(out or "").splitlines():
+                if not line.strip():
+                    continue
+                text = line.strip()
+                try:
+                    identity, end = json.JSONDecoder().raw_decode(text)
+                    mounts = json.loads(text[end:])
+                except (ValueError, TypeError):
+                    return refuse("bound_list_failed")
+                if not isinstance(identity, str) or not isinstance(mounts, list):
+                    return refuse("bound_list_failed")
+                alive.add(identity)
+                for mount in mounts:
+                    source = str((mount or {}).get("Source") or "") if isinstance(mount, dict) else ""
+                    if source and (source.rstrip("/") == root or source.startswith(root + "/")):
+                        bound.append(identity)
+                        break
+        inspected = []
+        if bound:
+            code, out, err = run(["docker", "inspect"] + bound, 60)
+            if code != 0 and not vanished(code, err):
+                return refuse("bound_inspect_failed")
+            try:
+                inspected = json.loads(out or "[]")
+            except ValueError:
+                return refuse("bound_inspect_failed")
+            if not isinstance(inspected, list) or not all(isinstance(r, dict) for r in inspected):
+                return refuse("bound_inspect_failed")
+        matched = []
+        for found in inspected:
+            identity = found.get("Id")
+            labels = (found.get("Config") or {}).get("Labels") or {}
+            project = labels.get("com.docker.compose.project") if isinstance(labels, dict) else None
+            if project:
+                if not owned(project):
+                    return refuse("bound_container_not_exclusive")
+                if project not in projects:
+                    projects.append(project)
+                continue
+            if identity not in planned:
+                return refuse("unplanned_bound_container:" + str(identity))
+            verdict = assess_stray_container(found, checkout)
+            if not verdict["owned"] or verdict["fingerprint"] != planned[identity]:
+                return refuse("container_evidence_changed:" + identity)
+            matched.append(identity)
+        for identity in planned:
+            if identity in alive and identity not in matched:
+                # Still on the host but no longer bound (or no longer judged
+                # as the same container): not what the operator reviewed.
+                return refuse("container_evidence_changed:" + identity)
+        for identity in planned:
+            if identity not in matched:
+                result["strays_removed"].append(identity)
+                continue
+            record("stray_container", identity, fingerprint=planned[identity])
+            code, _out, err = run(["docker", "stop", "-t", "5", identity], 30)
+            if code != 0 and "no such container" not in str(err).lower():
+                return refuse("stray_stop_failed:" + identity)
+            code, _out, err = run(["docker", "rm", identity], 30)
+            if code != 0 and "no such container" not in str(err).lower():
+                return refuse("stray_rm_failed:" + identity)
+            result["strays_removed"].append(identity)
+        ids = []
     if ids:
         code, out, _err = run(["docker", "inspect", "--format",
                                '{{json .Config.Labels}}'] + ids, 60)

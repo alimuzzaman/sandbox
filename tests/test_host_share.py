@@ -480,6 +480,7 @@ class StackPageTests(unittest.TestCase):
         self.assertIn("'cccccccccccccccccccccccccccccccc'", plugin)
         self.assertIn("INSERT IGNORE INTO ' . $wpdb->options", plugin)
         self.assertIn("if ( 1 !== $claimed )", plugin)
+        self.assertIn("( is_multisite() && ! is_main_site() )", plugin)
         self.assertNotIn("add_site_option", plugin)
         self.assertIn("X-Robots-Tag: noindex, nofollow, noarchive", plugin)
         self.assertIn(f"$exp > $now + {share.SIGN_IN_SECONDS}", plugin)
@@ -496,7 +497,7 @@ class StackPageTests(unittest.TestCase):
             page = stack_page.with_key(stack_page.build(found, declaration, request_email=None), "l-" + "e" * 32)
         calls = []
         with patch.object(hosting_cmd, "_remote_checked",
-                          side_effect=lambda _e, command, **kw: calls.append((command, kw)) or "1\n"), \
+                          side_effect=lambda _e, command, **kw: calls.append((command, kw)) or "sandbox-keys=1\n"), \
              patch.object(stack_page, "_prefix", return_value="docker compose"):
             stack_page.install_wordpress_key(found, page, 4_000_000_000)
             removed = stack_page.remove_wordpress_keys(found, "l-" + "e" * 32)
@@ -506,6 +507,22 @@ class StackPageTests(unittest.TestCase):
         self.assertIn(f"sandbox-share-4000000000-{'e' * 32}.php", command)
         self.assertIn(f"sandbox-share-*-{'e' * 32}.php", calls[1][0])
         self.assertEqual(removed, 1)
+
+    def test_a_key_that_survives_removal_fails_the_revoke(self):
+        found, _declaration = self.target()
+        with patch.object(stack_page, "_prefix", return_value="docker compose"):
+            with patch.object(hosting_cmd, "_remote_checked", return_value="sandbox-keys=1\n") as checked:
+                stack_page.remove_wordpress_keys(found, "l-" + "e" * 32)
+            script = shlex.split(checked.call_args.args[1])[-1]
+            self.assertIn('rm -f "$f" || exit 1; [ ! -e "$f" ] || exit 1;', script)
+            for output in ("", "1\n", "sandbox-keys=x\n", "noise\n"):
+                with self.subTest(output=output), \
+                        patch.object(hosting_cmd, "_remote_checked", return_value=output), \
+                        self.assertRaises(share.ShareRefusal):
+                    stack_page.remove_wordpress_keys(found, "l-" + "e" * 32)
+            with patch.object(hosting_cmd, "_remote_checked", side_effect=RuntimeError("exit 1")), \
+                    self.assertRaises(share.ShareRefusal):
+                stack_page.remove_wordpress_keys(found, "l-" + "e" * 32)
 
     def test_a_revoke_retry_still_deletes_the_wordpress_key(self):
         # The first revoke removed the gate's link but not the key file; the retry finds

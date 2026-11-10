@@ -294,14 +294,16 @@ label) and health, and sign-in links:
   `container_path`) and is not private. Minting writes a per-link mu-plugin,
   `sandbox-share-<expiry>-<link id>.php`, next to `container_path`. It holds a random
   key; the gate holds the same key. Each page view signs a fresh token that works once
-  and for at most 10 minutes. Revoking the link deletes the file; an expired one is inert
-  and removed at the next mint.
+  and for at most 10 minutes, on the main site only (on a multisite, other blogs refuse
+  it). Revoking the link deletes the file and fails if the file survives; an expired one
+  is inert and removed at the next mint.
 - **Login-service entries** named in `share.stack_sign_in`, such as a Hub QA sign-in
   (`magic_link` or `inbox_gate`). Each view writes that entry's token record, as
   `host login-url` would, so the previous link of the entry stops working. A `magic_link`
   entry uses the target's saved address, or `--email`. The token is bound to the stack
   link: once that link is revoked or expires, an unused sign-in link from its page is
-  refused, even one a view was still minting during the revoke. A service session that a
+  refused, even one a view was still minting during the revoke, or one whose sign-in
+  form was still being posted. A service session that a
   sign-in already started keeps its own lifetime (`session_ttl_seconds`).
 - **Revoke retries.** If the gate revoke works but the WordPress key file cannot be
   deleted, the command says so; running the same revoke again deletes the file, even

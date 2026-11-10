@@ -171,7 +171,9 @@ add_action( 'init', static function () {{
     header( 'Referrer-Policy: no-referrer' );
     $until = {int(expires_at)};
     $now = time();
-    if ( $now >= $until ) {{
+    // One blog only, so one options table holds every claimed nonce: on a multisite the
+    // same token cannot be spent again under another blog's path or domain.
+    if ( $now >= $until || ( is_multisite() && ! is_main_site() ) ) {{
         status_header( 404 );
         exit;
     }}
@@ -277,8 +279,10 @@ def remove_wordpress_keys(found, link_id: str) -> int:
     pattern = f"{KEY_FILE_PREFIX}*-*.php" if link_id == "all" else f"{KEY_FILE_PREFIX}*-{link_id[2:]}.php"
     if link_id != "all" and not _KID.fullmatch(link_id[2:]):
         return 0
+    # Any file that survives fails the whole command, so a revoke never reports a key gone
+    # that still signs people in.
     script = (f"n=0; for f in {shlex.quote(directory)}/{pattern}; do [ -e \"$f\" ] || continue; "
-              "rm -f \"$f\" && n=$((n+1)); done; echo \"$n\"")
+              "rm -f \"$f\" || exit 1; [ ! -e \"$f\" ] || exit 1; n=$((n+1)); done; echo \"sandbox-keys=$n\"")
     service = shlex.quote(autologin.get("service") or found.validated["compose"]["service"])
     try:
         output = _remote_checked(found.entry, f"{_prefix(found)} exec -T {service} sh -c {shlex.quote(script)}",
@@ -286,5 +290,9 @@ def remove_wordpress_keys(found, link_id: str) -> int:
     except (RuntimeError, subprocess.SubprocessError, OSError):
         raise ShareRefusal("share_failed", "the link is revoked, but its WordPress sign-in key could not be "
                                            "removed; retry the revoke") from None
-    lines = [line for line in str(output or "").splitlines() if line.strip()]
-    return int(lines[-1]) if lines and lines[-1].strip().isdigit() else 0
+    lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
+    found = re.fullmatch(r"sandbox-keys=([0-9]{1,4})", lines[-1]) if lines else None
+    if found is None:
+        raise ShareRefusal("share_failed", "the link is revoked, but removing its WordPress sign-in key gave "
+                                           "no readable answer; retry the revoke")
+    return int(found.group(1))

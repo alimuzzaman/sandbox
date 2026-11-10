@@ -607,13 +607,19 @@ class Gate:
             return None
         if not MIN_LINK_SECONDS <= expires - issued <= MAX_LINK_SECONDS:
             return None
-        if "via" in raw:
-            # Minted by a stack page: it dies with that stack link.
-            via = raw["via"]
-            store = self.sites.get(via.get("entry")) if isinstance(via, dict) else None
-            if store is None or not store.stack_link_alive(via.get("link")):
-                return None
-        return raw
+        return raw if self.bound(raw) else None
+
+    def bound(self, record):
+        """Whether a token record's stack link (if a stack page minted it) is still alive.
+
+        A sign-in from a stack page dies with that stack link. Callers check again after
+        the body arrives and right before granting, so a revoke during a slow sign-in wins.
+        """
+        if "via" not in record:
+            return True
+        via = record["via"]
+        store = self.sites.get(via.get("entry")) if isinstance(via, dict) else None
+        return store is not None and store.stack_link_alive(via.get("link"))
 
     def _used_marker(self, digest):
         return self.state_dir / "used" / digest
@@ -1162,15 +1168,17 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         email = record.get("email")
         if entry["mode"] == "magic_link" and not (isinstance(email, str) and _ADDRESS.fullmatch(email)):
             return self._fail(403, "invalid_link")
-        # The body can arrive long after dispatch checked the cutoff.
-        if not gate.enabled():
+        # The body can arrive long after dispatch checked the cutoff and the stack link.
+        if not gate.enabled() or not gate.bound(record):
             return self._answer_not_found()
         if not gate.claim(digest):
             return self._fail(410, "link_used")
         gate.log(f"consumed entry={name}")
         if entry["mode"] == "inbox_gate":
+            if not gate.bound(record):
+                return self._answer_not_found()
             return self._start_session(name, entry)
-        return self._exchange_magic_link(name, entry, email)
+        return self._exchange_magic_link(name, entry, email, record)
 
     def _start_session(self, name, entry):
         # No Max-Age or Expires: the cookie ends with the browser session. The
@@ -1180,13 +1188,14 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
                   "Secure; HttpOnly; SameSite=Strict")
         self._reply(303, b"", [("Location", entry.get("landing_path") or "/"), ("Set-Cookie", cookie)])
 
-    def _exchange_magic_link(self, name, entry, email):
+    def _exchange_magic_link(self, name, entry, email, record):
         try:
             link = self.gate.sign_in(entry["magic_link"], email)
         except SignInFailure as failure:
             self.gate.log(f"signin_failed entry={name} code={failure.code}")
             return self._fail(failure.status, failure.code)
-        if not self.gate.enabled():
+        # The exchange waits on mail; a revoke of the stack link meanwhile still wins.
+        if not self.gate.enabled() or not self.gate.bound(record):
             return self._answer_not_found()
         self._reply(303, b"", [("Location", link)])
 

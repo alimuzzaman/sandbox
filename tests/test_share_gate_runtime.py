@@ -468,6 +468,24 @@ class StackPageTests(_Gate):
         self.assertFalse(gate.is_live("qa"))
         self.assertIsNone(gate.record("qa"))
 
+    def test_a_sign_in_posted_slowly_across_a_revoke_is_refused(self):
+        # Headers first, so the gate loads the token record; then the revoke; then the body.
+        cookie, link_id = self.stack_cookie()
+        _, body = self.view(cookie)
+        token = re.search(rf'href="https://{re.escape(QA_HOST)}/__sandbox/login/qa#sandbox_autologin=([A-Za-z0-9_-]+)"',
+                          body.decode()).group(1)
+        form = urllib.parse.urlencode({"token": token}).encode()
+        sock = __import__("socket").create_connection(("127.0.0.1", self.public.server_address[1]), timeout=10)
+        self.addCleanup(sock.close)
+        sock.sendall((f"POST /__sandbox/login/qa HTTP/1.1\r\nHost: {QA_HOST}\r\n"
+                      "Content-Type: application/x-www-form-urlencoded\r\n"
+                      f"Content-Length: {len(form)}\r\n\r\n").encode())
+        time.sleep(0.5)
+        self.manage("revoke", "share", link_id)
+        sock.sendall(form)
+        self.assertIn(b" 404 ", sock.recv(4096).split(b"\r\n", 1)[0])
+        self.assertFalse((self.state_dir / "used" / hashlib.sha256(token.encode()).hexdigest()).exists())
+
     def test_a_spent_one_use_stack_link_keeps_its_sign_in_links(self):
         token, link_id = self.mint(kind="stack", scope=share.STACK_PAGE_PATH, stack=dict(self.STACK), uses=1)
         response, _ = self.open(token)

@@ -1716,14 +1716,18 @@ def _assert_login_service_applicable(validated: dict) -> None:
         raise hosting.HostingError(str(exc)) from None
 
 
-def _preflight_login_service(entry: dict, prefix: str, validated: dict) -> None:
+def _preflight_login_service(entry: dict, prefix: str, validated: dict,
+                             loopback_port: int | None = None) -> None:
     """Refuse an apply when the capture service or login service publishes a port."""
     from sandbox.hosting import login_service as login
     declaration = validated["login_service"]
     capture = (declaration.get("capture") or {}).get("service")
+    gate_port = login.gate_loopback_port(loopback_port) if loopback_port else None
     try:
         login.check_preflight(_remote_checked(
-            entry, login.preflight_command(prefix, capture, login.site_upstream_services(declaration)),
+            entry, login.preflight_command(
+                prefix, capture, login.preflight_upstreams(declaration, validated["compose"]["service"]),
+                gate_port),
             timeout=75))
     except login.LoginServiceError as exc:
         raise hosting.HostingError(str(exc)) from None
@@ -1769,7 +1773,7 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
         )
     prefix = _compose_prefix(validated, source_dir, override, env_file)
     if validated.get("login_service"):
-        _preflight_login_service(entry, prefix, validated)
+        _preflight_login_service(entry, prefix, validated, runtime.get("loopback_port"))
     runtime_services = [
         shlex.quote(validated["compose"]["service"]),
         *(shlex.quote(service) for service in validated["compose"].get("background_services", [])),
@@ -4053,21 +4057,22 @@ def _site_remote(validated: dict, entry: dict, name: str, verb: str, *extra: str
 
 def _mint_site_link(validated: dict, entry: dict, remote_name: str, state: dict, name: str,
                     ttl: int, uses: int) -> dict:
-    """Store one share-link record in the service; the token itself goes nowhere but the result."""
+    """Store one whole-site share link (spec 081 record); the token goes nowhere but the result."""
+    from sandbox.commands import host_share
     from sandbox.hosting import login_service as login
+    from sandbox.hosting import share
     config = validated["login_service"]["entries"][name]
     if not isinstance(state.get("hosts", {}).get(hosting.state_key(remote_name, validated)), dict):
         raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
-    token = secrets.token_urlsafe(32)
-    link_id = f"l-{secrets.token_hex(6)}"
-    issued_at = int(time.time())
-    record = login.render_site_link_record(
-        name, link_id, hashlib.sha256(token.encode()).hexdigest(), issued_at, issued_at + ttl, uses)
-    # Over stdin, and the hash only: argv is visible to process listings.
-    reply = _site_remote(validated, entry, name, "mint", input_data=record)
-    if reply.get("id") != link_id:
-        raise login.LoginServiceError("login_link_failed", "the login service did not confirm the link")
-    return {"link": login.login_link(config, token), "link_id": link_id, "expires_at": issued_at + ttl,
+    request = share.LinkRequest(entry=name, kind="site", scope="/", ttl_seconds=ttl, uses=uses)
+    try:
+        # Over stdin, and the hash only: argv is visible to process listings.
+        minted, _reply = host_share.mint_link(validated, entry, request)
+    except share.ShareRefusal as exc:
+        raise login.LoginServiceError(
+            "login_link_failed" if exc.code == "share_failed" else exc.code, exc.message) from None
+    return {"link": share.share_url(config["hostname"], minted.link_id, minted.token),
+            "link_id": minted.link_id, "expires_at": minted.expires_at,
             "uses": uses, "service": name, "hostname": config["hostname"]}
 
 
@@ -4108,6 +4113,7 @@ def _cmd_host_site_link(validated: dict, entry: dict, args, declaration: dict, r
     if revoke is not None:
         if not login.valid_revoke_target(revoke):
             raise login.LoginServiceError("site_link_unknown", "pass a link id (l-...), a session id (s-...), or all")
+        # A stack link's WordPress key is removed by `sb host share revoke`; site links have none.
         reply = _with_host_writer_lock(
             validated, args.remote, lambda current, _save: _site_remote(validated, entry, name, "revoke", revoke))
         counts = {"revoked_links": reply.get("revoked_links"), "revoked_sessions": reply.get("revoked_sessions")}
@@ -7541,6 +7547,13 @@ def cmd_host(cfg, args) -> None:
         from sandbox.commands.host_tailnet_name import cmd_host_tailnet_name
         cmd_host_tailnet_name(args)
         return
+    if args.action == "share":
+        from sandbox.commands.host_share import cmd_host_share
+        cmd_host_share(args)
+        return
+    if getattr(args, "stack", None) is not None or getattr(args, "share_path", None) is not None \
+            or getattr(args, "share_id", None) is not None or getattr(args, "entry", None) is not None:
+        die("--stack, --path, --entry and a link id are only accepted by `host share`")
     if getattr(args, "tailnet_hostname", None) is not None:
         die("a hostname argument is only accepted by `host tailnet-name`")
     if getattr(args, "exec_argv", None) is not None:

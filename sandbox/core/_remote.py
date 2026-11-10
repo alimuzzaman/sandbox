@@ -1732,8 +1732,11 @@ def _caddy_proxy_command(
         "    }\n"
         if robots == "deny" else ""
     )
+    # Spec 081: the same routes also say "do not index" on every response.
+    noindex = ("    header {\n        defer\n        X-Robots-Tag \"noindex, nofollow, noarchive\"\n    }\n"
+               if robots == "deny" else "")
     proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
-    body = (f"{robots_block}    handle {{\n    {proxy}    }}\n"
+    body = (f"{noindex}{robots_block}    handle {{\n    {proxy}    }}\n"
             if robots_block else proxy)
     site_q = shlex.quote(f"{hostname} {{\n{body}}}\n")
     file_q = shlex.quote(f"/etc/caddy/conf.d/{conf_prefix}-{hostname}.caddy")

@@ -47,7 +47,7 @@ hash.
 `{"ok": false, "code": "<code>", "message": "..."}`, exit 1. Codes:
 `share_not_declared`, `agent_mint_not_enabled`, `terminal_required`, `job_output_refused`,
 `share_ttl_invalid`, `share_scope_invalid`, `uses_out_of_range`, `share_entry_required`,
-`share_entry_unknown`, `stack_share_not_declared`, `share_options_conflict`,
+`share_entry_unknown`, `stack_unknown`, `stack_share_not_declared`, `share_options_conflict`,
 `site_link_limit`, `site_link_unknown`, `site_entry_unknown`, `login_service_expired`,
 `email_required`, `share_failed`, plus the target-resolution codes.
 

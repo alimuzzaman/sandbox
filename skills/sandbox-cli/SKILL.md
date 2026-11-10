@@ -520,12 +520,15 @@ before protected effects.
 - `sb host logs|status|diagnose --remote R --target <project>/<env>` (or `--name <slug>`) reads a recorded stack's rendered manifest, so it works from a template checkout.
 - `sb host tailnet-name add FQDN --remote R --upstream HOST:PORT [--replace-upstream] [--json]` (nginx front door only): DNS-only Cloudflare A record to the remote's tailnet IPv4, a DNS-01 certificate from `lego` on the controller (key made on the remote), and a block bound only to the tailnet IP, installed under the edge lock with `nginx -t` and reload, then verified over the tailnet and refused publicly. Refuses busy remotes (`tailnet_name_busy`) and existing different/proxied records (`tailnet_name_dns_conflict`). Every step reruns safely. `list` shows upstream and expiry, `renew FQDN|--all [--force]` reissues within 30 days, `remove` drops block, cert, then the recorded DNS record. Config: `tailnet_names` in `sandbox.local.yml` (zones, broker source/key for the token, `acme_email`). The token reaches only broker children. A proxied app that checks Host needs its own allow-list.
 
-## Sharing a private hosted site (spec 075)
+## Sharing a private hosted site (specs 075, 081)
 
-- A login-service entry with `mode: site_gate`, `hostname` (a served alias), `upstream: http://<background service>:<port>` and `ttl_seconds` puts a link-only gate in front of that service. See `docs/login-service.md#sharing-a-private-site-site_gate`.
-- Mint: `sb host login-url --service <entry> --remote R --confirm [--uses N] [--json]`. The link goes to the controlling terminal only; stdout and `--json` carry `link_id`, `expires_at` and `uses`. Agents and jobs have no terminal and get `terminal_required`: ask the owner to run it themselves, and never try to capture the link.
-- `sb host login-url --service <entry> --remote R --list [--json]` shows ids and counts. `--revoke <l-...|s-...|all> --confirm` revokes; revoking a link ends its sessions.
-- Without a session the gate hostname answers 404. The project edge must forward only that hostname to `sandbox-login:8080`, and the upstream must publish only on loopback.
+- Declare `share: {hostname: <served alias>, private: true, agent_mint: true, image, enabled_until, allowed_host_suffixes}` on the environment. Sandbox routes that hostname to the gate; `private` makes every other hostname answer 404. No edge config. See `docs/login-service.md#sharing-a-private-site-share-links`.
+- Make a link: `sb host share create --remote R --project-dir . [--path /folder/|/page.html] [--ttl 7d] [--uses N] --json`. With `agent_mint: true` the result's `link` is the only copy: give it to the person, never write it to a file, note, log or commit. Without it the link goes to the owner's terminal only (`terminal_required` for agents); ask the owner to run it.
+- `--stack <slug>` makes a stack-page link (hostnames, health, fresh WordPress and QA sign-in links). The stack target's manifest needs the `share` block.
+- `sb host share list|revoke ID|all ...` (MCP: `host_share_create`, `host_share_list`, `host_share_revoke`). Never run `create` inside `sb job-start`: it refuses (`job_output_refused`).
+- The owner views a private site through its loopback port (`sb host status`), with `tailscale serve` or `ssh -L`.
+- `sb host login-url --service <site entry> --confirm` still mints a terminal-only whole-site link.
+- Hosted targets are not indexed: `X-Robots-Tag: noindex, nofollow, noarchive` on every response and `robots: deny`, unless `indexing: public`.
 
 When the owner exited before recording anything, recovery cannot observe its way out:
 it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.

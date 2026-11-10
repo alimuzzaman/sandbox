@@ -1177,22 +1177,32 @@ Limits:
 route only. `sb deploy --expose`, instance aliases and `sb preview` refuse before any side
 effect with `front_door_capability_unavailable`. Use a Caddy remote for those.
 
-## Keeping a public route out of search results
+## Keeping hosted routes out of search results
 
-An environment may declare `robots: deny` beside `cloudflare:`:
+Hosted targets are not indexed by default (spec 081). Under the default
+`indexing: noindex`:
+
+- Both front doors add `X-Robots-Tag: noindex, nofollow, noarchive` to every response of
+  every hostname of the environment: served, redirected, gated, refused, auth challenges
+  and `robots.txt`. Caddy applies it with `header { defer ... }`, so it replaces any
+  value the application sends. nginx hides the application's value and adds its own
+  with `always` on every server, location and if-block.
+- `robots` defaults to `deny`: the front door answers `/robots.txt` with
+  `User-agent: * / Disallow: /` ahead of the proxy (the proxy moves inside its own
+  `handle` so the two are mutually exclusive routes).
+
+To let a site be indexed, say so explicitly:
 
 ```yaml
-robots: deny   # default: allow
+indexing: public   # no X-Robots-Tag; robots defaults to allow
+robots: allow      # refused unless indexing is public
 ```
 
-Caddy then answers `/robots.txt` with `User-agent: * / Disallow: /` for every served
-hostname of that environment, ahead of the proxy (the proxy moves inside its own
-`handle` so the two are mutually exclusive routes). The default `allow` leaves the
-application's own `robots.txt` in charge — permanent hosting fronts real production
-sites that want to be indexed.
+`tests/test_hosted_noindex.py` renders every route kind on both front doors and fails
+if any can answer without the header.
 
-Ephemeral routes are the other way round: `sb preview create` and the remote control
-proxy deny by default (`_remote._caddy_proxy_command`), because a preview hostname is a
+Ephemeral routes deny too: `sb preview create` and the remote control proxy deny
+`robots.txt` and send the same header by default (`_remote._caddy_proxy_command`), because a preview hostname is a
 real public DNS record usually handed out with an autologin token in the URL. Fresh WP
 instances also install with `blog_public=0`, which emits `noindex,nofollow` on every
 page — the part that actually prevents indexing, since a `robots.txt` disallow alone

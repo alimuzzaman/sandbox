@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sandbox.hosting import login_service as login  # noqa: E402
+from sandbox.hosting import share  # noqa: E402
 from sandbox.hosting.login_service import runtime  # noqa: E402
 
 CREDENTIAL = "capture-password-sentinel"
@@ -810,6 +811,11 @@ class _SiteBase(unittest.TestCase):
         _serve(self.public)
         self.addCleanup(self.public.shutdown)
         self.addCleanup(self.health.server_close)
+        self.ids = {}
+
+    def link_path(self, token=None):
+        """/s/<id> of a minted token, or of an id nothing knows."""
+        return share.LINK_PREFIX + (self.ids.get(token) or share.new_link_id())
 
     def manage(self, *argv, stdin=""):
         out = io.StringIO()
@@ -818,14 +824,17 @@ class _SiteBase(unittest.TestCase):
         self.assertEqual(code, 0)
         return json.loads(out.getvalue())
 
-    def mint(self, token=None, *, uses=1, ttl=600, link_id=None):
+    def mint(self, token=None, *, uses=1, ttl=7200, link_id=None, scope="/"):
         token = token or secrets_token()
         issued = int(self.now)
-        record = login.render_site_link_record(
-            "mockup", link_id or f"l-{os.urandom(6).hex()}", hashlib.sha256(token.encode()).hexdigest(),
-            issued, issued + ttl, uses)
-        reply = self.manage("mint", "mockup", stdin=record)
+        record = {"schema": "sandbox.share-link.v2", "entry": "mockup",
+                  "id": link_id or share.new_link_id(),
+                  "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+                  "issued_at": issued, "expires_at": issued + ttl, "uses": uses, "scope": scope,
+                  "kind": "site"}
+        reply = self.manage("mint", "mockup", stdin=json.dumps({"link": record, "stack": None}))
         self.assertTrue(reply["ok"], reply)
+        self.ids[token] = reply["id"]
         return token, reply["id"]
 
     def request(self, method, path, *, body=None, headers=None, host=SITE):
@@ -838,7 +847,7 @@ class _SiteBase(unittest.TestCase):
 
     def open_link(self, token, **headers):
         body = urllib.parse.urlencode({"token": token})
-        return self.request("POST", SITE_PATH, body=body, headers={
+        return self.request("POST", self.link_path(token), body=body, headers={
             "Content-Type": "application/x-www-form-urlencoded", **headers})
 
     def session(self, token=None):
@@ -861,9 +870,10 @@ def secrets_token():
 
 class SiteLinkTests(_SiteBase):
     def test_link_page_needs_a_live_link_and_never_holds_the_token(self):
-        self.assertEqual(self.request("GET", SITE_PATH)[0].status, 404)
+        self.assertEqual(self.request("GET", self.link_path())[0].status, 404)
         token, _ = self.mint()
-        response, body = self.request("GET", SITE_PATH)
+        self.assertEqual(self.request("GET", self.link_path())[0].status, 404)
+        response, body = self.request("GET", self.link_path(token))
         self.assertEqual(response.status, 200)
         self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
         self.assertIn("script-src 'sha256-", response.getheader("Content-Security-Policy"))
@@ -879,7 +889,7 @@ class SiteLinkTests(_SiteBase):
         self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
         cookie = response.getheader("Set-Cookie")
         name, _, rest = cookie.partition("=")
-        self.assertEqual(name, "__Host-sandbox_site_mockup")
+        self.assertEqual(name, runtime.SHARE_COOKIE)
         attributes = [part.strip() for part in rest.split(";")[1:]]
         self.assertEqual({item.split("=")[0] for item in attributes},
                          {"Path", "Max-Age", "Secure", "HttpOnly", "SameSite"})
@@ -930,8 +940,8 @@ class SiteNoAccessTests(_SiteBase):
             for path in ("/", "/index.html", "/__sandbox/share/other"):
                 with self.subTest(method=method, path=path):
                     self.assertEqual(self.request(method, path)[0].status, 404)
-        for cookie in ("__Host-sandbox_site_mockup=" + "x" * 43, "__Host-sandbox_site_mockup=",
-                       "__Host-sandbox_site_mockup=../../links/x"):
+        for cookie in (runtime.SHARE_COOKIE + "=" + "x" * 43, runtime.SHARE_COOKIE + "=",
+                       runtime.SHARE_COOKIE + "=../../links/x"):
             self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
         self.assert_upstream_untouched()
 
@@ -1001,7 +1011,7 @@ class SiteNoAccessTests(_SiteBase):
         self.now = self.config["enabled_until_epoch"] + 1
         self.assertEqual(self.request("GET", "/", headers={"Cookie": cookie})[0].status, 404)
         self.assertEqual(self.open_link(token)[0].status, 404)
-        self.assertEqual(self.request("GET", SITE_PATH)[0].status, 404)
+        self.assertEqual(self.request("GET", self.link_path(token))[0].status, 404)
         self.assert_upstream_untouched()
 
     def test_session_expires_on_time(self):
@@ -1114,11 +1124,15 @@ class SiteOperatorTests(_SiteBase):
 
     def test_mint_refusals(self):
         def record(**fields):
-            base = json.loads(login.render_site_link_record(
-                "mockup", "l-0123456789ab", "a" * 64, int(self.now), int(self.now) + 600, 1))
-            return json.dumps({**base, **fields})
-        for fields in ({"uses": 21}, {"uses": 0}, {"expires_at": int(self.now) + 7200},
-                       {"entry": "other"}, {"id": "l-x"}, {"extra": 1}, {"token_sha256": "zz"}):
+            base = {"schema": "sandbox.share-link.v2", "entry": "mockup", "id": "l-" + "0" * 32,
+                    "token_sha256": "a" * 64, "issued_at": int(self.now), "expires_at": int(self.now) + 600,
+                    "uses": 1, "scope": "/", "kind": "site"}
+            return json.dumps({"link": {**base, **fields}, "stack": None})
+        for fields in ({"uses": 21}, {"uses": 0}, {"uses": True},
+                       {"expires_at": int(self.now) + 31 * 86400}, {"entry": "other"}, {"id": "l-x"},
+                       {"id": "l-0123456789ab"}, {"extra": 1}, {"token_sha256": "zz"},
+                       {"scope": "/a/../b/"}, {"scope": "a/"}, {"kind": "other"}, {"kind": "stack"},
+                       {"schema": "sandbox.site-link.v1"}):
             with self.subTest(fields=fields):
                 self.assertEqual(self.manage("mint", "mockup", stdin=record(**fields))["code"],
                                  "site_record_invalid")
@@ -1153,7 +1167,7 @@ class SiteOperatorTests(_SiteBase):
         for value in (token, secret, hashlib.sha256(token.encode()).hexdigest(),
                       hashlib.sha256(secret.encode()).hexdigest()):
             self.assertNotIn(value, joined)
-        self.assertIn("site_link_used entry=mockup", joined)
+        self.assertIn("share_opened entry=mockup", joined)
 
     def test_main_runs_operator_verbs_inside_the_service(self):
         config = base64.b64encode(json.dumps(self.config).encode()).decode()

@@ -1765,9 +1765,9 @@ def _choose_control_transport(args, as_json: bool) -> str:
     if explicit in {"https", "tailscale"}:
         return explicit
     if as_json or _arg_true(args, "yes") or not sys.stdin.isatty():
-        return "https"
-    ans = input("Use Tailscale private control plane instead of public HTTPS? [y/N] ")
-    return "tailscale" if ans.strip().lower() in {"y", "yes"} else "https"
+        return "tailscale"
+    ans = input("Use Tailscale private control plane? [Y/n] ")
+    return "https" if ans.strip().lower() in {"n", "no"} else "tailscale"
 
 
 def _ssh_host(ssh_target: str) -> str:

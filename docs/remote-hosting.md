@@ -384,9 +384,9 @@ marks the remote that project selects through `runtime.remote` in its
 when the project names no remote), and text output prefixes the selected row with `*`.
 Without `--project-dir` the output is unchanged.
 
-`provision` asks whether you want Tailscale instead of public HTTPS when run
-interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
-`--control tailscale` to opt into Tailscale explicitly. It is plan-first: omit
+`provision` defaults to Tailscale control, including in `--json`/non-interactive
+mode. Use `--control https` to select public HTTPS. Interactive use defaults to
+Tailscale when prompted. It is plan-first: omit
 `--confirm` to inspect the selected transport without modifying the VPS.
 
 Every confirmed provision creates an owner-only, secret-redacted journal under

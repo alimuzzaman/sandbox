@@ -1229,5 +1229,45 @@ class RoundSevenTests(Base):
         self.assertIn(root.stat().st_ino, events[:first_write])
         self.assertIn(self.base.stat().st_ino, events[:first_write])
 
+
+class RoundEightTests(Base):
+    def settle(self, token=TOKEN):
+        return self.call("settle", fqdn=FQDN, token=token, tailnet_ip=IP, jobs_probe=self.probe)
+
+    def test_settle_restores_a_candidate_that_fails_nginx_test(self):
+        """Re-review 12 NEW-1: a crash left this name's new block on disk,
+        untested; settle restores the loaded one under the lease and edge lock."""
+        self.publish()
+        original = self.conf.read_text()
+        real_write = rp._write
+
+        def write_then_die(dir_fd, name, data, mode):
+            real_write(dir_fd, name, data, mode)
+            if name.endswith(".conf"):
+                raise _Crash()
+        with mock.patch.object(rp, "_write", write_then_die):
+            with self.assertRaises(_Crash):
+                self.commit(block=block(port=9000))
+        self.assertNotEqual(self.conf.read_text(), original)
+        self.host.nginx_ok = False  # the candidate fails nginx -t
+        real_restore = rp._restore
+
+        def restore(*args, **kwargs):
+            real_restore(*args, **kwargs)
+            self.host.nginx_ok = True
+        with mock.patch.object(rp, "_restore", restore):
+            result = self.settle()
+        self.assertEqual((result["ok"], result["settled"]), (True, "restored"), result)
+        self.assertEqual(self.conf.read_text(), original)
+        self.assertEqual(json.loads((self.name_dir / "activation.json").read_text())["state"],
+                         "loaded")
+
+    def test_settle_needs_the_lease_and_leaves_a_settled_name_alone(self):
+        self.publish()
+        self.assertEqual(self.settle(token=OTHER)["code"], "lease_lost")
+        reloads = len(self.host.ran("systemctl", "reload", "nginx"))
+        self.assertEqual(self.settle(), {"ok": True, "settled": None})
+        self.assertEqual(len(self.host.ran("systemctl", "reload", "nginx")), reloads)
+
 if __name__ == "__main__":
     unittest.main()

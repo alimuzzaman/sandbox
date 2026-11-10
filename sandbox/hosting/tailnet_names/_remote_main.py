@@ -1212,6 +1212,50 @@ def commit(payload, paths, runner, lock_wait):
         scope.close()
 
 
+def settle(payload, paths, runner, lock_wait):
+    """Finish an interrupted activation of this one name, and nothing else.
+
+    ``add`` runs this before its whole-config preflight when that preflight
+    fails, so a crash that left this name's own candidate block failing
+    ``nginx -t`` cannot block its own recovery. The same lease, edge lock,
+    gate, ownership and proof rules as commit apply; any other invalid nginx
+    configuration still fails the ``nginx -t`` inside _settle.
+    """
+    fqdn, token = _fqdn(payload.get("fqdn")), _token(payload.get("token"))
+    ip = _tailnet_ip(payload.get("tailnet_ip"))
+    scope = _NameScope(paths, fqdn, lock_wait, create=False)
+    try:
+        scope.require(token)
+        name_fd = _name_dir(scope.root, fqdn, paths)
+        if name_fd is None:
+            return {"ok": True, "settled": None}
+        conf_fd = edge = None
+        try:
+            journal = _journal(name_fd, paths)
+            if not journal or journal.get("state") == "loaded":
+                return {"ok": True, "settled": None}
+            conf_fd = _open_dir(paths["conf_dir"], paths)
+            edge = _flock(None, None, lock_wait, absolute=paths["edge_lock"], paths=paths)
+            _gate(paths, payload, runner, holding_edge=True)
+            current_block, managed = _block(conf_fd, fqdn, paths)
+            if current_block is not None and not managed:
+                raise Refusal("unmanaged", "the reserved block path holds a file Sandbox did not write")
+
+            def fence():
+                _gate(paths, payload, runner, holding_edge=True)
+            proof = _disk_proof(conf_fd, name_fd, fqdn, paths, ip)
+            return {"ok": True, "settled": _settle(conf_fd, name_fd, fqdn, paths, runner,
+                                                   fence, proof)}
+        finally:
+            if edge is not None:
+                os.close(edge)
+            if conf_fd is not None:
+                os.close(conf_fd)
+            os.close(name_fd)
+    finally:
+        scope.close()
+
+
 def remove(payload, paths, runner, lock_wait):
     """Remove the managed block (test, reload), then the managed directory.
 
@@ -1317,7 +1361,8 @@ def remove(payload, paths, runner, lock_wait):
         scope.close()
 
 
-ACTIONS = {"inspect": inspect, "reserve": reserve, "extend": extend, "release": release, "csr": csr,
+ACTIONS = {"inspect": inspect, "reserve": reserve, "extend": extend, "release": release,
+           "settle": settle, "csr": csr,
            "commit": commit, "remove": remove}
 
 

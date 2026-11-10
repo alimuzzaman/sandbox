@@ -479,6 +479,30 @@ def _verify(ctx: Context, deps: Deps, run: _Run, rec: _Recorder, name: TailnetNa
     run.result.code, run.result.error = PUBLIC_EXPOSED, detail
 
 
+def _recover_then_preflight(ctx: Context, deps: Deps, run: _Run, name: TailnetName,
+                            existing: TailnetNameRecord | None, error: FrontDoorError) -> dict:
+    """The whole-config preflight failed. If this very name has an interrupted
+    activation on the remote, its own candidate block may be what fails
+    ``nginx -t``: settle that one transaction under the lease, then preflight
+    again. Any other preflight refusal stands as it was."""
+    info = run.call("preflight", _inspect, ctx, deps, name.fqdn)
+    row = info.rows.get(name.fqdn)
+    if row is None or row.activation in (None, "loaded"):
+        run.stop("preflight", error.code, str(error), "refused")
+    _ownership(run, row)
+    _gate(ctx, deps, run, info.locks)
+    token = existing.lease_token if existing and existing.lease_token else deps.new_token()
+    jobs = _jobs(run, deps, ctx)
+    with _lease(run, deps, ctx, name.fqdn, token):
+        _remote(run, "preflight", deps, ctx, "settle",
+                {"fqdn": name.fqdn, "token": token, "tailnet_ip": ctx.target.tailnet_ip,
+                 "jobs_probe": jobs})
+    try:
+        return deps.preflight(ctx.target.entry, [name.fqdn], nginx.route_file(name.route_name))
+    except FrontDoorError as exc:
+        run.stop("preflight", exc.code, str(exc), "refused")
+
+
 def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
         replace_upstream: bool = False) -> Result:
     run = _Run("add", name.fqdn)
@@ -493,7 +517,7 @@ def add(ctx: Context, deps: Deps, name: TailnetName, upstream: Upstream, *,
             try:
                 facts = deps.preflight(entry, [name.fqdn], nginx.route_file(name.route_name))
             except FrontDoorError as exc:
-                run.stop("preflight", exc.code, str(exc), "refused")
+                facts = _recover_then_preflight(ctx, deps, run, name, existing, exc)
             info = run.call("preflight", _inspect, ctx, deps, name.fqdn)
             if info.bound is not True:
                 run.stop("preflight", TAILNET_ADDRESS_UNBOUND,

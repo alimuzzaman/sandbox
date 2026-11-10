@@ -1694,6 +1694,11 @@ published name changes nothing.
    staging name with its marker and renamed into place, and a removed one is
    renamed to a tombstone before it is emptied, so a crash never leaves an
    unmarked directory at the name; the next run finishes either leftover.
+   When the nginx checks fail and this name has an unfinished activation on
+   the remote, its own untested block may be the cause: `add` first settles
+   that one transaction (the same gate, lease, edge lock and proofs as an
+   activation), then runs the nginx checks again. Any other failure is
+   refused as before.
 2. **Gate**: no durable job is active on the remote and none of
    `/run/lock/sandbox-{hosting-caddy,edge-nginx,docker-pool}.lock` is held.
    A busy remote is refused (`tailnet_name_busy`), never waited for. A lock

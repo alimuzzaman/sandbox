@@ -477,6 +477,12 @@ class StateTests(unittest.TestCase):
                     with self.assertRaises(m.TailnetNameError) as caught:
                         store.load()
                     self.assertEqual(caught.exception.code, m.STATE_CORRUPT)
+            # Re-review 12 NEW-2: undecodable bytes are corrupt state, not a crash.
+            path.write_bytes(b'{"version": 1, "names": {"\xff": 1}}')
+            with self.assertRaises(m.TailnetNameError) as caught:
+                store.load()
+            self.assertEqual(caught.exception.code, m.STATE_CORRUPT)
+            self.assertNotIn("\\xff", caught.exception.detail)
 
     def test_a_write_is_durable_in_its_directory(self):
         """Re-review 11 NEW-2: temp fsync, then rename, then directory fsync."""
@@ -757,6 +763,15 @@ class FakeRemote:
             return {"ok": False, "code": "lease_lost"}
         if action == "extend":
             return {"ok": True}
+        if action == "settle":
+            assert payload.get("jobs_probe") == {"home": "/home/u/sandbox"}, payload
+            if self.activation.get(fqdn) not in (None, "loaded"):
+                # The interrupted candidate is restored away; nginx -t passes again.
+                self.activation[fqdn] = "loaded"
+                self.blocks.pop(fqdn, None)
+                self.preflight_error = None
+                return {"ok": True, "settled": "restored"}
+            return {"ok": True, "settled": None}
         if action == "csr":
             if fqdn in self.foreign_dir:
                 return {"ok": False, "code": "unmanaged"}
@@ -1043,6 +1058,26 @@ class AddTests(ServiceTestCase):
         self.remote.bound = True
         self.remote.preflight_error = FrontDoorError("front_door_conflict", "name served elsewhere")
         self.assertEqual(self.add().code, "front_door_conflict")
+        self.assertEqual(self.dns.requests, [])
+
+    def test_add_settles_its_own_interrupted_activation_before_preflight(self):
+        """Re-review 12 NEW-1: a crash left this name's candidate block failing
+        nginx -t; the rerun settles that transaction, then preflights again."""
+        self.remote.keys.add(FQDN)
+        self.remote.blocks[FQDN] = "candidate"
+        self.remote.activation[FQDN] = "written"
+        self.remote.preflight_error = FrontDoorError("config_invalid", "nginx -t failed")
+        result = self.add()
+        self.assertTrue(result.ok, result.envelope())
+        self.assertEqual(self.remote.actions("preflight", "settle")[:3],
+                         ["preflight", "settle", "preflight"])
+        self.assertEqual(self.remote.leases, {}, "the settle lease is released")
+
+    def test_an_unrelated_invalid_config_still_refuses_add(self):
+        self.remote.preflight_error = FrontDoorError("config_invalid", "nginx -t failed")
+        result = self.add()
+        self.assertEqual((result.ok, result.code), (False, "config_invalid"))
+        self.assertEqual(self.remote.actions("settle", "reserve"), [])
         self.assertEqual(self.dns.requests, [])
 
     def test_upstream_differs_needs_replace(self):

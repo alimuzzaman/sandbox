@@ -80,7 +80,7 @@ any result is not ok.
 | `tailnet_name_no_tailnet_address` | The registration has no tailnet IPv4. |
 | `tailnet_name_tailnet_address_unbound` | The remote does not hold that address. |
 | `front_door_capability_unavailable` | The remote's front door is not nginx. |
-| `front_door_*` | nginx preflight refusals (missing, inactive, invalid, conflict). |
+| `front_door_*` | nginx preflight refusals (missing, inactive, invalid, conflict). `add` first settles an unfinished activation of the same name and checks again. |
 | `tailnet_name_acme_client_missing` | `lego` is not found. |
 | `tailnet_name_acme_client_untrusted` | `lego` is not pinned: not a root/user-owned, non-writable file in a known install path or matching `lego_sha256`, or its `--version` probe did not report lego 5+. |
 | `tailnet_name_unmanaged` | A block or certificate directory at the name's reserved paths was not written by Sandbox (no header for this name, not root 0600, no `managed.json`, or unknown files); it is left alone. |

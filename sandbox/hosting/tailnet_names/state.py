@@ -61,10 +61,10 @@ class StateStore:
         The file holds DNS ownership, so it is never read as empty by mistake.
         """
         try:
-            text = self.path.read_text()
+            text = self.path.read_bytes().decode("utf-8")
         except FileNotFoundError:
             return {}
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise TailnetNameError(STATE_CORRUPT,
                                    f"cannot read {self.path.name} ({type(exc).__name__})") from None
         try:

@@ -70,8 +70,8 @@ def _local(requested: dict[str, int], confirm: bool) -> dict:
 
     try:
         current = host_scheduler_policy()
-    except JobSchedulerConfigError:
-        if not requested:
+    except JobSchedulerConfigError as exc:
+        if not requested or exc.code == "job_policy_config_unreadable":
             raise
         # An invalid block may be repaired: the new block is built from the
         # defaults plus the requested values and replaces it whole.

@@ -35,16 +35,19 @@ class SchedulerPolicyInvalid(WorkspaceBusy):
         self.queue_reason = error.code
 
 
-def host_scheduler_policy() -> JobSchedulerPolicy:
-    """Read ``jobs.scheduler`` from this host's own machine config."""
-    from sandbox.config.job_scheduler import machine_job_scheduler_provider
+def _host_machine_config() -> dict:
     from sandbox.core._config import ConfigParseError, load_config
     try:
-        raw = load_config()
+        return load_config()
     except (SystemExit, OSError, ConfigParseError):  # die() exits on a missing sandbox.yml.
         raise JobSchedulerConfigError(
             "host machine config is unreadable", "job_policy_config_unreadable") from None
-    return machine_job_scheduler_provider(raw)
+
+
+def host_scheduler_policy() -> JobSchedulerPolicy:
+    """Read ``jobs.scheduler`` from this host's own machine config."""
+    from sandbox.config.job_scheduler import machine_job_scheduler_provider
+    return machine_job_scheduler_provider(_host_machine_config())
 
 
 def matrix_workspace_label(*, project_identity: str, parent_job_id: str,
@@ -63,8 +66,8 @@ def check_host_policy_write(policy: JobSchedulerPolicy) -> None:
     so a bad key there survives a local write; only fixing that file repairs it.
     """
     from sandbox.config.job_scheduler import machine_job_scheduler_provider
-    from sandbox.core._config import CONFIG, deep_merge, load_config
-    merged = deep_merge(load_config(), {"jobs": {"scheduler": policy.as_mapping()}})
+    from sandbox.core._config import CONFIG, deep_merge
+    merged = deep_merge(_host_machine_config(), {"jobs": {"scheduler": policy.as_mapping()}})
     try:
         machine_job_scheduler_provider(merged)
     except JobSchedulerConfigError as exc:

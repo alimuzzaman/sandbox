@@ -324,6 +324,16 @@ class JobPolicyCommandTests(unittest.TestCase):
         self.assertIn("sandbox.yml", payload["error"])
         self.assertEqual(self.local.read_text(), before)
 
+    def test_an_unreadable_config_is_a_structured_refusal(self):
+        self.local.write_text("jobs: [unclosed\n")
+        before = self.local.read_text()
+        code, payload = self.run_command(max_parallel=3, confirm=True)
+        self.assertEqual((code, payload["code"]), (1, "job_policy_config_unreadable"))
+        self.assertEqual(self.local.read_text(), before)
+        with mock.patch.object(_config, "CONFIG", Path(self.temp.name) / "missing.yml"):
+            code, payload = self.run_command(max_parallel=3, confirm=True)
+        self.assertEqual((code, payload["code"]), (1, "job_policy_config_unreadable"))
+
     def test_remote_runs_the_same_command_on_the_host(self):
         reply = {"ok": True, "status": "updated", "policy": {"max_parallel": 4},
                  "slots": {"max_parallel": 4, "in_use": 1}}

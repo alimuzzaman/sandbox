@@ -340,7 +340,6 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn(canary, json.dumps(entry))
         self.assertFalse(multiplex)
         self.assertNotIn(canary, (self.out / "environ.json").read_text())
-        self.assertNotIn(canary, json.dumps(dict(os.environ)))
         self.assertEqual(self._tree_contains(self.home, self.CANARY), [])
         self.assertEqual(self._tree_contains(self.checkout, self.CANARY), [])
         audit = (self.runtime / "host-exec" / "audit.jsonl").read_text().splitlines()

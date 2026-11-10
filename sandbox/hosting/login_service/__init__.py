@@ -29,7 +29,16 @@ MAX_LINK_SECONDS = 3600
 DEFAULT_LINK_SECONDS = 900
 MAX_POLL_SECONDS = 30
 CAPTURE_ADAPTERS = ("mailpit_v1",)
-ENTRY_MODES = ("magic_link", "inbox_gate")
+ENTRY_MODES = ("magic_link", "inbox_gate", "site_gate")
+# Modes that read the capture service; a declaration of only site_gate entries needs none.
+CAPTURE_MODES = ("magic_link", "inbox_gate")
+SITE_LINK_SCHEMA = "sandbox.site-link.v1"
+SITE_PATH_PREFIX = "/__sandbox/share/"
+SITE_MAX_USES = 20
+SITE_DEFAULT_USES = 1
+# Links and sessions are files on the tmpfs, each taking at least one page.
+SITE_STATE_TMPFS_SIZE = "8m"
+_LOADER = "import base64,sys;exec(compile(base64.b64decode(sys.argv[1]),'login_service','exec'))"
 
 _ENTRY_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _PINNED_IMAGE = re.compile(r"[a-z0-9][a-z0-9./_:-]*@sha256:[0-9a-f]{64}")
@@ -39,7 +48,10 @@ _EMAIL = re.compile(
 )
 _SERVICE_FIELDS = {"image", "enabled_until", "session_ttl_seconds", "allowed_host_suffixes", "capture"}
 _CAPTURE_FIELDS = {"service", "adapter", "api_url", "username", "credential_secret"}
-_ENTRY_FIELDS = {"mode", "requires_email", "hostname", "path", "ttl_seconds", "magic_link", "landing_path"}
+_ENTRY_FIELDS = {"mode", "requires_email", "hostname", "path", "ttl_seconds", "magic_link", "landing_path",
+                 "upstream"}
+_SITE_LINK_ID = re.compile(r"l-[0-9a-f]{12}")
+_SITE_REVOKE_TARGET = re.compile(r"all|[ls]-[0-9a-f]{12}")
 _MAGIC_FIELDS = {"request_url", "request_origin", "link_origin", "link_path", "link_pattern",
                  "required_params", "poll_timeout_seconds", "denied_emails"}
 
@@ -216,8 +228,40 @@ def _parse_magic_link(raw: object, *, services: set[str], where: str, suffixes: 
     }
 
 
+def _gate_hostname(raw: dict, gate_hosts: set[str], where: str) -> str:
+    hostname = str(raw.get("hostname") or "").strip().rstrip(".").lower()
+    if hostname not in gate_hosts:
+        raise _invalid(f"{where}.hostname must be a served alias of this target, not its primary hostname")
+    return hostname
+
+
+def _parse_site_gate(name: str, raw: dict, *, where: str, gate_hosts: set[str], upstreams: set[str]) -> dict:
+    """A share-link gate in front of one background service of this project."""
+    if raw.get("requires_email", False) is not False:
+        raise _invalid(f"{where}.requires_email must be false for site_gate")
+    if "magic_link" in raw:
+        raise _invalid(f"{where}.magic_link applies only to magic_link entries")
+    hostname = _gate_hostname(raw, gate_hosts, where)
+    path = _url_path(raw.get("path", f"{SITE_PATH_PREFIX}{name}"), f"{where}.path")
+    if path == "/":
+        raise _invalid(f"{where}.path must be a dedicated path, not /")
+    upstream = _internal_url(raw.get("upstream"), upstreams, f"{where}.upstream")
+    if upstream.path not in ("", "/") or not 0 < upstream.port < 65536:
+        raise _invalid(f"{where}.upstream must be http://<background service>:<port> with no path")
+    landing = _url_path(raw.get("landing_path", "/"), f"{where}.landing_path")
+    if landing == path:
+        raise _invalid(f"{where}.landing_path must differ from {where}.path")
+    return {
+        "mode": "site_gate", "requires_email": False, "hostname": hostname, "path": path,
+        "ttl_seconds": _bounded_int(raw.get("ttl_seconds", DEFAULT_LINK_SECONDS), MIN_LINK_SECONDS,
+                                    MAX_LINK_SECONDS, f"{where}.ttl_seconds"),
+        "upstream": f"http://{upstream.hostname}:{upstream.port}",
+        "landing_path": landing,
+    }
+
+
 def _parse_entry(name: object, raw: object, *, gate_hosts: set[str], services: set[str],
-                 suffixes: list[str]) -> dict:
+                 suffixes: list[str], upstreams: set[str]) -> dict:
     if not isinstance(name, str) or not _ENTRY_NAME.fullmatch(name):
         raise _invalid("entry name must be lowercase letters, digits, or hyphens")
     where = f"entries.{name}"
@@ -227,12 +271,14 @@ def _parse_entry(name: object, raw: object, *, gate_hosts: set[str], services: s
     mode = raw.get("mode")
     if mode not in ENTRY_MODES:
         raise _invalid(f"{where}.mode must be one of: " + ", ".join(ENTRY_MODES))
+    if mode == "site_gate":
+        return _parse_site_gate(name, raw, where=where, gate_hosts=gate_hosts, upstreams=upstreams)
+    if "upstream" in raw:
+        raise _invalid(f"{where}.upstream applies only to site_gate entries")
     needs_email = raw.get("requires_email")
     if not isinstance(needs_email, bool) or needs_email is not (mode == "magic_link"):
         raise _invalid(f"{where}.requires_email must be true for magic_link and false for inbox_gate")
-    hostname = str(raw.get("hostname") or "").strip().rstrip(".").lower()
-    if hostname not in gate_hosts:
-        raise _invalid(f"{where}.hostname must be a served alias of this target, not its primary hostname")
+    hostname = _gate_hostname(raw, gate_hosts, where)
     path = _url_path(raw.get("path"), f"{where}.path")
     if path == "/":
         raise _invalid(f"{where}.path must be a dedicated path, not /")
@@ -292,17 +338,27 @@ def parse_declaration(raw: object, *, routes: list[dict], compose: dict, secrets
     if not _PINNED_IMAGE.fullmatch(image):
         raise _invalid("login_service.image must be pinned as name@sha256:digest")
     suffixes = _check_suffixes(service.get("allowed_host_suffixes"), routes)
-    capture = _parse_capture(service.get("capture"), primary=primary, background=background, secrets=secrets)
     entries = raw["entries"]
     if not isinstance(entries, dict) or not entries:
         raise _invalid("entries must be a non-empty mapping")
+    needs_capture = any(not isinstance(item, dict) or item.get("mode") != "site_gate"
+                        for item in entries.values())
+    capture = None
+    if needs_capture or "capture" in service:
+        # Without a capture-reading entry the block is optional, but a given one is still checked.
+        capture = _parse_capture(service.get("capture"), primary=primary, background=background,
+                                 secrets=secrets)
     gate_hosts = {route["hostname"] for route in routes
                   if route["mode"] == "serve" and not route.get("primary")
                   and not route["hostname"].startswith("*.")}
-    callable_services = {primary, *background} - {capture["service"]}
+    callable_services = {primary, *background} - ({capture["service"]} if capture else set())
     parsed = {name: _parse_entry(name, item, gate_hosts=gate_hosts, services=callable_services,
-                                suffixes=suffixes)
+                                suffixes=suffixes, upstreams=set(background))
               for name, item in entries.items()}
+    site_hosts = [entry["hostname"] for entry in parsed.values() if entry["mode"] == "site_gate"]
+    if any(sum(1 for entry in parsed.values() if entry["hostname"] == host) > 1 for host in site_hosts):
+        # The gate answers every path on its hostname, so nothing else may share it.
+        raise _invalid("a site_gate hostname must front no other entry")
     seen, inbox_hosts = set(), set()
     for entry in parsed.values():
         location = (entry["hostname"], entry["path"])
@@ -339,6 +395,17 @@ def assert_applicable(declaration: dict, *, now: float) -> None:
             f"autologin.login_service.enabled_until must be within {MAX_ENABLED_DAYS} days")
 
 
+def has_site_gate(declaration: dict | None) -> bool:
+    return bool(declaration) and any(
+        entry["mode"] == "site_gate" for entry in declaration["entries"].values())
+
+
+def site_upstream_services(declaration: dict) -> list[str]:
+    """Compose services that a site_gate entry forwards to."""
+    return sorted({urllib.parse.urlsplit(entry["upstream"]).hostname
+                   for entry in declaration["entries"].values() if entry["mode"] == "site_gate"})
+
+
 def status_view(declaration: dict, *, now: float) -> dict:
     return {
         "state": "expired" if now >= _enabled_until_epoch(declaration) else "enabled",
@@ -362,7 +429,8 @@ def runtime_config(declaration: dict) -> dict:
     return {
         "enabled_until_epoch": _enabled_until_epoch(declaration),
         "session_ttl_seconds": declaration["session_ttl_seconds"],
-        "capture": {key: capture[key] for key in ("adapter", "api_url", "username")},
+        "capture": ({key: capture[key] for key in ("adapter", "api_url", "username")}
+                    if capture else None),
         "entries": entries,
     }
 
@@ -373,11 +441,12 @@ def _b64(data: bytes) -> str:
 
 def render_service(declaration: dict) -> str:
     """Render the Compose service block; it joins the override's ``services:``."""
-    source = _b64(Path(__file__).with_name("runtime.py").read_bytes())
+    source = _runtime_source()
     config = _b64(json.dumps(runtime_config(declaration), sort_keys=True, separators=(",", ":")).encode())
-    loader = "import base64,sys;exec(compile(base64.b64decode(sys.argv[1]),'login_service','exec'))"
     probe = f"import urllib.request as u;u.urlopen('http://127.0.0.1:{HEALTH_PORT}/healthz',timeout=3)"
     capture = declaration["capture"]
+    started_after = sorted({*([capture["service"]] if capture else []), *site_upstream_services(declaration)})
+    size = SITE_STATE_TMPFS_SIZE if has_site_gate(declaration) else "1m"
     lines = [
         f"  {SERVICE_NAME}:",
         f"    image: {json.dumps(declaration['image'])}",
@@ -386,16 +455,16 @@ def render_service(declaration: dict) -> str:
         "    read_only: true",
         "    cap_drop: [\"ALL\"]",
         "    security_opt: [\"no-new-privileges:true\"]",
-        f"    tmpfs: [{json.dumps(STATE_DIRECTORY + ':mode=0700,uid=65534,gid=65534,size=1m')}]",
+        f"    tmpfs: [{json.dumps(STATE_DIRECTORY + f':mode=0700,uid=65534,gid=65534,size={size}')}]",
         f"    expose: [\"{INTERNAL_PORT}\"]",
-        "    depends_on:",
-        f"      {capture['service']}:",
-        "        condition: service_started",
+        *(["    depends_on:"] if started_after else []),
+        *(line for name in started_after
+          for line in (f"      {name}:", "        condition: service_started")),
         "    environment:",
         f'      SANDBOX_LOGIN_CONFIG: "{config}"',
         *([f'      SANDBOX_LOGIN_CAPTURE_CREDENTIAL: "${{{capture["credential_secret"]}}}"']
-          if capture["credential_secret"] else []),
-        f"    command: {json.dumps(['python3', '-c', loader, source])}",
+          if capture and capture["credential_secret"] else []),
+        f"    command: {json.dumps(['python3', '-c', _LOADER, source])}",
         "    healthcheck:",
         f"      test: {json.dumps(['CMD', 'python3', '-c', probe])}",
         "      interval: 10s",
@@ -405,11 +474,16 @@ def render_service(declaration: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def preflight_command(prefix: str, capture_service: str) -> str:
+def _runtime_source() -> str:
+    return _b64(Path(__file__).with_name("runtime.py").read_bytes())
+
+
+def preflight_command(prefix: str, capture_service: str | None, upstreams: list[str] = ()) -> str:
     """A read-only remote probe; its output is counts, never Compose values."""
     program = "\n".join((
         "import json,subprocess,sys",
-        "command,capture,login=sys.argv[1:4]",
+        "command,capture,login,upstreams=sys.argv[1:5]",
+        "upstreams=json.loads(upstreams)",
         "done=subprocess.run(command,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=60,check=True)",
         "services=json.loads(done.stdout)['services']",
         "LOOPBACK={'127.0.0.1','::1'}",
@@ -418,10 +492,13 @@ def preflight_command(prefix: str, capture_service: str) -> str:
         "def beyond_loopback(port):return not (isinstance(port,dict) and port.get('host_ip') in LOOPBACK)",
         "capture_ports=sum(1 for port in ports(capture) if beyond_loopback(port))+host_network(capture)",
         "login_ports=len(ports(login))+host_network(login)",
-        "print(json.dumps({'capture_present':capture in services,'capture_ports':capture_ports,'login_ports':login_ports}))",
+        "upstream_missing=sum(1 for name in upstreams if name not in services)",
+        "upstream_ports=sum(sum(1 for port in ports(name) if beyond_loopback(port))+host_network(name) for name in upstreams)",
+        "print(json.dumps({'capture_present':(capture in services) if capture else True,'capture_ports':capture_ports,'login_ports':login_ports,'upstream_missing':upstream_missing,'upstream_ports':upstream_ports}))",
     ))
     config = f"{prefix} --profile '*' config --format json"
-    return shlex.join(["python3", "-c", program, config, capture_service, SERVICE_NAME])
+    return shlex.join(["python3", "-c", program, config, capture_service or "", SERVICE_NAME,
+                       json.dumps(sorted(upstreams))])
 
 
 def check_preflight(output: object) -> None:
@@ -435,6 +512,13 @@ def check_preflight(output: object) -> None:
         raise LoginServiceError("capture_not_in_project", "the capture service is not in this Compose project")
     if capture_ports:
         raise LoginServiceError("capture_port_published", "the capture service may publish ports only on loopback")
+    upstream_missing, upstream_ports = observed.get("upstream_missing", 0), observed.get("upstream_ports", 0)
+    if not isinstance(upstream_missing, int) or not isinstance(upstream_ports, int):
+        raise LoginServiceError("login_service_preflight_failed", "the Compose topology could not be read")
+    if upstream_missing:
+        raise LoginServiceError("upstream_not_in_project", "a site_gate upstream is not in this Compose project")
+    if upstream_ports:
+        raise LoginServiceError("upstream_port_published", "a site_gate upstream may publish ports only on loopback")
     if login_ports:
         raise LoginServiceError("login_port_published", f"{SERVICE_NAME} must not publish a port")
 
@@ -457,6 +541,51 @@ def install_script(target: str) -> str:
     quoted = shlex.quote(target)
     return (f"set -eu; umask 077; tmp={quoted}.tmp.$$; trap 'rm -f \"$tmp\"' EXIT; "
             f"cat > \"$tmp\"; mv -f \"$tmp\" {quoted}; trap - EXIT")
+
+
+def render_site_link_record(entry: str, link_id: str, token_hash: str, issued_at: int, expires_at: int,
+                            uses: int) -> str:
+    """A share-link record: the hash and counts only, never the token."""
+    record = {"schema": SITE_LINK_SCHEMA, "entry": entry, "id": link_id, "token_sha256": token_hash,
+              "issued_at": int(issued_at), "expires_at": int(expires_at), "uses": int(uses)}
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+
+def valid_revoke_target(value: object) -> bool:
+    return isinstance(value, str) and bool(_SITE_REVOKE_TARGET.fullmatch(value))
+
+
+def site_command(prefix: str, verb: str, entry: str, *extra: str) -> str:
+    """Run the service's own runtime to mint, list or revoke share links.
+
+    The argv holds the public runtime source and ids only. A mint record goes on stdin.
+    """
+    return (f"{prefix} exec -T {SERVICE_NAME} "
+            + shlex.join(["python3", "-c", _LOADER, _runtime_source(), "site", verb, entry, *extra]))
+
+
+def parse_site_reply(output: object) -> dict:
+    """Read the one JSON line a site command prints, refusing anything else."""
+    lines = [line for line in str(output or "").splitlines() if line.strip()]
+    try:
+        reply = json.loads(lines[-1])
+    except (IndexError, ValueError):
+        raise LoginServiceError("login_link_failed", "the login service gave no readable answer") from None
+    if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool):
+        raise LoginServiceError("login_link_failed", "the login service gave no readable answer")
+    if not reply["ok"]:
+        code = reply.get("code")
+        code = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,40}", code) else "login_link_failed"
+        raise LoginServiceError(code, _SITE_REFUSALS.get(code, "the login service refused the request"))
+    return reply
+
+
+_SITE_REFUSALS = {
+    "site_link_limit": "this entry already has the maximum number of live share links; revoke some first",
+    "site_link_unknown": "no live share link or session has that id",
+    "site_entry_unknown": "the running login service does not know this site_gate entry; run `./sb host apply` first",
+    "login_service_expired": "autologin.login_service.enabled_until has passed",
+}
 
 
 def login_link(entry: dict, token: str) -> str:

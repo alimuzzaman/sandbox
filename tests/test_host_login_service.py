@@ -842,5 +842,320 @@ class StatusTests(unittest.TestCase):
         self.assertIsNone(result["login_service"])
 
 
+
+SITE_HOST = "share.example.test"
+CANARY = "C4nAryT0kenC4nAryT0kenC4nAryT0kenC4nAryT0k"  # 43 characters, like token_urlsafe(32)
+
+
+def _site_entry(**fields):
+    return {"mode": "site_gate", "hostname": SITE_HOST, "upstream": "http://site:80", **fields}
+
+
+def _site_environment(entries=None, *, capture=False, basic_auth=None):
+    block = _login_block()
+    if not capture:
+        block["login_service"].pop("capture")
+    block["entries"] = entries if entries is not None else {"mockup": _site_entry()}
+    environment = _environment(block)
+    environment["compose"]["background_services"] = ["capture", "app", "site"]
+    environment["host"]["aliases"].append({"hostname": SITE_HOST, "mode": "serve"})
+    if basic_auth:
+        environment["basic_auth"] = basic_auth
+    return environment
+
+
+class SiteDeclarationTests(unittest.TestCase):
+    def assert_refused(self, environment, needle):
+        with self.assertRaises(hosting.HostingError) as raised:
+            _validate(environment)
+        self.assertIn(needle, str(raised.exception))
+
+    def test_site_gate_needs_no_capture_and_takes_defaults(self):
+        declaration = _validate(_site_environment())["login_service"]
+        self.assertIsNone(declaration["capture"])
+        self.assertEqual(declaration["entries"]["mockup"], {
+            "mode": "site_gate", "requires_email": False, "hostname": SITE_HOST,
+            "path": "/__sandbox/share/mockup", "ttl_seconds": 900,
+            "upstream": "http://site:80", "landing_path": "/"})
+
+    def test_a_given_capture_is_still_checked(self):
+        environment = _site_environment(capture=True)
+        environment["autologin"]["login_service"]["capture"]["adapter"] = "other"
+        self.assert_refused(environment, "capture.adapter")
+
+    def test_upstream_must_be_a_background_service_with_a_port_only(self):
+        for upstream in ("http://web:8080", "http://sandbox-login:8080", "http://nope:80",
+                         "http://site:80/sub", "http://site:80?x=1", "http://u:p@site:80",
+                         "https://site:443", "http://site", "http://site:0", None):
+            with self.subTest(upstream=upstream):
+                self.assert_refused(_site_environment({"mockup": _site_entry(upstream=upstream)}),
+                                    "upstream")
+
+    def test_gate_hostname_must_be_an_alias(self):
+        self.assert_refused(_site_environment({"mockup": _site_entry(hostname="app.example.test")}),
+                            "served alias")
+
+    def test_a_site_gate_hostname_fronts_nothing_else(self):
+        entries = {"mockup": _site_entry(),
+                   "inbox": {"mode": "inbox_gate", "requires_email": False, "hostname": SITE_HOST,
+                             "path": "/__sandbox/login/inbox"}}
+        self.assert_refused(_site_environment(entries, capture=True), "front no other entry")
+        entries["other"] = _site_entry(path="/__sandbox/share/other")
+        del entries["inbox"]
+        self.assert_refused(_site_environment(entries), "front no other entry")
+
+    def test_requires_email_must_stay_false(self):
+        self.assert_refused(_site_environment({"mockup": _site_entry(requires_email=True)}),
+                            "requires_email")
+
+    def test_link_path_rules(self):
+        self.assert_refused(_site_environment({"mockup": _site_entry(path="/")}), "dedicated path")
+        self.assert_refused(_site_environment({"mockup": _site_entry(path="/x", landing_path="/x")}),
+                            "must differ")
+
+    def test_capture_modes_still_need_a_capture(self):
+        entries = {"mockup": _site_entry(),
+                   "inbox": {"mode": "inbox_gate", "requires_email": False,
+                             "hostname": "gate.example.test", "path": "/__sandbox/login/inbox"}}
+        self.assert_refused(_site_environment(entries), "capture must be a mapping")
+
+    def test_upstream_belongs_to_site_gate_only(self):
+        environment = _environment(_login_block())
+        environment["autologin"]["entries"]["inbox"]["upstream"] = "http://capture:8025"
+        self.assert_refused(environment, "applies only to site_gate")
+
+    def test_basic_auth_cannot_front_a_site_gate(self):
+        self.assert_refused(
+            _site_environment(basic_auth={"username": "owner", "password_secret": "CAPTURE_PASSWORD"}),
+            "site_gate")
+
+
+class SiteRenderTests(unittest.TestCase):
+    def test_override_without_capture(self):
+        validated = _validate(_site_environment())
+        override = hosting.compose_override(validated, 18080)
+        self.assertIn("      site:\n        condition: service_started", override)
+        self.assertNotIn("capture:", override)
+        self.assertNotIn("SANDBOX_LOGIN_CAPTURE_CREDENTIAL", override)
+        self.assertIn("size=8m", override)
+        config = login.runtime_config(validated["login_service"])
+        self.assertIsNone(config["capture"])
+        self.assertEqual(config["entries"]["mockup"]["upstream"], "http://site:80")
+
+    def test_declarations_without_a_site_gate_keep_their_tmpfs(self):
+        self.assertIn("size=1m", hosting.compose_override(_valid(), 18080))
+
+    def test_status_lists_the_site_gate(self):
+        view = login.status_view(_validate(_site_environment())["login_service"], now=0)
+        self.assertEqual(view["entries"][0]["mode"], "site_gate")
+
+
+class SitePreflightTests(unittest.TestCase):
+    def test_upstream_checks(self):
+        base = {"capture_present": True, "capture_ports": 0, "login_ports": 0}
+        login.check_preflight(json.dumps(base))
+        login.check_preflight(json.dumps({**base, "upstream_missing": 0, "upstream_ports": 0}))
+        for extra, code in (({"upstream_missing": 1}, "upstream_not_in_project"),
+                            ({"upstream_ports": 1}, "upstream_port_published"),
+                            ({"upstream_ports": "1"}, "login_service_preflight_failed")):
+            with self.subTest(code=code), self.assertRaises(login.LoginServiceError) as raised:
+                login.check_preflight(json.dumps({**base, **extra}))
+            self.assertEqual(raised.exception.code, code)
+
+    def _probe(self, services):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "config.json")
+            config.write_text(json.dumps({"services": services}))
+            fake = Path(directory, "compose.sh")
+            fake.write_text(f"#!/bin/sh\nexec /bin/cat {config}\n")
+            command = shlex.split(login.preflight_command(f"/bin/sh {fake}", None, ["site"]))
+            done = run_test_process([sys.executable, *command[1:]], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_probe_counts_upstream_exposure(self):
+        public = {"mode": "ingress", "target": 80, "published": "8090", "protocol": "tcp"}
+        self.assertEqual(self._probe({"site": {"ports": [public]}})["upstream_ports"], 1)
+        loopback = {**public, "host_ip": "127.0.0.1"}
+        observed = self._probe({"site": {"ports": [loopback]}})
+        self.assertEqual((observed["upstream_ports"], observed["upstream_missing"]), (0, 0))
+        self.assertTrue(observed["capture_present"])
+        self.assertEqual(self._probe({"site": {"network_mode": "host"}})["upstream_ports"], 1)
+        self.assertEqual(self._probe({})["upstream_missing"], 1)
+
+    def test_apply_preflight_names_the_upstream(self):
+        validated = _validate(_site_environment())
+        with patch.object(hosting_cmd, "_remote_checked",
+                          return_value=json.dumps({"capture_present": True, "capture_ports": 0,
+                                                   "login_ports": 0, "upstream_missing": 0,
+                                                   "upstream_ports": 0})) as checked:
+            hosting_cmd._preflight_login_service({}, "docker compose", validated)
+        self.assertIn('["site"]', checked.call_args.args[1])
+
+
+class _Terminal(io.StringIO):
+    """A fake controlling terminal that keeps what was written after close."""
+
+    def close(self):
+        self.final = self.getvalue()
+        super().close()
+
+
+class SiteCommandTests(unittest.TestCase):
+    def setUp(self):
+        environment = _site_environment({"mockup": _site_entry()}, capture=True)
+        environment["autologin"]["entries"]["inbox"] = {
+            "mode": "inbox_gate", "requires_email": False, "hostname": "gate.example.test",
+            "path": "/__sandbox/login/inbox"}
+        self.validated = _validate(environment)
+        self.key = "remote/example-site/production"
+        self.state = {"version": 1, "hosts": {self.key: {}}}
+        self.replies = {}
+
+    def _remote(self, _entry, command, timeout=180, **kwargs):
+        self.commands.append(command)
+        self.inputs.append(kwargs.get("input_data"))
+        verb = shlex.split(command.split(" exec -T ", 1)[1])[6]
+        if verb in self.replies:
+            return self.replies[verb]
+        if verb == "mint":
+            record = json.loads(kwargs["input_data"])
+            return json.dumps({"ok": True, "id": record["id"], "expires_at": record["expires_at"],
+                               "uses": record["uses"]})
+        if verb == "list":
+            return json.dumps({"ok": True, "links": [{"id": "l-000000000001", "issued_at": 1,
+                                                       "expires_at": 2, "uses": 1, "used": 0}],
+                               "sessions": []})
+        return json.dumps({"ok": True, "revoked_links": 1, "revoked_sessions": 2})
+
+    def _run(self, *, terminal=True, lock_error=None, **fields):
+        args = SimpleNamespace(**{"service": "mockup", "email": None, "save_email": False, "json": True,
+                                  "remote": "remote", "ttl_seconds": None, "uses": None,
+                                  "list_links": False, "revoke": None, **fields})
+        self.commands, self.inputs, self.saves = [], [], []
+        self.terminal = _Terminal() if terminal else None
+
+        def locked(_validated, _remote_name, callback):
+            if lock_error is not None:
+                raise lock_error
+            return callback(self.state, lambda state: self.saves.append(copy.deepcopy(state)))
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(hosting_cmd.remote, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(hosting_cmd, "_compose_prefix", return_value="docker compose"), \
+             patch.object(hosting_cmd, "_remote_checked", side_effect=self._remote), \
+             patch.object(hosting_cmd, "_with_host_writer_lock", side_effect=locked), \
+             patch.object(hosting_cmd, "_operator_terminal", return_value=self.terminal), \
+             patch.object(hosting_cmd.secrets, "token_urlsafe", return_value=CANARY), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                hosting_cmd._cmd_host_login_link(self.validated, {"provisioned": True}, args)
+                code = 0
+            except SystemExit as stopped:
+                code = stopped.code
+        return code, out.getvalue(), err.getvalue()
+
+    def _assert_no_leak(self, out, err):
+        digest = hashlib.sha256(CANARY.encode()).hexdigest()
+        stored = json.dumps(self.saves) + json.dumps(self.state)
+        for channel in (out, err, stored, *self.commands):
+            self.assertNotIn(CANARY, channel)
+            self.assertNotIn(digest, channel)
+        for sent in self.inputs:
+            self.assertNotIn(CANARY, sent or "")
+
+    def test_mint_shows_the_link_on_the_terminal_only(self):
+        code, out, err = self._run(uses=3)
+        self.assertEqual(code, 0, out + err)
+        self._assert_no_leak(out, err)
+        self.assertEqual(self.terminal.final.count(CANARY), 1)
+        self.assertEqual(self.terminal.final.strip(),
+                         f"https://{SITE_HOST}/__sandbox/share/mockup#sandbox_autologin={CANARY}")
+        reply = json.loads(out)
+        self.assertNotIn("url", reply)
+        self.assertEqual((reply["ok"], reply["uses"], reply["link_shown_on"]), (True, 3, "terminal"))
+        self.assertRegex(reply["link_id"], r"^l-[0-9a-f]{12}$")
+        record = json.loads(self.inputs[0])
+        self.assertEqual(record["token_sha256"], hashlib.sha256(CANARY.encode()).hexdigest())
+        self.assertEqual((record["uses"], record["expires_at"] - record["issued_at"]), (3, 900))
+
+    def test_human_mint_output_carries_no_link(self):
+        code, out, err = self._run(json=False)
+        self.assertEqual(code, 0, out + err)
+        self._assert_no_leak(out, err)
+        self.assertIn("Share link l-", out)
+        self.assertEqual(self.terminal.final.count(CANARY), 1)
+
+    def test_no_terminal_refuses_before_minting(self):
+        code, out, _ = self._run(terminal=False)
+        self.assertEqual((code, json.loads(out)["code"]), (1, "terminal_required"))
+        self.assertEqual(self.commands, [])
+
+    def test_uses_bounds(self):
+        for uses in (0, 21, -1, True):
+            with self.subTest(uses=uses):
+                code, out, _ = self._run(uses=uses)
+                self.assertEqual((code, json.loads(out)["code"]), (1, "uses_out_of_range"))
+                self.assertEqual(self.commands, [])
+
+    def test_site_options_belong_to_site_gate_entries(self):
+        for fields in ({"uses": 2}, {"list_links": True}, {"revoke": "all"}):
+            with self.subTest(fields=fields):
+                code, out, _ = self._run(service="inbox", **fields)
+                self.assertEqual((code, json.loads(out)["code"]), (1, "site_gate_only"))
+
+    def test_conflicting_options(self):
+        for fields in ({"email": "person@example.test"}, {"save_email": True},
+                       {"list_links": True, "revoke": "all"}, {"list_links": True, "uses": 2},
+                       {"revoke": "all", "ttl_seconds": 600}):
+            with self.subTest(fields=fields):
+                code, out, _ = self._run(**fields)
+                self.assertEqual((code, json.loads(out)["code"]), (1, "site_options_conflict"))
+                self.assertEqual(self.commands, [])
+
+    def test_list_reports_ids_and_counts(self):
+        code, out, _ = self._run(list_links=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["links"][0]["id"], "l-000000000001")
+        self.assertIn("site list mockup", self.commands[0])
+        self.assertEqual(self.inputs, [None])
+
+    def test_revoke_runs_under_the_writer_lock(self):
+        code, out, _ = self._run(revoke="l-000000000001")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["revoked_sessions"], 2)
+        self.assertIn("site revoke mockup l-000000000001", self.commands[0])
+
+    def test_revoke_target_is_checked_before_the_remote(self):
+        code, out, _ = self._run(revoke="x; rm -rf /")
+        self.assertEqual((code, json.loads(out)["code"]), (1, "site_link_unknown"))
+        self.assertEqual(self.commands, [])
+
+    def test_service_refusals_pass_through(self):
+        self.replies["list"] = json.dumps({"ok": False, "code": "site_entry_unknown"})
+        code, out, _ = self._run(list_links=True)
+        self.assertEqual((code, json.loads(out)["code"]), (1, "site_entry_unknown"))
+        self.replies["mint"] = "Traceback (most recent call last)"
+        code, out, _ = self._run()
+        self.assertEqual((code, json.loads(out)["code"]), (1, "login_link_failed"))
+        self.assertEqual(self.terminal.final, "")
+
+    def test_a_busy_target_is_a_named_failure(self):
+        code, out, err = self._run(lock_error=TimeoutError())
+        self.assertEqual((code, json.loads(out)["code"]), (1, "login_link_failed"))
+        self._assert_no_leak(out, err)
+
+    def test_expired_declaration_mints_nothing(self):
+        self.validated["login_service"]["enabled_until"] = "2000-01-01"
+        code, out, _ = self._run()
+        self.assertEqual((code, json.loads(out)["code"]), (1, "login_service_expired"))
+        self.assertEqual(self.commands, [])
+
+    def test_site_command_argv_holds_no_secret(self):
+        command = login.site_command("docker compose", "mint", "mockup")
+        self.assertTrue(command.startswith("docker compose exec -T sandbox-login python3 -c "))
+        self.assertEqual(shlex.split(command)[-3:], ["site", "mint", "mockup"])
+
+
 if __name__ == "__main__":
     unittest.main()

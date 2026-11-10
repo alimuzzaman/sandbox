@@ -516,6 +516,13 @@ before protected effects.
 - `sb host stack list --remote R` and `sb host stack down --name <slug> --remote R --confirm` (existing destroy, then ports released).
 - Stack ports come from 18100-18199 per remote and persist until `down`. Every apply refuses a hostname another project holds on the remote (`hostname_owned_by_other_project`). `allowed_branches` accepts globs (`feat/*`).
 
+## Sharing a private hosted site (spec 075)
+
+- A login-service entry with `mode: site_gate`, `hostname` (a served alias), `upstream: http://<background service>:<port>` and `ttl_seconds` puts a link-only gate in front of that service. See `docs/login-service.md#sharing-a-private-site-site_gate`.
+- Mint: `sb host login-url --service <entry> --remote R --confirm [--uses N] [--json]`. The link goes to the controlling terminal only; stdout and `--json` carry `link_id`, `expires_at` and `uses`. Agents and jobs have no terminal and get `terminal_required`: ask the owner to run it themselves, and never try to capture the link.
+- `sb host login-url --service <entry> --remote R --list [--json]` shows ids and counts. `--revoke <l-...|s-...|all> --confirm` revokes; revoking a link ends its sessions.
+- Without a session the gate hostname answers 404. The project edge must forward only that hostname to `sandbox-login:8080`, and the upstream must publish only on loopback.
+
 When the owner exited before recording anything, recovery cannot observe its way out:
 it refuses with `partial_evidence` while apply refuses with `required_evidence_missing`.
 Close that attempt explicitly, then apply again.

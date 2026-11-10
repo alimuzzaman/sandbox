@@ -6,7 +6,7 @@ Every response below carries `Cache-Control: no-store` on gate-generated respons
 | Request | Condition | Response |
 |---|---|---|
 | any | `enabled_until` passed | 404 |
-| any | request target is not origin-form, starts with `//`, or `Host` is missing, duplicated, or not the gate hostname | 404 |
+| any | request target is not origin-form (a leading `//` reaches the gate already folded to `/`, so it is only ever a path on the upstream), or `Host` is missing, duplicated, or not the gate hostname | 404 |
 | `GET`/`HEAD` `<path>` | at least one live link | 200 link page (CSP with script hash, `Referrer-Policy: no-referrer`) |
 | `GET`/`HEAD` `<path>` | no live link | 404 |
 | `POST` `<path>` | over 30 attempts in 60 s for the entry | 429 `rate_limited`, `Referrer-Policy: no-referrer` |

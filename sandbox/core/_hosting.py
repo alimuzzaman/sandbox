@@ -731,6 +731,10 @@ def validate_loaded(root: Path, manifest: dict, environment: str | None = None, 
             env.get("autologin"), routes=routes, compose=compose, secrets=secrets)
     except login_service.LoginServiceError as exc:
         raise HostingError(str(exc)) from None
+    if basic_auth and login_service.has_site_gate(login_declaration):
+        # Caddy's basic_auth covers every served hostname, the gate's included.
+        raise HostingError("login_service_invalid: basic_auth would put a password in front of the "
+                           "site_gate hostname; remove one of them")
     normalized_compose = {
         **compose,
         "files": compose_paths,

@@ -168,8 +168,9 @@ present on the terminal stream exactly once.
 - **FR-012**: Without a valid session every request to the gate hostname MUST answer
   404 and reach nothing, websocket upgrades included.
 - **FR-013**: Only origin-form request targets for the exact gate hostname, with one
-  `Host` header, MAY be forwarded. Absolute-form targets, `//` paths, other hosts and
-  duplicate `Host` headers MUST answer 404.
+  `Host` header, MAY be forwarded. Absolute-form targets, other hosts and duplicate
+  `Host` headers MUST answer 404. A path starting with `//` MUST never name a
+  destination; at most it is an ordinary path on the declared upstream.
 - **FR-014**: A session MUST end at `session_ttl_seconds` after it starts, at revoke,
   or at `enabled_until`, whichever comes first. After `enabled_until` the gate answers
   404 to everything and open tunnels close.

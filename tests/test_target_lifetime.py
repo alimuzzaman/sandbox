@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sandbox.hosting import names
 from sandbox.hosting.lifetime import hoststore as hs
+from tests.subprocess_support import run_test_process
 
 NOW = hs.parse_rfc3339("2026-11-10T10:00:00Z")
 CTRL_A = "a" * 32
@@ -449,11 +450,9 @@ class HostStoreTests(unittest.TestCase):
 
     def test_shipped_program_runs_as_python_c(self):
         source = Path(hs.__file__).read_text(encoding="utf-8")
-        environment = dict(os.environ, SANDBOX_HOME=str(self.home))
-        environment.pop("PYTHONPATH", None)
-        result = subprocess.run([sys.executable, "-I", "-c", source], input=json.dumps(_request("list")),
-                                capture_output=True, text=True, env=environment, cwd=str(self.home),
-                                timeout=60, check=False)
+        result = run_test_process([sys.executable, "-I", "-c", source], input=json.dumps(_request("list")),
+                                  capture_output=True, text=True, env={"SANDBOX_HOME": str(self.home)},
+                                  cwd=str(self.home), timeout=60, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["ok"])
 
@@ -728,10 +727,9 @@ class MergeSweepTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="sb-merge-"))
         self.addCleanup(lambda: __import__("shutil").rmtree(self.root, ignore_errors=True))
-        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.test",
-                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.test",
-                   GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, HOME=str(self.root))
-        self.env = env
+        self.env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.test",
+                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "HOME": str(self.root)}
         origin = self.root / "origin"
         self.git(self.root, "init", "--quiet", "--bare", "--initial-branch=dev", str(origin))
         self.work = self.root / "work"
@@ -748,13 +746,13 @@ class MergeSweepTests(unittest.TestCase):
         self.calls = []
 
     def git(self, cwd, *args):
-        result = subprocess.run(["git", "-C", str(cwd), *args], env=self.env, capture_output=True,
-                                text=True, check=True, timeout=60)
+        result = run_test_process(["git", "-C", str(cwd), *args], env=self.env, capture_output=True,
+                                  text=True, check=True, timeout=60)
         return result.stdout.strip()
 
     def runner(self, checkout, *args, timeout=120):
-        return subprocess.run(["git", "-C", str(checkout), *args], env=self.env, capture_output=True,
-                              text=True, check=False, timeout=timeout)
+        return run_test_process(["git", "-C", str(checkout), *args], env=self.env, capture_output=True,
+                                text=True, check=False, timeout=timeout)
 
     def record(self, commit):
         return {"kind": "stack", "lifetime": "temporary", "state": "active",

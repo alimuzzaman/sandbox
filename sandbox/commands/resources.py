@@ -1611,10 +1611,35 @@ def _run_tier(args) -> dict:
         if isinstance(data, dict):
             data["budget_seconds"] = float(requested_budget)
         return payload
-    return service.cleanup(
+    payload = service.cleanup(
         tier=args.tier, plan_id=getattr(args, "plan_id", None),
         confirm=bool(args.confirm), budget_seconds=remaining_budget,
     )
+    # Hosted targets live on remotes; on the host itself the routine runs this pass.
+    if (args.confirm and args.tier in {"safe", "all"} and getattr(args, "remote", None)
+            and isinstance(payload, dict)):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            data["hosted_targets"] = _hosted_tier_pass(args.remote)
+    return payload
+
+
+def _hosted_tier_pass(remote_name: str) -> dict:
+    """Spec 077: expired or merged temporary hosted targets, after the probe cleanup."""
+    from sandbox.core._hosting import HostingError
+    from sandbox.core._remote import get_remote
+    from sandbox.hosting.lifetime import reaper
+
+    try:
+        entry = get_remote(remote_name)
+        if not isinstance(entry, dict):
+            return {"ok": False, "code": "remote_unknown", "error": f"no remote named {remote_name!r}"}
+        return reaper.run_remote(entry, remote_name, confirm=True, trigger="safe_tier")
+    except HostingError as exc:
+        return {"ok": False, "code": getattr(exc, "code", "stack_reap_unavailable"),
+                "error": str(getattr(exc, "detail", exc))[:300]}
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {"ok": False, "code": "stack_reap_unavailable", "error": type(exc).__name__}
 
 
 def cmd_resources(_cfg, args) -> None:

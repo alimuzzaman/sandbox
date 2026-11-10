@@ -7430,12 +7430,17 @@ def cmd_host(cfg, args) -> None:
     if args.action == "image" and getattr(args, "image_action", None) == "verify":
         _cmd_host_image_verify(args)
         return
-    if args.action == "stack" or image_action in {"up", "list", "down"}:
-        if args.action != "stack" or image_action not in {"up", "list", "down"}:
-            die("use `sb host stack up|list|down`")
+    stack_actions = {"up", "list", "down", "ttl", "sweep", "reap", "limits"}
+    if args.action == "stack" or image_action in stack_actions:
+        if args.action != "stack" or image_action not in stack_actions:
+            die("use `sb host stack up|list|down|ttl|sweep|reap|limits`")
         from sandbox.commands.host_stack import cmd_host_stack
         args.stack_action = image_action
         cmd_host_stack(args)
+        return
+    if args.action == "classify":
+        from sandbox.commands.host_classify import cmd_host_classify
+        cmd_host_classify(args)
         return
     if args.action == "stage":
         _cmd_host_stage(args)

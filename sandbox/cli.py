@@ -1043,10 +1043,10 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="print the result as JSON (for the MCP server)")
 
     host_p = sub.add_parser("host", help="Validate, plan, stage, activate immutable images, apply, recover, sync, diagnose, read logs, or issue a one-time hosting login URL, destroy a hosted target, heal hosted services that exhausted their restarts, run per-slug stacks from a template, or run one command in a hosted service (`host exec ... -- ARGV`)")
-    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec"])
+    host_p.add_argument("action", choices=["validate", "plan", "status", "diagnose", "stage", "image", "apply", "recover", "retire-delivery", "sync", "logs", "secrets", "login-url", "destroy", "heal", "stack", "exec", "classify"])
     host_p.add_argument("image_action", nargs="?",
-        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down"],
-        help="immutable image action, or `host stack up|list|down`; `host image recover` is distinct from failed-apply `host recover`")
+        choices=["authority", "forward-review", "provision", "verify", "status", "activate", "adopt", "rollback", "recover", "settle", "build-local", "push-local", "storage-admission", "up", "list", "down", "ttl", "sweep", "reap", "limits"],
+        help="immutable image action, or `host stack up|list|down|ttl|sweep|reap|limits`; `host image recover` is distinct from failed-apply `host recover`")
     host_p.add_argument("--template", default=None, metavar="PATH",
         help="host stack up: the committed stack template (sandbox.hosting.yml with a stack: block)")
     host_p.add_argument("--name", default=None, metavar="SLUG",
@@ -1057,6 +1057,32 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="host stack up: pin a named stack port (repeatable)")
     host_p.add_argument("--plan", action="store_true",
         help="host stack up: report the render, ports and submission without changing anything")
+    host_p.add_argument("--lifetime", default=None, choices=["temporary", "hosted", "permanent"],
+        help="host stack up/ttl, host classify: temporary (default, reaped after its TTL or once merged), "
+             "hosted (the one canonical dev-branch stack, never reaped) or permanent (never reaped)")
+    host_p.add_argument("--ttl", default=None, metavar="36h|14d|2w",
+        help="host stack up/ttl, host classify: a temporary stack's time limit (default 14d); "
+             "`stack ttl` sets its expiry to now plus this")
+    host_p.add_argument("--owner", default=None, metavar="LABEL",
+        help="host stack: the owner label recorded on the remote (default: git user.email)")
+    host_p.add_argument("--copy", default=None, metavar="COPY_ID",
+        help="host stack up: target your own existing copy of this stack from another controller")
+    host_p.add_argument("--force-owner", dest="force_owner", action="store_true",
+        help="host stack down/ttl, host classify: act on a stack or target another owner holds (recorded)")
+    host_p.add_argument("--here", action="store_true",
+        help="host stack reap: run on this host itself (the remote side of `stack reap --remote`)")
+    host_p.add_argument("--trigger", default=None, choices=["scheduled_routine", "stack_reap", "safe_tier"],
+        help=argparse.SUPPRESS)
+    host_p.add_argument("--checkout", action="append", default=None, metavar="PATH",
+        help="host stack sweep: a local checkout to check merges in (repeatable; recorded stacks' checkouts are used too)")
+    host_p.add_argument("--per-owner", dest="per_owner", type=int, default=None, metavar="N",
+        help="host stack limits: active temporary stacks one owner may hold on the remote (default 5)")
+    host_p.add_argument("--total", type=int, default=None, metavar="N",
+        help="host stack limits: hosted targets the remote may hold in all (default 40)")
+    host_p.add_argument("--min-free-gb", dest="min_free_gb", type=float, default=None, metavar="GB",
+        help="host stack limits: free disk a new stack needs on the remote (default 20)")
+    host_p.add_argument("--unclassify", action="store_true",
+        help="host classify: remove the target's lifetime record (it becomes unclassified and protected)")
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--project", default=None, help="host heal or image storage-admission: hosted project name")

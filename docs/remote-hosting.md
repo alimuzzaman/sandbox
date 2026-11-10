@@ -2007,6 +2007,34 @@ not toward any instance or the unattributed list. Each row links to its card on
 `/hosting`. On a server, `/host/local` shows the same rows. A controller sees them for a
 registered remote only after `sb remote service migrate` installs this code there.
 
+**Lifetimes.** Every stack and hosted target on `/hosting` shows its spec 077 lifetime record:
+
+- lifetime (`temporary`, `hosted` or `permanent`), owner label, and expiry with time left;
+- `canonical`;
+- whether server cleanup may remove it now, and why (`expired` or `merged`);
+- `state` (`active`, `reaping` or `reaped`) and `extended_count`.
+
+A "Lifetimes" list at the top of the page orders them temporary first, then hosted, then permanent, with unclassified targets last. Within temporary, reapable copies come first, then the soonest to expire. Several copies of one branch are separate rows, each with its owner. A record with no card of its own is still listed.
+
+Where the lifetimes come from:
+
+- On a server, the panel reads `runtime/target-lifetimes/*.json` through `Store.peek` in `hoststore.py`. It takes no lock, writes nothing, skips symlinks, and reads at most 500 files of 256 KiB each. Validation and eligibility use the store's own rules.
+- On a controller, it runs `sb host stack list --remote R --json` for each remote its records name. The result is cached for 60 seconds, the fetch runs in the background, and the page never waits for a remote. Until the first result arrives the lifetime reads "loading". An unreachable remote reads "unknown" and is reported as partial.
+
+A target with no record, or with a record that is unreadable, partly written, oversized or invalid, reads "unclassified, protected". It is never shown as reapable. The panel has no classify, TTL or reap control.
+
+The host pages' hosted apps table shows the same lifetime, owner and time left, ordered the same way. Each row's lifetime is built by the host itself into its inventory. A stack target with no `summary.json` takes its stack name from the lifetime record.
+
+**Last apply.** `summary.json` records the outcome from the apply's delivery record:
+
+- `succeeded`: delivery is complete.
+- `unverified`: the apply executed, but delivery stayed incomplete or unknown. The reason is kept, for example `required_evidence_missing` when the project declares no source revision. The panel shows "applied · delivery unverified (required evidence missing)".
+- `failed`: execution failed or delivery failed.
+
+A target without a summary reads "applied before tracking", not a bare "not recorded".
+
+**Landing page and sidebar.** On a server with hosted apps, `/host/local` leads with them: their count and a list linking to their `/hosting` rows. The two kinds are labelled "Sandbox dev instances" and "Hosted apps (sb host apply / stacks)". With no dev instances, the page hides the "New instance" prompt and the footer hides "Start all" and "Stop all". Those buttons act on dev instances only. The sidebar shows the dev instance count and the hosted app count. A host's resource page titles its instance table "Sandbox dev instances on this host". CPU figures are labelled as a point-in-time sample from one `docker stats` read.
+
 ## 8. CLI + MCP surface
 
 See `specs/014-remote-vps-hosting/contracts/cli-and-mcp.md` for the full flag/JSON-shape

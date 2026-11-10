@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   applyLabel, timeLeft, lifetimeLabel, reapLabel, expiryTone, showBulkActions, hostedCountText,
-  humanReason, CPU_LABEL, CPU_TITLE, type LifetimeLike,
+  humanReason, compareLifetimes, CPU_LABEL, CPU_TITLE, type LifetimeLike,
 } from "../src/ui/hostlabels.ts";
 
 const NOW = 1_800_000_000;
@@ -87,4 +87,18 @@ test("bulk instance actions only with dev instances; hosted count text", () => {
 test("CPU is labelled a point-in-time sample", () => {
   assert.match(CPU_LABEL, /sample/i);
   assert.match(CPU_TITLE, /point-in-time/i);
+});
+
+test("host page rows sort temporary copies near expiry first", () => {
+  const rows = [
+    lifetime({ classification: "unclassified", reason: "no_record", lifetime: null, expires_at: null }),
+    lifetime({ lifetime: "permanent", expires_at: null }),
+    lifetime({ expires_at: NOW + 9000, owner: "Bob" }),
+    lifetime({ lifetime: "hosted", canonical: true, expires_at: null }),
+    lifetime({ expires_at: NOW + 60 }),
+    lifetime({ reap_eligible: true, reap_reason: "merged", expires_at: NOW + 99999 }),
+  ];
+  const order = [...rows].sort(compareLifetimes).map(row => `${row.lifetime}:${row.expires_at ?? "-"}`);
+  assert.deepEqual(order, [`temporary:${NOW + 99999}`, `temporary:${NOW + 60}`, `temporary:${NOW + 9000}`,
+    "hosted:-", "permanent:-", "null:-"]);
 });

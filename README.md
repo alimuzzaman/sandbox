@@ -949,6 +949,7 @@ You can view and drive instances with:
 ./sb web                  # the same dashboard in the browser (127.0.0.1:8765)
 ./sb web --host tailscale # serve it to your tailnet, with full control (docs/remote-hosting.md)
                           # its Stacks & sites page (/hosting) lists every stack's servers, read-only
+                          # with each copy's lifetime, owner and time left (spec 077), read-only
                           # --allow-host NAME also accepts a tailnet-only proxy's name (repeatable)
 ./sb instance suspend <name>  # graceful stop; idle_stop is the resolved default
 ./sb instance resume <name>   # start a provisioned instance and wait for readiness

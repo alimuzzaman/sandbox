@@ -11,7 +11,7 @@ only on xspeed-dev through `sb job-start --remote xspeed-dev`, compared with an
 
 ## Phase 1: Setup
 
-- [ ] T001 (blocked: orchestrator hold on xspeed-dev jobs; first attempt exited before running tests) Record the `origin/latest` baseline for the touched test modules on xspeed-dev (scratch root `baseline.txt`)
+- [x] T001 Record the `origin/latest` baseline for the touched test modules on xspeed-dev (scratch root `baseline.txt`)
 
 ## Phase 2: Foundational (types)
 
@@ -76,9 +76,9 @@ only on xspeed-dev through `sb job-start --remote xspeed-dev`, compared with an
 
 ## Phase 6: Polish
 
-- [ ] T031 Run the touched and neighbouring test modules on xspeed-dev (Haiku helper, fixed report) and compare with T001
-- [ ] T032 Self-review `git diff origin/latest..HEAD`; commit; push `fix/proxy-on-demand`
-- [ ] T033 Luna review of the head (read-only); fix or answer every finding; re-push
+- [x] T031 Run the touched and neighbouring test modules on xspeed-dev (Haiku helper, fixed report) and compare with T001
+- [x] T032 Self-review `git diff origin/latest..HEAD`; commit; push `fix/proxy-on-demand`
+- [x] T033 Luna review of the head (read-only); fix or answer every finding; re-push
 
 ## Dependencies
 
@@ -97,3 +97,11 @@ only on xspeed-dev through `sb job-start --remote xspeed-dev`, compared with an
 
 MVP is US1 (the reported problem). US2 ships in the same release cycle: it is one coherent
 feature outcome (the owner's question covers both), so the phase is not split.
+
+## Verification record (2026-11-10)
+
+- Baseline `origin/latest` 99dec45, job c5bbeaac39f94bf86e09cc561813ff30: Ran 491, 1 failure, 6 errors, 8 skipped.
+- Branch 0a7125c, job 152fd6d0c3e15c2da1cbfd915bef0870: Ran 535, 1 failure, 6 errors, 9 skipped. Same failing ids as the baseline (6 `test_creation_requests` errors from the host's network-range state, 1 `test_web_dashboard` remote-summary failure); no new failures.
+- `tests/test_lifecycle.py` was excluded from both runs: on the host's Python 3.12 it fails to import (`SyntaxError: too many statically nested blocks`, line 470) on `origin/latest` already.
+- Luna review of a2cde6a: APPROVE WITH FIXES (one medium, fixed in 0a7125c); re-check of 0a7125c: APPROVE.
+

@@ -72,6 +72,23 @@ def _drop_journal(path: Path) -> None:
         path.unlink()
 
 
+def _journal_matches_verified_update(root: Path, branch: str, old: str, new: str,
+                                     policy: Policy) -> bool:
+    """True when ``old -> new`` is a strict fast-forward and ``new`` is on upstream."""
+    if old == new:
+        return False
+    checkout = gitops.read_checkout(root, timeout=policy.git_timeout)
+    if (checkout is None or checkout.branch != branch
+            or not checkout.upstream_remote or not checkout.upstream_branch):
+        return False
+    tip = f"refs/remotes/{checkout.upstream_remote}/{checkout.upstream_branch}"
+    timeout = policy.git_timeout
+    return (gitops.has_commit(root, old, timeout=timeout)
+            and gitops.has_commit(root, new, timeout=timeout)
+            and gitops.is_ancestor(root, old, new, timeout=timeout)
+            and gitops.is_ancestor(root, new, tip, timeout=timeout))
+
+
 def _recover(root: Path, lock_dir: Path, policy: Policy) -> Decision | None:
     """Finish a rollback a crash interrupted. ``None`` means nothing to do."""
     journal = journal_path(root, lock_dir)
@@ -90,6 +107,14 @@ def _recover(root: Path, lock_dir: Path, policy: Policy) -> Decision | None:
         # git accepts; anything else is not a rollback of this checkout.
         if (not gitops.valid_branch_name(resolved, branch, timeout=policy.git_timeout)
                 or gitops.current_branch(resolved, timeout=policy.git_timeout) != branch):
+            _drop_journal(journal)
+            return None
+        # The journal is only a note to ourselves, so it proves nothing on its
+        # own: act on it only when it still describes an update this engine
+        # could have made, a fast-forward from ``old`` to a ``new`` that is on
+        # the branch's published upstream. Otherwise it could name any local
+        # commit as the place to roll back to.
+        if not _journal_matches_verified_update(resolved, branch, old, new, policy):
             _drop_journal(journal)
             return None
         try:

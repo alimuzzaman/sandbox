@@ -44,7 +44,7 @@ Matches only when revision and upstream both match and `until` is in the future.
 | upstream_remote | `str | None` |
 | upstream_branch | `str | None` (short name, e.g. `latest`) |
 | origin_url | `str | None` (raw config value) |
-| clean | `bool` (tracked files and index) |
+| clean | `bool` (work tree, index and untracked files; ignored files excluded) |
 
 `read_checkout(root) -> CheckoutState | None`; `None` means "not a git
 checkout" and ends evaluation silently.

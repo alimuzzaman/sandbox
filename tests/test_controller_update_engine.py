@@ -259,22 +259,44 @@ class UnsafeCheckoutTests(EngineCase):
         self.assertIsInstance(decision, Skip)
         self.assertIs(decision.reason, SkipReason.DIRTY)
 
-    def test_untracked_file_does_not_block(self):
-        c2 = self.known_newer()
+    def test_untracked_file_is_dirty(self):
+        self.known_newer()
         (self.repos.ctl / "scratch.txt").write_text("loose\n", encoding="utf-8")
         decision = self.run_engine()
-        self.assertIsInstance(decision, Updated)
-        self.assertEqual(self.repos.head(), c2)
+        self.assertIsInstance(decision, Skip)
+        self.assertIs(decision.reason, SkipReason.DIRTY)
+        self.assertEqual(self.repos.head(), self.repos.c1)
 
-    def test_untracked_file_in_the_way_fails_the_fast_forward(self):
+    def test_untracked_file_at_an_incoming_path_is_dirty_and_kept(self):
         self.known_newer()
         (self.repos.ctl / "b.txt").write_text("would be overwritten\n", encoding="utf-8")
         decision = self.run_engine()
         self.assertIsInstance(decision, Skip)
-        self.assertIs(decision.reason, SkipReason.FF_FAILED)
+        self.assertIs(decision.reason, SkipReason.DIRTY)
         self.assertEqual(self.repos.head(), self.repos.c1)
         self.assertEqual((self.repos.ctl / "b.txt").read_text(encoding="utf-8"),
                          "would be overwritten\n")
+
+    def test_ignored_file_does_not_block(self):
+        c2 = self.known_newer()
+        (self.repos.ctl / ".git" / "info" / "exclude").write_text("*.log\n", encoding="utf-8")
+        (self.repos.ctl / "run.log").write_text("ignored\n", encoding="utf-8")
+        decision = self.run_engine()
+        self.assertIsInstance(decision, Updated)
+        self.assertEqual(self.repos.head(), c2)
+
+    def test_fast_forward_failure_is_reported_and_leaves_head(self):
+        self.known_newer()
+
+        def failing(root, revision, *, timeout):
+            raise engine.GitError("simulated merge failure")
+
+        with patch.object(engine.gitops, "fast_forward", failing):
+            decision = self.run_engine()
+        self.assertIsInstance(decision, Skip)
+        self.assertIs(decision.reason, SkipReason.FF_FAILED)
+        self.assertIn("simulated merge failure", decision.notice)
+        self.assertEqual(self.repos.head(), self.repos.c1)
 
     def test_branch_without_upstream(self):
         self.known_newer()
@@ -356,6 +378,27 @@ class RollbackTests(EngineCase):
         self.assertIsInstance(decision, Stranded)
         self.assertEqual(decision.head, c2)
         self.assertIn(f"git -C {self.repos.ctl.resolve()} status", decision.notice)
+        # The ref was swapped back, so branch and index agree at the new revision.
+        self.assertEqual(self.repos.git(self.repos.ctl, "rev-parse", "refs/heads/main"), c2)
+        self.assertEqual(self.repos.git(self.repos.ctl, "diff", "--cached", "--name-only"), "")
+
+    def test_branch_moved_by_someone_else_during_refresh_is_not_touched(self):
+        c2 = self.repos.publish()
+        self.hint(c2)
+        moved = {}
+
+        def refresher(root, policy):
+            # Another tool commits on the branch while the refresh runs.
+            moved["sha"] = self.repos.commit(Path(root), "other.txt", "x\n", "concurrent")
+            return "refresh failed"
+
+        decision = self.run_engine(refresher=refresher)
+        self.assertIsInstance(decision, Stranded)
+        self.assertIn("branch moved", decision.notice)
+        self.assertEqual(self.repos.head(), moved["sha"])
+        self.assertEqual(decision.head, moved["sha"])
+        self.assertEqual(self.repos.git(self.repos.ctl, "status", "--porcelain"), "")
+        self.assertTrue((self.repos.ctl / "b.txt").exists())
 
 
 if __name__ == "__main__":

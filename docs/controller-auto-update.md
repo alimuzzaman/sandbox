@@ -49,8 +49,8 @@ The controller moves only when all of these hold:
   named `origin`;
 - `origin`'s configured URL is a GitHub URL (`https://github.com/...`,
   `git@github.com:...`, `ssh://git@github.com/...`);
-- tracked files and the index are clean (untracked files do not block, but git
-  refuses a fast-forward that would overwrite one);
+- the working tree and index are clean, untracked files included (ignored
+  files such as `.cli-venv/` do not count);
 - no other Sandbox process holds the update lock
   (`$SANDBOX_HOME/runtime/locks/controller-update-<digest>.lock`, `flock`,
   released automatically when a process exits);
@@ -77,11 +77,13 @@ rule wins.
    point, arguments and environment plus `SANDBOX_AUTO_UPDATE_REEXEC=1`, which
    forbids any further update in that process tree.
 
-If the refresh fails, the checkout goes back to the previous revision
-(`git read-tree -m -u` then a compare-and-swap `git update-ref`) and the
-command runs on the old code. If even that fails, `sb` prints where the
-checkout is and `git -C <root> status`, and exits 1 without running the
-command.
+If the refresh fails, the checkout goes back to the previous revision and the
+command runs on the old code. The branch moves first with a compare-and-swap
+`git update-ref` (so a branch someone else moved meanwhile is left alone),
+then `git read-tree -m -u` moves the files; if that refuses because of local
+edits, the ref is swapped back so branch, index and files agree. If the
+rollback cannot complete, `sb` prints where the checkout is and
+`git -C <root> status`, and exits 1 without running the command.
 
 ## Notices
 
@@ -110,7 +112,7 @@ To stay quiet:
 
 - **Pinned controllers**: detached checkouts such as
   `.scratch/sandbox/controller-<sha>` get the notice only.
-- **Machine-readable runs**: with `--json` nothing happens and nothing is
+- **Machine-readable runs**: with `--json` (or `--format json|jsonl`) nothing happens and nothing is
   printed on either stream, so output is byte-identical to a run with the
   feature off. Agents and the MCP server keep exact output; a human run of the
   same command updates.

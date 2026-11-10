@@ -93,7 +93,7 @@ class CheckoutState:
     upstream_remote: str | None
     upstream_branch: str | None  # short name, e.g. "latest"
     origin_url: str | None       # raw configured value, no insteadOf applied
-    clean: bool                  # tracked files and index
+    clean: bool                  # work tree, index, untracked (not ignored)
 
     @property
     def upstream(self) -> str | None:

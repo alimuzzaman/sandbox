@@ -99,7 +99,10 @@ def read_checkout(root: Path, *, timeout: float) -> CheckoutState | None:
             if upstream_remote == ".":
                 upstream_remote = upstream_branch = None
         origin_url = _value(root, "config", "--get", "remote.origin.url", timeout=timeout)
-        status = run(root, "status", "--porcelain", "--untracked-files=no", timeout=timeout)
+        # Untracked files count (ignored ones do not): the owner's rule is a
+        # clean working tree, not merely an unchanged index.
+        status = run(root, "status", "--porcelain", "--untracked-files=normal",
+                     timeout=timeout)
         if status.returncode != 0:
             return None
         return CheckoutState(
@@ -152,15 +155,21 @@ def changed_paths(root: Path, old: str, new: str, *, timeout: float) -> tuple[st
 
 
 def rollback(root: Path, branch: str, old: str, new: str, *, timeout: float) -> None:
-    """Return the work tree and ``branch`` from ``new`` to ``old``.
+    """Return ``branch`` and the work tree from ``new`` to ``old``.
 
-    ``read-tree -m -u`` refuses to overwrite local edits, and ``update-ref``
-    with the expected old value refuses if the branch moved meanwhile.
+    The ref moves first with a compare-and-swap, so a branch someone else
+    moved is never touched. ``read-tree -m -u`` then refuses to overwrite
+    local edits; if it does, the ref is swapped back to ``new``, leaving the
+    checkout consistent at ``new``. Either way index, work tree and branch
+    always agree.
     """
+    ref_name = f"refs/heads/{branch}"
+    ref = run(root, "update-ref", "-m", "sb: controller update rolled back",
+              ref_name, old, new, timeout=timeout)
+    if ref.returncode != 0:
+        raise GitError("branch moved during the update: " + short_detail(ref.stderr))
     tree = run(root, "read-tree", "-m", "-u", new, old, timeout=timeout)
     if tree.returncode != 0:
+        run(root, "update-ref", "-m", "sb: controller rollback undone",
+            ref_name, new, old, timeout=timeout)
         raise GitError(short_detail(tree.stderr))
-    ref = run(root, "update-ref", "-m", "sb: controller update rolled back",
-              f"refs/heads/{branch}", old, new, timeout=timeout)
-    if ref.returncode != 0:
-        raise GitError(short_detail(ref.stderr))

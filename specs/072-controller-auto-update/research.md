@@ -63,11 +63,11 @@
 
 ## R5. Cleanliness
 
-- **Decision**: `git status --porcelain --untracked-files=no` must be empty.
-  Untracked files do not block; if the fast-forward would overwrite one, git
-  refuses and the controller prints the failure notice.
-- **Rationale**: matches "working tree and index are clean" without blocking on
-  stray scratch files; git itself protects untracked content.
+- **Decision**: `git status --porcelain --untracked-files=normal` must be empty:
+  untracked files count, ignored files do not.
+- **Rationale**: the owner's rule is a clean working tree and index. Review
+  (Luna, 2026-11-10) found the first version, which ignored untracked files,
+  let an update run with user files present.
 
 ## R6. Lock
 
@@ -86,8 +86,10 @@
   which calls the new code's `_ensure_cli_requirements` (a no-op when the
   requirements digest stamp matches). If `mcp/**/requirements*.txt` changed,
   print a notice to run `./sb mcp-install`. On refresh failure, roll back with
-  `git read-tree -m -u <new> <old>` then
-  `git update-ref refs/heads/<b> <old> <new>` (compare-and-swap).
+  `git update-ref refs/heads/<b> <old> <new>` (compare-and-swap, so a branch
+  moved by someone else is never touched) then `git read-tree -m -u <new> <old>`;
+  if the tree step refuses, the ref is swapped back to `<new>` so branch, index
+  and files agree (review finding, 2026-11-10).
 - **Rationale**: reuses the existing venv convergence path and its digest stamp;
   the refresh runs the new revision's code. The two-step rollback refuses to
   overwrite local edits and refuses if the branch moved meanwhile.

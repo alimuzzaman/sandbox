@@ -283,12 +283,12 @@ def _apply_locked(started: CheckoutState, candidates: list[Hint], policy: Policy
         return Updated(old, new, upstream, notices)
     try:
         gitops.rollback(root, checkout.branch, old, new, timeout=policy.git_timeout)
-    except GitError:
-        after = gitops.read_checkout(root, timeout=policy.git_timeout)
-        head = after.head if after else None
+    except GitError as exc:
+        head = gitops.read_head(root, timeout=policy.git_timeout)
         return Stranded(head, (
             f"sb: controller update to {short(new)} failed ({failure}) and could not be "
-            f"rolled back; {root} is at {short(head)}. Recover with: git -C {root} status"))
+            f"rolled back ({exc}); {root} is at {short(head)}. "
+            f"Recover with: git -C {root} status"))
     return RolledBack(old, new, (
         f"sb: controller update to {short(new)} rolled back: setup refresh failed "
         f"({failure}); running on {short(old)}."))

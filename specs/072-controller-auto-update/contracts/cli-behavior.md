@@ -13,7 +13,7 @@ command continues on the current code.
 
 1. `SANDBOX_AUTO_UPDATE_REEXEC` set (any value) -> no action.
 2. `SANDBOX_DURABLE_JOB_ID` set -> no action.
-3. `getattr(args, "json", False)` true -> no action.
+3. Machine output (`args.json` true, or `args.format` in `json, jsonl`) -> no action.
 4. Process is not the real `sb` entry (`sys.argv[0]` resolves to `ENTRY`) -> no action.
 5. `SANDBOX_AUTO_UPDATE` in `0,false,no,off` (case-insensitive) -> no action.
 6. Command is not remote-capable -> no action.

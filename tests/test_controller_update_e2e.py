@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from tests.controller_update_support import GITHUB_URL, git_env  # noqa: E402
 
-_COPIED = ("sb", "sandbox", "sandbox.yml", "requirements-cli.txt", "VERSION", "config")
+_COPIED = ("sb", "sandbox", "sandbox.yml", "requirements-cli.txt", "VERSION", "config", ".gitignore")
 _IGNORED = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
 UPDATED = "sb: controller updated"
 
@@ -121,6 +121,7 @@ class EndToEndTests(unittest.TestCase):
     def test_dirty_checkout_prints_one_notice_and_does_not_move(self):
         self.git(self.ctl, "fetch", "-q", "origin")
         (self.ctl / "VERSION").write_text("local edit\n", encoding="utf-8")
+        (self.ctl / "UPDATE_MARKER").write_text("untracked in the way\n", encoding="utf-8")
         result = self.sb("remote", "list")
         self.assertEqual(self.head(), self.c1)
         self.assertEqual(result.stderr.count("sb: controller not updated"), 1, result.stderr)

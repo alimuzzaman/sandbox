@@ -50,6 +50,21 @@ def is_remote_capable(args) -> bool:
     return cmd in REMOTE_ROUTED and not getattr(args, "local", False)
 
 
+MACHINE_FORMATS = frozenset({"json", "jsonl"})
+
+
+def is_machine_output(args) -> bool:
+    """Every CLI machine-output switch: ``--json`` and ``--format json|jsonl``.
+
+    ``tests/test_controller_update_hook.py`` scans ``sandbox/cli.py`` and the
+    command modules for other output-format options, so a new one fails a
+    test until it is added here.
+    """
+    if getattr(args, "json", False):
+        return True
+    return getattr(args, "format", None) in MACHINE_FORMATS
+
+
 def is_sb_entry(argv: Sequence[str], entry: Path, main_file: str | None = None) -> bool:
     """True only for a process executing the real ``sb`` entry.
 
@@ -118,7 +133,7 @@ def maybe_auto_update(args, argv: Sequence[str] | None = None, *,
     # Gating order: first match wins, all silent (contracts/cli-behavior.md).
     if environ.get(ENV_REEXEC_GUARD) or environ.get(ENV_JOB_CHILD):
         return
-    if getattr(args, "json", False):
+    if is_machine_output(args):
         return
     if not is_sb_entry(argv, entry, main_file):
         return

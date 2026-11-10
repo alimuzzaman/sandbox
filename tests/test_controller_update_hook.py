@@ -101,6 +101,31 @@ class GatingTests(HookCase):
         updated = Updated(OLD, NEW, "origin/latest")
         self.assert_silent_no_engine(*self.call(ns("remote", json=True), decision=updated))
 
+    def test_format_json_runs_never_reach_the_engine(self):
+        for fmt in ("json", "jsonl"):
+            self.assert_silent_no_engine(*self.call(
+                ns("remote", format=fmt), decision=Updated(OLD, NEW, "origin/latest")))
+        self.assertFalse(hook.is_machine_output(ns("remote", format="text")))
+
+    def test_every_machine_output_option_is_covered(self):
+        """A new output-format option on any parser must extend is_machine_output."""
+        import re
+        sources = [ROOT / "sandbox" / "cli.py",
+                   *sorted((ROOT / "sandbox" / "commands").glob("*.py"))]
+        option = re.compile(r'add_argument\(\s*"(--[a-z][a-z-]*)"(.*?)\)\s*$', re.S | re.M)
+        output_flag = re.compile(r"--(?:json|jsonl|ndjson|porcelain|machine)(?:-output)?$")
+        format_choice = re.compile(r'choices=[^\n]*["\'](?:json|jsonl|ndjson)["\']')
+        found = set()
+        for path in sources:
+            for name, rest in option.findall(path.read_text(encoding="utf-8")):
+                # Output switches only; "--spec-json FILE" style options take input.
+                if output_flag.match(name) and "store_true" in rest:
+                    found.add(name)
+                elif format_choice.search(rest):
+                    found.add(name)
+        self.assertIn("--json", found)
+        self.assertLessEqual(found, {"--json", "--format"}, sorted(found))
+
     def test_durable_job_child_never_reaches_the_engine(self):
         self.assert_silent_no_engine(*self.call(
             ns("remote"), decision=Updated(OLD, NEW, "origin/latest"),

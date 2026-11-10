@@ -205,7 +205,7 @@ add_action( 'init', static function () {{
     }}
     // The claim is one INSERT IGNORE on this site's options table, whose option_name is a
     // UNIQUE key on single sites and on every multisite blog: of concurrent requests, one
-    // inserts a row. add_site_option() is not enough: sitemeta has no unique key, and
+    // inserts a row. Network options are not enough (sitemeta has no unique key), and
     // add_option() reports a changed value as success.
     global $wpdb;
     $used = 'sandbox_share_n_' . substr( hash( 'sha256', $kid . '|' . $m[2] ), 0, 40 );

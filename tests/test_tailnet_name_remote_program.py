@@ -695,8 +695,8 @@ class RemovalAndCrashTests(Base):
 
     def test_an_unprobeable_lock_counts_as_held(self):
         os.symlink(self.base / "nowhere", self.paths["locks"][0])
-        self.assertTrue(rp._held(self.paths["locks"][0]))
-        self.assertFalse(rp._held(self.paths["locks"][2]))
+        self.assertTrue(rp._held(self.paths["locks"][0], self.paths))
+        self.assertFalse(rp._held(self.paths["locks"][2], self.paths))
         self.reserve()
         chain = self.sign(self.csr())
         result = self.commit(block=block(), chain=chain)
@@ -940,6 +940,67 @@ class RoundFourTests(Base):
         self.assertEqual((result["ok"], result["code"]), (False, "busy"))
         self.assertEqual(len(self.host.ran("nginx", "-t")), tests)
         self.assertEqual(self.journal()["state"], "written")
+
+
+class RoundFiveTests(Base):
+    """Re-review 5: an unload is proven only when no managed block answers."""
+
+    def test_remove_after_an_interrupted_renewal_waits_for_the_old_block_to_go(self):
+        old_chain = self.publish()
+        # A renewal wrote certificate B and crashed before reloading: nginx
+        # still serves A and the old block, the disk holds B.
+        new_chain = self.sign(self.csr(), days=60)
+        self.assertNotEqual(old_chain, new_chain)
+        os.chmod(self.name_dir / "fullchain.pem", 0o644)
+        (self.name_dir / "fullchain.pem").write_text(new_chain)
+        os.chmod(self.name_dir / "activation.json", 0o600)
+        (self.name_dir / "activation.json").write_text(json.dumps(
+            {"state": "written", "generation": "0" * 64, "had_block": True, "had_chain": True,
+             "chain_changed": True}))
+        self.host.reload_accepted = False
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertTrue(self.name_dir.exists(), "the key and certificates stay")
+        self.host.reload_accepted = True
+        result = self.call("remove", fqdn=FQDN, token=TOKEN, jobs_probe=self.probe)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(self.name_dir.exists())
+
+    def test_a_first_add_that_fails_can_be_rerun_beside_another_https_site(self):
+        """No previous chain to compare with, and another server answers
+        the tailnet socket with its own certificate."""
+        self.host.loaded = {"other.example.test": (b"server {}", b"")}
+        self.reserve()
+        chain = self.sign(self.csr())
+        self.host.reload_accepted = False
+        result = self.commit(block=block(), chain=chain)
+        self.assertEqual((result["ok"], result["code"]), (False, "reload_failed"))
+        self.assertFalse(self.conf.exists())
+        [row] = self.call("inspect", tailnet_ip=IP)["inventory"]
+        self.assertEqual(row["activation"], "loaded", "the rollback is proven")
+        self.host.reload_accepted = True
+        result = self.commit(block=block(), chain=chain)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.journal_state(), "loaded")
+
+    def journal_state(self):
+        return json.loads((self.name_dir / "activation.json").read_text())["state"]
+
+    def test_unload_needs_a_complete_answer_without_a_marker(self):
+        conf_fd = os.open(self.paths["conf_dir"], os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for served, proven in ((("refused", None, None), True),
+                                   (("handshake", "e" * 64, b""), True),
+                                   (("handshake", "e" * 64, b"<html>not found</html>"), True),
+                                   (("handshake", "e" * 64, b"0123456789abcdef0123456789abcdef"),
+                                    False),
+                                   (("handshake", "e" * 64, None), False),
+                                   (("error", None, None), False)):
+                with self.subTest(served=served):
+                    paths = dict(self.paths, served=lambda ip, fqdn, s=served: s)
+                    self.assertEqual(rp._disk_proof(conf_fd, None, FQDN, paths, IP)(), proven)
+        finally:
+            os.close(conf_fd)
 
 
 if __name__ == "__main__":

@@ -635,6 +635,9 @@ _MARKER = re.compile(r'location = /\.well-known/sandbox-tailnet-activation \{ de
                      r'text/plain; return 200 "([0-9a-f]{32})"; \}')
 
 
+_MARKER_BODY = re.compile(rb"[0-9a-f]{32}")
+
+
 def _marker_of(block):
     """The activation marker a block serves, or None when it has no valid one.
 
@@ -664,8 +667,10 @@ def _leaf_sha(chain):
 
 def _served(ip, fqdn, *, timeout=3):
     """What nginx serves for the name on the tailnet address right now:
-    ("handshake", leaf sha256, marker body) | ("refused", None, None) |
-    ("error", None, None)."""
+    ("handshake", leaf sha256, body) | ("refused", None, None) |
+    ("error", None, None). ``body`` is the response body of a complete
+    response, b"" when the server closed without answering (nginx's 444), or
+    None when the answer was cut off."""
     import socket
     import ssl
     try:
@@ -683,13 +688,20 @@ def _served(ip, fqdn, *, timeout=3):
             tls.sendall((f"GET {MARKER_PATH} HTTP/1.1\r\nHost: {fqdn}\r\n"
                          "Connection: close\r\n\r\n").encode())
             data = b""
-            while len(data) < 8192:
-                chunk = tls.recv(2048)
-                if not chunk:
-                    break
-                data += chunk
-        body = data.split(b"\r\n\r\n", 1)[1].strip() if b"\r\n\r\n" in data else b""
-        return "handshake", hashlib.sha256(der).hexdigest() if der else None, body
+            try:
+                while len(data) < 8192:
+                    chunk = tls.recv(2048)
+                    if not chunk:
+                        break
+                    data += chunk
+            except (ssl.SSLZeroReturnError, ssl.SSLEOFError, ConnectionResetError):
+                pass  # 444 closes without a TLS close_notify
+        leaf = hashlib.sha256(der).hexdigest() if der else None
+        if not data:
+            return "handshake", leaf, b""
+        if b"\r\n\r\n" not in data:
+            return "handshake", leaf, None
+        return "handshake", leaf, data.split(b"\r\n\r\n", 1)[1].strip()
     except (ssl.SSLError, OSError):
         return "error", None, None
     finally:
@@ -700,8 +712,11 @@ def _disk_proof(conf_fd, name_fd, fqdn, paths, ip):
     """A check that nginx now serves exactly what is on disk for the name.
 
     With a block on disk: the block's own marker and the chain's leaf. With
-    no block: our leaf is no longer presented (or nothing listens at all).
-    A respawned worker of an old configuration can never pass either check.
+    no block: no version of a managed block for the name answers at all,
+    i.e. nothing listens, or the answer to the marker path is complete and
+    is not a marker. Every managed block serves its marker, so an older
+    block still loaded (after an interrupted renewal, say) fails the check
+    whatever certificate it presents.
     """
     served = paths.get("served", _served)
 
@@ -716,7 +731,7 @@ def _disk_proof(conf_fd, name_fd, fqdn, paths, ip):
                     and leaf == ours and body == marker.encode())
         if kind == "refused":
             return True
-        return kind == "handshake" and ours is not None and leaf is not None and leaf != ours
+        return kind == "handshake" and body is not None and not _MARKER_BODY.fullmatch(body)
     return check
 
 

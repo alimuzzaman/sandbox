@@ -1726,7 +1726,9 @@ published name changes nothing.
    must get the installed certificate and, from
    `/.well-known/sandbox-tailnet-activation`, the block's own marker (a digest
    of the block's text, so every version of the block has its own). After a
-   removal, our certificate must no longer be presented. `systemctl reload`
+   removal or a rollback to no block, no version of a managed block for the
+   name may still answer: nothing listens, or the marker path gets a
+   complete answer that is not a marker. `systemctl reload`
    succeeding is not proof, because nginx keeps its old configuration when
    it rejects a reload (a socket it cannot bind, for example), and a worker
    it respawns runs that old configuration. A failed test or reload restores the previous block and chain.

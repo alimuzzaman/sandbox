@@ -51,7 +51,9 @@ characters removed.
 
 ## Re-exec
 
-`os.execve(ENTRY, [str(ENTRY), *sys.argv[1:]], {**os.environ, "SANDBOX_AUTO_UPDATE_REEXEC": "1"})`.
+`os.execve(sys.executable, [sys.executable, str(ENTRY), *sys.argv[1:]], {**os.environ, "SANDBOX_AUTO_UPDATE_REEXEC": "1"})`.
+The same interpreter is kept (normally `.cli-venv/bin/python`, which the
+refresh just converged), so the re-run does not repeat interpreter discovery.
 The update lock is released before exec. The re-run's exit status is the
 command's exit status.
 

@@ -96,9 +96,10 @@
 
 ## R8. Re-exec
 
-- **Decision**: `os.execve(ENTRY, [str(ENTRY), *sys.argv[1:]], env)` with
-  `SANDBOX_AUTO_UPDATE_REEXEC=1` added. `ENTRY` is the resolved checkout `sb`,
-  so the shell bootstrap picks the interpreter again under the new code.
+- **Decision**: `os.execve(sys.executable, [sys.executable, str(ENTRY), *sys.argv[1:]], env)`
+  with `SANDBOX_AUTO_UPDATE_REEXEC=1` added. `ENTRY` is the resolved checkout
+  `sb`; keeping the interpreter reuses the venv the refresh just converged
+  instead of repeating the shell bootstrap's interpreter discovery.
 - **Rationale**: stdin has not been read, no locks are held (released before
   exec), and Python fds are non-inheritable by default.
 

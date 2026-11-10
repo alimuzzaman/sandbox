@@ -4601,6 +4601,40 @@ def _runtime_compatibility_fields(local_revision, installed_revision, declared,
     }
 
 
+_REMOTE_SOURCE_RECEIPT = "$HOME/sandbox/runtime/source-revision.json"
+
+
+def _source_receipt_command(source_revision: str) -> str:
+    """Shell that atomically writes the remote source receipt (spec 072)."""
+    receipt = json.dumps({"schema_version": 1, "source_revision": source_revision},
+                         separators=(",", ":"))
+    return (
+        "{ receipt_dir=$HOME/sandbox/runtime; mkdir -p \"$receipt_dir\" && "
+        "receipt_tmp=$(mktemp \"$receipt_dir/.source-revision.XXXXXX\") && "
+        f"printf '%s\\n' {shlex.quote(receipt)} > \"$receipt_tmp\" && "
+        "chmod 600 \"$receipt_tmp\" && "
+        f"mv \"$receipt_tmp\" \"{_REMOTE_SOURCE_RECEIPT}\"; "
+        "} || rm -f -- \"${receipt_tmp:-}\" || true; "
+    )
+
+
+def _record_controller_hint(remote: dict, revision, source: str) -> None:
+    """Record a remote's installed source revision for controller auto-update.
+
+    Best effort and local only: uses this module's ``RUNTIME_DIR`` binding so
+    tests that relocate it keep the machine's real state untouched.
+    """
+    name = remote.get("_remote_name") if isinstance(remote, dict) else None
+    if not isinstance(name, str) or not isinstance(revision, str):
+        return
+    try:
+        from sandbox.controller_update import state as controller_update_state
+        controller_update_state.record_hint(
+            name, revision, source, path=controller_update_state.default_path(RUNTIME_DIR))
+    except Exception:
+        pass
+
+
 def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = None) -> dict:
     """The service status a remote effect is gated on (spec 061).
 
@@ -4643,6 +4677,7 @@ def remote_mcp_service_status(remote: dict) -> dict:
             "legacy_pidfile": "unknown",
             "local_runtime_revision": local_revision if local_revision_valid else None,
             "installed_runtime_revision": None,
+            "installed_source_revision": None,
             "runtime_revision_state": "unavailable" if local_revision_valid else "unknown",
             **_runtime_compatibility_fields(
                 local_revision if local_revision_valid else None, None, None,
@@ -4690,6 +4725,23 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"if test -r \"{unit_path}\" && command -v python3 >/dev/null 2>&1; then "
         f"python3 -c {shlex.quote(revision_program)} \"{unit_path}\"; "
         "else echo remote_revision=unavailable; fi; "
+    )
+    # Spec 072: the git source revision the last install left behind. Read in
+    # this same ssh call, validated remotely before it is printed.
+    source_program = (
+        "import json,re,sys\n"
+        "try:\n"
+        " raw=json.loads(open(sys.argv[1],encoding='utf-8').read(4096))\n"
+        "except (OSError,ValueError,UnicodeError):\n"
+        " print('remote_source=unknown')\n"
+        " raise SystemExit\n"
+        "value=raw.get('source_revision') if isinstance(raw,dict) and raw.get('schema_version')==1 else None\n"
+        "print('remote_source=' + (value if isinstance(value,str) and re.fullmatch(r'[0-9a-f]{40}', value) else 'unknown'))"
+    )
+    source_probe = (
+        f"if test -f \"{_REMOTE_SOURCE_RECEIPT}\" && command -v python3 >/dev/null 2>&1; then "
+        f"python3 -c {shlex.quote(source_program)} \"{_REMOTE_SOURCE_RECEIPT}\"; "
+        "else echo remote_source=unavailable; fi; "
     )
     listener_probe = (
         f"if command -v ss >/dev/null 2>&1; then listeners=$(ss -H -ltn 'sport = :{port}' 2>/dev/null | awk '{{print $4}}'); "
@@ -4767,7 +4819,7 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "printf '%s\\nprobe_state=%s\\nprobe_error=%s\\n' \"$linger\" \"$probe_state\" \"$probe_error\"; "
     )
     command = (
-        systemd_probe + marker_probe + revision_probe + pid_probe
+        systemd_probe + marker_probe + revision_probe + source_probe + pid_probe
         + listener_probe + auth_probe + legacy_probe
     )
     try:
@@ -4783,9 +4835,9 @@ def remote_mcp_service_status(remote: dict) -> dict:
     values: dict[str, str] = {}
     for line in (res.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "remote_revision", "remote_protocol", "pid_ownership", "listener", "auth", "legacy_pidfile", "probe_state", "probe_error"}:
+        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "remote_revision", "remote_source", "remote_protocol", "pid_ownership", "listener", "auth", "legacy_pidfile", "probe_state", "probe_error"}:
             normalized = value.strip()
-            values[key] = normalized if key == "remote_revision" else normalized.lower()
+            values[key] = normalized if key in {"remote_revision", "remote_source"} else normalized.lower()
     probe_state = values.get("probe_state")
     probe_error = values.get("probe_error")
     if probe_state not in _REMOTE_SERVICE_PROBE_STATES or probe_error is None:
@@ -4813,6 +4865,13 @@ def remote_mcp_service_status(remote: dict) -> dict:
         and _REMOTE_MCP_REVISION_RE.fullmatch(observed_revision) is not None
     )
     installed_revision = observed_revision if observed_revision_valid else None
+    observed_source = values.get("remote_source")
+    installed_source = (
+        observed_source if isinstance(observed_source, str)
+        and _REMOTE_SOURCE_REVISION_RE.fullmatch(observed_source) else None
+    )
+    if installed_source is not None:
+        _record_controller_hint(remote, installed_source, "probe")
     if observed_revision_valid and local_revision_valid:
         revision_state = "match" if observed_revision == local_revision else "mismatch"
     elif (observed_revision is not None and observed_revision != "unavailable") or not local_revision_valid:
@@ -4832,6 +4891,7 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "legacy_pidfile": values.get("legacy_pidfile", "unknown"),
         "local_runtime_revision": local_revision if local_revision_valid else None,
         "installed_runtime_revision": installed_revision,
+        "installed_source_revision": installed_source,
         "runtime_revision_state": revision_state,
         **_runtime_compatibility_fields(
             local_revision if local_revision_valid else None, installed_revision,
@@ -5049,7 +5109,12 @@ os.close(fd)'''
         # the Sandbox-owned unit to ensure its bearer middleware receives the
         # newly minted token rather than retaining an old process environment.
         f"if ! systemctl --user enable {REMOTE_MCP_SERVICE} || ! systemctl --user restart {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
-        "exit 1; fi; trap - EXIT; source_mode=''; rm -rf -- \"$stage_root\" \"$backup\"; "
+        "exit 1; fi; trap - EXIT; source_mode=''; "
+        # Spec 072: leave the installed git source revision where the status
+        # probe can read it. The service is already live, so this is best
+        # effort and can never fail the install.
+        + _source_receipt_command(source_revision) +
+        "rm -rf -- \"$stage_root\" \"$backup\"; "
         "test ! -e \"$backup\""
     )
     from sandbox.remote_runtime.pins import (
@@ -5075,6 +5140,7 @@ os.close(fd)'''
         if detail:
             raise RuntimeError(f"could not install the remote MCP service: {detail}")
         raise RuntimeError("could not install the remote MCP service")
+    _record_controller_hint(remote, source_revision, "install")
     return {**plan, "status": "applied", "service": record}
 
 

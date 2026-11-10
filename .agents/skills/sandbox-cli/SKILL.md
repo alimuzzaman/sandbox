@@ -265,6 +265,19 @@ sb resources swap-history --remote scaleway-sandbox --since 2026-09-04T00:00:00Z
 - **Fault Recovery & Rollback**: Any failure during apply triggers an automatic reverse teardown of owned
   artifacts. Aggregate history (`/var/log/sandbox/host-memory.jsonl`) and unowned files are strictly preserved.
 
+## Controller auto-update (spec 072)
+
+A remote-capable command (`remote`, `deploy`, `host`, `preview`, `hermes`,
+anything with `--remote`, and `test`/`e2e`/`ci`/`job`/`jobs` without
+`--local`) may fast-forward the controller checkout before it runs, when a
+remote recorded a newer revision that is on the checkout's `origin/<upstream>`
+on GitHub, then re-run itself once. It prints one `sb: controller ...` line on
+stderr. It never runs for `--json`, durable job children, detached (pinned)
+checkouts or dirty trees, and never fetches from the remote server. Turn it off
+with `SANDBOX_AUTO_UPDATE=0` or `defaults.controller_auto_update: false`.
+Agents parsing output should use `--json`, which stays byte-identical. See
+`docs/controller-auto-update.md`.
+
 ## Durable remote-first jobs
 
 ### Recoverable delivery admission and diagnosis

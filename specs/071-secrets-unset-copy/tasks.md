@@ -42,8 +42,8 @@
 - [x] T018 [P] Update `skills/secret-inspection/SKILL.md` and the secrets lines of `skills/sandbox-cli/SKILL.md`
 - [x] T019 Run the secrets test modules and a byte-compile check in a Haiku helper; logs under the scratch root
 - [x] T020 CLI smoke of `unset` against a temp source in a temp `SANDBOX_HOME` in a Haiku helper
-- [ ] T021 Luna non-author review of the head; fix or answer every finding
-- [ ] T022 Commit, push `feat/secrets-unset-copy` with `-u`, verify upstream
+- [x] T021 Luna non-author review of the head; fix or answer every finding
+- [x] T022 Commit, push `feat/secrets-unset-copy` with `-u`, verify upstream
 
 ## Dependencies
 
@@ -52,3 +52,16 @@ T002-T004 block both stories. US1 (T005-T008) does not depend on US2. US2 needs 
 ## Implementation strategy
 
 MVP is US1 (local only). US2 needs the remote's runtime migrated before real use.
+
+## Evidence (2026-11-10)
+
+- `tests.test_secret_unset_copy`: 37 run, 37 passed.
+- Four existing secret modules (`test_secret_commands`, `test_secret_service`,
+  `test_secret_ownership_cli_acceptance`, `test_secret_ownership_review_regressions`):
+  220 run, 218 passed, 2 errors. The base commit `faeb419` has the same 2 errors
+  (`test_context_check_requires_no_descriptor_or_source_file`,
+  `test_allowed_and_denied_offload_contexts`, project-root allowlist).
+- CLI smoke against a temp `SANDBOX_HOME`: 10 of 10 expectations held. The removed
+  fixture value appears 0 times in the output and 0 times in the audit.
+- Non-author review (GPT-6 Luna, high effort, Codex Office) of `4a12190`: no findings.
+- Not run: `copy` against a real remote (the brief forbids it).

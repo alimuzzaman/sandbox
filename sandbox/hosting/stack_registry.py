@@ -37,7 +37,8 @@ class LastApply(TypedDict, total=False):
     status: str
     error: str
     # The commit this apply was asked to deliver. `sb host apply` copies it to
-    # the record's ``commit`` once it has proven the delivery (record_delivery).
+    # the record's ``commit`` once the apply completes (record_delivery); readers
+    # also treat it as delivered once the apply's job succeeded (delivered_commit).
     commit: str
 
 
@@ -163,11 +164,30 @@ def locked(path: Path | None = None) -> Iterator[Registry]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+APPLY_SUCCEEDED = "succeeded"
+
+
+def delivered_commit(record: Mapping, last_apply_status: str | None) -> str | None:
+    """The commit a stack's server is known to run.
+
+    ``last_apply_status`` is the last apply's status as refined from its durable
+    job. A succeeded apply's ``last_apply.commit`` counts even when the apply's
+    own ``record_delivery`` write was missed, so readers agree with
+    ``last_apply``. Otherwise the record's ``commit`` stands. A record written
+    before ``last_apply.commit`` existed keeps its ``commit``, which may name a
+    commit that was never delivered until the next apply completes.
+    """
+    requested = (record.get("last_apply") or {}).get("commit")
+    if last_apply_status == APPLY_SUCCEEDED and requested:
+        return requested
+    return record.get("commit")
+
+
 def record_delivery(remote_name: str, slug: str, *, request_id: str | None, commit: str,
                     now: int | None = None, path: Path | None = None) -> bool:
-    """Move a stack's ``commit`` to the commit its apply just proved delivered.
+    """Move a stack's ``commit`` to the commit its apply just delivered.
 
-    `sb host apply` calls this once delivery has succeeded. Only the apply the
+    `sb host apply` calls this when the apply completes. Only the apply the
     record waits for counts: ``last_apply.request_id`` and ``last_apply.commit``
     must both match, so a manual or older apply of the same manifest never
     moves the record. Returns whether the record changed.

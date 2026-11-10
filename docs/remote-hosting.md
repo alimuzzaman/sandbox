@@ -1495,15 +1495,22 @@ the record, releasing the ports. A destroy failure keeps all of them
 (`stack_destroy_failed`). `list` shows slug, project, ref and commit, hostnames,
 ports, and the last apply's status and time from the durable job.
 
-The stack record's `commit` is the commit the server is proven to run. `up` records
-the commit it asks for as `last_apply.commit` and keeps `commit` at the previously
-delivered one (null before the first delivery, shown as `not delivered`). `sb host
-apply` moves `commit` to `last_apply.commit` only once its delivery has succeeded,
-and only for the apply the record is waiting for (same `last_apply.request_id`). A
+The stack record's `commit` is the commit the server runs, as far as this controller
+knows. `up` records the commit it asks for as `last_apply.commit` and keeps `commit`
+at the previously delivered one (null before the first delivery, shown as `not
+delivered`). `sb host apply` moves `commit` to `last_apply.commit` when it completes,
+the same point that makes its durable job, and so `last_apply.status`, succeed. The
+delivery-outcome summary can still read `incomplete` (`required_evidence_missing`)
+then, because some proof is observed later; only a `failed` or `unknown` summary
+keeps `commit` back. It moves only for the apply the record is waiting for (same
+`last_apply.request_id`). `list` and the next `up` also treat a succeeded
+`last_apply` as delivered, so a missed write does not leave the record behind. A
 failed, refused or cancelled apply leaves `commit` where it was, so `list` never runs
-ahead of the server. For this controller's own copies `list` reports that `commit`;
-the remote lifetime record keeps the commit its claim was made for, which `list`
-shows for other controllers' copies.
+ahead of the server. A record written before `last_apply.commit` existed keeps its
+`commit`, which may name a commit that was never delivered, until its next apply
+completes. For this controller's own copies `list` reports that `commit`; the remote
+lifetime record keeps the commit its claim was made for, which `list` shows for other
+controllers' copies.
 
 **Hostname ownership.** Every apply, a stack's or an ordinary one, refuses before any
 effect a hostname that a different project already holds on the same remote, with

@@ -102,6 +102,12 @@ class RequestGateTest(unittest.TestCase):
         self.assertTrue(self.allowed("127.0.0.1", origin="http://127.0.0.1:53012"))
         self.assertTrue(self.allowed("127.0.0.1", origin="http://localhost:5173"))
 
+    def test_a_localhost_page_on_a_tailnet_device_is_refused(self):
+        for origin in ("http://localhost:3000", "http://127.0.0.1:8000"):
+            with self.subTest(origin=origin):
+                self.assertFalse(self.allowed("100.100.1.2", bound=TAILNET,
+                                              host=f"{TAILNET}:8765", origin=origin))
+
 
 class BridgeStartTest(unittest.TestCase):
     def test_the_snapshot_bridge_still_listens_for_containers(self):

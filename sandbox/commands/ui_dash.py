@@ -85,7 +85,11 @@ def _web_request_allowed(peer, bound_host, host_header, origin) -> bool:
         return False
     if parts.scheme not in ("http", "https") or not origin_name:
         return False
-    return parts.netloc.lower() == host_header.lower() or origin_name in _LOOPBACK_NAMES
+    if parts.netloc.lower() == host_header.lower():
+        return True
+    # The desktop app's proxy and the web dev server run on this machine and
+    # forward a loopback Origin; never trust one from a tailnet device's browser.
+    return origin_name in _LOOPBACK_NAMES and _is_loopback_peer(peer)
 
 
 def _remote_summary_rows() -> list[dict]:

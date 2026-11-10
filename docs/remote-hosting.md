@@ -1493,9 +1493,14 @@ the server's tailnet IPv4 address only, so nothing is opened on the public addre
 There is no login. Every device on the tailnet gets full control: a shell in any
 container, stop, reset and delete, and instance login links. Restrict who can reach the
 port with tailnet access rules. The dashboard accepts a request only when it comes from
-this machine or a tailnet address, uses an IP, `localhost` or `.ts.net` host name, and
-carries no `Origin` other than the dashboard itself or a loopback address. This stops a
-web page open in your browser from driving it. `--host` also takes any IP literal; with
+this machine or a Tailscale address, uses an IP, `localhost` or `.ts.net` host name, and
+carries no `Origin` other than the dashboard itself (or, from this machine only, a
+loopback address, as the desktop app's proxy sends). This stops a web page open in your
+browser from driving it. The address check is not proof of tailnet membership on its
+own, since `100.64.0.0/10` is also shared carrier address space. Membership rests on
+the dashboard listening only on the tailnet address and on Tailscale's own firewall rules,
+which on Linux drop that range unless it arrives on the Tailscale interface. Do not run it
+this way on a host where Tailscale's firewall rules are turned off. `--host` also takes any IP literal; with
 `0.0.0.0` the dashboard still serves only this machine, which is how the wp-admin snapshot
 bridge runs on port 8765. `sb up` starts that bridge itself; if you start `sb web` on 8765
 yourself first, pass `--host 0.0.0.0` or containers may not reach the bridge. Use another

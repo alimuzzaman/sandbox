@@ -118,6 +118,7 @@ class TestMcpComposition(unittest.TestCase):
             "resources", "feedback",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
             "secrets", "plugin_check", "remote", "hermes", "recovery", "sync", "owned_storage", "delivery",
+            "share",
         )
         self.assertEqual(BUILTIN_TOOL_GROUPS, expected)
         self.assertEqual(built_in_tool_registry().group_ids(), expected)
@@ -200,10 +201,11 @@ class TestMcpComposition(unittest.TestCase):
                 "sync": ("sync_service",),
                 "owned_storage": (),
                 "delivery": ("delivery_service_factory", "trace_service_factory"),
+                "share": (),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync", "owned_storage", "delivery"}))
+                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources", "feedback", "secrets", "sync", "owned_storage", "delivery", "share"}))
 
     def test_domains_group_declares_the_full_ingress_transport_contract(self):
         from tools.manifest import BUILTIN_TOOL_NAMES

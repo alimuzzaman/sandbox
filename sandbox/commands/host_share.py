@@ -295,6 +295,27 @@ def list_shares(remote_name: str, *, target: str | None = None, name: str | None
             "sessions": list(reply.get("sessions") or [])}
 
 
+def revoke_on_gate(found: ShareTarget, name: str, link_id: str) -> dict:
+    """Revoke on the gate, then delete a stack link's WordPress key file.
+
+    The gate drops the stack page first. The key file goes even when the gate no longer
+    knows the link, so a revoke whose key removal failed can be retried until it is gone.
+    Callers hold the host writer lock.
+    """
+    try:
+        reply = _remote_site(found, "revoke", name, link_id)
+    except login.LoginServiceError as exc:
+        if exc.code != "site_link_unknown" or link_id.startswith("s-"):
+            raise
+        reply = None
+    keys = 0 if link_id.startswith("s-") else stack_page.remove_wordpress_keys(found, link_id)
+    if reply is None:
+        if not keys:
+            raise login.LoginServiceError("site_link_unknown", "no live share link or session has that id")
+        reply = {"revoked_links": 0, "revoked_sessions": 0}
+    return {**reply, "revoked_keys": keys}
+
+
 def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, name: str | None = None,
                  stack: str | None = None, project_dir: str | None = None,
                  environment: str | None = None, entry: str | None = None) -> dict:
@@ -308,14 +329,9 @@ def revoke_share(remote_name: str, link_id: str, *, target: str | None = None, n
         name_ = _entry_name(_declaration(found), entry)
         from sandbox.commands.hosting import _with_host_writer_lock
 
-        def revoke(_current, _save):
-            reply = _remote_site(found, "revoke", name_, link_id)
-            # The gate drops the stack page and its key first; the WordPress key file goes after.
-            keys = stack_page.remove_wordpress_keys(found, link_id) if not link_id.startswith("s-") else 0
-            return {**reply, "revoked_keys": keys}
-
         try:
-            reply = _with_host_writer_lock(found.validated, found.remote, revoke)
+            reply = _with_host_writer_lock(found.validated, found.remote,
+                                           lambda _current, _save: revoke_on_gate(found, name_, link_id))
         except TimeoutError:
             raise ShareRefusal("share_failed", "another host apply or recovery owns this target") from None
     except Exception as exc:  # noqa: BLE001

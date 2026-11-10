@@ -338,7 +338,8 @@ def _render(validated: dict, port: int, *, name: str, cert_path, key_path,
                 *guard, *marker_location,
                 "    location / {",
                 *ni_loc,
-                f"        return 308 {route['target']}$request_uri;",
+                # share.private: a redirect alias would announce the primary, so it answers 404 too.
+                "        return 404;" if private else f"        return 308 {route['target']}$request_uri;",
                 "    }", "}"]
     plain = ["", "server {", "    listen 80;"]
     if ipv6:

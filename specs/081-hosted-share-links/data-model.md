@@ -58,7 +58,8 @@ revoked (file removed). Use markers: `used/<token_sha256>.<slot>`, created with
 Constants: kid, key (hex), user, expires_at. Token `<exp>.<nonce>.<mac>`:
 `exp` within 600 s of now and before `expires_at`; `nonce` 22-64 base64url;
 `mac = hex(HMAC-SHA256(key, "sandbox-share-login.v1|<kid>|<exp>|<nonce>"))`. Single use
-via `add_site_option('sandbox_share_n_' . substr(sha256(kid . nonce), 0, 40))`.
+via one `INSERT IGNORE` of option `'sandbox_share_n_' . substr(sha256(kid . '|' . nonce), 0, 40)`
+into the site's options table; only an insert of exactly one row signs in.
 
 ## AuditRecord (`audit.jsonl`, controller and server)
 

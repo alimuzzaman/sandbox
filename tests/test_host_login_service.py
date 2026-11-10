@@ -414,9 +414,11 @@ class OverrideTests(unittest.TestCase):
         self.validated = _valid()
         self.override = hosting.compose_override(self.validated, 18000)
 
-    def test_only_the_routed_service_publishes_a_port(self):
-        self.assertEqual(self.override.count("ports:"), 1)
+    def test_only_the_routed_service_and_the_gate_publish_ports(self):
+        # Spec 081: the gate takes its own loopback port, the target's plus 3000.
+        self.assertEqual(self.override.count("ports:"), 2)
         self.assertIn("127.0.0.1:18000:8080", self.override)
+        self.assertIn('ports: ["127.0.0.1:21000:8080"]', self.override)
 
     def test_service_is_rendered_hardened_and_unpublished(self):
         for expected in (login.SERVICE_NAME + ":", "read_only: true", "cap_drop", "no-new-privileges",

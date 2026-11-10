@@ -242,6 +242,51 @@ class ScopeTests(_Gate):
                       "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n").encode())
         self.assertIn(b" 404 ", sock.recv(4096))
 
+    def test_a_declined_upgrade_never_becomes_a_raw_tunnel(self):
+        # An upstream that answers the upgrade with 200 and keeps the connection open:
+        # a request pipelined behind it must not reach the upstream unchecked.
+        token, _ = self.mint(scope="/designs/")
+        cookie = self.cookie(token)
+        sock = __import__("socket").create_connection(("127.0.0.1", self.public.server_address[1]), timeout=5)
+        self.addCleanup(sock.close)
+        with patch.object(_Upstream, "do_GET", _declining_handle):
+            sock.sendall((f"GET /designs/ws HTTP/1.1\r\nHost: {GATE}\r\nCookie: {cookie}\r\n"
+                          "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+                          f"GET /secret HTTP/1.1\r\nHost: {GATE}\r\n\r\n").encode())
+            received = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                received += chunk
+        self.assertIn(b" 502 ", received.split(b"\r\n", 1)[0])
+        self.assertIn(b"upgrade_refused", received)
+        self.assertNotIn(b"declined", received)
+        self.assertEqual([item["path"] for item in self.upstream_store["requests"]], ["/designs/ws"])
+
+    def test_an_upgrade_with_a_body_or_another_method_is_refused(self):
+        token, _ = self.mint()
+        cookie = self.cookie(token)
+        for head in ("POST /ws HTTP/1.1\r\nContent-Length: 4\r\n", "GET /ws HTTP/1.1\r\nContent-Length: 4\r\n",
+                     "GET /ws HTTP/1.1\r\nTransfer-Encoding: chunked\r\n"):
+            with self.subTest(head=head.split("\r\n")[1]):
+                sock = __import__("socket").create_connection(("127.0.0.1", self.public.server_address[1]), timeout=5)
+                self.addCleanup(sock.close)
+                sock.sendall((f"{head}Host: {GATE}\r\nCookie: {cookie}\r\n"
+                              "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\nping").encode())
+                self.assertRegex(sock.recv(4096).split(b"\r\n", 1)[0], rb" (400|411) ")
+        self.assertEqual(self.upstream_store["requests"], [])
+
+
+def _declining_handle(self):
+    self.server.store["requests"].append({"method": self.command, "path": self.path,
+                                          "headers": self.headers.items()})
+    body = b"declined"
+    self.send_response(200)
+    self.send_header("Content-Length", str(len(body)))
+    self.end_headers()
+    self.wfile.write(body)
+
 
 class RevokeTests(_Gate):
     def test_revoking_one_link_ends_its_sessions_at_the_next_request(self):
@@ -290,6 +335,32 @@ class NoIndexTests(_Gate):
         for response, _ in answers:
             with self.subTest(status=response.status):
                 self.assertEqual(response.getheader("X-Robots-Tag"), TAG)
+
+    def test_errors_http_server_raises_itself_carry_the_header(self):
+        for method in ("TRACE", "PROPFIND"):
+            with self.subTest(method=method):
+                response, _ = self.request(method, "/")
+                self.assertEqual(response.status, 501)
+                self.assertEqual(response.getheader("X-Robots-Tag"), TAG)
+                self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+
+    def test_an_accepted_upgrade_carries_the_header(self):
+        token, _ = self.mint()
+        cookie = self.cookie(token)
+        sock = __import__("socket").create_connection(("127.0.0.1", self.public.server_address[1]), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall((f"GET /ws HTTP/1.1\r\nHost: {GATE}\r\nCookie: {cookie}\r\n"
+                      "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = sock.recv(4096)
+            self.assertTrue(chunk, head)
+            head += chunk
+        self.assertIn(b" 101 ", head.split(b"\r\n", 1)[0])
+        self.assertIn(f"X-Robots-Tag: {TAG}".encode(), head)
+        self.assertIn(b"Upgrade: websocket", head)
+        sock.sendall(b"ping")
+        self.assertEqual(sock.recv(1024), b"echo:ping")
 
     def test_the_upstreams_own_robots_header_is_replaced(self):
         token, _ = self.mint()
@@ -385,6 +456,31 @@ class StackPageTests(_Gate):
         self.manage("revoke", "share", link_id)
         self.assertFalse((store.stacks / f"{link_id}.json").exists())
         self.assertEqual(self.view(cookie)[0].status, 404)
+
+    def test_revoking_the_stack_link_ends_the_sign_in_links_it_minted(self):
+        cookie, link_id = self.stack_cookie()
+        self.assertEqual(self.view(cookie)[0].status, 200)
+        gate = self.public.gate
+        self.assertTrue(gate.is_live("qa"))
+        self.manage("revoke", "share", link_id)
+        # The token record is still on disk, but it no longer counts.
+        self.assertTrue((self.state_dir / "qa.json").exists())
+        self.assertFalse(gate.is_live("qa"))
+        self.assertIsNone(gate.record("qa"))
+
+    def test_a_spent_one_use_stack_link_keeps_its_sign_in_links(self):
+        token, link_id = self.mint(kind="stack", scope=share.STACK_PAGE_PATH, stack=dict(self.STACK), uses=1)
+        response, _ = self.open(token)
+        cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+        self.assertEqual(self.view(cookie)[0].status, 200)
+        self.assertTrue(self.public.gate.is_live("qa"))
+
+    def test_a_sign_in_record_naming_an_unknown_stack_link_is_dead(self):
+        self.public.gate.mint_sign_in("qa", "qa@dev.example.test", int(self.now) + 300,
+                                      ("share", share.new_link_id()))
+        self.assertFalse(self.public.gate.is_live("qa"))
+        self.public.gate.mint_sign_in("qa", "qa@dev.example.test", int(self.now) + 300, ("nope", "l-x"))
+        self.assertFalse(self.public.gate.is_live("qa"))
 
     def test_stack_records_are_checked(self):
         def mint(**changes):

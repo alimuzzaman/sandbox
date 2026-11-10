@@ -254,12 +254,12 @@ target.update(imported_parent.values())
         sys.path.insert(0, str(mcp_root))
         try:
             from tools.manifest import BUILTIN_TOOL_GROUPS, BUILTIN_TOOL_NAMES
-            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 27)
+            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 28)
             tool_names = tuple(
                 name for group_id in BUILTIN_TOOL_GROUPS
                 for name in BUILTIN_TOOL_NAMES[group_id]
             )
-            self.assertEqual(len(tool_names), 149)
+            self.assertEqual(len(tool_names), 152)
             self.assertEqual(len(tool_names), len(set(tool_names)))
         finally:
             sys.path.remove(str(mcp_root))

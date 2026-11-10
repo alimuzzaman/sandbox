@@ -140,7 +140,7 @@ def render_key_plugin(kid: str, key: str, user: str, expires_at: int, *, now: fl
 
     GET shows a page that posts the token from the fragment, so the token never reaches a
     request line. POST checks the signature, the token's own expiry (at most 10 minutes
-    out), the key's expiry and a single-use nonce recorded with ``add_site_option``.
+    out), the key's expiry and a single-use nonce claimed by one ``INSERT IGNORE``.
     """
     if not _KID.fullmatch(kid) or not _KEY.fullmatch(key):
         raise ShareRefusal("share_failed", "a share key must be 128-bit id and 256-bit key in hex")
@@ -201,8 +201,17 @@ add_action( 'init', static function () {{
         status_header( 403 );
         wp_die( 'This Sandbox sign-in link is invalid.' );
     }}
+    // The claim is one INSERT IGNORE on this site's options table, whose option_name is a
+    // UNIQUE key on single sites and on every multisite blog: of concurrent requests, one
+    // inserts a row. add_site_option() is not enough: sitemeta has no unique key, and
+    // add_option() reports a changed value as success.
+    global $wpdb;
     $used = 'sandbox_share_n_' . substr( hash( 'sha256', $kid . '|' . $m[2] ), 0, 40 );
-    if ( ! add_site_option( $used, $now ) ) {{
+    $claimed = $wpdb->query( $wpdb->prepare(
+        'INSERT IGNORE INTO ' . $wpdb->options . " (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+        $used, (string) $exp
+    ) );
+    if ( 1 !== $claimed ) {{
         status_header( 410 );
         wp_die( 'This Sandbox sign-in link has already been used.' );
     }}

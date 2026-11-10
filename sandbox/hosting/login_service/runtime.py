@@ -232,6 +232,13 @@ class SiteStore:
         """Whether a live link has this public id (the opener page answers only then)."""
         return any(record["id"] == link_id and self.is_live(record) for _, record in self._links())
 
+    def stack_link_alive(self, link_id):
+        """Whether a stack link is unrevoked and unexpired: its sign-in links live only that long."""
+        if not isinstance(link_id, str) or not _LINK_ID.fullmatch(link_id):
+            return False
+        return (self.stacks / f"{link_id}.json").exists() and any(
+            record["id"] == link_id and self.clock() < record["expires_at"] for _, record in self._links())
+
     def spent(self, record):
         if record["uses"] is None:
             return 0
@@ -555,11 +562,14 @@ class Gate:
                 results[item["hostname"]] = cached[1] if cached else "unreachable"
         return results
 
-    def mint_sign_in(self, name, email, expires_at):
+    def mint_sign_in(self, name, email, expires_at, via):
         """Mint a one-time link for a declared magic_link or inbox_gate entry of this service.
 
         Writes the same token record ``host login-url`` would, so the previous link of
-        that entry stops working. Returns the link, or None when the entry cannot take one.
+        that entry stops working. ``via`` is the (share entry, stack link id) of the page
+        that asked: the token works only while that link is unrevoked and unexpired, so a
+        revoke also ends sign-in links a view minted, even one still in flight. Returns
+        the link, or None when the entry cannot take one.
         """
         entry = self.config["entries"].get(name)
         if not isinstance(entry, dict) or entry.get("mode") not in ("magic_link", "inbox_gate"):
@@ -570,7 +580,8 @@ class Gate:
         token = secrets.token_urlsafe(32)
         record = {"schema": RECORD_SCHEMA, "entry": name,
                   "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
-                  "issued_at": issued, "expires_at": int(expires_at)}
+                  "issued_at": issued, "expires_at": int(expires_at),
+                  "via": {"entry": via[0], "link": via[1]}}
         if entry["mode"] == "magic_link":
             if not isinstance(email, str) or not _ADDRESS.fullmatch(email):
                 return None
@@ -596,6 +607,12 @@ class Gate:
             return None
         if not MIN_LINK_SECONDS <= expires - issued <= MAX_LINK_SECONDS:
             return None
+        if "via" in raw:
+            # Minted by a stack page: it dies with that stack link.
+            via = raw["via"]
+            store = self.sites.get(via.get("entry")) if isinstance(via, dict) else None
+            if store is None or not store.stack_link_alive(via.get("link")):
+                return None
         return raw
 
     def _used_marker(self, digest):
@@ -775,6 +792,37 @@ def classify(status):
     if status in (401, 403):
         return "up_login"
     return "client_error" if status < 500 else "server_error"
+
+
+MAX_UPGRADE_HEAD = 16384
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
+def _read_upgrade_head(upstream):
+    """The upstream's answer to an upgrade: (status, headers, bytes after the head).
+
+    Anything unreadable comes back as status 0, which the caller refuses.
+    """
+    data = b""
+    while b"\r\n\r\n" not in data:
+        if len(data) > MAX_UPGRADE_HEAD:
+            return 0, [], b""
+        chunk = upstream.recv(4096)
+        if not chunk:
+            return 0, [], b""
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    parts = lines[0].split(" ", 2)
+    if len(parts) < 2 or parts[0] not in ("HTTP/1.0", "HTTP/1.1") or not re.fullmatch(r"[0-9]{3}", parts[1]):
+        return 0, [], b""
+    headers = []
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if not separator or not _HEADER_NAME.fullmatch(name) or "\r" in value or "\n" in value:
+            return 0, [], b""
+        headers.append((name, value.strip()))
+    return int(parts[1]), headers, rest
 
 
 def _probe(hostname, probe, upstream, suffixes):
@@ -1013,7 +1061,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if record["wordpress"] is not None:
             links.append(("WordPress admin", wordpress_link(record["wordpress"], ends)))
         for item in record["sign_in"]:
-            minted = gate.mint_sign_in(item["entry"], item.get("email"), ends)
+            minted = gate.mint_sign_in(item["entry"], item.get("email"), ends, (name, session["link"]))
             if minted is not None:
                 links.append((f"Sign in: {item['entry']}", minted))
         gate.log(f"stack_viewed entry={name} link={session['link']}")
@@ -1099,8 +1147,10 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         token = self._read_token()
         if token is None:
             return self._fail(413, "too_large")
+        # The confirmation page sends Referrer-Policy: no-referrer, under which a browser
+        # posts "Origin: null"; the token still has to match.
         origin = self.headers.get("Origin")
-        if origin is not None and origin != f"https://{entry['hostname']}":
+        if origin not in (None, "null", f"https://{entry['hostname']}"):
             return self._fail(403, "invalid_link")
         if not _TOKEN.fullmatch(token):
             return self._fail(403, "invalid_link")
@@ -1167,8 +1217,7 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
 
     def _forward(self, address, headers, session_expires, still_allowed=None):
         """Send this request to a fixed address; nothing in it chooses where."""
-        if self.headers.get("Upgrade", "").lower() == "websocket":
-            return self._tunnel(address, headers, session_expires, still_allowed)
+        # Framing first, for both modes: a request the gate cannot frame never goes on.
         length = self._content_length()
         if length is None or "Transfer-Encoding" in self.headers:
             self.close_connection = True
@@ -1176,6 +1225,11 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         if length > MAX_PROXY_BODY:
             self.close_connection = True
             return self._fail(413, "too_large")
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            if self.command != "GET" or length:
+                self.close_connection = True
+                return self._fail(400, "bad_upgrade")
+            return self._tunnel(address, headers, session_expires, still_allowed)
         connection = http.client.HTTPConnection(*address, timeout=30)
         try:
             body = self.rfile.read(length) if length else None
@@ -1228,25 +1282,51 @@ class _PublicHandler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(len(pending)) if pending else b""
 
     def _tunnel(self, address, headers, session_expires, still_allowed=None):
+        """A websocket. Raw bytes flow only after the upstream accepts the upgrade.
+
+        Until the upstream answers 101 with ``Upgrade: websocket``, nothing the client sent
+        after its request goes upstream. An upstream that declines and keeps the
+        connection open therefore never sees later requests that skipped the gate's checks.
+        """
+        self.close_connection = True
+        pending = self._buffered_client_bytes()
         try:
             upstream = socket.create_connection(address, timeout=10)
         except OSError:
-            self.close_connection = True
             return self._fail(502, "upstream_unavailable")
-        self.close_connection = True
         try:
             lines = [f"{self.command} {self.path} HTTP/1.1"]
             lines += [f"{name}: {value}" for name, value in headers]
             lines += ["Upgrade: websocket", "Connection: Upgrade", "", ""]
             upstream.sendall("\r\n".join(lines).encode("latin-1", "replace"))
-            upstream.sendall(self._buffered_client_bytes())
+            status, response_headers, rest = _read_upgrade_head(upstream)
+            if status != 101 or not any(name.lower() == "upgrade" and value.lower() == "websocket"
+                                        for name, value in response_headers):
+                return self._fail(502, "upgrade_refused")
+            self.send_response(101)
+            for name, value in response_headers:
+                if name.lower() not in ("x-robots-tag", "referrer-policy", "server", "date"):
+                    self.send_header(name, value)
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Robots-Tag", ROBOTS_TAG)
+            self.end_headers()
             self.wfile.flush()
+            if rest:
+                self.connection.sendall(rest)
+            if pending:
+                upstream.sendall(pending)
             self._pump(self.connection, upstream, session_expires, still_allowed)
         except OSError:
             pass
         finally:
             upstream.close()
         return None
+
+    def send_error(self, code, message=None, explain=None):
+        """Errors http.server raises itself (an unknown method, a bad request line) carry the gate's headers too."""
+        self.close_connection = True
+        self._reply(code, f"{int(code)}\n".encode(),
+                    [("Content-Type", "text/plain; charset=utf-8"), ("Connection", "close")])
 
     def _pump(self, client, upstream, session_expires, still_allowed=None):
         """Copy bytes both ways until a side closes, the link idles out, or access ends.

@@ -52,7 +52,7 @@ def _variants():
         "basic_auth_bypass_routes": _environment(basic_auth={**BASIC, "bypass_routes": [
             {"path_template": "/api/{id}", "methods": ["GET", "POST"]}, {"path": "/hook", "methods": ["POST"]}]}),
         "basic_auth_bypass_ips": _environment(cloudflare=dict(PROXIED),
-                                              basic_auth={**BASIC, "bypass_ips": ["203.0.113.7"]}),
+                                              basic_auth={**BASIC, "bypass_ips": ["103.95.98.15"]}),
         "share_private": _environment(_share()),
         "share_public": _environment(_share(private=False)),
         "site_gate_075": with_site,
@@ -120,21 +120,28 @@ class CaddyCoverageTests(unittest.TestCase):
 
 
 class NginxCoverageTests(unittest.TestCase):
-    def assert_covered(self, conf, label):
-        servers = _nginx_blocks(conf, r"server \{")
-        self.assertTrue(servers, label)
-        for server in servers:
+    @staticmethod
+    def uncovered(conf):
+        """Every server, location or if-block of ``conf`` that can answer without the header."""
+        header = f'add_header X-Robots-Tag "{TAG}" always;'
+        missing = []
+        for server in _nginx_blocks(conf, r"server \{"):
             name = re.search(r"server_name ([^;]+);", server).group(1)
-            with self.subTest(variant=label, server=name):
-                self.assertIn(f'\n    add_header X-Robots-Tag "{TAG}" always;', server)
-                for location in _nginx_blocks(server, r"location "):
-                    self.assertIn(f'add_header X-Robots-Tag "{TAG}" always;', location,
-                                  location.splitlines()[0])
-                    if "proxy_pass" in location:
-                        self.assertIn("proxy_hide_header X-Robots-Tag;", location)
-                for block in _nginx_blocks(server, r"if \("):
-                    if "add_header" in block:
-                        self.assertIn(f'add_header X-Robots-Tag "{TAG}" always;', block)
+            if f"\n    {header}" not in server:
+                missing.append((name, "server"))
+            for location in _nginx_blocks(server, r"location "):
+                if header not in location:
+                    missing.append((name, location.splitlines()[0].strip()))
+                if "proxy_pass" in location and "proxy_hide_header X-Robots-Tag;" not in location:
+                    missing.append((name, location.splitlines()[0].strip() + " (no proxy_hide_header)"))
+            for block in _nginx_blocks(server, r"if \("):
+                if "add_header" in block and header not in block:
+                    missing.append((name, block.splitlines()[0].strip()))
+        return missing
+
+    def assert_covered(self, conf, label):
+        self.assertTrue(_nginx_blocks(conf, r"server \{"), label)
+        self.assertEqual(self.uncovered(conf), [], label)
 
     def test_every_server_location_and_if_block_carries_the_header(self):
         for name, environment in _variants().items():
@@ -161,8 +168,8 @@ class NginxCoverageTests(unittest.TestCase):
         broken = conf.replace(f'        add_header X-Robots-Tag "{TAG}" always;\n        proxy_pass',
                               "        proxy_pass", 1)
         self.assertNotEqual(broken, conf)
-        with self.assertRaises(AssertionError):
-            self.assert_covered(broken, "broken")
+        self.assertEqual(self.uncovered(conf), [])
+        self.assertEqual(len(self.uncovered(broken)), 1)
 
 
 if __name__ == "__main__":

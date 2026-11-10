@@ -57,8 +57,9 @@
   holds a random 256-bit key, the key id, the user and the expiry. The gate holds the same
   key in the stack record. Each view mints `<exp>.<nonce>.<hmac>` for at most 10 minutes.
   The WordPress link is `https://<primary>/?sandbox_share_login=<kid>#<token>`. The
-  mu-plugin serves an auto-submit page on GET, verifies on POST, and records the nonce
-  with `add_site_option`, so each token works once. Revoke deletes the file; expiry makes
+  mu-plugin serves an auto-submit page on GET, verifies on POST, and claims the nonce
+  with one `INSERT IGNORE` into the site's options table (a UNIQUE key on single sites and
+  every multisite blog), so each token works once. Revoke deletes the file; expiry makes
   it inert, and the next mint deletes expired files.
   Login-service entries listed in `share.stack_sign_in` are minted locally by the gate:
   it writes the 075 token record for that entry, with a 600 s lifetime.

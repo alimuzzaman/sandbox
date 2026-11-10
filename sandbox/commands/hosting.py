@@ -4113,9 +4113,16 @@ def _cmd_host_site_link(validated: dict, entry: dict, args, declaration: dict, r
     if revoke is not None:
         if not login.valid_revoke_target(revoke):
             raise login.LoginServiceError("site_link_unknown", "pass a link id (l-...), a session id (s-...), or all")
-        # A stack link's WordPress key is removed by `sb host share revoke`; site links have none.
-        reply = _with_host_writer_lock(
-            validated, args.remote, lambda current, _save: _site_remote(validated, entry, name, "revoke", revoke))
+        from sandbox.commands import host_share
+        from sandbox.hosting.share import ShareRefusal
+        found = host_share.ShareTarget(remote=args.remote, validated=validated, entry=entry, label=name,
+                                       project_dir="")
+        # The same revoke as `sb host share revoke`, so a stack link's WordPress key goes too.
+        try:
+            reply = _with_host_writer_lock(
+                validated, args.remote, lambda current, _save: host_share.revoke_on_gate(found, name, revoke))
+        except ShareRefusal as exc:
+            raise login.LoginServiceError(exc.code, exc.message) from None
         counts = {"revoked_links": reply.get("revoked_links"), "revoked_sessions": reply.get("revoked_sessions")}
         emit(counts, f"Revoked {counts['revoked_links']} link(s) and {counts['revoked_sessions']} session(s)")
         return

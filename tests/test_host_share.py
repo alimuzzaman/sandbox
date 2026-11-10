@@ -166,6 +166,19 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn(f"reverse_proxy 127.0.0.1:{PORT}", rendered)
         self.assertIn(f"reverse_proxy 127.0.0.1:{PORT + 3000}", _caddy_block(rendered, GATE))
 
+    def test_private_redirect_aliases_answer_404_on_both_front_doors(self):
+        alias = "old.dev.example.test"
+        self.assertIn("respond 404", _caddy_block(hosting.caddyfile(self.private, PORT), alias))
+        self.assertNotIn("redir ", _caddy_block(hosting.caddyfile(self.private, PORT), alias))
+        self.assertIn("redir ", _caddy_block(hosting.caddyfile(self.public, PORT), alias))
+        conf = nginx.render_host_conf(self.private, PORT, name="mockups", cert_path="/c", key_path="/k")
+        redirect = next(block for block in _nginx_servers(conf)
+                        if f"server_name {alias};" in block and "ssl_certificate" in block)
+        self.assertIn("return 404;", redirect)
+        self.assertNotIn("return 308", redirect)
+        public = nginx.render_host_conf(self.public, PORT, name="mockups", cert_path="/c", key_path="/k")
+        self.assertIn("return 308 https://", public)
+
     def test_caddy_public_keeps_the_app_route(self):
         rendered = hosting.caddyfile(self.public, PORT)
         self.assertIn(f"reverse_proxy 127.0.0.1:{PORT}", _caddy_block(rendered, PRIMARY))
@@ -383,10 +396,12 @@ class CommandTests(unittest.TestCase):
                                project_dir=None, environment=None, entry=None, share_path=None, ttl=None,
                                uses=None, email=None)
         out = io.StringIO()
-        with patch.object(host_share, "create_share", return_value={"ok": True, "link": "L"}) as created, \
+        result = {"ok": True, "link": "L", "link_id": "l-" + "0" * 32, "hostname": GATE, "kind": "site",
+                  "scope": "/", "uses": None, "expires_at": 1, "expires_clamped": False}
+        with patch.object(host_share, "create_share", return_value=result) as created, \
              contextlib.redirect_stdout(out):
             host_share.cmd_host_share(args)
-        self.assertEqual(json.loads(out.getvalue()), {"ok": True, "link": "L"})
+        self.assertEqual(json.loads(out.getvalue()), result)
         self.assertEqual(created.call_args.kwargs["caller"], "cli")
         args.image_action = "revoke"
         args.share_id = "x; rm -rf /"
@@ -463,7 +478,9 @@ class StackPageTests(unittest.TestCase):
     def test_key_plugin_holds_a_key_and_never_a_token(self):
         plugin = stack_page.render_key_plugin("c" * 32, "d" * 64, "admin", 4_000_000_000)
         self.assertIn("'cccccccccccccccccccccccccccccccc'", plugin)
-        self.assertIn("add_site_option( $used", plugin)
+        self.assertIn("INSERT IGNORE INTO ' . $wpdb->options", plugin)
+        self.assertIn("if ( 1 !== $claimed )", plugin)
+        self.assertNotIn("add_site_option", plugin)
         self.assertIn("X-Robots-Tag: noindex, nofollow, noarchive", plugin)
         self.assertIn(f"$exp > $now + {share.SIGN_IN_SECONDS}", plugin)
         for kid, key, user, until in (("short", "d" * 64, "admin", 4_000_000_000),
@@ -489,6 +506,28 @@ class StackPageTests(unittest.TestCase):
         self.assertIn(f"sandbox-share-4000000000-{'e' * 32}.php", command)
         self.assertIn(f"sandbox-share-*-{'e' * 32}.php", calls[1][0])
         self.assertEqual(removed, 1)
+
+    def test_a_revoke_retry_still_deletes_the_wordpress_key(self):
+        # The first revoke removed the gate's link but not the key file; the retry finds
+        # no link on the gate and must still delete the key.
+        found, _declaration = self.target()
+        link_id = "l-" + "e" * 32
+        gone = login.LoginServiceError("site_link_unknown", "no live share link or session has that id")
+        with patch.object(host_share, "_remote_site", side_effect=gone), \
+             patch.object(stack_page, "remove_wordpress_keys", return_value=1) as removed:
+            reply = host_share.revoke_on_gate(found, "share", link_id)
+        removed.assert_called_once_with(found, link_id)
+        self.assertEqual(reply, {"revoked_links": 0, "revoked_sessions": 0, "revoked_keys": 1})
+        with patch.object(host_share, "_remote_site", side_effect=gone), \
+             patch.object(stack_page, "remove_wordpress_keys", return_value=0):
+            with self.assertRaises(login.LoginServiceError) as raised:
+                host_share.revoke_on_gate(found, "share", link_id)
+        self.assertEqual(raised.exception.code, "site_link_unknown")
+        with patch.object(host_share, "_remote_site", side_effect=gone), \
+             patch.object(stack_page, "remove_wordpress_keys") as never:
+            with self.assertRaises(login.LoginServiceError):
+                host_share.revoke_on_gate(found, "share", "s-" + "e" * 32)
+        never.assert_not_called()
 
     def test_sign_in_entries_need_an_address_for_magic_links(self):
         environment = _environment(_share(stack_sign_in=["qa"]), autologin={

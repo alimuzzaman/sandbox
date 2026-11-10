@@ -1169,7 +1169,9 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
         blocks.append(site(gate_hosts, basic_for(gate_port), gate_port))
     for route in validated["routes"]:
         if route["mode"] == "redirect":
-            blocks.append(f"{route['hostname']} {{\n{noindex}    redir {route['target']}{{uri}} 308\n}}\n")
+            # share.private: a redirect alias would announce the primary, so it answers 404 too.
+            answer = "respond 404" if private else f"redir {route['target']}{{uri}} 308"
+            blocks.append(f"{route['hostname']} {{\n{noindex}    {answer}\n}}\n")
     return "\n".join(blocks)
 
 

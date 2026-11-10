@@ -204,7 +204,10 @@ That is the whole declaration: no edge config. Sandbox renders the gate as the
 `sandbox-login` service, publishes it on its own loopback port (the target's port plus
 3000), and both front doors send the gate hostname there. With `private: true`, the
 front door answers every other hostname with 404, so nothing but a valid share session
-reaches the site.
+reaches the site. Redirect aliases answer 404 too, instead of pointing at the primary.
+A few answers stay, and none of them reaches the application: `robots.txt` (deny) on every
+hostname, the HTTP-to-HTTPS redirect and ACME challenge files on port 80, and on nginx
+the route marker that apply checks.
 
 - Pick a gate hostname that says nothing, such as a few random characters. It is the
   only public way in.
@@ -251,7 +254,9 @@ one; the `share` block's entry is the default. MCP tools `host_share_create`,
   it, the 075 rule holds: the link goes to the controlling terminal only, and with no
   terminal the command refuses with `terminal_required`. MCP always refuses then, with
   `agent_mint_not_enabled`. `create` refuses inside a durable job (`job_output_refused`),
-  because job output is stored.
+  because job output is stored. The terminal rule keeps the link out of stdout, logs and
+  job output; it does not prove a person is reading. A process that owns the terminal
+  (an agent running the CLI under a PTY, or `script`) sees what is written to it.
 - **Lifetime.** `--ttl` is `90m`, `12h`, `7d`, `2w` or seconds. The default is 7 days and
   the maximum 30. A link never outlives `enabled_until`; the result says
   `expires_clamped: true` when it was shortened.
@@ -294,7 +299,13 @@ label) and health, and sign-in links:
 - **Login-service entries** named in `share.stack_sign_in`, such as a Hub QA sign-in
   (`magic_link` or `inbox_gate`). Each view writes that entry's token record, as
   `host login-url` would, so the previous link of the entry stops working. A `magic_link`
-  entry uses the target's saved address, or `--email`.
+  entry uses the target's saved address, or `--email`. The token is bound to the stack
+  link: once that link is revoked or expires, an unused sign-in link from its page is
+  refused, even one a view was still minting during the revoke. A service session that a
+  sign-in already started keeps its own lifetime (`session_ttl_seconds`).
+- **Revoke retries.** If the gate revoke works but the WordPress key file cannot be
+  deleted, the command says so; running the same revoke again deletes the file, even
+  though the gate no longer knows the link. `host login-url --revoke` takes the same path.
 
 Tokens ride in the URL fragment and are posted by a small page, so no request line or
 access log holds one. The page is served by the stack target's own gate: the stack's

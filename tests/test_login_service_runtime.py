@@ -310,6 +310,15 @@ class ConfirmationTests(_Base):
         self.assertEqual(response.status, 403)
         self.assertEqual(self.consume()[0].status, 303)
 
+    def test_a_browser_null_origin_is_accepted_with_the_token(self):
+        # The confirmation page is served with Referrer-Policy: no-referrer, so a
+        # browser's own form post says "Origin: null".
+        self.issue()
+        body = urllib.parse.urlencode({"token": "t" * 43})
+        response, _ = self.request("POST", INBOX_PATH, body=body, headers={
+            "Content-Type": "application/x-www-form-urlencoded", "Origin": "null"})
+        self.assertEqual(response.status, 303)
+
     def test_oversized_body_is_refused(self):
         self.issue()
         response, _ = self.request("POST", INBOX_PATH, body="x" * 70000, headers={

@@ -239,6 +239,19 @@ class BranchPolicyTests(unittest.TestCase):
                              "feat/one")
 
 
+class DeliveredCommitTests(unittest.TestCase):
+    def test_a_succeeded_last_apply_is_delivered(self):
+        record = {"commit": "a" * 40, "last_apply": {"commit": "b" * 40}}
+        for status, expected in (("succeeded", "b" * 40), ("failed", "a" * 40), ("running", "a" * 40),
+                                 ("submitted", "a" * 40), (None, "a" * 40)):
+            with self.subTest(status=status):
+                self.assertEqual(stack_registry.delivered_commit(record, status), expected)
+        self.assertIsNone(stack_registry.delivered_commit({"last_apply": {"commit": "b" * 40}}, "failed"))
+        # A record written before last_apply.commit existed keeps its commit.
+        self.assertEqual(stack_registry.delivered_commit({"commit": "c" * 40, "last_apply": {}}, "succeeded"),
+                         "c" * 40)
+
+
 class RecordDeliveryTests(unittest.TestCase):
     def test_only_the_awaited_apply_moves_the_commit(self):
         path = Path(tempfile.mkdtemp()) / "registry.json"
@@ -577,7 +590,8 @@ class StackCommandTests(unittest.TestCase):
             validated = hosting.validate_manifest(str(manifest_root), "sandbox")
             last = stack_registry.read()["stacks"]["r/demo"]["last_apply"]
             hosting_cmd._record_stack_delivery(validated, "r", {
-                "delivery_succeeded": succeeded, "request_id": request_id or last["request_id"]})
+                "delivery_succeeded": succeeded, "delivery_state": "succeeded" if succeeded else "failed",
+                "request_id": request_id or last["request_id"]})
 
         def listed():
             payload = host_stack._list(self.args("list"))
@@ -617,6 +631,74 @@ class StackCommandTests(unittest.TestCase):
             self.assertIn(f"commit {newer[:12]}", text)
             apply_finished(True)
             self.assertEqual(listed()[0]["commit"], newer)
+
+    def test_live_sequence_failed_then_completed_apply_moves_the_commit(self):
+        """Feedback 94bf4610: a pre-fix record held the commit of an apply that failed;
+        the next apply completed with an `incomplete` delivery summary (exit 0,
+        required_evidence_missing) and `commit` stayed at the undelivered commit."""
+        manifest_root = self.runtime.runtime / "stacks" / "demo"
+        jobs: dict[str, str] = {}
+
+        def view(job_id):
+            return {"lifecycle": jobs[job_id], "finished_at": None} if job_id in jobs else None
+
+        def row():
+            return host_stack._list(self.args("list"))["stacks"][0]
+
+        with patch.object(host_stack, "job_view", side_effect=view):
+            with patch.object(host_stack, "_submit", return_value="job-1"):
+                host_stack._up(self.args("up", confirm=True))
+            # Rewrite it the way the pre-fix `up` did: commit = requested, no last_apply.commit.
+            with stack_registry.locked() as registry:
+                legacy = registry.get("r", "demo")
+                legacy["commit"] = self.head
+                legacy["last_apply"].pop("commit")
+                registry.put(legacy)
+            jobs["job-1"] = "failed"
+            tree = _git(self.hub, "rev-parse", "HEAD^{tree}")
+            newer = _git(self.hub, "commit-tree", tree, "-p", self.head, "-m", "next")
+            _git(self.hub, "update-ref", "refs/heads/stack/demo", newer)
+            with patch.object(host_stack, "_submit", return_value="job-2"):
+                host_stack._up(self.args("up", confirm=True))
+            jobs["job-2"] = "running"
+            self.assertEqual(row()["commit"], self.head)  # a pre-fix value cannot be told apart
+            validated = hosting.validate_manifest(str(manifest_root), "sandbox")
+            request_id = stack_registry.read()["stacks"]["r/demo"]["last_apply"]["request_id"]
+            hosting_cmd._record_stack_delivery(validated, "r", {
+                "request_id": request_id, "delivery_state": "incomplete", "delivery_succeeded": False})
+            jobs["job-2"] = "succeeded"
+            self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["commit"], newer)
+            self.assertEqual(row()["commit"], newer)
+
+    def test_a_succeeded_apply_counts_even_when_its_record_write_was_missed(self):
+        jobs = {"job-1": "running"}
+        with patch.object(host_stack, "job_view",
+                          side_effect=lambda job_id: {"lifecycle": jobs[job_id]} if job_id in jobs else None):
+            with patch.object(host_stack, "_submit", return_value="job-1"):
+                host_stack._up(self.args("up", confirm=True))
+            self.assertIsNone(host_stack._list(self.args("list"))["stacks"][0]["commit"])
+            jobs["job-1"] = "succeeded"  # the apply finished; record_delivery never ran
+            self.assertIsNone(stack_registry.read()["stacks"]["r/demo"]["commit"])
+            self.assertEqual(host_stack._list(self.args("list"))["stacks"][0]["commit"], self.head)
+            # The next `up` carries the delivered commit, not the stale stored one.
+            with patch.object(host_stack, "_submit", return_value="job-2"):
+                host_stack._up(self.args("up", confirm=True))
+            self.assertEqual(stack_registry.read()["stacks"]["r/demo"]["commit"], self.head)
+
+    def test_a_failed_delivery_never_moves_the_commit(self):
+        manifest_root = self.runtime.runtime / "stacks" / "demo"
+        with patch.object(host_stack, "job_view", return_value=None):
+            with patch.object(host_stack, "_submit", return_value="job-1"):
+                host_stack._up(self.args("up", confirm=True))
+            validated = hosting.validate_manifest(str(manifest_root), "sandbox")
+            request_id = stack_registry.read()["stacks"]["r/demo"]["last_apply"]["request_id"]
+            for state in ("failed", "unknown", None):
+                with self.subTest(state=state):
+                    hosting_cmd._record_stack_delivery(validated, "r", {
+                        "request_id": request_id, "delivery_state": state, "delivery_succeeded": False})
+                    self.assertIsNone(stack_registry.read()["stacks"]["r/demo"]["commit"])
+            hosting_cmd._record_stack_delivery(validated, "r", None)
+            self.assertIsNone(stack_registry.read()["stacks"]["r/demo"]["commit"])
 
     def test_failed_submission_keeps_the_delivered_commit(self):
         with patch.object(host_stack, "job_view", return_value={"lifecycle": "succeeded"}):

@@ -645,9 +645,10 @@ def _up(args) -> dict:
             "remote": remote_name, "slug": slug, "project": project, "environment": environment,
             "template": str(template_path), "checkout": str(checkout), "ref": ref.ref,
             "ref_branch": ref.ref_branch, "hostnames": sorted(hostnames),
-            # `commit` stays what an apply last proved delivered; `sb host apply`
-            # moves it to last_apply.commit once this one is (record_delivery).
-            "commit": (previous or {}).get("commit"),
+            # `commit` stays what an apply last delivered; `sb host apply` moves
+            # it to last_apply.commit once this one completes (record_delivery).
+            "commit": (stack_registry.delivered_commit(previous, _last_apply_view(previous).get("status"))
+                       if previous else None),
             "ports": ports, "manifest": str(manifest_path),
             "worktrees": [*earlier, str(worktree)],
             "created_at": (previous or {}).get("created_at", now), "updated_at": now,
@@ -739,8 +740,8 @@ def _list_row(local: dict | None, remote_item: dict | None, remote_state: str) -
     row["last_apply"] = _last_apply_view(local) if local else None
     if row["mine"]:
         # The remote record holds the commit its claim was made for; this
-        # controller's record holds the one an apply proved delivered.
-        row["commit"] = local.get("commit")
+        # controller's record holds the one an apply delivered.
+        row["commit"] = stack_registry.delivered_commit(local, row["last_apply"].get("status"))
     return row
 
 

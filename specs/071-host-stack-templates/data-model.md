@@ -48,7 +48,7 @@ stack_instance:
 - Key `<remote>/<slug>`; a slug is unique per controller across remotes.
 - `ports` is set on the first `up` and only changed by a `--port` pin; removed only by `down`.
 - `last_apply.status` is refined at read time from the durable job (`accepted|queued|running|cancelling|succeeded|failed|timed_out|cancelled|interrupted`).
-- `last_apply.commit` is the commit the latest `up` asked for. `commit` is the last commit an apply proved delivered (`null` before the first): `sb host apply` copies `last_apply.commit` into it only after its delivery succeeds and only when its request id is `last_apply.request_id` (feedback 20153592).
+- `last_apply.commit` is the commit the latest `up` asked for. `commit` is the commit of the last apply that completed, the host's `recorded_revision` (`null` before the first): `sb host apply` copies `last_apply.commit` into it when it completes (delivery summary `succeeded` or `incomplete`, never `failed` or `unknown`) and only when its request id is `last_apply.request_id`; readers treat a succeeded `last_apply` as delivered even if that write was missed (feedback 20153592, 94bf4610).
 
 ## Hosting state addition
 

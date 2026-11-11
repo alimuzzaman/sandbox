@@ -1,5 +1,5 @@
 import json
-import json
+import os
 import tempfile
 import threading
 import unittest
@@ -38,6 +38,24 @@ class _CiReleaseRegistry:
         if self.mode == "released":
             return {"ok": True, "status": "released"}
         raise AssertionError(self.mode)
+
+
+class _NoQueuedJobs:
+    """Drain API of a scheduler that reports no queued jobs (spec 083).
+
+    The status read then admits its own job through ``acquire`` as before.
+    """
+    last_refusal = None
+    def refresh_policy(self):
+        pass
+    def newest_queued(self):
+        return None
+    def queued_in_order(self, *, after=None, limit=500):
+        return []
+    def free_slots(self):
+        return 1
+    def record_snapshot_reason(self, _snapshot):
+        pass
 
 
 class JobServiceTests(unittest.TestCase):
@@ -366,7 +384,7 @@ class JobServiceTests(unittest.TestCase):
             projected = Path(temp) / "generation"
             admission_started = threading.Event()
             release_admission = threading.Event()
-            class Scheduler:
+            class Scheduler(_NoQueuedJobs):
                 def acquire(self, *_args, **_kwargs):
                     admission_started.set()
                     release_admission.wait(5)
@@ -432,7 +450,7 @@ class JobServiceTests(unittest.TestCase):
                 created_at="2026-08-26T00:00:02Z",
             )
             projected = Path(temp) / "generation"
-            class Scheduler:
+            class Scheduler(_NoQueuedJobs):
                 attempts = 0
                 def acquire(self, *_args, **_kwargs):
                     self.attempts += 1
@@ -470,6 +488,59 @@ class JobServiceTests(unittest.TestCase):
                              "sync_generation_pending")
             service.get(accepted["job_id"], reconcile=False)
             self.assertEqual(len(launched), 1)
+            jobs.close()
+
+    def test_a_caller_that_did_not_claim_a_sync_launch_leaves_it_to_its_owner(self):
+        from sandbox.jobs.process import capture_process_identity
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = JobRepository(Path(temp) / "registry.sqlite")
+            sync = SyncRepository(Path(temp) / "sync.json")
+            sync.put_relationship(SynchronizationRelationship(
+                "relationship", "p", "remote", "workspace",
+                mode="live", lifecycle="active",
+                updated_at="2026-08-26T00:00:00Z",
+            ))
+            pending, _ = sync.reserve_generation(
+                relationship_id="relationship", request_id="pending",
+                request_digest="c" * 64, manifest_digest="d" * 64,
+                file_count=1, byte_count=1,
+                created_at="2026-08-26T00:00:02Z",
+            )
+            projected = Path(temp) / "generation"
+            class Scheduler(_NoQueuedJobs):
+                acquired = 0
+                def acquire(self, *_args, **_kwargs):
+                    self.acquired += 1
+                def queue_details(self, _row):
+                    return {"reason": "workspace_or_capacity_busy",
+                            "position": 1, "blocking_jobs": []}
+                def release(self, _job_id):
+                    pass
+            scheduler = Scheduler()
+            launched = []
+            service = JobService(
+                jobs, JobStorage(temp, free_disk_reserve=0), None,
+                launcher=launched.append, scheduler=scheduler,
+                sync_gateway=SyncJobGateway(sync, materialize=lambda *_args: {
+                    "project_root": str(projected),
+                    "source_identity": "sha256:" + "d" * 64,
+                }),
+            )
+            accepted = service.submit(JobSubmission(
+                "test", temp, "p", "local", "default", ("echo", "ok"), 60,
+                SourceIdentity("caller"), sync_relationship_id="relationship",
+                sync_generation_id=pending.generation_id,
+            ))
+            owner = capture_process_identity(os.getpid())
+            self.assertIsNotNone(jobs.claim_pending_sync_launch(
+                accepted["job_id"], owner_boot_id=owner.host_boot_id,
+                owner_pid=owner.pid, owner_start_identity=owner.start_identity))
+            seen = service.get(accepted["job_id"], reconcile=False)
+            self.assertEqual(seen["queue_reason"], "sync_generation_launching")
+            self.assertEqual(scheduler.acquired, 0)
+            self.assertEqual(launched, [])
+            self.assertEqual(jobs.get(accepted["job_id"])["queue_reason"],
+                             "sync_generation_launching")
             jobs.close()
 
     def test_synchronized_request_race_replays_original_digest(self):

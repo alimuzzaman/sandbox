@@ -25,6 +25,8 @@ class ProcessCompatibilityTests(unittest.TestCase):
         self.repo = JobRepository(self.home / 'jobs.sqlite3')
         self.addCleanup(self.repo.close)
         self.scheduler = Mock()
+        self.scheduler.queued_in_order.return_value = []
+        self.scheduler.newest_queued.return_value = None
         self.scheduler.reconcile.return_value = []
         self.service = JobService(self.repo, JobStorage(self.home, free_disk_reserve=0),
                                   None, scheduler=self.scheduler)

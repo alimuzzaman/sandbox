@@ -171,6 +171,33 @@ slots in use admits nothing until enough running jobs finish.
 `policy_error`; `sb remote service diagnostics <remote>` reports the same as
 `data.job_slots`. Both need a runtime at control protocol 23 or later.
 
+### Admission order
+
+Queued jobs start oldest first across the whole host, by acceptance time and then
+job id, whichever client is polling (spec 083). An older job that cannot start for a
+reason of its own does not hold up younger jobs: one whose workspace is busy (under the
+normal sharing rules), one waiting on a dependency or a sync generation, or a matrix or
+plan parent. A younger job waits only for older jobs that could take a free slot now,
+and `queue.position` counts exactly those, host-wide.
+
+Admission does not wait for anyone to read a status. A drain offers free slots to
+queued jobs in order and stops at the first host-wide refusal (no slot, the resource
+floor, an invalid policy). It runs:
+
+- when a job's supervisor finishes and releases its slot;
+- when a status read or a cancel releases a slot;
+- at the start of every `sb job-*` command and MCP job tool, after the existing
+  reconciliation;
+- every 20 seconds in the remote control service, which also runs that
+  reconciliation, so a running job whose supervisor is proved gone frees its slot
+  without any command.
+
+One pass ends at the newest job that was queued when it started. A status read of a
+queued job runs that drain before it looks at its own job, and its
+own job starts only when no older job waits, so a frequent poller never jumps the queue. Read commands can therefore start other
+queued jobs. A job that is live but silent past its stall threshold keeps its slot
+unless it was submitted with `--cancel-on-stall`; pass that flag for unattended runs.
+
 ## Readiness before submission
 
 `./sb remote readiness [NAME] [--project-dir DIR] [--json]` (MCP

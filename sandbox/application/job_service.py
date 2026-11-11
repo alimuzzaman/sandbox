@@ -6,13 +6,14 @@ this module so CLI and MCP adapters share one service contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import nullcontext
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -28,7 +29,8 @@ from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
                                   signal_owned_process_group, verify_owned_process_identity,
                                   verify_process_identity, is_boot_session_identity,
                                   process_absence_proven)
-from sandbox.jobs.scheduler import WorkspaceBusy
+from sandbox.jobs.registry import JobTransitionConflict
+from sandbox.jobs.scheduler import HOST_WIDE_REFUSALS, WorkspaceBusy
 from sandbox.sync.projection import ProjectionPending, ProjectionTerminal
 
 
@@ -47,6 +49,8 @@ def _launch_failure(stage: str, exc: BaseException) -> dict:
     return {"stage": stage, "error_class": type(exc).__name__[:64],
             "errno": errno if isinstance(errno, int) else None}
 CHILD_IDENTITY_PUBLISH_WAIT_SECONDS = 1.0
+# Queued jobs read per page by one drain pass (spec 083); a pass reads every page.
+DRAIN_PAGE_SIZE = 500
 
 
 def _parse_retention_timestamp(ts: Any) -> datetime | None:
@@ -85,6 +89,8 @@ class JobService:
     workspace_registry: Any = None
     sync_gateway: Any = None
     mount_controller: Any = None
+    # Per thread, so a drain in one thread never silences another's.
+    _drain_local: Any = field(default_factory=threading.local, repr=False, compare=False)
 
     def submit(self, submission: JobSubmission):
         pending_sync = False
@@ -372,6 +378,16 @@ class JobService:
         # scheduler/launcher during status reconciliation.
         if self._is_aggregate(snapshot):
             return self._get_parent(snapshot)
+        if snapshot["lifecycle"] == Lifecycle.QUEUED.value and self._drain_instead():
+            # A status read of a queued job first offers free slots to older
+            # jobs, oldest first (spec 083), then reads its own job as before;
+            # the order gate in acquire keeps it from jumping ahead.
+            self.drain_queue()
+            self._drain_local.active = True
+            try:
+                return self.get(job_id, reconcile=reconcile)
+            finally:
+                self._drain_local.active = False
         if (
             snapshot["lifecycle"] == Lifecycle.QUEUED.value
             and snapshot.get("queue_reason") in {
@@ -442,12 +458,14 @@ class JobService:
                     termination_reason="dependency_failed")
             elif dependency_state != "ready":
                 snapshot["queue_reason"] = dependency_reason or snapshot.get("queue_reason") or "dependency"
+                self._record_queue_reason(snapshot)
                 snapshot["queue"] = {
                     "reason": snapshot["queue_reason"], "position": None,
                     "blocking_jobs": [],
                 }
                 return snapshot
             if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
+                claimed_here = False
                 try:
                     if (
                         snapshot.get("sync_relationship_id") is not None
@@ -464,6 +482,12 @@ class JobService:
                         if claimed is None:
                             return self.repository.snapshot(job_id)
                         snapshot = claimed
+                        claimed_here = True
+                    if (snapshot.get("queue_reason") == "sync_generation_launching"
+                            and not claimed_here):
+                        # Another caller owns this launch claim; only it may
+                        # admit, commit or reset it.
+                        return self.repository.snapshot(job_id)
                     if self.scheduler is not None:
                         self.scheduler.acquire(
                             snapshot,
@@ -484,12 +508,11 @@ class JobService:
                     self._launch(self.storage.job_dir(job_id) / "descriptor.json")
                     snapshot = self.repository.snapshot(job_id)
                 except WorkspaceBusy as busy:
-                    if (
-                        snapshot.get("sync_relationship_id") is not None
-                        and snapshot.get("queue_reason") == "sync_generation_launching"
-                    ):
+                    if claimed_here and snapshot.get("queue_reason") == "sync_generation_launching":
                         snapshot = self.repository.reset_pending_sync_launch(job_id)
                     snapshot["queue_reason"] = busy.queue_reason
+                    if busy.kind != "admitted":
+                        self._record_queue_reason(snapshot)
                     if self.scheduler is not None:
                         snapshot["queue"] = self.scheduler.queue_details(snapshot)
                         snapshot["queue_position"] = snapshot["queue"]["position"]
@@ -545,6 +568,8 @@ class JobService:
             snapshot["health_evidence"] = evidence
         if self.scheduler is not None and snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             self.scheduler.release(job_id)
+            if self._drain_instead():
+                self.drain_queue()
         if snapshot["lifecycle"] in {item.value for item in (
                 Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
                 Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
@@ -1049,7 +1074,60 @@ class JobService:
         stale = self.scheduler.reconcile_stale() if self.scheduler is not None else []
         for job_id in interrupted:
             self._finalize_terminal_workspace(job_id)
+        if self._drain_instead():
+            self.drain_queue()
         return {"ok": True, "interrupted": interrupted, "released_leases": stale}
+
+    def _drain_instead(self) -> bool:
+        return self.scheduler is not None and not getattr(self._drain_local, "active", False)
+
+    def _record_queue_reason(self, snapshot: dict) -> None:
+        if self.scheduler is not None:
+            self.scheduler.record_snapshot_reason(snapshot)
+
+    def drain_queue(self) -> list[str]:
+        """Offer free host slots to queued jobs, oldest first (spec 083).
+
+        Each job goes through the normal admission path of ``get``. The pass
+        stops at the first host-wide refusal (no slot, floor, policy) and
+        continues past refusals that concern one job (its workspace, an older
+        job first, already admitted, a dependency wait, a launch failure).
+        Re-entrant calls in the same thread are no-ops. Returns the ids of the
+        jobs admitted to a slot or ended during the pass.
+        """
+        scheduler = self.scheduler
+        if scheduler is None or getattr(self._drain_local, "active", False):
+            return []
+        self._drain_local.active = True
+        changed = []
+        try:
+            scheduler.refresh_policy()
+            # One finite pass: jobs accepted after it starts wait for the next.
+            newest = scheduler.newest_queued()
+            if newest is None:
+                return changed
+            after = None
+            while True:
+                page = scheduler.queued_in_order(after=after, limit=DRAIN_PAGE_SIZE)
+                if not page:
+                    return changed
+                for accepted_at, job_id in page:
+                    if (accepted_at, job_id) > newest or scheduler.free_slots() <= 0:
+                        return changed
+                    scheduler.last_refusal = None
+                    held_before = scheduler.holds_slot(job_id)
+                    try:
+                        self.get(job_id, reconcile=False)
+                    except Exception:
+                        pass  # that job failed; the next one may still start
+                    if ((scheduler.holds_slot(job_id) and not held_before)
+                            or not scheduler.is_queued(job_id)):
+                        changed.append(job_id)
+                    if scheduler.last_refusal in HOST_WIDE_REFUSALS:
+                        return changed
+                after = page[-1]
+        finally:
+            self._drain_local.active = False
 
     def read_output(self, job_id: str, query: OutputQuery | None = None):
         query = query or OutputQuery()
@@ -1107,11 +1185,21 @@ class JobService:
             if snapshot["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
                 if snapshot.get("queue_reason") == "sync_generation_launch_committed":
                     raise RuntimeError("process_launch_in_progress")
-                self.repository.transition(job_id, Lifecycle.CANCELLED,
-                    termination_reason="cancelled_before_process_start")
+                try:
+                    self.repository.transition(job_id, Lifecycle.CANCELLED,
+                        termination_reason="cancelled_before_process_start",
+                        expected_lifecycles=frozenset({Lifecycle.ACCEPTED.value,
+                                                       Lifecycle.QUEUED.value}),
+                        unless_queue_reason="sync_generation_launch_committed")
+                except JobTransitionConflict:
+                    # A launch won after the snapshot was read: decide again
+                    # from the job's current state (lifecycles only move on).
+                    return self.cancel(job_id, force=force)
                 if self.scheduler is not None:
                     self.scheduler.release(job_id)
                 self._finalize_terminal_workspace(job_id)
+                if self._drain_instead():
+                    self.drain_queue()
                 return self.repository.snapshot(job_id)
             # The supervisor publishes the child identity immediately after
             # launching it. A caller can observe RUNNING in the small window

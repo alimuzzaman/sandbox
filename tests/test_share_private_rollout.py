@@ -8,6 +8,7 @@ front of the newly built, unlocked runtime.
 import datetime as dt
 import io
 import re
+import subprocess
 import sys
 import unittest
 import urllib.error
@@ -226,13 +227,74 @@ class RenderedPrivateRouteTests(unittest.TestCase):
             _HostingOwnerFixture(self, _private_manifest(proxied=True))
 
 
+class FrontDoorClosureCommandTests(unittest.TestCase):
+    """The closure step's remote commands: a strict read and a forced reload."""
+
+    def test_the_caddy_transaction_can_force_a_reload(self):
+        plain = hosting_cmd._caddy_transaction_command("/etc/caddy/conf.d/x.caddy", None, "absent",
+                                                       operation="apply", remove=True)
+        forced = hosting_cmd._caddy_transaction_command("/etc/caddy/conf.d/x.caddy", None, "absent",
+                                                        operation="apply", remove=True, force=True)
+        self.assertEqual(forced, plain + " 1")
+        self.assertIn('[ "$force_reload" != 1 ]', forced)
+        for command in (plain, forced):
+            result = subprocess.run(["sh", "-n", "-c", command], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_nginx_transaction_can_force_a_reload_and_prove_removal(self):
+        plain = nginx.transaction_command("/etc/nginx/conf.d/sandbox-x.conf", None, "absent",
+                                          operation="apply", remove=True)
+        forced = nginx.transaction_command("/etc/nginx/conf.d/sandbox-x.conf", None, "absent",
+                                           operation="apply", remove=True, force=True,
+                                           probe_host="a.example.test", gone_marker="c" * 24)
+        self.assertTrue(forced.endswith(" 1 " + "c" * 24))
+        self.assertNotIn(" 1 -", plain[-6:])
+        script = nginx.transaction_script()
+        self.assertIn('[ "$force" != 1 ]', script)
+        self.assertIn("route_still_loaded", script)
+        self.assertEqual(nginx._EXIT_REASONS[74], "route_still_loaded")
+
+    def test_strict_reads_tell_absence_from_failure(self):
+        cases = ((0, "route\n", "route\n"), (43, "", None), (255, "", "raise"), (44, "", "raise"), (1, "", "raise"))
+        for code, stdout, expected in cases:
+            result = subprocess.CompletedProcess([], code, stdout, "")
+            with self.subTest(door="caddy", code=code), patch.object(hosting_cmd.remote, "ssh_run", return_value=result):
+                if expected == "raise":
+                    with self.assertRaisesRegex(hosting.HostingError, "route state unknown"):
+                        hosting_cmd._read_remote_strict({}, "/etc/caddy/conf.d/x.caddy")
+                else:
+                    self.assertEqual(hosting_cmd._read_remote_strict({}, "/etc/caddy/conf.d/x.caddy"), expected)
+            with self.subTest(door="nginx", code=code), patch.object(nginx, "_ssh", return_value=result):
+                if expected == "raise":
+                    with self.assertRaises(nginx.FrontDoorError):
+                        nginx.read_route_strict({}, "x")
+                else:
+                    self.assertEqual(nginx.read_route_strict({}, "x"), expected)
+
+    def test_nginx_reconcile_removes_with_the_old_marker_or_installs_the_kept_route(self):
+        validated = _HostingOwnerFixture(self, _private_manifest()).validated
+        kept = nginx.render_host_conf(validated, 18123, name="x", cert_path="/c", key_path="/k")
+        public = nginx.render_host_conf(_HostingOwnerFixture(self, _private_manifest(private=False)).validated,
+                                        18123, name="x", cert_path="/c", key_path="/k")
+        commands = []
+
+        def fake(_entry, command, timeout=60, input_data=None):
+            commands.append(command)
+            return subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(nginx, "_ssh", side_effect=fake):
+            nginx.reconcile_route({}, "x", None, public)
+            self.assertTrue(commands[-1].endswith(" 1 " + nginx.route_marker(public)))
+            nginx.reconcile_route({}, "x", kept, kept)
+            self.assertTrue(commands[-1].endswith(" " + nginx.route_marker(kept) + " 1 -"))
+
+
 class FailedPrivateApplyTests(unittest.TestCase):
     """A private apply that fails never leaves the public name serving the application."""
 
     def fixture(self, previous, *, private=True):
         fixture = _HostingOwnerFixture(self, _private_manifest(private))
         self.port = fixture.runtime["loopback_port"]
-        self.live = {"route": previous}
+        self.live = {"route": self.public_route() if previous == "public" else previous}
 
         def read(_entry, path, *_a, **_k):
             return self.live["route"] if path.endswith(f"/{ROUTE}.caddy") else None
@@ -244,13 +306,20 @@ class FailedPrivateApplyTests(unittest.TestCase):
         def restore(_entry, _name, previous_route, **_k):
             self.live["route"] = previous_route
             return {"state": "rollback_complete", "digest": "x"}
+
+        def reconcile(_entry, _name, keep, **_k):
+            self.live["route"] = keep
+            return {"state": "reconciled", "digest": "x"}
         fixture.patch.object(hosting_cmd, "_read_remote_optional", side_effect=read)
+        fixture.read_strict = fixture.patch.object(hosting_cmd, "_read_remote_strict", side_effect=read)
+        fixture.reconcile = fixture.patch.object(hosting_cmd, "_reconcile_host_caddy", side_effect=reconcile)
         fixture.configure_edge.side_effect = configure
         fixture.restore_edge.side_effect = restore
         fixture.manager = MagicMock()
         fixture.manager.attach_mock(fixture.compose, "compose")
         fixture.manager.attach_mock(fixture.configure_edge, "configure")
         fixture.manager.attach_mock(fixture.restore_edge, "restore")
+        fixture.manager.attach_mock(fixture.reconcile, "reconcile")
         return fixture
 
     def public_route(self):
@@ -270,7 +339,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
         for name, args, _kwargs in fixture.manager.mock_calls:
             if name == "compose":
                 composed = True
-            elif name in ("configure", "restore"):
+            elif name in ("configure", "restore", "reconcile"):
                 live = args[2]
             if composed:
                 self.assertFalse(_serves_app(live, self.port), (name, live))
@@ -281,46 +350,68 @@ class FailedPrivateApplyTests(unittest.TestCase):
         self.live["route"] = self.public_route()
         fixture.edge.side_effect = RuntimeError(f"edge verification failed for {PRIMARY}: HTTP 404")
         self.run_failing(fixture)
-        self.assertEqual(self.calls(fixture)[:3], ["restore", "compose", "configure"])
-        self.assertIsNone(fixture.restore_edge.call_args_list[0].args[2])
         # The private route this apply installed stays after the failure.
-        self.assertEqual(self.calls(fixture), ["restore", "compose", "configure"])
+        self.assertEqual(self.calls(fixture), ["reconcile", "compose", "configure"])
+        self.assertIsNone(fixture.reconcile.call_args.args[2])
         self.assert_never_public(fixture)
         live = self.live["route"]
         self.assertTrue(hosting.is_marked_private_route(live))
         self.assertIn(f"reverse_proxy 127.0.0.1:{self.port + 3000}", live)
 
     def test_a_runtime_failure_before_the_edge_leaves_no_route(self):
-        fixture = self.fixture(self.public_route())
+        fixture = self.fixture("public")
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
         fixture.configure_edge.assert_not_called()
-        self.assertEqual(self.calls(fixture)[:2], ["restore", "compose"])
+        self.assertEqual(self.calls(fixture)[:2], ["reconcile", "compose"])
         self.assertTrue(all(call.args[2] is None for call in fixture.restore_edge.call_args_list))
         self.assertIsNone(self.live["route"])
         self.assert_never_public(fixture)
 
+    def test_an_absent_route_is_still_reloaded_before_the_runtime_changes(self):
+        """A fragment a failed reload left loaded is unloaded although the file is gone."""
+        fixture = self.fixture(None)
+        fixture.apply()
+        self.assertEqual(self.calls(fixture)[:2], ["reconcile", "compose"])
+        self.assertIsNone(fixture.reconcile.call_args.args[2])
+
     def test_no_runtime_change_when_the_route_cannot_be_closed(self):
-        for failure in ("restore", "still_there"):
+        for failure in ("unreadable", "reload_failed", "unchanged"):
             with self.subTest(failure=failure):
-                fixture = self.fixture(self.public_route())
-                if failure == "restore":
-                    fixture.restore_edge.side_effect = hosting.HostingError("rollback_incomplete: Caddy restore failed")
+                fixture = self.fixture("public")
+                if failure == "unreadable":
+                    fixture.read_strict.side_effect = hosting.HostingError("route state unknown: exit 255")
+                elif failure == "reload_failed":
+                    def failed_reload(*_a, **_k):
+                        self.live["route"] = None  # removed on disk, reload failed
+                        raise hosting.HostingError("caddy reload failed")
+                    fixture.reconcile.side_effect = failed_reload
                 else:
-                    fixture.restore_edge.side_effect = lambda *_a, **_k: {"state": "rollback_complete"}
+                    fixture.reconcile.side_effect = lambda *_a, **_k: {"state": "reconciled"}
                 with self.assertRaisesRegex(hosting.HostingError, "private_route_closure_failed"):
                     fixture.apply()
                 fixture.compose.assert_not_called()
                 fixture.configure_edge.assert_not_called()
 
-    def test_a_marked_private_route_is_restored(self):
+    def test_a_proxied_record_is_refused_before_any_effect(self):
+        fixture = self.fixture("public")
+        fixture.client.records.return_value = [
+            {"id": "r1", "type": "A", "name": PRIMARY, "content": "192.0.2.1", "proxied": True}]
+        with self.assertRaisesRegex(hosting.HostingError, "private_proxied_record"):
+            fixture.apply()
+        fixture.reconcile.assert_not_called()
+        fixture.compose.assert_not_called()
+        fixture.client.upsert_address.assert_not_called()
+
+    def test_a_marked_private_route_is_kept_and_restored(self):
         fixture = self.fixture(None)
         previous = hosting.caddyfile({**fixture.validated, "route_tag": "e" * 32},
                                      self.port, "/c", "/k")
         self.live["route"] = previous
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
-        self.assertEqual(self.calls(fixture), ["compose", "restore"])
+        self.assertEqual(self.calls(fixture), ["reconcile", "compose", "restore"])
+        self.assertEqual(fixture.reconcile.call_args.args[2], previous)
         fixture.restore_edge.assert_called_once_with(fixture.entry, ROUTE, previous, log_path=APPLY_LOG)
         self.assert_never_public(fixture)
 
@@ -331,7 +422,7 @@ class FailedPrivateApplyTests(unittest.TestCase):
                               f"{GATE} {{\n    reverse_proxy localhost:{self.port}\n}}\n")
         fixture.health.side_effect = RuntimeError("remote healthcheck did not return 200-399 within 60 seconds")
         self.run_failing(fixture)
-        self.assertEqual(self.calls(fixture)[:2], ["restore", "compose"])
+        self.assertEqual(self.calls(fixture)[:2], ["reconcile", "compose"])
         self.assertIsNone(self.live["route"])
 
     def test_a_public_manifest_still_restores_its_previous_route(self):

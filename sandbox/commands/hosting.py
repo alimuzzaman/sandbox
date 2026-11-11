@@ -1038,7 +1038,7 @@ def _compose_prefix(validated: dict, source_dir: str, override_path: str, env_pa
 
 
 def _caddy_transaction_command(path: str, temporary: str | None, digest: str,
-                               *, operation: str, remove: bool) -> str:
+                               *, operation: str, remove: bool, force: bool = False) -> str:
     """Build one locked Caddy transaction with bounded observable phases.
 
     One remote shell owns the host-global flock for the entire fragment
@@ -1053,6 +1053,7 @@ temporary=$2
 desired_digest=$3
 operation=$4
 remove_fragment=$5
+force_reload=${{6:-0}}
 phase() {{
   printf '[Sandbox] caddy phase=%s state=%s digest=%s\\n' "$1" "$2" "$desired_digest"
 }}
@@ -1088,7 +1089,9 @@ if [ "$current_digest" = "$desired_state" ]; then
 else
   phase digest changed
 fi
-if [ "$current_digest" = "$desired_state" ] && [ "$import_changed" = 0 ]; then
+# force_reload (spec 081 private closure): validate and reload even when the file
+# already matches, so a fragment removed by a failed earlier reload is unloaded too.
+if [ "$current_digest" = "$desired_state" ] && [ "$import_changed" = 0 ] && [ "$force_reload" != 1 ]; then
   if [ "$temporary" != - ]; then rm -f "$temporary"; fi
   if [ "$operation" = apply ]; then
     phase noop unchanged
@@ -1139,6 +1142,7 @@ fi
         f"sh -c {shlex.quote(script)} sandbox-caddy "
         f"{shlex.quote(path)} {shlex.quote(temporary_value)} {shlex.quote(digest)} "
         f"{shlex.quote(operation)} {'1' if remove else '0'}"
+        + (" 1" if force else "")
     )
 
 
@@ -1185,6 +1189,39 @@ def _restore_host_caddy(entry: dict, name: str, previous: str | None, *,
     except Exception as exc:
         raise hosting.HostingError(f"rollback_incomplete: Caddy restore failed: {exc}") from exc
     return {"state": "rollback_complete", "digest": digest}
+
+
+def _read_remote_strict(entry: dict, path: str) -> str | None:
+    """A remote file's text, or None only when it is confirmed absent; else raises."""
+    script = 'if [ -f "$1" ]; then cat "$1"; elif [ -e "$1" ] || [ -L "$1" ]; then exit 44; else exit 43; fi'
+    result = remote.ssh_run(entry, f"sh -c {shlex.quote(script)} sandbox-read {shlex.quote(path)}",
+                            timeout=30)
+    if result.returncode == 0:
+        return result.stdout
+    if result.returncode == 43:
+        return None
+    raise hosting.HostingError(f"route state unknown: {path} could not be read (exit {result.returncode})")
+
+
+def _reconcile_host_caddy(entry: dict, name: str, keep: str | None, *,
+                          log_path: str | None = None) -> dict:
+    """Install ``keep`` (or remove the fragment) with a forced validate and reload."""
+    path = f"/etc/caddy/conf.d/{name}.caddy"
+    temporary = None
+    digest = "absent"
+    if keep is not None:
+        digest = hashlib.sha256(keep.encode()).hexdigest()
+        temporary = f"/tmp/{name}.close.{digest}.caddy"
+        _write_remote_text(entry, temporary, keep, "0644")
+    _remote_checked(
+        entry,
+        _caddy_transaction_command(path, temporary, digest, operation="apply",
+                                   remove=keep is None, force=True),
+        timeout=_CADDY_TRANSACTION_TIMEOUT_SECONDS,
+        log_path=log_path,
+        log_phase="edge_caddy_private_closure",
+    )
+    return {"state": "reconciled", "digest": digest}
 
 
 def _read_remote_optional(entry: dict, path: str) -> str | None:
@@ -1241,6 +1278,13 @@ class _CaddyHostEdge:
     def read_previous(self, name: str) -> str | None:
         return _read_remote_optional(self.entry, f"/etc/caddy/conf.d/{name}.caddy")
 
+    def read_strict(self, name: str) -> str | None:
+        return _read_remote_strict(self.entry, f"/etc/caddy/conf.d/{name}.caddy")
+
+    def reconcile(self, name: str, keep: str | None, current: str | None, *,
+                  log_path: str | None = None) -> dict:
+        return _reconcile_host_caddy(self.entry, name, keep, log_path=log_path)
+
     def certificate(self, proxied: bool, validated: dict, runtime: dict,
                     state_entry: dict, client, home: str, name: str):
         if proxied:
@@ -1290,6 +1334,15 @@ class _NginxHostEdge:
 
     def read_previous(self, name: str) -> str | None:
         return self.nginx.read_route(self.entry, self.route_name(name))
+
+    def read_strict(self, name: str) -> str | None:
+        return self.nginx.read_route_strict(self.entry, self.route_name(name))
+
+    def reconcile(self, name: str, keep: str | None, current: str | None, *,
+                  log_path: str | None = None) -> dict:
+        return self.nginx.reconcile_route(
+            self.entry, self.route_name(name), keep, current,
+            log=lambda output: self._log(log_path, output))
 
     def certificate(self, proxied: bool, validated: dict, runtime: dict,
                     state_entry: dict, client, home: str, name: str):
@@ -3774,6 +3827,7 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
         cert_path = key_path = certificate = None
         runtime = {"loopback_port": port, "records": edge_intent["records"],
                    "certificate_hostnames": edge_intent["certificate_hostnames"]}
+        _refuse_proxied_records_for_private(client, validated, runtime)
         cert_path, key_path, certificate = edge.certificate(
             proxied, validated, runtime, recorded, client, home, caddy_name)
         route_tag = _route_tag(validated)
@@ -3790,6 +3844,7 @@ def _continue_host_edge_only(validated: dict, entry: dict, remote_name: str,
                 raise RuntimeError("edge recovery requires an already-strict zone policy")
             kind = "AAAA" if ":" in wanted["address"] else "A"
             records = client.records(zone["id"], hostname)
+            _refuse_proxied_now(validated, hostname, records)
             cname = next((item for item in records if item.get("type") == "CNAME"), None)
             if cname:
                 raise RuntimeError(
@@ -4547,29 +4602,69 @@ def _restore_edge_fail_closed(edge, name: str, previous: str | None, *, validate
 
 def _close_route_for_private_apply(edge, name: str, previous: str | None, *, validated: dict,
                                    log_path: str) -> str | None:
-    """Take an unmarked route down before a ``share.private`` apply changes anything.
+    """Prove the front door serves nothing public before a ``share.private`` apply.
 
     A public route left in place while the runtime is recreated would put the public
-    name in front of the new application until the private route replaces it. Returns
-    the route to treat as the previous one from here on. Raises (before any runtime
-    change) when the removal cannot be confirmed.
+    name in front of the new application until the private route replaces it. The
+    route is read strictly (a failed read is not "no route"); a marked private route
+    is kept, anything else removed, and either way the front door validates and
+    reloads, so a fragment that a failed earlier reload left loaded is unloaded too.
+    Returns the route to treat as the previous one from here on. Raises, before any
+    runtime change, when that cannot be confirmed.
     """
     from sandbox.hosting import login_service as login
-    if (previous is None or not login.is_private(validated.get("login_service"))
-            or hosting.is_marked_private_route(previous)):
+    if not login.is_private(validated.get("login_service")):
         return previous
     try:
-        edge.restore(name, None, log_path=log_path)
-        remaining = edge.read_previous(name)
+        current = edge.read_strict(name)
+        keep = current if hosting.is_marked_private_route(current) else None
+        edge.reconcile(name, keep, current, log_path=log_path)
+        installed = edge.read_strict(name)
     except Exception as exc:
         raise hosting.HostingError(
-            f"private_route_closure_failed: the previous front door route could not be "
-            f"removed before the private apply: {exc}") from exc
-    if remaining is not None:
+            f"private_route_closure_failed: the front door route could not be closed before "
+            f"the private apply; nothing was changed on the runtime: {exc}") from exc
+    if installed != keep:
         raise hosting.HostingError(
-            "private_route_closure_failed: the previous front door route is still installed; "
+            "private_route_closure_failed: the front door route changed during closure; "
             "nothing was changed on the runtime")
-    return None
+    return keep
+
+
+def _refuse_proxied_records_for_private(client, validated: dict, runtime: dict) -> None:
+    """A private target's names must not be proxied by Cloudflare (spec 081).
+
+    Checked before any effect, so a public, proxied deployment cannot become private
+    while Cloudflare still caches its pages, and DNS rollback never puts proxying back.
+    """
+    from sandbox.hosting import login_service as login
+    if not login.is_private(validated.get("login_service")):
+        return
+    names = {route["hostname"] for route in validated["routes"]}
+    names.update(record["hostname"] for record in runtime.get("records") or [])
+    coverage = validated.get("dns_coverage") or {}
+    if coverage.get("mode") == "shared" and coverage.get("zone"):
+        names.add(f"*.{coverage['zone']}")
+    zones: dict[str, dict] = {}
+    for hostname in sorted(names):
+        lookup = hostname[2:] if hostname.startswith("*.") else hostname
+        zone = zones.get(lookup) or _zone_for_hostname(client, lookup)
+        zones[lookup] = zone
+        for record in client.records(zone["id"], hostname):
+            if record.get("proxied"):
+                raise hosting.HostingError(
+                    f"private_proxied_record: {hostname} is proxied by Cloudflare, which can keep "
+                    "serving cached pages; make it DNS-only and purge the Cloudflare cache "
+                    "before applying share.private")
+
+
+def _refuse_proxied_now(validated: dict, hostname: str, records: list[dict]) -> None:
+    """Re-check just before a DNS change, so rollback never restores a proxied record."""
+    from sandbox.hosting import login_service as login
+    if login.is_private(validated.get("login_service")) and any(
+            record.get("proxied") for record in records):
+        raise hosting.HostingError(
+            f"private_proxied_record: {hostname} became proxied by Cloudflare during the apply")
 
 
 def _route_tag(validated: dict) -> str | None:
@@ -5167,6 +5262,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     str(evidence_error))[:500]
             raise HostRuntimeApplyRefused(reason)
         # Spec 081: a private manifest never runs behind the previous public route.
+        _refuse_proxied_records_for_private(client, validated, runtime)
         previous_caddy = _close_route_for_private_apply(
             edge, caddy_name, previous_caddy, validated=validated, log_path=apply_log)
         local_image_evidence = None
@@ -5266,6 +5362,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                     client.ssl_mode(zone["id"], "strict")
             kind = "AAAA" if ":" in wanted["address"] else "A"
             all_records = client.records(zone["id"], hostname)
+            _refuse_proxied_now(validated, hostname, all_records)
             cname = next((record for record in all_records if record.get("type") == "CNAME"), None)
             if cname and not proxied:
                 raise RuntimeError(

@@ -7,10 +7,43 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import secrets
+import subprocess
+import sys
 
 
 def dispatch_host_if_selected(args) -> bool:
+    try:
+        return _dispatch_host_if_selected(args)
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+        code = getattr(error, "code", None)
+        unknown = bool(getattr(error, "completion_unknown", False)) or (
+            bool(getattr(args, "_server_cli_submission_started", False))
+            and code != "server_cli_capability_unavailable")
+        _failure(args, "server_cli_acceptance_unknown" if unknown else
+                 "server_cli_execution_unavailable", unknown=unknown)
+
+
+def _failure(args, code, *, unknown, receipt=None):
+    request_id = getattr(args, "_server_cli_request_id", None) or getattr(args, "request_id", None)
+    if not isinstance(request_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", request_id) is None:
+        request_id = None
+    payload = {"ok": False, "code": code, "request_id": request_id,
+        "acceptance": "unknown" if unknown else "not_accepted",
+        "error": ("Inspect the original request/job; execution is not safe to replay."
+                  if unknown else "Server execution is unavailable; no controller fallback was attempted.")}
+    job_id = receipt.get("job_id") if isinstance(receipt, dict) else None
+    if isinstance(job_id, str) and re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{32})", job_id):
+        payload["job_id"] = job_id
+    if getattr(args, "json", False):
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(f"{code}: {payload['error']} request_id={request_id or 'unavailable'}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _dispatch_host_if_selected(args) -> bool:
     original = getattr(args, "_server_cli_argv", None)
     remote_name = getattr(args, "remote", None)
     if not original or not remote_name:
@@ -23,8 +56,10 @@ def dispatch_host_if_selected(args) -> bool:
                       (action == "stack" and getattr(args, "image_action", None) == "up"))
     if not selected_apply or not getattr(args, "confirm", False) or getattr(args, "plan", False):
         return False
+    args._server_cli_request_id = (getattr(args, "_server_cli_request_id", None)
+        or getattr(args, "request_id", None) or "host-cli-" + secrets.token_hex(12))
     from sandbox.hosting.host_exec import split_passthrough
-    head, tail = split_passthrough(list(original))
+    _, tail = split_passthrough(list(original))
     if tail is not None:
         raise ValueError("server_cli_unexpected_stdin_or_command")
     # Explicit credential declarations retain their existing closed contract.
@@ -87,10 +122,15 @@ def dispatch_host_if_selected(args) -> bool:
                 argv[index + 1] = relocated
                 index += 1
         index += 1
-    request_id = getattr(args, "request_id", None) or "host-cli-" + secrets.token_hex(12)
+    request_id = args._server_cli_request_id
+    args._server_cli_submission_started = True
     receipt = dispatch_server_cli(remote_name, argv, project_dir=str(root),
         request_id=request_id, timeout_seconds=getattr(args, "timeout", None) or 900)
     # The adapter returns the retained original receipt, including unknown
     # acceptance. Never reinterpret it as execution or delivery success.
+    if not isinstance(receipt, dict):
+        _failure(args, "server_cli_acceptance_unknown", unknown=True)
+    if receipt.get("ok") is False or receipt.get("status") == "acceptance_unknown":
+        _failure(args, "server_cli_acceptance_unknown", unknown=True, receipt=receipt)
     print(json.dumps(receipt, sort_keys=True))
     return True

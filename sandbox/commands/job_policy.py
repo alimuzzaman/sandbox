@@ -169,13 +169,33 @@ def _remote_control_predispatch(args) -> bool:
 
 def _configure_capabilities(parser) -> None:
     parser.add_argument('--json', action='store_true')
+    parser.add_argument('--inspect-host-target', action='store_true',
+                        help='read existing owner target metadata without source staging or job acceptance')
+    parser.add_argument('--origin-remote-name')
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument('--target')
+    selector.add_argument('--name')
+    parser.add_argument('--environment')
 
 
 def cmd_job_capabilities(_cfg, args) -> None:
     """Observe the assembled installed job contract without opening its ledger."""
     from sandbox.application.server_cli import capabilities, ServerCLIUnavailable
+    from sandbox.hosting.target_resolution import TargetRefusal
     try:
-        payload = capabilities()
+        if getattr(args, 'inspect_host_target', False):
+            from sandbox.application.server_cli_targets import inspect_current_server_target
+            payload = inspect_current_server_target(origin_remote_name=getattr(args, 'origin_remote_name', None),
+                target=getattr(args, 'target', None), name=getattr(args, 'name', None),
+                environment=getattr(args, 'environment', None))
+        else:
+            if any(getattr(args, field, None) is not None for field in
+                   ('origin_remote_name', 'target', 'name', 'environment')):
+                raise ServerCLIUnavailable('target selectors require the installed inspection mode')
+            payload = capabilities()
+    except TargetRefusal as exc:
+        payload = {'schema_version': 1, 'ok': False, 'code': exc.code,
+                   'error': 'owner target metadata is unavailable; no job was accepted'}
     except (ServerCLIUnavailable, OSError):
         payload = {'schema_version': 1, 'ok': False, 'code': 'server_cli_capability_unavailable',
                    'error': 'installed server CLI capability is unavailable'}

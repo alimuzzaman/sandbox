@@ -132,10 +132,17 @@ def capabilities() -> dict:
     revision = owner.runtime_revision
     if not re.fullmatch('[0-9a-f]{24}', revision):
         raise ServerCLIUnavailable('installed CLI revision is unavailable')
+    from sandbox.application.server_cli_targets import installed_inspector, CONTRACT as INSPECTION_CONTRACT
+    try:
+        installed_inspector()
+        inspection = [INSPECTION_CONTRACT]
+    except ServerCLIUnavailable:
+        inspection = []
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
             'target_metadata': _receiver_routing_metadata(owner),
+            'inspection_capabilities': inspection,
             'capabilities': ['job.exec', 'job.execution-policy.v1', CONTRACT]}
 
 
@@ -578,6 +585,17 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     if not isinstance(entry, dict) or entry.get('joined') is not True or entry.get('control_transport') != 'tailscale':
         raise ServerCLIUnavailable('server CLI requires an admitted joined Tailnet registration')
     identity = authenticated_target_identity(remote_name)
+    # A fresh identity read may have safely reconnected the observed revision
+    # cache. Use that current registration, preserving the original owner pin.
+    current = _remote.get_remote(remote_name)
+    if (not isinstance(current, dict) or current.get('joined') is not True
+            or current.get('control_transport') != 'tailscale'
+            or (current.get('mcp_service') or {}).get('ownership_marker') !=
+               (entry.get('mcp_service') or {}).get('ownership_marker')
+            or ('control_identity' in current and current['control_identity'] !=
+                {'schema_version': 1, 'target_identity': identity['target_identity']})):
+        raise ServerCLIUnavailable('joined owner registration changed during identity observation')
+    entry = current
     transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
         ssh_run=_remote.ssh_run, remote_lookup=lambda name: entry if name == remote_name else None,
         remote_sb_path=_remote.remote_sb_path)

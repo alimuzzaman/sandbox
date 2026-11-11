@@ -110,3 +110,25 @@ stdin/interactive options refuse before lookup or acceptance; normal synchronous
 CLI contracts remain unchanged. A local host-exec adapter may retain the original
 stdin FD with the validated local argv/environment ports, but that alone is not
 proof of an end-to-end remote stdin transport.
+
+`job-capabilities --inspect-host-target --origin-remote-name NAME --name SLUG`
+or `--target PROJECT/ENVIRONMENT` composes the installed owner's fixed read-only
+target inspector. Optional `--environment` narrows name selection. The inspector
+must actually be installed; its absence reports capability unavailable. This
+mode observes existing server lifetime, successful summary, published and
+original source commits, native mutation keys and five nonsecret container
+labels. It creates no job, source checkout, target claim or execution grant.
+The schema1 response includes service name/index/container ID and a selector
+digest. It excludes container environments and provider values.
+
+`sandbox.application.server_cli_targets.observe_server_cli_target(remote_name,
+*, target=None, name=None, environment=None, budget_seconds=45)` performs that
+fixed read through the joined keyless Tailnet transport, after authenticated
+machine identity and current owner/revision validation. It needs no controller
+project directory or local stack history. The returned metadata cannot select a
+local process channel or authorize a later job. Execution must independently
+resolve and revalidate the retained selector under genuine current-job proof.
+Discovery lists the optional contract in `inspection_capabilities`, separately
+from executable job contracts so older strict execution consumers remain valid.
+No no-source job admission or remote original-stdin handoff is enabled by this
+metadata port.

@@ -54,9 +54,9 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(kwargs["request_id"], "original")
         self.assertEqual(json.loads(output.getvalue()), self.submit.return_value)
 
-    def test_observation_validation_plan_and_exec_do_not_stage_cwd_or_consume_stdin(self):
+    def test_observation_validation_and_plan_do_not_stage_cwd_or_consume_stdin(self):
         for action, subaction in (("stack", "list"), ("logs", None), ("status", None),
-                ("diagnose", None), ("validate", None), ("plan", None), ("exec", None)):
+                ("diagnose", None), ("validate", None), ("plan", None)):
             with self.subTest(action=action):
                 self.args.action, self.args.image_action = action, subaction
                 self.args.project_dir = "/nonexistent/not-a-checkout"
@@ -127,7 +127,7 @@ class OwnerTargetTests(unittest.TestCase):
             (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat(),
             ("host", "exec"), "box", MappingProxyType({"front_door": "nginx"}), self.owner)
         self.current = self.enterContext(patch.object(sdk, "validate_owner_current", return_value=self.context))
-        self.enterContext(patch.object(sdk, "server_cli_context_if_selected", return_value=self.context))
+        self.selected_context = self.enterContext(patch.object(sdk, "server_cli_context_if_selected", return_value=self.context))
         self.entry = targets.selected_owner_target("box")
 
     def test_only_original_alias_selects_owner_and_no_dict_can_grant_it(self):
@@ -267,6 +267,14 @@ class ServerSelectionTests(OwnerTargetTests):
     def selected(self):
         return selection.read_owner_exec_selection(self.entry, name="named")
 
+    def bind_original_selector(self):
+        digest = "sha256:" + self.selected().fingerprint
+        self.context = replace(self.context, target_selector_digest=digest)
+        self.current.return_value = self.context
+        self.selected_context.return_value = self.context
+        self.entry = targets.selected_owner_target("box")
+        return digest
+
     def test_server_inventory_resolves_without_local_history_and_uses_actual_alias_keys(self):
         with patch("sandbox.hosting.stack_registry.read", side_effect=AssertionError("local registry")), \
                 patch("sandbox.core._hosting.load_host_state", side_effect=AssertionError("local history")):
@@ -278,6 +286,7 @@ class ServerSelectionTests(OwnerTargetTests):
 
     def test_owner_exec_prepare_uses_selected_server_manifest_without_laptop_history(self):
         from sandbox.commands import host_exec
+        self.bind_original_selector()
         args = Namespace(remote="box", name="named", target=None, environment=None,
             project_dir="/unrelated/controller", exec_argv=["id", "-un"], service="web", timeout=30, json=True)
         with patch("sandbox.hosting.stack_registry.read", side_effect=AssertionError("local registry")), \
@@ -289,6 +298,58 @@ class ServerSelectionTests(OwnerTargetTests):
         self.assertEqual(shlex.split(prefix), ["docker", "exec", "-i", "f" * 12])
         self.assertNotIn("environment.env", prefix)
         self.assertIs(type(entry), targets.OwnerHostTarget)
+
+    def test_owner_exec_without_original_selector_refuses_before_metadata_or_effects(self):
+        from sandbox.commands import host_exec
+        args = Namespace(remote="box", name="named", target=None, environment=None,
+            exec_argv=["id"], service="web", timeout=30, json=True)
+        with self.assertRaises(host_exec.ExecRefusal) as refusal:
+            host_exec._prepare(args)
+        self.assertEqual(refusal.exception.code, "server_cli_target_binding_unavailable")
+        self.process.assert_not_called()
+
+    def test_held_exec_contends_with_actual_native_alias_locks(self):
+        from sandbox.commands import host_exec
+        from sandbox.hosting.recovery.repository import RecoveryRepository
+        repository = RecoveryRepository(self.home / "hosts.json", self.home / "native-locks")
+        self.bind_original_selector()
+        selected = selection.read_owner_exec_selection(self.entry, name="named",
+            expected_selector_digest=self.context.target_selector_digest)
+        request = host_exec.ExecRequest(selected.target, "web", ("id",), owner_selection=selected)
+        lease = {"path": str(self.home / "lease"), "token": "a" * 32, "owner": "b" * 32}
+        with patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+                patch("sandbox.hosting.target_lease.acquire", return_value=lease) as acquire:
+            with host_exec._execution_scope(request, self.entry):
+                for key in selected.native_keys:
+                    with self.assertRaises(TimeoutError), repository.effect_lock(key, timeout_seconds=0):
+                        self.fail("native alias was not held")
+            acquire.assert_called_once()
+        # The same actual native locks become available after complete exit.
+        for key in selected.native_keys:
+            with repository.effect_lock(key, timeout_seconds=0):
+                pass
+        self.assertTrue(self.process.call_args.args[1].endswith(" release"))
+
+    def test_native_exit_failure_does_not_retire_physical_fence(self):
+        from sandbox.commands import host_exec
+        from contextlib import contextmanager
+        self.bind_original_selector()
+        selected = selection.read_owner_exec_selection(self.entry, name="named",
+            expected_selector_digest=self.context.target_selector_digest)
+        request = host_exec.ExecRequest(selected.target, "web", ("id",), owner_selection=selected)
+        @contextmanager
+        def broken_exit(*args, **kwargs):
+            yield
+            raise OSError("synthetic native unlock failure")
+        repository = Mock()
+        repository.effect_lock.side_effect = broken_exit
+        with patch("sandbox.hosting.recovery.repository.RecoveryRepository", return_value=repository), \
+                patch("sandbox.hosting.target_lease.acquire", return_value={
+                    "path": "synthetic", "token": "a" * 32, "owner": "b" * 32}), \
+                self.assertRaises(OSError):
+            with host_exec._execution_scope(request, self.entry):
+                pass
+        self.assertFalse(any(call.args[1].endswith(" release") for call in self.process.call_args_list))
 
     def test_owner_exec_refuses_a_service_without_a_unique_first_container(self):
         selected = self.selected()

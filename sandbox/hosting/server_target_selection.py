@@ -95,9 +95,10 @@ def inspect_server_exec_target(*, origin_remote_name, target=None, name=None, en
     owner = reader()
     if type(owner) is not server_cli.ServerCliOwner:
         raise server_cli.ServerCLIUnavailable("current installed owner metadata is unavailable")
+    deadline = time.monotonic() + 30
 
     def check():
-        if reader() != owner:
+        if time.monotonic() >= deadline or reader() != owner:
             _refuse()
 
     def run(argv):
@@ -108,7 +109,7 @@ def inspect_server_exec_target(*, origin_remote_name, target=None, name=None, en
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
         result = BoundedProcessRunner(max_output=65536, terminate_on_output_limit=True).run(
-            tuple(argv), cwd=owner.home, env=env, timeout=30)
+            tuple(argv), cwd=owner.home, env=env, timeout=max(0.001, deadline - time.monotonic()))
         check()
         if result.termination_reason is not None or result.stdout_truncated or result.stderr_truncated:
             _refuse()
@@ -135,8 +136,10 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
     from sandbox.hosting.host_exec import busy_reason
     if bool(target) == bool(name):
         raise TargetRefusal("host_target_invalid", "pass exactly one of --target or --name")
-    if name and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name) is None:
+    if name and (not isinstance(name, str) or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name) is None):
         raise TargetRefusal("host_target_invalid", "invalid stack name")
+    if target is not None and not isinstance(target, str):
+        raise TargetRefusal("host_target_invalid", "invalid server target")
     pair = parse_target(target) if target else None
     home = Path(owner.sandbox_home)
     inventory = Store(home).peek(int(time.time()))

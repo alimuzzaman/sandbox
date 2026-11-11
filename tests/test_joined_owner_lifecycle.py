@@ -15,7 +15,8 @@ class JoinedOwnerLifecycleTest(unittest.TestCase):
     def record(self):
         return {'joined': True, 'control_access': 'tailnet', 'control_transport': 'tailscale',
             'ssh': 'alim@100.64.1.2', 'tailscale_host': '100.64.1.2',
-            'mcp_service': {'ownership_marker': remote._remote_mcp_marker('100.64.1.2', 9174)}}
+            'mcp_service': {'ownership_marker': remote._remote_mcp_marker('100.64.1.2', 9174),
+                            'runtime_revision': 'a' * 24}}
 
     def test_confirmed_owner_refresh_preserves_private_file_without_controller_token(self):
         with mock.patch.object(remote, '_remote_mcp_runtime_revision', return_value='b' * 24), \

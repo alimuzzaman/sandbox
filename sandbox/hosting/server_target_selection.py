@@ -81,7 +81,7 @@ def read_owner_exec_selection(entry, *, target=None, name=None, environment=None
     pair = parse_target(target) if target else None
     home = Path(context.owner.sandbox_home)
     inventory = Store(home).peek(int(time.time()))
-    if inventory.get("truncated") or inventory.get("invalid"):
+    if inventory.get("truncated"):
         _refuse()
     matches = [item for item in inventory["records"] if
         ((item.get("project"), item.get("environment")) == pair if pair else item.get("slug") == name)]
@@ -96,9 +96,9 @@ def read_owner_exec_selection(entry, *, target=None, name=None, environment=None
     compose_project = compose_project_for(project, env)
     if lifetime.get("compose_project") != compose_project:
         _refuse()
-    records = read_server_records(home / "runtime")
-    if records["partial_reasons"]:
+    if any(item.get("compose_project") == compose_project for item in inventory.get("invalid", ())):
         _refuse()
+    records = read_server_records(home / "runtime")
     summaries = [item for item in records["targets"] if
                  (item["project"], item["environment"]) == (project, env)]
     if len(summaries) != 1:

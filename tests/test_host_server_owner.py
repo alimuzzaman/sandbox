@@ -210,7 +210,7 @@ class ServerSelectionTests(OwnerTargetTests):
         self.enterContext(patch("sandbox.hosting.panel_records.read_server_records",
             side_effect=lambda *a, **k: {"targets": [self.summary], "partial_reasons": []}))
         self.enterContext(patch("sandbox.hosting.recovery.repository.RecoveryRepository.load", side_effect=lambda: self.state))
-        self.labels = ["sandbox-host-project-dev", f"{self.compose},{self.override}", str(self.source)]
+        self.labels = ["sandbox-host-project-dev", f"{self.compose},{self.override}", str(self.source), "web", "1"]
         self.published_commit = "e" * 40
         def output(owner, command, **kwargs):
             argv = shlex.split(command)
@@ -243,12 +243,22 @@ class ServerSelectionTests(OwnerTargetTests):
             project_dir="/unrelated/controller", exec_argv=["id", "-un"], service="web", timeout=30, json=True)
         with patch("sandbox.hosting.stack_registry.read", side_effect=AssertionError("local registry")), \
                 patch("sandbox.core._hosting.load_host_state", side_effect=AssertionError("local history")), \
-                patch.object(host_exec, "_deployed_services", return_value=["web"]):
+                patch.object(host_exec, "_deployed_services", side_effect=AssertionError("runtime env rendering")):
             request, entry, prefix = host_exec._prepare(args)
         self.assertIsNotNone(request.owner_selection)
         self.assertEqual(request.target.project, "project")
-        self.assertIn(str(self.compose), prefix)
+        self.assertEqual(shlex.split(prefix), ["docker", "exec", "-i", "f" * 12])
+        self.assertNotIn("environment.env", prefix)
         self.assertIs(type(entry), targets.OwnerHostTarget)
+
+    def test_owner_exec_refuses_a_service_without_a_unique_first_container(self):
+        selected = self.selected()
+        with self.assertRaises(TargetRefusal):
+            selected.exec_prefix("another-service")
+        self.labels[4] = "2"
+        selected = self.selected()
+        with self.assertRaises(TargetRefusal):
+            selected.exec_prefix("web")
 
     def test_unknown_apply_or_active_native_owner_refuses_without_execution(self):
         self.summary["last_apply"]["status"] = "unverified"

@@ -76,10 +76,9 @@ def _prepare(args) -> tuple[ExecRequest, dict, str]:
         request = ExecRequest(target=selected.target, service=service, argv=tuple(argv),
             timeout_seconds=min(timeout, remaining), capture=bool(getattr(args, "json", False)),
             owner_selection=selected)
-        prefix = selected.compose_prefix()
-        services = _deployed_services(entry, prefix)
-        if service not in services:
-            raise ExecRefusal(host_exec.UNKNOWN_SERVICE, "service is absent from the selected server target")
+        # Live service/container labels are part of the current selector. This
+        # branch never renders Compose with the provider-bearing env file.
+        prefix = selected.exec_prefix(service)
         return request, entry, prefix
     state = hosting.load_host_state()
     target = target_resolution.resolve(
@@ -159,7 +158,9 @@ def cmd_host_exec(args) -> None:
     as_json = bool(getattr(args, "json", False))
     try:
         request, entry, prefix = _prepare(args)
-        command = host_exec.remote_command(prefix, request)
+        command = (shlex.join(["timeout", "--kill-after=10", str(request.timeout_seconds), "env"]) +
+                   " " + prefix + " " + shlex.join(request.argv) if request.owner_selection is not None else
+                   host_exec.remote_command(prefix, request))
         process_options = {}
         if is_owner_target(entry):
             from sandbox.application.server_cli import owner_command_args, owner_environment

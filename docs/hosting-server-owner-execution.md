@@ -28,7 +28,7 @@ personal store and trusted hosting consumers.
 
 Existing hosted exec targets can be selected without the invoking controller's
 stack registry or hosting history. The server selector cross-checks the lifetime
-copy and tuple, successful server apply summary, deployed Git revision and three
+copy and tuple, successful server apply summary, deployed Git revision and five
 specific Compose labels. It never reads container environments or the runtime
 environment file. It requires known committed Compose source files and retains
 the actual runtime override. For a subtree publication, the successful summary
@@ -50,6 +50,12 @@ retained job, including a reissued same-server target. Apply withholds provider
 and runtime rollback while the original child may still write, and keeps its
 physical lease. A timeout of the exec client does not prove container-side
 descendants stopped, so owner exec keeps that lease as well.
+
+Owner exec selects the requested service's unique first running container from
+those verified labels. It executes that exact container ID without asking
+Compose to render configuration or read the runtime environment file just to
+discover service names. The original SSH/Compose path stays intact for existing
+controller-local execution.
 
 `hosting.server_target_selection.inspect_server_exec_target` is a metadata-only
 receiver composition port. It uses the SDK's current installed owner reader,

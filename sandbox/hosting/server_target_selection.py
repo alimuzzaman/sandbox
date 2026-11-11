@@ -34,6 +34,7 @@ class OwnerExecSelection:
     source_dir: str
     compose_files: tuple[str, ...]
     native_keys: tuple[str, ...]
+    services: tuple[tuple[str, int, str], ...]
     fingerprint: str
     _entry: object = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
@@ -47,18 +48,13 @@ class OwnerExecSelection:
             _refuse()
         return self
 
-    def compose_prefix(self):
+    def exec_prefix(self, service):
         self.require_current()
-        from sandbox.hosting.lifetime.hoststore import compose_project_for
-        home = self._entry.sandbox_home()
-        env = str(Path(home) / "runtime" / "hosts" / self.target.project /
-                  self.target.environment / "environment.env")
-        argv = ["env", "SANDBOX_HOST_ENV_FILE=" + env, "docker", "compose",
-                "--env-file", env, "-p", compose_project_for(
-                    self.target.project, self.target.environment)]
-        for path in self.compose_files:
-            argv.extend(["-f", path])
-        return shlex.join(argv)
+        matches = [identifier for name, index, identifier in self.services
+                   if name == service and index == 1]
+        if len(matches) != 1:
+            raise TargetRefusal("host_exec_unknown_service", "selected service has no unique running first container")
+        return shlex.join(["docker", "exec", "-i", matches[0]])
 
 
 def _output(run, argv):
@@ -125,6 +121,8 @@ def inspect_server_exec_target(*, origin_remote_name, target=None, name=None, en
         "copy_id": snapshot["copy_id"], "source_commit": snapshot["source_commit"],
         "source_origin_commit": snapshot["source_origin_commit"], "source_dir": snapshot["source_dir"],
         "compose_files": list(snapshot["compose_files"]), "native_keys": list(snapshot["native_keys"]),
+        "services": [{"name": name, "index": index, "container_id": identifier}
+                     for name, index, identifier in snapshot["services"]],
         "selector_digest": "sha256:" + snapshot["fingerprint"]}
 
 
@@ -203,23 +201,35 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
                          compose_project, "--format", "{{.ID}}"]).splitlines()
     if not ids or len(ids) > 64 or any(re.fullmatch(r"[0-9a-f]{12,64}", item) is None for item in ids):
         _refuse()
-    # Only three known nonsecret labels are requested. No container environment,
+    # Only five known nonsecret labels are requested. No container environment,
     # full inspect/config output or runtime environment file is read or returned.
     projection = ('[{{json (index .Config.Labels "com.docker.compose.project")}},'
                   '{{json (index .Config.Labels "com.docker.compose.project.config_files")}},'
-                  '{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}]')
+                  '{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},'
+                  '{{json (index .Config.Labels "com.docker.compose.service")}},'
+                  '{{json (index .Config.Labels "com.docker.compose.container-number")}}]')
     lines = _output(run, ["docker", "inspect", "--format", projection, *ids]).splitlines()
     if len(lines) != len(ids):
         _refuse()
     try:
         labels = [json.loads(line) for line in lines]
-        if any(item != labels[0] for item in labels):
+        if any(not isinstance(item, list) or len(item) != 5 or item[:3] != labels[0][:3] for item in labels):
             _refuse()
-        observed_project, config_files, working = labels[0]
+        observed_project, config_files, working = labels[0][:3]
         if observed_project != compose_project:
             _refuse()
         paths = tuple(config_files.split(","))
     except (ValueError, TypeError, AttributeError):
+        _refuse()
+    services = []
+    for identifier, row in zip(ids, labels):
+        service, index = row[3:]
+        if (not isinstance(service, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", service) is None
+                or not isinstance(index, str) or re.fullmatch(r"[1-9][0-9]{0,3}", index) is None):
+            _refuse()
+        services.append((service, int(index), identifier))
+    services = tuple(sorted(services))
+    if len({(name, index) for name, index, _ in services}) != len(services):
         _refuse()
     override = home / "runtime" / "hosts" / project / env / "compose.override.yml"
     if not 2 <= len(paths) <= 33 or paths[-1] != str(override):
@@ -243,7 +253,7 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
     digest = hashlib.sha256(json.dumps({"lifetime": lifetime, "summary": summary,
         "machine": owner.target_identity, "marker": owner.ownership_marker,
         "runtime_revision": owner.runtime_revision,
-        "containers": sorted(ids), "labels": labels[0], "keys": keys},
+        "services": services, "labels": labels[0][:3], "keys": keys},
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     check()
     resolved = ResolvedTarget(remote_name, project, env,
@@ -251,4 +261,4 @@ def _read_exec_snapshot(owner, remote_name, *, target, name, environment, run, c
     native_keys = tuple(sorted(set(keys + [resolved.state_key])))
     return {"target": resolved, "copy_id": lifetime.get("copy_id"), "source_commit": commit,
         "source_origin_commit": lifetime.get("commit"), "source_dir": str(source),
-        "compose_files": paths, "native_keys": native_keys, "fingerprint": digest}
+        "compose_files": paths, "native_keys": native_keys, "services": services, "fingerprint": digest}

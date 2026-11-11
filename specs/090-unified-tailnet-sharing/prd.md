@@ -1,6 +1,6 @@
 # Product Requirements Draft: Unified tailnet sharing
 
-**Status**: Ready for specification
+**Status**: Authority decision refined, independent revalidation pending
 
 **Created**: 2026-11-11
 
@@ -10,9 +10,9 @@
 
 **Drafting Model**: Personal Codex GPT-6.1-Sol, high; root-authored, no execution helpers.
 
-**Final Validation**: `PASS`, independent personal Codex GPT-6.1-Sol high readiness review.
+**Final Validation**: `PENDING` for the revised owner-network delegation model. The earlier independent personal Sol high PASS covered the superseded actor-ACL-preservation draft.
 
-**Validated On**: 2026-11-11
+**Validated On**: N/A for this revision
 
 **Artifact Owner**: `speckit-refine`
 
@@ -37,7 +37,7 @@ The user explicitly requested one share system and a convenience script. Root ow
 
 - One canonical `sb host share` engine and common create/list/revoke lifecycle for all supported target kinds.
 - A target choice of stack, recorded target with declared service/entry/path, or verified tailnet HTTP(S) URL.
-- Explicit delegation of the operator's allowed destination scope, with no increase in their existing rights.
+- Explicit delegation by a currently admitted server-owner operator of the receiver's own network reachability, bounded to the selected service/path and reviewable policy revision.
 - Useful web application behavior through the actual receiver, including scoped navigation, assets and supported WebSockets.
 - Finite expiry, explicit use control, revocable gate sessions, safe uncertainty reporting and recovery.
 
@@ -66,15 +66,15 @@ The user explicitly requested one share system and a convenience script. Root ow
 
 ### Scenario 3: A verified tailnet web destination
 
-- **Starting state**: A destination is HTTP(S), its actual server-side Tailscale node identity and DNS-to-IP binding can be established, and the operator has authority for that node/service/scope.
+- **Starting state**: A destination is HTTP(S), its actual server-side Tailscale node identity and DNS-to-IP binding can be established, the operator is currently admitted to the receiver with owner rights, and the receiver's own network identity may reach that node/service.
 - **User action**: Request a share for the URL with an explicit scope, expiry and use allowance.
 - **Expected outcome**: The canonical gate admits a target-bound share. The recipient can use the approved scope without receiving the operator's tailnet credentials or authority over other node ports or services.
 
 ### Scenario 4: Changed destination or uncertain authority
 
-- **Starting state**: A public host resembles a tailnet name, DNS answers change, an address is reused by another node, ACL evidence is missing/denied, or the receiver cannot establish the saved actor/target binding.
+- **Starting state**: A public host resembles a tailnet name, DNS answers change, an address is reused by another node, the operator is no longer admitted, receiver connectivity is unknown/denied, or the receiver cannot establish the saved actor/target/policy binding.
 - **User action**: Create or use the affected share.
-- **Expected outcome**: Admission or access refuses before contacting an unverified destination. No hostname suffix, address prefix or server-wide reachability alone establishes operator authority. Failure never silently retargets an existing grant.
+- **Expected outcome**: Admission or access refuses before contacting an unverified destination. No hostname suffix, address prefix or network connection alone establishes operator admission or target identity. Failure never silently retargets an existing grant.
 
 ### Scenario 5: Navigation, assets and application sign-in
 
@@ -91,8 +91,8 @@ The user explicitly requested one share system and a convenience script. Root ow
 ## Proposed Product Behavior
 
 1. The canonical target choice is stack, recorded target plus entry/path, or verified tailnet URL. The same management and authenticated transport serve each kind. A URL share uses the existing authentication gate and session lifecycle, not a parallel listener or login system.
-2. Generic URL admission requires evidence from the actual receiving server's Tailscale node inventory, an unambiguous address-to-node binding and applicable ACL/actor authority for the selected scheme, service/port and path. A caller's assertion or merely successful server reachability is insufficient. Missing, stale or contradictory evidence refuses safely.
-3. Approved proxy destination configuration and actor/target identity are immutable for a grant. DNS changes, redirects, node replacement or changed authorization must not redirect its authority. Loss of required binding/authorization prevents further access; an intended destination change requires a newly authorized grant.
+2. A currently admitted owner operator may delegate the receiving server's network reachability to an explicit bounded HTTP(S) bearer grant. Operator admission must come from the actual ControlGate-issued actor receipt and current membership revalidation. Target identity must come from current trusted receiver Tailscale node/netmap and DNS-to-address observations, not tailnet-name configuration. The receiver must itself be authorized to reach the selected service under its own network identity. Unknown identity or connectivity refuses. The operator's direct ACL to that destination is not a prerequisite and must not be claimed as preserved.
+3. Approved proxy destination configuration, authenticated actor identity, receiver identity and explicit owner-delegation policy revision are immutable for a grant. DNS changes, redirects, node replacement or changed authorization must not redirect its authority. Loss of required binding/authorization prevents further access; an intended destination change requires a newly authorized grant.
 4. HTTP and HTTPS are the only generic URL protocols. Unsupported schemes, embedded user credentials, invalid/ambiguous authorities and unverified destinations refuse. HTTPS preserves destination identity verification; the gate must not disable TLS checks to make a target work.
 5. Every new generic-URL grant has finite expiry and a finite use allowance. Existing stack/recorded-target use policies retain their current semantics. Shared reporting makes lifetime, allowance, scope and recovery status clear without claiming that established application sessions are revoked globally.
 6. A path-scoped grant authorizes only its declared web behavior. Normalization, asset retrieval, redirects, cookies, WebSocket handshakes and subsequent forwarding must preserve that boundary at the actual receiver. An incompatible application receives a bounded unsupported result rather than a broader grant.
@@ -109,6 +109,8 @@ The user explicitly requested one share system and a convenience script. Root ow
 - Source SDK release, host jobs, runtime activation, credentials, deployments and unpark operations remain unauthorized. Root owns integration and all test execution for this work.
 - Independent readiness review precedes formal specification. Authentication/authorization review and owner sign-off precede any eventual release; source and fixture results do not establish installed capability.
 - Existing canonical short links, per-host gate sessions, operator opt-in, companion recovery fences, target leases and token-free audits must retain their guarantees. No parity-sensitive fallback is removed as a side effect of planning.
+- User/coordinator authority clarification: admitted tailnet operators receive this server's owner/sudo/secret-use rights. Delegating that server's verified network reachability is intentional, including destinations the operator's own node might not reach directly. This is a consequential public bearer delegation and MUST be disclosed in mandatory human authentication/release review before enablement. It does not authorize arbitrary public, LAN, loopback or metadata targets, global ACL edits or application-auth bypass.
+- The actor source is the actual ControlGate receipt and member revalidation. A client field, log attribution dictionary, serialized receipt or controller label cannot substitute. Exact target and policy-revision binding belongs to the formal source contract. No new authentication server is permitted.
 
 ## Decisions
 
@@ -116,8 +118,9 @@ The user explicitly requested one share system and a convenience script. Root ow
 |----------|--------|-----------|--------------|
 | Canonical system | Extend `sb host share` and its existing gate/management transport | One creation and recovery model for every target kind | Explicit user/coordinator requirement |
 | Target kinds | Stack; recorded target plus entry/path; verified tailnet HTTP(S) URL | Covers whole-stack and individual-link intent | Explicit user/coordinator requirement |
-| Network authority | Actual receiver node/DNS-IP binding plus ACL and actor authority | A reachable server must not act as a confused deputy | Explicit coordinator requirement |
-| Scope and compatibility | Bounded scope at receiver; refuse unsupported flows without widening | Preserve operator rights and existing companion fences | Explicit coordinator requirement |
+| Network authority | Currently admitted owner operator delegates the receiver's own verified network reachability | Intentionally permits receiver-owner delegation; does not claim preservation of the operator's direct target ACL | Explicit user/coordinator clarification |
+| Actor and policy source | Genuine current ControlGate-issued admission and explicit delegation-policy revision | Clients and attribution records cannot manufacture owner authority | Explicit user/coordinator clarification |
+| Scope and compatibility | Bounded scope at receiver; refuse unsupported flows without widening | Preserve current owner admission policy and companion fences | Explicit coordinator requirement |
 | URL grant lifetime | Finite expiry and finite use allowance; existing kinds retain current policies | Bound new delegation while preserving current operator behavior | Coordinator finite-use requirement and preservation constraint |
 | Application login | Retain application authentication; no generic URL autologin fallback | Sharing transport is not authority to bypass the application | Explicit coordinator requirement |
 | Wrapper owner | Root, using the current SDK only | Convenience must not create another share engine | Explicit coordinator ownership |
@@ -125,12 +128,12 @@ The user explicitly requested one share system and a convenience script. Root ow
 
 ## Open Questions
 
-No blocking product choice is introduced beyond the confirmed scope above. Precise admissible evidence freshness, lifetime/use bounds, receiver compatibility rules and capability negotiation require formal specification and security design. They must not be invented by the wrapper or treated as runtime approval. Independent readiness review may reopen a product decision before specification.
+No blocking product choice remains in the clarified authority model. Precise proof freshness, actor transport, lifetime/use bounds, receiver compatibility and capability negotiation remain formal security design work. The changed PRD requires independent readiness revalidation before regenerating the earlier specification/plan. The wrapper must not invent these contracts or treat source design as runtime approval.
 
 ## Acceptance Outcomes
 
 - **AO1, unified management**: A supported example of each target kind can be created, listed and revoked through the same operator workflow; the wrapper delegates to that engine, with no separate issuer or authentication endpoint.
-- **AO2, verified delegation**: Creation and later access refuse public lookalikes, node/address replacement, changed DNS binding, missing/stale proof and actor/ACL-denied destinations. Authorized URL examples work through the receiving server without wider operator rights.
+- **AO2, verified owner delegation**: Creation refuses non-admitted/stale actors and unverified targets; later access refuses invalid target/policy binding, node/address replacement and unknown or denied receiver connectivity. A currently admitted owner can authorize a bounded verified tailnet service that the receiver may reach even when the operator's own node cannot directly reach it. The result explicitly delegates receiver-owner network authority rather than claiming end-user target ACL preservation.
 - **AO3, scope isolation**: A recipient can browse a declared path and its supported assets while attempts through traversal, alternate host/port, redirects or cookies cannot reach another path/service or the panel. Unsupported browser flows refuse without widened scope.
 - **AO4, application boundaries**: An application requiring its own login still requires it through the URL share. No generic URL triggers WordPress administrator login or exposes a raw mailbox; existing explicitly declared stack access remains intact.
 - **AO5, lifetime and revoke**: Concurrent admission attempts enforce each grant's applicable use policy; every generic-URL grant has a finite allowance. Expiry/revoke deny new sessions and further gated HTTP/WebSocket access, including already-open gated streams, within a specified acceptance bound. Recovery after a lost reply uses original IDs and reports incomplete cleanup honestly.
@@ -139,13 +142,13 @@ No blocking product choice is introduced beyond the confirmed scope above. Preci
 
 ## Risks and Assumptions
 
-- **Risk**: Receiver ACL authority can exceed the initiating operator's rights. Reachability alone must never authorize delegation.
+- **Risk**: A public bearer grant intentionally delegates the receiver's network authority, which can exceed the initiating person's direct target ACL. Scope, genuine owner admission and explicit policy binding must constrain it; mandatory human authentication/release review must approve this consequence before activation.
 - **Risk**: A verified node can serve many ports, applications or users. Binding the node alone is insufficient without service and path authority.
 - **Risk**: DNS churn, node reuse and redirects can change the real destination after issuance. Access must fail safely rather than follow unverified changes.
 - **Risk**: Absolute URLs, cross-origin sign-in, cookies, WebSockets and streaming can be incompatible with strict scope; compatibility must be demonstrated, not promised universally.
 - **Risk**: A secret already embedded in a URL can leak through an upstream access log or browser navigation. Formal design must identify safe supported input/forwarding behavior before claiming AO6.
-- **Assumption**: Supported receiving servers can obtain sufficient authenticated Tailscale and operator authority evidence. If not, that receiver cannot support generic URL grants; the existing target kinds remain available.
-- **Assumption**: Non-tailnet recipients are trusted teammates, as decided for 088. That does not authorize another actor's targets, change application login rights or remove the canonical gate's lifetime boundary.
+- **Assumption**: Supported receiving servers can obtain genuine current ControlGate admission and trusted Tailscale node/address/netmap plus receiver-connectivity evidence. If unavailable, generic grants refuse while existing supported target kinds remain available.
+- **Assumption**: Non-tailnet recipients are trusted teammates, as decided for 088. Receiving an owner-authorized bearer grant confers only its explicit scope, never general receiver control, another grant's management, application login bypass or lifetime extension.
 
 ## Readiness for Specification
 
@@ -157,6 +160,6 @@ No blocking product choice is introduced beyond the confirmed scope above. Preci
 - [x] Acceptance outcomes identify observable positive and negative results.
 - [x] No blocking open product question is currently identified.
 - [x] No implementation plan, task list, wire contracts, or code changes are included.
-- [x] The latest independent readiness review verdict is `PASS`.
+- [ ] The revised owner-network authority model has an independent readiness `PASS`.
 
-**Readiness**: `READY FOR SPECKIT`. Document readiness does not establish implementation, installed support or authentication acceptance. The next explicit workflow is `speckit-specify`; no downstream artifacts or runtime enablement are created by this refinement.
+**Readiness**: `NOT READY`, pending independent revalidation of the explicitly revised authority model. Prior specification/Phase0 plan clauses requiring the initiating person's destination ACL are superseded product intent and must be regenerated through the specification/planning workflow after readiness PASS. No forwarding, issuance, credentials or runtime enablement is authorized by this refinement.

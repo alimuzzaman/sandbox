@@ -197,3 +197,97 @@ class JoinedStatusTruthTest(unittest.TestCase):
         self.assertEqual(value['control_admission']['state'], 'admitted')
         self.assertEqual(value['ssh_access']['state'], 'denied')
         self.assertFalse(value['compatibility']['ok'])
+
+
+class JoinedObservationBudgetTest(unittest.TestCase):
+    def observe(self, *, differing=False, discovery=1, compatibility=0.25):
+        from sandbox.resources import context
+        clock = [100.0]
+        record = {'mcp_service': {'ownership_marker': 'a' * 24, 'runtime_revision': 'b' * 24}}
+        def lookup(*args, **kwargs):
+            clock[0] += discovery
+            return record
+        def compatible(*args, **kwargs):
+            clock[0] += compatibility
+            return {'compatibility': {'ok': True, 'state': 'compatible'}}
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch('time.monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(Path, 'home', return_value=Path(home)), \
+                mock.patch.object(remote, 'get_remote', side_effect=lookup), \
+                mock.patch.object(remote, '_remote_mcp_runtime_revision', return_value=('d' if differing else 'b') * 24), \
+                mock.patch('sandbox.remote_runtime.verdict.strict_requested', return_value=False), \
+                mock.patch.object(remote, 'remote_runtime_status_for_operation', side_effect=compatible) as probe, \
+                mock.patch.object(remote, 'remote_host_memory_request', return_value=evidence()) as request:
+            try:
+                result = context.host_memory_status('box', budget_seconds=2)
+            except RemoteProtocolError as exc:
+                result = exc
+            return result, probe, request
+
+    def test_status_transport_and_compatibility_receive_only_original_remainder(self):
+        for differing in (False, True):
+            with self.subTest(differing=differing):
+                result, probe, request = self.observe(differing=differing)
+                self.assertEqual(result['data']['target_identity'], 'c' * 24)
+                available = 0.75 if differing else 1
+                self.assertLessEqual(request.call_args.kwargs['timeout_seconds'], available)
+                self.assertLessEqual(request.call_args.args[1]['budget_seconds'], available)
+                if differing:
+                    self.assertLessEqual(probe.call_args.kwargs['timeout_seconds'], 1)
+                else:
+                    probe.assert_not_called()
+
+    def test_expired_discovery_starts_neither_compatibility_nor_status(self):
+        result, probe, request = self.observe(differing=True, discovery=2.1)
+        self.assertEqual(result.code, 'remote_budget_exhausted')
+        probe.assert_not_called()
+        request.assert_not_called()
+
+    def test_expired_compatibility_cannot_start_final_status(self):
+        result, probe, request = self.observe(differing=True, compatibility=1.1)
+        self.assertEqual(result['error']['code'], 'remote_budget_exhausted')
+        probe.assert_called_once()
+        request.assert_not_called()
+
+    def test_strict_pin_and_recheck_share_remaining_deadline(self):
+        from sandbox.remote_runtime.pins import PinError
+        clock = [100.0]
+        def status(*args, **kwargs):
+            self.assertLessEqual(kwargs['timeout_seconds'], 2)
+            clock[0] += 0.5
+            return {'compatibility': {'ok': True}}
+        def gate(entry, observed, *, store, recheck, **kwargs):
+            self.assertEqual(store.list(), [])
+            recheck()
+            clock[0] = 103
+            with self.assertRaises(PinError):
+                store.list()
+            with self.assertRaises(TimeoutError):
+                recheck()
+            return observed
+        def ssh(*args, **kwargs):
+            self.assertLessEqual(kwargs['timeout'], 1.5)
+            clock[0] += 0.25
+            return SimpleNamespace(returncode=0, stdout='{"ok":true,"action":"list","pins":[]}')
+        with mock.patch('time.monotonic', side_effect=lambda: clock[0]), \
+                mock.patch('sandbox.remote_runtime.verdict.strict_requested', return_value=True), \
+                mock.patch('sandbox.remote_runtime.pins.strict_gate', side_effect=gate), \
+                mock.patch.object(remote, 'remote_mcp_service_status', side_effect=status) as observe, \
+                mock.patch.object(remote, 'ssh_run', side_effect=ssh) as dispatch:
+            remote.remote_runtime_status_for_operation({'ssh': 'owner@synthetic'}, purpose='fixture', timeout_seconds=2)
+        self.assertEqual(observe.call_count, 2)
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertLessEqual(observe.call_args.kwargs['timeout_seconds'], 1.25)
+
+    def test_status_never_starts_ssh_after_http_exhausts_deadline(self):
+        clock = [100.0]
+        def http(*args, **kwargs):
+            clock[0] += 3
+            return evidence()
+        with mock.patch('time.monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(remote, '_remote_mcp_runtime_revision', return_value='b' * 24), \
+                mock.patch.object(remote, 'remote_host_memory_request', side_effect=http), \
+                mock.patch.object(remote, 'ssh_run') as ssh:
+            result = remote.remote_mcp_service_status({'joined': True, 'control_access': 'tailnet'}, timeout_seconds=2)
+        self.assertTrue(result['authenticated'])
+        ssh.assert_not_called()

@@ -144,16 +144,26 @@ def _build_host_memory_service(remote: str | None = None, *, budget_seconds=15):
     if not remote:
         raise ValueError("remote_required")
     from sandbox.core import _remote
-    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError
+    import time
+    from .host_memory.remote import HostMemoryRemote, RemoteProtocolError, validate_request
     from .host_memory.service import HostMemoryService
 
-    record = _remote.get_remote(remote, budget_seconds=budget_seconds)
+    validate_request({'action': 'host_memory_status', 'remote_name': remote, 'budget_seconds': budget_seconds})
+    deadline = time.monotonic() + budget_seconds
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise RemoteProtocolError('remote_budget_exhausted', 'host-memory observation exhausted its operation budget')
+        return value
+    record = _remote.get_remote(remote, budget_seconds=remaining())
     if not isinstance(record, dict):
         raise ValueError("unknown_remote")
-    _require_compatible_runtime(remote, record)
+    _require_compatible_runtime(remote, record, timeout_seconds=remaining())
 
     def request(selected, payload):
-        return _remote.remote_host_memory_request(selected, payload)
+        available = remaining()
+        payload = {**payload, 'budget_seconds': min(payload['budget_seconds'], available)}
+        return _remote.remote_host_memory_request(selected, payload, timeout_seconds=available)
 
     adapter = HostMemoryRemote(remote, record, request)
     from pathlib import Path
@@ -208,7 +218,7 @@ def authenticated_target_identity(remote: str, *, budget_seconds: float = 15) ->
 
 def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
     """Return Feature 046's immutable read-only governance projection only."""
-    service = _build_host_memory_service(remote)
+    service = _build_host_memory_service(remote, budget_seconds=budget_seconds)
     result = service.status(budget_seconds)
     if not result.get("ok"):
         error = result.get("error") or {}
@@ -218,23 +228,23 @@ def host_memory_status_projection(remote: str, *, budget_seconds: int = 15):
 
 def host_memory_plan(remote: str, *, size_gib: int = 4, budget_seconds: float = 15):
     """Return one deterministic controller-owned enable plan without mutation."""
-    return _build_host_memory_service(remote).plan(size_gib, budget_seconds)
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).plan(size_gib, budget_seconds)
 
 
 def host_memory_apply(remote: str, *, plan_id=None, confirm: bool = False, budget_seconds: float = 300):
     """Execute confirmed host-memory apply with normative outcome envelope."""
-    return _build_host_memory_service(remote).apply(plan_id, confirmed=confirm, budget_seconds=budget_seconds)
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).apply(plan_id, confirmed=confirm, budget_seconds=budget_seconds)
 
 def host_memory_history(remote: str, *, since=None, until=None, limit: int = 288, budget_seconds: float = 15):
     """Retrieve bounded aggregate history window for the remote host."""
-    return _build_host_memory_service(remote).history(
+    return _build_host_memory_service(remote, budget_seconds=budget_seconds).history(
         since=since, until=until, limit=limit, budget_seconds=budget_seconds,
     )
 
 
 def host_memory_disable(remote: str, *, plan_id=None, confirm: bool = False, budget_seconds: float = 300):
     """Execute confirmed host-memory disable with normative outcome envelope."""
-    service = _build_host_memory_service(remote)
+    service = _build_host_memory_service(remote, budget_seconds=budget_seconds)
     if not plan_id:
         plan_res = service.disable_plan(budget_seconds=min(budget_seconds, 15))
         if not plan_res.get("ok"):

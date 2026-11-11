@@ -4773,17 +4773,28 @@ def remote_runtime_status_for_operation(remote: dict, *, purpose: str | None = N
     """
     from sandbox.remote_runtime.verdict import strict_requested
 
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError('runtime compatibility observation budget expired')
+        return value
     def observe():
         return (remote_mcp_service_status(remote) if timeout_seconds is None
-                else remote_mcp_service_status(remote, timeout_seconds=timeout_seconds))
+                else remote_mcp_service_status(remote, timeout_seconds=remaining()))
     status = observe()
     if not strict_requested():
         return status
     from sandbox.core._paths import ROOT
-    from sandbox.remote_runtime.pins import purpose_for, strict_gate
+    from sandbox.remote_runtime.pins import PinStore, purpose_for, strict_gate
     command = " ".join(["sb", *[arg for arg in sys.argv[1:3] if not arg.startswith("-")]])
+    kwargs = {}
+    if deadline is not None:
+        def bounded_ssh(selected, command, *, timeout):
+            return ssh_run(selected, command, timeout=min(timeout, remaining()))
+        kwargs['store'] = PinStore(remote, ssh_run=bounded_ssh)
     return strict_gate(remote, status, purpose=purpose or purpose_for(command, str(ROOT)),
-                       recheck=observe)
+                       recheck=observe, **kwargs)
 
 
 def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18) -> dict:
@@ -4811,7 +4822,7 @@ def remote_mcp_service_status(remote: dict, *, timeout_seconds: float = 18) -> d
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
         if 'HTTP 401' in str(exc) or 'HTTP 403' in str(exc):
             admission = {'state': 'denied', 'method': 'tailnet', 'code': 'remote_access_denied'}
-    remaining = max(0.001, deadline - time.monotonic())
+    remaining = max(0, deadline - time.monotonic())
     status = _remote_mcp_service_status_via_ssh(remote, timeout_seconds=remaining)
     status['control_admission'] = admission
     status.setdefault('ssh_access', {'state': 'unavailable', 'transport': 'tailscale'})
@@ -4991,6 +5002,8 @@ def _remote_mcp_service_status_via_ssh(remote: dict, *, timeout_seconds: float =
         + listener_probe + auth_probe + legacy_probe
     )
     try:
+        if timeout_seconds <= 0:
+            return unavailable('remote_service_probe_timeout')
         res = ssh_run(remote, command, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         return unavailable("remote_service_probe_timeout")

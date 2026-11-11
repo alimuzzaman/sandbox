@@ -143,6 +143,7 @@ class HostMemoryRemote:
     def _exchange(self, payload):
         action = payload['action']
         try: response=self.request(self.record,payload)
+        except RemoteProtocolError: raise
         except Exception as exc: raise RemoteProtocolError("remote_unreachable","remote control endpoint is unreachable") from exc
         result = validate_response(response,marker=self.marker,revision=self.revision,
                                    action=action)

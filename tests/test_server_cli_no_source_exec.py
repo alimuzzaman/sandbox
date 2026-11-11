@@ -43,6 +43,7 @@ class NoSourceReceiverTests(unittest.TestCase):
             original.write(input_data)
             original.seek(0)
             with mock.patch.object(execute, 'read_current_server_owner', return_value=OWNER), \
+                    mock.patch.object(execute, 'exec_contract_available', return_value=True), \
                     mock.patch.object(execute, 'inspect_current_server_target',
                         side_effect=observations or [{'ok': True, **snapshot()}, {'ok': True, **snapshot()}]), \
                     mock.patch('sandbox.application.context.durable_job_dependencies', return_value={'job_service': self.service}), \
@@ -117,6 +118,10 @@ class NoSourceClientTests(unittest.TestCase):
                     mock.patch.object(_remote, 'remote_sb_path', return_value=OWNER.executable), \
                     mock.patch('sandbox.resources.context.authenticated_target_identity', return_value={'target_identity': OWNER.target_identity}), \
                     mock.patch('sandbox.services.process.BoundedProcessRunner.run', side_effect=run), \
+                    mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.control', return_value={
+                        'ok': True, 'target_identity': OWNER.target_identity,
+                        'ownership_marker': OWNER.ownership_marker, 'runtime_revision': OWNER.runtime_revision,
+                        'server_exec_capabilities': [execute.CONTRACT]}), \
                     mock.patch('sandbox.remote_runtime.verdict.strict_requested', return_value=False), \
                     mock.patch.object(_remote, 'deploy_exact_working_tree', side_effect=AssertionError('no controller source')):
                 return execute.submit_server_cli_exec('box', snapshot=snapshot(), service='wordpress',
@@ -146,3 +151,14 @@ class NoSourceClientTests(unittest.TestCase):
         with self.assertRaises(ServerCLIUnavailable):
             self.invoke(payload={'ok': False, 'status': 'refused', 'code': 'server_cli_exec_unavailable'})
         self.assertEqual(len(self.calls), 1)
+
+    def test_missing_installed_capability_refuses_before_original_stdin_or_submit(self):
+        with mock.patch.object(_remote, 'get_remote', return_value={
+                'joined': True, 'control_transport': 'tailscale', 'mcp_service': {
+                    'ownership_marker': OWNER.ownership_marker, 'runtime_revision': OWNER.runtime_revision}}), \
+                mock.patch('sandbox.resources.context.authenticated_target_identity', return_value={'target_identity': OWNER.target_identity}), \
+                mock.patch('sandbox.transports.remote_jobs.RemoteJobTransport.control', return_value={'ok': False}), \
+                mock.patch.object(execute, 'capture_input', side_effect=AssertionError('no stdin intake')):
+            with self.assertRaises(ServerCLIUnavailable):
+                execute.submit_server_cli_exec('box', snapshot=snapshot(), service='wordpress',
+                    argv=['cat'], stdin_fd=0, request_id='original-exec', timeout_seconds=30)

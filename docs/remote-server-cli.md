@@ -184,5 +184,10 @@ It captures batch stdin before admission; it does not provide an interactive
 TTY or claim live streaming. The generic v1 forwarding adapter still refuses
 `host exec`; normal controller integration must explicitly use this dedicated
 port and preserve its original receipt, status and captured result. No public
-exec capability is advertised by these source adapters. Source checks,
-independent review and installed end-to-end acceptance are still required.
+exec readiness is inferred from metadata alone. Discovery's separate
+`server_exec_capabilities` contains `job.server-cli.exec-stdin.v1` only when
+the actual receiver parser, owner target, native execution scope and digest-aware
+selector are assembled. The client observes that contract before reading stdin
+or submitting a job. Older receivers refuse as capability unavailable at this
+read-only stage. Source checks, independent review and installed end-to-end
+acceptance are still required.

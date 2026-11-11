@@ -138,11 +138,13 @@ def capabilities() -> dict:
         inspection = [INSPECTION_CONTRACT]
     except ServerCLIUnavailable:
         inspection = []
+    from sandbox.application.server_cli_exec import exec_contract_available, CONTRACT as EXEC_CONTRACT
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
             'target_metadata': _receiver_routing_metadata(owner),
             'inspection_capabilities': inspection,
+            'server_exec_capabilities': [EXEC_CONTRACT] if exec_contract_available() else [],
             'capabilities': ['job.exec', 'job.execution-policy.v1', CONTRACT]}
 
 

@@ -15,6 +15,28 @@ from sandbox.application.server_cli_targets import inspect_current_server_target
 from sandbox.jobs.anonymous_input import capture_input
 from sandbox.jobs.models import JobSubmission, SourceIdentity, validate_argv
 
+CONTRACT = 'job.server-cli.exec-stdin.v1'
+
+
+def exec_contract_available():
+    """Only assembled receiver handlers; never infer readiness from a snapshot."""
+    import argparse
+    import inspect
+    try:
+        from sandbox.commands.jobs_runtime import configure_start_parser
+        from sandbox.commands.host_exec import _execution_scope
+        from sandbox.hosting.server_cli_target import OwnerHostTarget, require_owner_target
+        from sandbox.hosting.server_target_selection import read_owner_exec_selection
+        from sandbox.application.server_cli_targets import installed_inspector
+        parser = argparse.ArgumentParser(add_help=False)
+        configure_start_parser(parser)
+        return ('--server-cli-exec-selector' in parser._option_string_actions
+            and callable(_execution_scope) and isinstance(OwnerHostTarget, type)
+            and callable(require_owner_target) and callable(installed_inspector())
+            and 'expected_selector_digest' in inspect.signature(read_owner_exec_selection).parameters)
+    except (ImportError, ValueError, ServerCLIUnavailable):
+        return False
+
 
 def _exec_argv(argv):
     from sandbox.services.redaction import require_safe_argv, RedactionError
@@ -78,6 +100,8 @@ def receive_server_cli_exec(args, *, stdin_fd):
     from sandbox.config.facade import project_identity
     from sandbox.config.runtime import resolve_execution_policy
     from sandbox.remote_runtime.verdict import strict_requested
+    if not exec_contract_available():
+        raise ServerCLIUnavailable('installed fixed server exec handlers are not assembled')
     if (getattr(args, 'server_cli', False) is not True or not getattr(args, 'local', False)
             or getattr(args, 'remote', None) is not None
             or not isinstance(getattr(args, 'request_id', None), str)
@@ -166,6 +190,7 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
     from sandbox.services.process import BoundedProcessRunner
     from sandbox.remote_runtime.verdict import strict_requested
     from types import SimpleNamespace
+    from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
     if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600
             or not isinstance(request_id, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', request_id) is None
             or not isinstance(service, str) or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', service) is None):
@@ -183,6 +208,18 @@ def submit_server_cli_exec(remote_name, *, snapshot, service, argv, stdin_fd, re
     owner = SimpleNamespace(target_identity=identity['target_identity'],
         ownership_marker=binding.get('ownership_marker'), runtime_revision=binding.get('runtime_revision'))
     validate_target_snapshot(snapshot, owner=owner, origin_remote_name=remote_name)
+    transport = RemoteJobTransport(deploy=None, ssh_run=_remote.ssh_run,
+        remote_lookup=lambda name: record if name == remote_name else None, remote_sb_path=_remote.remote_sb_path)
+    try:
+        installed = transport.control(remote_name, ['job-capabilities'], timeout=min(15, remaining()))
+    except RemoteJobTransportError:
+        raise ServerCLIUnavailable('installed server exec capability could not be observed; no job was submitted') from None
+    if (not isinstance(installed, dict) or installed.get('ok') is not True
+            or any(installed.get(field) != getattr(owner, field) for field in
+                   ('target_identity', 'ownership_marker', 'runtime_revision'))
+            or not isinstance(installed.get('server_exec_capabilities'), list)
+            or installed['server_exec_capabilities'] != [CONTRACT]):
+        raise ServerCLIUnavailable('installed server exec contract is unavailable or changed')
     if not any(item['name'] == service and item['index'] == 1 for item in snapshot['services']):
         raise ServerCLIUnavailable('selected owner service has no unique running first container')
     with capture_input(stdin_fd, timeout_seconds=min(30, remaining())) as original_input:

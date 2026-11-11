@@ -64,6 +64,11 @@ does not skip target/native/lifetime locks or turn a dictionary flag into local
 authority. Host/CI selection and credential-consuming recipe integration must be
 assembled and tested before claiming a complete stack workflow.
 
+Cancelling a process-owning server CLI parent still cancels its original
+process when a listed child finishes concurrently. Only a fresh observation
+of that exact child's terminal state permits continuing after `already_terminal`;
+live-process identity failures and unknown outcomes remain errors.
+
 `owner_command_args(owner, command)` and `owner_environment(owner)` support a
 bounded host-exec caller retaining its original stdin FD. The caller revalidates
 the issued host target before and after effects and enforces the retained
@@ -158,8 +163,8 @@ descriptor number or serialized binding cannot substitute for the held file.
 An occupied scheduler slot produces a retained terminal
 `anonymous_stdin_capacity_unavailable` receipt and no dispatch, rather than
 queuing a job whose anonymous input would disappear. Ordinary jobs retain
-DEVNULL. This internal handoff does not yet assemble no-source CLI admission,
-client original-stdin forwarding or advertise remote exec readiness.
+DEVNULL. The dedicated no-source adapter composes this handoff; it does not
+enable generic project argv forwarding or an interactive TTY.
 
 `ServerCLIContext.target_selector_digest` is optional retained selection context.
 It is read only after the actual original job and current kernel child have been
@@ -170,7 +175,8 @@ snapshot dictionaries cannot create a `ServerCLIContext` or replace its job
 provenance.
 
 `sandbox.application.server_cli_exec.submit_server_cli_exec(remote_name, *,
-snapshot, service, argv, stdin_fd, request_id, timeout_seconds=300)` implements
+snapshot, service, argv, stdin_fd, request_id, timeout_seconds=300,
+output_mode='artifact')` implements
 the source contract for a fixed historical host-exec job. It needs no controller
 checkout. The client captures original stdin once into a bounded anonymous file
 and sends only its size/hash in the nonsecret selector envelope, with the actual
@@ -188,9 +194,12 @@ canonical project/source identities and published commit on the receiver. Its
 retained provenance includes the original target snapshot, selector, input
 size/hash and absolute deadline. The supervisor and current-job context enforce
 that original deadline; admission time cannot reset it. The fixed installed
-child runs `host exec --json` under genuine owner-job context. Existing retained
-job status/output ports provide bounded synchronous-result observation to the
-client adapter. This contract does not grant a role or use a self remote alias.
+child runs `host exec --json` under genuine owner-job context. Artifact mode adds
+the private `--exec-capture-artifacts` receiver flag. The original job binds the
+chosen output contract; it cannot silently fall back to UTF8 after acceptance.
+Explicit `output_mode='utf8'` preserves the earlier capture projection. Existing
+retained job status/output/artifact ports provide bounded result observation.
+This contract does not grant a role or use a self remote alias.
 The server ledger retains the original request ID even if the controller loses
 its receipt. `job-list --remote NAME --kind server-cli --workspace server-exec
 --json` returns those request IDs; follow its normal cursor pagination. Inspect
@@ -209,7 +218,12 @@ the actual receiver parser, owner target, native execution scope and digest-awar
 selector are assembled. The client observes that contract before reading stdin
 or submitting a job. Older receivers refuse as capability unavailable at this
 read-only stage. Source checks, independent review and installed end-to-end
-acceptance are still required.
+acceptance are still required. Binary discovery is separate:
+`server_exec_capture_capabilities` advertises
+`job.server-cli.capture-artifact.v1` only when the actual host handler exports
+`SERVER_CLI_EXEC_CAPTURE_VERSION=1` with the committed custody implementation.
+Absent binary support refuses before stdin intake/submission; it is not an
+operator permission error.
 
 `read_server_cli_exec_result(remote_name, receipt, *, budget_seconds=15)` observes
 one original retained job. It checks the request/source/provenance and selected
@@ -222,3 +236,45 @@ replay. Malformed, missing, mismatched or truncated observations raise
 acceptance is not relabeled as a new unknown submission. Compatible service
 updates may permit reading an older job's ledger without rewriting that job's
 original revision or granting it a new execution context.
+
+`sandbox.application.server_cli_capture.prepare_server_cli_capture()` opens only
+the current original job's private artifact custody, before effects. The
+returned context manager's `publish(actual_ExecOutcome)` is one use and closes
+its handles; `close()` is idempotent for setup, cancellation and no-publish
+paths. The trusted host handler calls publish only after successful native-scope
+exit, final target validation and physical-fence retirement, followed by fresh
+current owner/selection proof. Unknown completion and cancellation cannot
+publish positive custody. Output persistence grants no new target authority.
+
+The publisher accepts actual bounded stdout/stderr bytes, not paths, environment
+values or provider-store references. It creates two immutable owner-only byte
+artifacts plus a closed binding manifest. The original job/request, machine,
+owner marker/revision, project/source identities, original and published source
+commits, selected target/service, selector digest and deadline bind the manifest.
+Files use fixed ledger IDs, no links, private directories and mode0600; bytes and
+directories are fsynced before one registry publication transaction. Only the
+small manifest descriptor and outcome metadata enter ordinary logs. Their
+existing redaction remains enabled. Byte artifacts intentionally preserve the
+authorized container output; the capture contract does not read host broker
+files, inherit provider values or provide an arbitrary host-file reader.
+
+Each stream is bounded to 1 MiB, with existing truncation flags retained. The
+manifest is at most16KiB; all three artifacts expire for reads within seven days
+and remain subject to supported job cleanup/retention. Expiration is not a new
+background deletion service. Missing/partial publication or a crash retains
+private uncertain files for existing cleanup and never authorizes replay or
+deleting prior data. Repeating custody for the same original result reuses its
+immutable registered artifacts; different bytes refuse overwrite.
+
+The artifact reader validates owner/private mode, no links, exact opened file
+identity, complete bounded content hash and retention before returning a chunk.
+The result adapter verifies the manifest against the original receipt and
+retained terminal ledger, then fetches bounded artifact chunks through the
+existing `job-artifacts` / `job-artifact-get` transport. 512KiB chunks remain below
+the 1 MiB JSON envelope limit after base64 expansion. This encoding is the
+existing byte transport, not a log encoding. Paired `stdout_bytes` /
+`stderr_bytes` are returned only after both streams verify. Plain CLI rendering
+writes those exact bytes; user JSON may keep its legacy UTF8 replacement
+projection. No bytes pass through the lexical log redactor, including canaries
+that resemble credentials. This is bounded completed-output parity, not
+unbounded output, interactive TTY or live streaming.

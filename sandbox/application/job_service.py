@@ -1227,7 +1227,19 @@ class JobService:
         if snapshot.get('kind') == 'server-cli':
             for child in self.repository.children(job_id):
                 if child['lifecycle'] not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}:
-                    server_children.append(self.cancel(child['job_id'], force=force))
+                    try:
+                        server_children.append(self.cancel(child['job_id'], force=force))
+                    except RuntimeError as exc:
+                        if str(exc) != 'already_terminal':
+                            raise
+                        # The listed child can finish before recursive cancel
+                        # reads it. Only a fresh positive terminal observation
+                        # permits continuing to the parent's own live process.
+                        current = self.repository.snapshot(child['job_id'])
+                        if (current.get('job_id') != child['job_id'] or current.get('lifecycle')
+                                not in {'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'}):
+                            raise
+                        server_children.append(current)
         if self._is_aggregate(snapshot):
             children = self.repository.children(job_id)
             cancelled = []
@@ -1339,6 +1351,10 @@ class JobService:
             if artifact["artifact_id"] == artifact_id:
                 if artifact.get("status", "available") != "available":
                     raise RuntimeError("artifact_unavailable")
+                from sandbox.jobs.artifacts import PRIVATE_CAPTURE_KIND, read_private_capture
+                if artifact.get('kind') == PRIVATE_CAPTURE_KIND:
+                    return read_private_capture(self.storage, job_id, artifact,
+                        offset=query.offset, max_bytes=query.max_bytes)
                 path = self.storage.job_dir(job_id) / artifact["stored_relative_path"]
                 with path.open("rb") as handle:
                     handle.seek(query.offset)

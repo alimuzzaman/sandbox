@@ -42,3 +42,31 @@ installed acceptance are separate gates. This document does not claim a live
 stack creation or provider validation. Authentication and production-path
 changes require owner review before release. No install, provider action,
 migration or retry of the old GS operation is performed by this increment.
+
+## Minimal installed-e467 composition
+
+The access transport SDK is a separate source dependency. This hosting adapter
+does not require `credential_selection`, `shared_credentials`, installation
+binding, Miu, owner-local baseline factories or their capability registries.
+For an e467-based candidate, register the public callable
+`sandbox.hosting.server_cli_dispatch.dispatch_host_if_selected` directly as the
+host command's preconfiguration handler. The broader 086 handler in this feature
+branch additionally owns its explicit-profile refusal and static parsing; none
+of that is needed to dispatch existing Linux owner commands.
+
+The minimal shared command hook is one optional `CommandSpec` field,
+`preconfiguration_dispatch: Callable | None = None`, and the CLI call immediately
+after parsing, before configuration/migration/credential access. The call checks
+the selected command's handler and returns from CLI main only when it returns
+true. The access SDK already retains `args._server_cli_argv = tuple(raw_argv)`
+at that boundary. Exposing `--credential-scope personal-local` preserves an
+explicit controller execution choice; it requires no registered-profile fields.
+
+Owned runtime files are `commands/hosting.py`, `commands/host_stack.py`,
+`commands/host_exec.py`, `hosting/host_exec.py`, `hosting/server_cli_dispatch.py`,
+`hosting/server_cli_target.py`, `hosting/server_target_selection.py`, and the
+two exact owner-target branches in `delivery/context.py`. Apply only this access
+delta, rather than copying the whole feature's hosting or CLI files. The SDK
+owns `application/server_cli.py`, fixed job admission/supervision and core
+process/home delegates. Its actual installed parser, contract discovery and
+retained job authority must accompany these adapters.

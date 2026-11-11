@@ -33,13 +33,13 @@ class DispatchTests(unittest.TestCase):
         self.template.write_text("version: 1\n")
         self.args = Namespace(action="stack", image_action="up", confirm=True, plan=False,
             remote="box", project_dir=str(self.root), template=str(self.template), request_id="original",
-            timeout=None, _server_cli_argv=("host", "stack", "up", "--remote", "box",
+            timeout=None, json=True, _server_cli_argv=("host", "stack", "up", "--remote", "box",
                 "--project-dir", str(self.root), "--template", str(self.template), "--confirm"))
         self.enterContext(patch.object(sdk, "server_cli_context_if_selected", return_value=None))
         self.lookup = self.enterContext(patch("sandbox.core._remote.get_remote",
             return_value={"joined": True, "control_transport": "tailscale"}))
         self.submit = self.enterContext(patch.object(sdk, "dispatch_server_cli",
-            return_value={"status": "acceptance_unknown", "request_id": "original"}))
+            return_value={"ok": True, "status": "accepted", "job_id": "d" * 32, "request_id": "original"}))
 
     def test_confirmed_stack_uses_original_receipt_and_relocates_only_source_paths(self):
         output = io.StringIO()
@@ -73,16 +73,46 @@ class DispatchTests(unittest.TestCase):
 
     def test_delimiter_is_refused_before_acceptance_for_automatic_apply(self):
         self.args._server_cli_argv += ("--", "cat")
-        with self.assertRaisesRegex(ValueError, "unexpected_stdin"):
+        with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as caught:
             dispatch.dispatch_host_if_selected(self.args)
+        self.assertEqual(caught.exception.code, 1)
         self.submit.assert_not_called()
 
     def test_invalid_selected_job_never_falls_back_or_replays(self):
         with patch.object(sdk, "server_cli_context_if_selected", side_effect=sdk.ServerCLIUnavailable("revoked")):
-            with self.assertRaises(sdk.ServerCLIUnavailable):
+            with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
                 dispatch.dispatch_host_if_selected(self.args)
         self.lookup.assert_not_called()
         self.submit.assert_not_called()
+
+    def test_old_capability_and_unknown_effect_have_bounded_json_without_error_body(self):
+        marker = "untrusted-provider-or-transport-body"
+        for error, acceptance in ((sdk.ServerCLIUnavailable(marker), "not_accepted"),
+                                  (sdk.ServerCLIEffectUnknown(marker), "unknown")):
+            with self.subTest(acceptance=acceptance), patch.object(sdk, "dispatch_server_cli", side_effect=error) as submit:
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as caught:
+                    dispatch.dispatch_host_if_selected(self.args)
+                self.assertEqual(caught.exception.code, 1)
+                self.assertEqual(len(output.getvalue().splitlines()), 1)
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["acceptance"], acceptance)
+                self.assertEqual(payload["request_id"], "original")
+                self.assertNotIn(marker, output.getvalue())
+                submit.assert_called_once()
+
+    def test_unknown_receipt_retains_only_original_handle_and_refuses_replay(self):
+        self.submit.return_value = {"status": "acceptance_unknown", "job_id": "d" * 32,
+            "request_id": "original", "error": "untrusted raw response"}
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            dispatch.dispatch_host_if_selected(self.args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["job_id"], "d" * 32)
+        self.assertEqual(payload["request_id"], "original")
+        self.assertEqual(payload["acceptance"], "unknown")
+        self.assertNotIn("untrusted raw response", output.getvalue())
+        self.submit.assert_called_once()
 
 
 class OwnerTargetTests(unittest.TestCase):

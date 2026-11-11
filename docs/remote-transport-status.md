@@ -41,6 +41,18 @@ Ordinary host-memory status and authenticated target-identity lookup also enforc
 the saved machine pin; a changed machine or malformed pin refuses without refresh.
 Legacy owner registrations with no machine pin keep their existing behavior.
 
+Joined registrations historically omitted the host front-door profile and therefore
+defaulted to Caddy. On a server already using incumbent nginx, explicitly adopt
+that local metadata with `remote join NAME USER@HOST --front-door nginx` or
+`remote service refresh NAME --front-door nginx --json` for an existing join.
+This optional profile step uses bounded read-only SSH probes, checks the same
+canonical machine identity as the authenticated control service, and requires
+active valid nginx with its conf.d include and no active Caddy. It changes no
+host configuration and cannot replace an explicit different profile. Plain
+refresh continues to use HTTP only. Existing failed/reserved stack manifests and
+delivery requests are not rewritten or retried by adoption. Do not use `remote add`
+to repair a join: it changes provisioning metadata.
+
 Every direct `remote ssh` command requires `--confirm`, including read-only commands,
 and a short `--reason`.
 

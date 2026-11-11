@@ -793,6 +793,9 @@ def _cmd_service(args, as_json: bool) -> None:
                 raise ValueError("refresh requires an existing joined tailnet registration")
             from sandbox.remote_runtime.join_identity import discover_join_identity
             evidence = discover_join_identity(name, entry, sr.remote_host_memory_request)
+            requested_profile = _arg_str(args, 'front_door')
+            if requested_profile is not None:
+                evidence.update(_joined_profile_evidence(entry, evidence, requested_profile))
             sr.put_remote(name, _expected=entry, **evidence)
             payload = {"ok": True, "name": name, "status": "refreshed",
                        "data": evidence, "error": None}
@@ -1511,6 +1514,20 @@ def _first_ssh_login(target: str, port) -> str:
     return "denied" if any(text in refusal for text in _TAILSCALE_SSH_REFUSALS) else "unknown"
 
 
+def _joined_profile_evidence(entry, evidence, requested):
+    from sandbox.remote_runtime.join_profile import MACHINE_PROGRAM, adopt_join_profile
+    from sandbox.hosting.front_door import nginx
+
+    def machine_probe(record):
+        result = sr.ssh_run(record, 'python3 -c ' + shlex.quote(MACHINE_PROGRAM), timeout=15)
+        if result.returncode != 0:
+            raise RuntimeError('joined_profile_identity_unavailable')
+        return (result.stdout or '').strip()
+
+    return adopt_join_profile(entry, evidence, requested,
+                              machine_probe=machine_probe, nginx_probe=nginx.probe)
+
+
 def _cmd_join(args, as_json: bool) -> None:
     """`sb remote join <name> <user>@<tailnet address or name>`: use a server someone else provisioned.
 
@@ -1550,6 +1567,14 @@ def _cmd_join(args, as_json: bool) -> None:
     except (RuntimeError, ValueError) as exc:
         die(f"join_refused: authenticated service identity is unavailable ({exc})")
     ssh_login = _first_ssh_login(f"{user}@{address}", parts.get("port"))
+    requested_profile = _arg_str(args, 'front_door')
+    if requested_profile is not None:
+        if ssh_login != 'ok':
+            die('join_refused: explicit profile adoption requires an admitted SSH metadata probe')
+        try:
+            entry.update(_joined_profile_evidence(entry, entry, requested_profile))
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            die(f'join_refused: front-door profile is unproven ({exc})')
     sr.put_remote(name, _expected=None, **entry)
     result = {"ok": True, "name": name, "status": "joined", "ssh": ssh,
               "control_url": entry["control_url"], "ssh_login": ssh_login, "error": None}

@@ -58,6 +58,8 @@ source_commit, timeout_seconds, parent_job_id)` derives a fixed nested job from
 the current original job. It retains the parent handle and target metadata, caps
 the original deadline and uses a deterministic child request key. The installed
 server verifies actual ancestry and the retained parent before acceptance.
+The supported job parser computes source/project identities for the exact child
+root; parent lineage and the exact child source commit remain separate bindings.
 Child supervisors watch the original parent deadline/cancellation; a CLI parent
 retains its own process lifecycle and exposes child receipts instead of being
 silently reclassified as a processless matrix. An uncertain nested receipt remains
@@ -70,3 +72,14 @@ from the controller. Normal server commands resolve the Linux owner's existing
 secret store. Secret value-output commands are unavailable through this retained
 adapter. No per-controller role, credential approval or new broker grant is
 introduced.
+
+Installed discovery can fill a missing origin from a unique actual public network
+interface address. It never queries an Internet address service, guesses a
+hostname, or overwrites explicit routing metadata. Ambiguous or private-only
+interfaces leave origin evidence unavailable.
+
+Version1 retained jobs have no interactive stdin handoff. `host exec` and explicit
+stdin/interactive options refuse before lookup or acceptance; normal synchronous
+CLI contracts remain unchanged. A local host-exec adapter may retain the original
+stdin FD with the validated local argv/environment ports, but that alone is not
+proof of an end-to-end remote stdin transport.

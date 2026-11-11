@@ -1018,8 +1018,12 @@ def ssh_run_bounded(remote_or_target, command: str, *, timeout: int = 30,
     completion unknown.
     """
     from sandbox.services.process import BoundedProcessRunner
-    if _owner_host_target(remote_or_target) is not None:
-        raise RuntimeError('owner local bounded-output process adapter is unavailable')
+    owner = _owner_host_target(remote_or_target)
+    if owner is not None:
+        if not callable(getattr(owner, 'process_bounded', None)):
+            raise RuntimeError('owner local bounded-output process adapter is unavailable')
+        return owner.process_bounded(command, timeout=timeout, max_output=max_output,
+                                     terminate_on_output_limit=terminate_on_output_limit)
 
     multiplex = True
     try:

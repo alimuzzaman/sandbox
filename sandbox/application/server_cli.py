@@ -38,6 +38,10 @@ class ServerCLIEffectUnknown(RuntimeError):
     completion_unknown = True
 
 
+class ServerCLIStdinUnavailable(ServerCLIUnavailable):
+    code = 'server_cli_stdin_unavailable'
+
+
 @dataclass(frozen=True)
 class ServerCliOwner:
     uid: int
@@ -121,10 +125,42 @@ def capabilities() -> dict:
     return {'schema_version': 1, 'ok': True, 'target_identity': owner.target_identity,
             'ownership_marker': owner.ownership_marker, 'runtime_revision': revision,
             'executable': owner.executable, 'uid': owner.uid,
+            'target_metadata': _receiver_routing_metadata(owner),
             'capabilities': ['job.exec', 'job.execution-policy.v1', CONTRACT]}
 
 
-def fixed_argv(argv) -> tuple[str, ...]:
+def _receiver_routing_metadata(owner: ServerCliOwner) -> dict:
+    """Unique actual public interface addresses, never an Internet/hostname guess."""
+    from sandbox.services.process import BoundedProcessRunner
+    try:
+        observed = BoundedProcessRunner(max_output=65_536, terminate_on_output_limit=True).run(
+            ['ip', '-json', 'address', 'show', 'scope', 'global'], cwd=owner.home,
+            env=owner_environment(owner), timeout=3)
+        if observed.returncode or observed.termination_reason or observed.stdout_truncated:
+            return {}
+        rows = json.loads(observed.stdout)
+        if not isinstance(rows, list) or len(rows) > 64:
+            return {}
+        candidates = {4: set(), 6: set()}
+        for row in rows:
+            addresses = row.get('addr_info') if isinstance(row, dict) else None
+            if not isinstance(addresses, list) or len(addresses) > 256:
+                return {}
+            for item in addresses:
+                if not isinstance(item, dict) or item.get('scope') != 'global':
+                    continue
+                if not isinstance(item.get('local'), str):
+                    return {}
+                address = ipaddress.ip_address(item['local'])
+                if address.is_global:
+                    candidates[address.version].add(str(address))
+        return {field: next(iter(candidates[version])) for field, version in
+                (('origin_ipv4', 4), ('origin_ipv6', 6)) if len(candidates[version]) == 1}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}  # Missing/ambiguous routing evidence is not denied owner access.
+
+
+def _command_argv(argv) -> tuple[str, ...]:
     values = validate_argv(tuple(argv))
     if values[0] in {'sb', 'sandbox'} or Path(values[0]).is_absolute():
         raise ServerCLIUnavailable('server CLI expects command argv without an executable')
@@ -132,8 +168,16 @@ def fixed_argv(argv) -> tuple[str, ...]:
     # Provider-specific normal commands consume the server store themselves.
     if values[:2] in {('secrets', 'reveal'), ('secrets', 'run')}:
         raise ServerCLIUnavailable('secret value output is unavailable through server CLI jobs')
+    if (values[:2] == ('host', 'exec')
+            or any(flag in values for flag in ('--stdin', '--token-stdin', '--interactive'))):
+        raise ServerCLIStdinUnavailable('retained server CLI stdin transport is unavailable; no job was accepted')
     from sandbox.services.redaction import require_safe_argv
     require_safe_argv(values)
+    return values
+
+
+def fixed_argv(argv) -> tuple[str, ...]:
+    values = _command_argv(argv)
     return (str(installed_cli()), *values)
 
 
@@ -163,6 +207,8 @@ def validate_target_metadata(value) -> dict:
     result = dict(value)
     for field, version in (('origin_ipv4', 4), ('origin_ipv6', 6)):
         if field in result:
+            if not isinstance(result[field], str):
+                raise ServerCLIUnavailable('original target address metadata must be text')
             try:
                 address = ipaddress.ip_address(result[field])
             except (ValueError, TypeError):
@@ -323,8 +369,7 @@ def local_server_cli_submission_argv(owner: ServerCliOwner, argv, *, project_dir
         '--server-cli-marker', owner.ownership_marker, '--server-cli-origin', context.origin_remote_name,
         '--server-cli-target-metadata', json.dumps(dict(context.target_metadata), sort_keys=True, separators=(',', ':')),
         '--parent-job-id', parent_job_id, '--project-dir', str(Path(project_dir).resolve()),
-        '--project-identity', context.project_identity, '--request-id', key,
-        '--source-identity', source_commit, '--source-commit', source_commit,
+        '--request-id', key, '--source-commit', source_commit,
         '--timeout', str(policy.deadline_seconds), '--execution-policy-json', encoded, '--json', '--', *values]
 
 
@@ -425,7 +470,7 @@ def owner_process_bounded(owner: ServerCliOwner, command: str, *, timeout: float
         result = BoundedProcessRunner(max_output=max_output,
             terminate_on_output_limit=terminate_on_output_limit).run(
                 ['/bin/sh', '-c', command], cwd=owner.home, env=owner_environment(owner),
-                timeout=min(timeout, remaining), stdin_source=source, start_new_session=False)
+                timeout=min(timeout, remaining), stdin=None if source is None else source.fileno(), start_new_session=False)
     # Remain in the original durable process group: its supervisor can still
     # terminate grandchildren after this caller exits. A local timeout does not
     # prove that every effect or escaped descendant stopped, so never retry it.
@@ -469,7 +514,7 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
     from sandbox.services.redaction import require_safe_argv
     from sandbox.config.facade import project_identity
     from sandbox.config.runtime import resolve_execution_policy
-    values = validate_argv(tuple(argv))
+    values = _command_argv(argv)
     require_safe_argv(values)
     if not request_id:
         raise ValueError('server CLI requires the original request identity')
@@ -502,4 +547,9 @@ def dispatch_server_cli(remote_name: str, argv, *, project_dir: str,
             or not isinstance(observed.get('capabilities'), list)
             or CONTRACT not in observed['capabilities']):
         raise ServerCLIUnavailable('installed server CLI contract is unavailable or changed')
-    return transport.submit_server_cli(submission, entry, observed)
+    routing = validate_target_metadata(observed.get('target_metadata', {}))
+    selected = dict(entry)
+    for field, value in routing.items():
+        if not selected.get(field):
+            selected[field] = value
+    return transport.submit_server_cli(submission, selected, observed)

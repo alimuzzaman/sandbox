@@ -813,6 +813,7 @@ class JobServiceTests(unittest.TestCase):
             descriptor = json.loads(launched[0].read_text())
             self.assertEqual(descriptor["cancel_grace_seconds"], 13)
             self.assertEqual(descriptor["authoritative_context"], {
+                'execution_kind': 'test',
                 "job_id": accepted["job_id"], "request_id": None,
                 "project_identity": "p",
                 "project_root_digest": "sha256:" + __import__("hashlib").sha256(

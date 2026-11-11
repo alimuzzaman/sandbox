@@ -874,10 +874,15 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
                    log_phase: str = "unclassified", input_data=None) -> str:
     if input_data is not None and (progress is not None or log_path):
         raise ValueError("a streamed remote command cannot take input")
-    if log_path:
+    owner_logged = bool(log_path) and is_owner_target(entry)
+    if log_path and not owner_logged:
         command = _logged_remote_command(command, log_path, phase=log_phase)
     try:
-        if progress is not None or log_path:
+        if owner_logged:
+            from sandbox.hosting.apply_output import run_owner_logged
+            result = run_owner_logged(entry, command, log_path, log_phase,
+                                      timeout=timeout, progress=progress)
+        elif progress is not None or log_path:
             result = remote.ssh_stream(entry, command, timeout=timeout,
                                        on_line=progress)
         else:
@@ -895,7 +900,7 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180, *,
         raise RuntimeError(
             f"remote command timed out after {timeout} seconds{suffix}"
         ) from None
-    if result.returncode == _SSH_TRANSPORT_EXIT:
+    if result.returncode == _SSH_TRANSPORT_EXIT and not is_owner_target(entry):
         # ssh's own failure code: the link dropped, so the remote phase may
         # still have finished. Never report this as a known command failure.
         raise RuntimeError(
@@ -1916,7 +1921,7 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     env_file = f"{runtime_dir}/environment.env"
     _write_remote_text(entry, override, runtime["compose_override"], "0600")
     _write_remote_text(entry, env_file, runtime["environment"], "0600")
-    if apply_log:
+    if apply_log and not is_owner_target(entry):
         _remote_checked(
             entry,
             f"umask 077; : >> {shlex.quote(apply_log)}; chmod 0600 {shlex.quote(apply_log)}",
@@ -5449,13 +5454,15 @@ def _release_host_apply_lease(entry: dict, lease: dict | None) -> None:
 
 
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict, *args, **kwargs) -> dict:
-    lease = _acquire_host_apply_lease(entry, validated)
-    try:
-        return _apply_host_unleased(validated, entry, remote_name, runtime, *args, **kwargs)
-    finally:
-        from sandbox.hosting.server_cli_target import owner_effect_unknown
-        if not owner_effect_unknown(entry):
-            _release_host_apply_lease(entry, lease)
+    from sandbox.hosting.apply_output import owner_apply_output_scope
+    with owner_apply_output_scope(entry):
+        lease = _acquire_host_apply_lease(entry, validated)
+        try:
+            return _apply_host_unleased(validated, entry, remote_name, runtime, *args, **kwargs)
+        finally:
+            from sandbox.hosting.server_cli_target import owner_effect_unknown
+            if not owner_effect_unknown(entry):
+                _release_host_apply_lease(entry, lease)
 
 
 def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime: dict,
@@ -5486,6 +5493,8 @@ def _apply_host_unleased(validated: dict, entry: dict, remote_name: str, runtime
         secret_values, missing = _secret_status(validated)
         if missing:
             raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
+        from sandbox.hosting.apply_output import bind_owner_apply_output
+        bind_owner_apply_output(entry, secret_values.values())
         if recovery_repository is not None:
             try:
                 binding_key, key_version = personal_secrets.hosting_binding_key(

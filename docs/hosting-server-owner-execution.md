@@ -68,6 +68,29 @@ foreign-owned file or multiply linked file before truncation, sets its mode
 before writing and synchronizes completion. This is the existing recipient
 facility, not a new laptop credential copy or arbitrary staging facility.
 
+Owner apply diagnostics use `hosting.apply_output` before log retention. The
+existing `_apply_host` scope binds the exact values already returned by hosting
+secret resolution to the genuine original owner job. Every logged owner phase
+uses a fixed helper with those values delivered only by anonymous stdin. The
+helper's child receives the explicit nonsecret owner environment and empty
+stdin; it never inherits the filter input. Both child streams share one pipe
+through the existing streaming exact-value and lexical scrubber. Only scrubbed
+bytes reach `apply.log` and the bounded public tail used for return, progress
+and errors. Phase timestamps, useful diagnostics and the actual exit status
+remain visible. Legacy controller transport keeps its existing path.
+
+The helper and child stay in the original durable process group and use the
+SDK's original deadline/cancellation guard. A missing/malformed completion
+receipt or post-child log failure fences that same job as unknown, withholds
+rollback and lease retirement, and never replays the initializer. Log files
+must be private, owner-held regular files without symlink or hardlink aliases.
+Missing exact-value scope refuses before logged command effects. The output
+scope is an internal negative filter, not a new operator role or grant.
+Generic downstream log redaction cannot repair a previously retained raw value;
+this change prevents new raw writes and does not claim historical log cleanup.
+Transformed or deliberately encoded child output remains outside the shared
+scrubber's exact-match guarantee.
+
 `hosting.server_target_selection.inspect_server_exec_target` is a metadata-only
 receiver composition port. It uses the SDK's current installed owner reader,
 fixed bounded Git/Docker metadata commands and a complete current-source

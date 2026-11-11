@@ -46,7 +46,7 @@
 - [x] T020 [P] Update skills/sandbox-cli/SKILL.md and copy it byte-identically to .agents/skills/sandbox-cli/SKILL.md
 - [x] T021 [P] Add the 084 row to specs/README.md
 - [x] T022 Run the quickstart test set on xspeed-dev (Haiku helper) and compare with T001
-- [ ] T023 Sol review (`gpt-6.1-sol`, high, `codex_office`, read-only) until it says safe; fix findings
+- [x] T023 Sol review (`gpt-6.1-sol`, high, `codex_office`, read-only) until it says safe; fix findings
 - [ ] T024 Stage named paths only (no `git add -A`), commit, push `feat/front-door-refresh`, check `@{upstream}`, write the handback; flag the privacy/routing change for human security review before release (user rule) and leave the live refresh to the orchestrator
 
 ## Dependencies

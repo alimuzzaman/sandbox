@@ -15,7 +15,7 @@ _SAFE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _MCP_MODE_ORDER = ("source_info", "keys", "metadata", "validate", "masked", "use")
 _MCP_MODES = frozenset(_MCP_MODE_ORDER)
-_SECRET_KEYS = frozenset(("sources", "useProfiles", "ownership"))
+_SECRET_KEYS = frozenset(("sources", "useProfiles", "hostingProfiles", "ownership"))
 _FILE_SOURCE_KEYS = frozenset(("type", "path", "format", "mcpModes"))
 _INFISICAL_SOURCE_KEYS = frozenset((
     "type", "endpoint", "projectId", "environment", "path", "key",
@@ -378,6 +378,17 @@ def normalize_secret_config(result: Mapping | None) -> dict:
         normalized_name, normalized = _normalize_profile(name, descriptor, sources)
         profiles[normalized_name] = normalized
     secret_config = {"sources": sources, "useProfiles": profiles}
+    if "hostingProfiles" in project or "hostingProfiles" in machine:
+        # Registered through this existing secrets schema provider. No argv,
+        # URL, role, destination environment or execution authority is accepted.
+        from sandbox.hosting.shared_credentials.profiles import normalize_hosting_profiles
+        project_hosting = _mapping(project.get("hostingProfiles", {}), "hosting profiles")
+        machine_hosting = _mapping(machine.get("hostingProfiles", {}), "hosting profiles")
+        if set(project_hosting) & set(machine_hosting):
+            raise ValueError("duplicate hosting profile names across layers")
+        secret_config["hostingProfiles"] = normalize_hosting_profiles(
+            {**project_hosting, **machine_hosting}, sources,
+        )
     if "ownership" in project or "ownership" in machine:
         # Lazy: configurations without an ownership block keep their exact
         # previous import graph and return shape.

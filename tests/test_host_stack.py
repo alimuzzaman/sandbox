@@ -934,5 +934,61 @@ class HostDispatchTests(unittest.TestCase):
         self.assertEqual((args.action, args.stack_action, args.port, args.plan, args.name, args.ref),
                          ("stack", "up", ["mailpit=8025"], True, "demo", "stack/demo"))
 
+
+class PersonalStackCredentialScopeCompatibilityTests(unittest.TestCase):
+    """Exercise legacy callers with intended state/store boundaries mocked."""
+
+    def test_default_and_explicit_scope_keep_remote_stack_listing_contract(self):
+        from unittest.mock import Mock
+        results = []
+        for scope in (None, "personal-local"):
+            args = SimpleNamespace(remote="fixture-personal-remote")
+            if scope is not None:
+                args.credential_scope = scope
+            entry = {"fixture": "remote-entry"}
+            store = Mock()
+            store.list.return_value = {"records": [], "policy": {"total": 3}}
+            with patch.object(host_stack, "_entry", return_value=entry) as lookup, \
+                    patch.object(stack_registry, "read", return_value={"stacks": {}}) as read, \
+                    patch.object(host_stack, "_store", return_value=store) as make_store:
+                result = host_stack._list(args)
+            lookup.assert_called_once_with("fixture-personal-remote")
+            read.assert_called_once_with()
+            make_store.assert_called_once_with(entry, None)
+            store.list.assert_called_once_with()
+            self.assertEqual(result, {"ok": True, "action": "stack-list", "remote": "fixture-personal-remote",
+                                      "stacks": [], "targets": [], "unclassified": [], "invalid": [],
+                                      "policy": {"total": 3}})
+            results.append(result)
+        self.assertEqual(results[0], results[1])
+
+    def test_personal_missing_provider_and_generated_keys_keep_different_outcomes(self):
+        validated = {"secrets": {"required": {"TOKEN": "PROVIDER_TOKEN"},
+                                 "generated": {"PASSWORD": "GENERATED_PASSWORD"}}}
+        # The real secret-status boundary is synthetic. No provider or native store is read.
+        for missing, generate, message in ((["PROVIDER_TOKEN", "GENERATED_PASSWORD"], True, "required hosting secrets"),
+                                           (["GENERATED_PASSWORD"], False, "generated hosting secrets")):
+            with self.subTest(missing=missing, generate=generate), \
+                    patch.object(hosting_cmd, "_secret_status", return_value=({}, missing)) as status, \
+                    patch.object(hosting_cmd.personal_secrets, "generate_secret") as generator, \
+                    patch.object(hosting_cmd.personal_secrets, "write_secret") as writer:
+                with self.assertRaisesRegex(host_stack.StackCommandError, message):
+                    host_stack._secrets_gate(validated, generate=generate, confirm=True)
+                status.assert_called_once_with(validated)
+                generator.assert_not_called()
+                writer.assert_not_called()
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, ["GENERATED_PASSWORD"])) as status, \
+                patch.object(hosting_cmd.personal_secrets, "generate_secret", return_value="synthetic-generated-value") as generator, \
+                patch.object(hosting_cmd.personal_secrets, "write_secret") as writer:
+            self.assertEqual(host_stack._secrets_gate(validated, generate=True, confirm=True), [])
+            status.assert_called_once_with(validated)
+            generator.assert_called_once_with()
+            writer.assert_called_once_with("GENERATED_PASSWORD", "synthetic-generated-value")
+        # Planning still reports missing names without generation, even when requested.
+        with patch.object(hosting_cmd, "_secret_status", return_value=({}, ["GENERATED_PASSWORD"])), \
+                patch.object(hosting_cmd.personal_secrets, "generate_secret") as generator:
+            self.assertEqual(host_stack._secrets_gate(validated, generate=True, confirm=False), ["GENERATED_PASSWORD"])
+            generator.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

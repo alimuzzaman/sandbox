@@ -33,6 +33,21 @@ def build_secret_service(*, project_root, config, personal_path, runtime_root,
             destination=item["destination"], timeout_seconds=item.get("timeoutSeconds", 300),
             max_output_bytes=item.get("maxOutputBytes", 1_048_576), mcp=item.get("mcp", False),
         )
+    from sandbox.hosting.shared_credentials.profiles import registered_profiles
+    hosting_profiles = registered_profiles(secret_config.get("hostingProfiles", {}))
+    # Extend existing provider approval with NONSECRET hosting structure only.
+    # No profiles means byte-for-byte legacy approval identities are preserved.
+    # credential-set and subsequent reads must use this same composition root.
+    if hosting_profiles:
+        import hashlib
+        import json
+        for alias, descriptor in sources.items():
+            revisions = sorted(profile.revision for profile in hosting_profiles.values()
+                               if profile.source == alias)
+            if revisions and source_kind(descriptor) == "infisical":
+                descriptor["authorityDigest"] = "a1-" + hashlib.sha256(json.dumps(
+                    [descriptor["authorityDigest"], revisions], separators=(",", ":")
+                ).encode("ascii")).hexdigest()
     root = Path(runtime_root) / "secrets"
     # Keep provider and OS-store imports lazy for projects that use only file
     # sources. The manifests select only explicitly registered adapters.
@@ -61,7 +76,7 @@ def build_secret_service(*, project_root, config, personal_path, runtime_root,
         SourceRegistry(project_root, sources, personal_path=personal_path, project_scope=project_scope),
         SecretAudit(root / "audit.jsonl"), revision_key_path=root / "revision.key",
         use_profiles=profiles, provider_adapter=provider_adapter,
-        credential_store=credential_store,
+        credential_store=credential_store, hosting_profiles=hosting_profiles,
     )
     if ownership is not None:
         # Attribute only; absent without an ownership block (no behaviour change).

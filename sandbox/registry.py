@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from argparse import Namespace
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -24,6 +25,8 @@ class CommandSpec:
     # the compatibility writers must be skipped for this invocation.
     predispatch_policy: Callable | None = None
     help: str | None = None
+    # Return True only when the command has fully handled this invocation.
+    preconfiguration_dispatch: Callable[[Namespace], bool] | None = None
 
 
 class CommandRegistry:

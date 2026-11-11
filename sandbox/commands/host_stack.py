@@ -480,6 +480,8 @@ def _lifetime_fields(record: dict) -> dict:
 # ----------------------------------------------------------------- commands
 
 def _up(args) -> dict:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     plan, confirm = bool(getattr(args, "plan", False)), bool(getattr(args, "confirm", False))
     if plan == confirm:
         raise StackCommandError(CONFIRMATION_REQUIRED, "stack up needs exactly one of --plan or --confirm")
@@ -746,6 +748,8 @@ def _list_row(local: dict | None, remote_item: dict | None, remote_state: str) -
 
 
 def _list(args) -> dict:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     entry_name = getattr(args, "remote", None)
     if not entry_name:
         raise StackCommandError(REMOTE_UNKNOWN, "--remote is required")
@@ -814,6 +818,8 @@ def _check_owner(remote_item: dict | None, caller: dict, local: dict | None, for
 
 
 def _down(args) -> dict:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     if not getattr(args, "confirm", False):
         raise StackCommandError(CONFIRMATION_REQUIRED,
                                 "stack down is destructive; pass --confirm to tear the stack down")
@@ -866,6 +872,8 @@ def _down(args) -> dict:
 
 
 def _ttl(args) -> dict:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     if not getattr(args, "confirm", False):
         raise StackCommandError(CONFIRMATION_REQUIRED, "stack ttl changes the stack's expiry; pass --confirm")
     if not getattr(args, "name", None):
@@ -906,6 +914,8 @@ def _ttl(args) -> dict:
 
 
 def _sweep(args) -> dict:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     entry = _entry(getattr(args, "remote", None))
     from sandbox.hosting.lifetime import merge
     checkouts: dict[str, Path] = {}
@@ -927,6 +937,8 @@ def _sweep(args) -> dict:
 
 
 def _limits(args) -> dict:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     entry = _entry(getattr(args, "remote", None))
     wanted = {}
     for flag, key in (("per_owner", "per_owner"), ("total", "total")):
@@ -949,6 +961,8 @@ def _limits(args) -> dict:
 
 
 def _reap(args) -> dict:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     from sandbox.hosting.lifetime import reaper
     plan, confirm = bool(getattr(args, "plan", False)), bool(getattr(args, "confirm", False))
     if plan == confirm:
@@ -1049,6 +1063,8 @@ STACK_ACTIONS = ("up", "list", "down", "ttl", "sweep", "reap", "limits")
 
 
 def cmd_host_stack(args) -> None:
+    from sandbox.commands.hosting import guard_server_execution
+    guard_server_execution(args)
     action = getattr(args, "stack_action", None)
     handlers = {"up": _up, "list": _list, "down": _down, "ttl": _ttl, "sweep": _sweep,
                 "reap": _reap, "limits": _limits}

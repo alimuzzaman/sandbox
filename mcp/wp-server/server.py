@@ -777,8 +777,10 @@ def _run_streamable_http(bind: str, port: int, token: str,
     class _BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             peer = request.client.host if request.client else None
-            if await gate.admit(request.headers.get("authorization"), peer) is None:
+            admission, receipt = await gate.admit_request(request.headers.get("authorization"), peer)
+            if admission is None:
                 return PlainTextResponse("Unauthorized", status_code=401)
+            request.state.control_receipt = receipt
             if attribution is not None:
                 return await attribution.observe(request, call_next)
             return await call_next(request)
